@@ -18,12 +18,16 @@ public class CommandProcessorService : BackgroundService
     private readonly ILogger<CommandProcessorService> _logger;
     private readonly CommandProcessorOptions _options;
 
-    // Default base image URLs
-    private static readonly Dictionary<string, string> ImageUrls = new()
+    // Default base image URLs (fallback)
+    private static readonly Dictionary<string, string> ImageUrls = new(StringComparer.OrdinalIgnoreCase)
     {
         ["ubuntu-24.04"] = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
         ["ubuntu-22.04"] = "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
-        ["debian-12"] = "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
+        ["ubuntu-20.04"] = "https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img",
+        ["debian-12"] = "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2",
+        ["debian-11"] = "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2",
+        ["fedora-40"] = "https://download.fedoraproject.org/pub/fedora/linux/releases/40/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2",
+        ["alpine-3.19"] = "https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/cloud/nocloud_alpine-3.19.1-x86_64-bios-cloudinit-r0.qcow2"
     };
 
     public CommandProcessorService(
@@ -67,6 +71,11 @@ public class CommandProcessorService : BackgroundService
     {
         var commands = await _orchestratorClient.GetPendingCommandsAsync(ct);
 
+        if (commands.Count > 0)
+        {
+            _logger.LogInformation("Processing {Count} pending command(s)", commands.Count);
+        }
+
         foreach (var command in commands)
         {
             _logger.LogInformation("Processing command {CommandId}: {Type}",
@@ -77,6 +86,8 @@ public class CommandProcessorService : BackgroundService
                 var success = await ExecuteCommandAsync(command, ct);
                 await _orchestratorClient.AcknowledgeCommandAsync(
                     command.CommandId, success, null, ct);
+
+                _logger.LogInformation("Command {CommandId} completed: {Success}", command.CommandId, success);
             }
             catch (Exception ex)
             {
@@ -121,53 +132,87 @@ public class CommandProcessorService : BackgroundService
             using var doc = JsonDocument.Parse(payload);
             var root = doc.RootElement;
 
-            var vmId = root.GetProperty("VmId").GetString() ?? Guid.NewGuid().ToString();
-            var name = root.GetProperty("Name").GetString() ?? vmId;
+            // Parse the new flat format from Orchestrator
+            var vmId = GetStringProperty(root, "VmId", "vmId") ?? Guid.NewGuid().ToString();
+            var name = GetStringProperty(root, "Name", "name") ?? vmId;
 
-            // Parse spec
-            var spec = root.GetProperty("Spec");
-            var cpuCores = spec.GetProperty("cpuCores").GetInt32();
-            var memoryMb = spec.GetProperty("memoryMb").GetInt64();
-            var diskGb = spec.GetProperty("diskGb").GetInt64();
-            var imageId = spec.GetProperty("imageId").GetString() ?? "ubuntu-22.04";
+            // Try new flat format first, then fall back to nested Spec format
+            int cpuCores;
+            long memoryBytes;
+            long diskBytes;
+            string? imageUrl;
+            string? imageId = null;
+            string? sshPublicKey;
+            string? tenantId;
+            string? leaseId;
 
-            // Get SSH key if provided
-            string? sshPublicKey = null;
-            if (spec.TryGetProperty("sshPublicKey", out var sshKeyProp) &&
-                sshKeyProp.ValueKind == JsonValueKind.String)
+            if (root.TryGetProperty("VCpus", out _) || root.TryGetProperty("MemoryBytes", out _))
             {
-                sshPublicKey = sshKeyProp.GetString();
+                // New flat format from updated Orchestrator
+                cpuCores = GetIntProperty(root, "VCpus", "vCpus") ?? 1;
+                memoryBytes = GetLongProperty(root, "MemoryBytes", "memoryBytes") ?? 1024L * 1024L * 1024L;
+                diskBytes = GetLongProperty(root, "DiskBytes", "diskBytes") ?? 10L * 1024L * 1024L * 1024L;
+                imageUrl = GetStringProperty(root, "BaseImageUrl", "baseImageUrl");
+                sshPublicKey = GetStringProperty(root, "SshPublicKey", "sshPublicKey");
+                tenantId = GetStringProperty(root, "TenantId", "tenantId") ?? "orchestrator";
+                leaseId = GetStringProperty(root, "LeaseId", "leaseId") ?? vmId;
+
+                _logger.LogInformation("Parsed flat format: {VCpus} vCPUs, {MemoryMB}MB, imageUrl={ImageUrl}",
+                    cpuCores, memoryBytes / 1024 / 1024, imageUrl ?? "null");
+            }
+            else if (root.TryGetProperty("Spec", out var spec))
+            {
+                // Old nested format
+                cpuCores = GetIntProperty(spec, "cpuCores", "CpuCores") ?? 1;
+                var memoryMb = GetLongProperty(spec, "memoryMb", "MemoryMb") ?? 1024;
+                var diskGb = GetLongProperty(spec, "diskGb", "DiskGb") ?? 10;
+                memoryBytes = memoryMb * 1024 * 1024;
+                diskBytes = diskGb * 1024 * 1024 * 1024;
+                imageId = GetStringProperty(spec, "imageId", "ImageId");
+                imageUrl = GetStringProperty(spec, "imageUrl", "ImageUrl");
+                sshPublicKey = GetStringProperty(spec, "sshPublicKey", "SshPublicKey");
+                tenantId = "orchestrator";
+                leaseId = vmId;
+
+                _logger.LogInformation("Parsed nested Spec format: {VCpus} vCPUs, {MemoryMB}MB, imageId={ImageId}",
+                    cpuCores, memoryMb, imageId ?? "null");
+            }
+            else
+            {
+                _logger.LogError("Unknown payload format - neither flat nor nested Spec found");
+                return false;
             }
 
-            // Get image URL
-            var imageUrl = spec.TryGetProperty("imageUrl", out var urlProp) &&
-                          urlProp.ValueKind == JsonValueKind.String &&
-                          !string.IsNullOrEmpty(urlProp.GetString())
-                ? urlProp.GetString()!
-                : ImageUrls.GetValueOrDefault(imageId, ImageUrls["ubuntu-22.04"]);
+            // Resolve image URL if not provided directly
+            if (string.IsNullOrEmpty(imageUrl))
+            {
+                imageUrl = ImageUrls.GetValueOrDefault(imageId ?? "ubuntu-22.04", ImageUrls["ubuntu-22.04"]);
+                _logger.LogInformation("Resolved imageId '{ImageId}' to URL: {ImageUrl}", imageId, imageUrl);
+            }
 
             var vmSpec = new VmSpec
             {
                 VmId = vmId,
                 Name = name,
                 VCpus = cpuCores,
-                MemoryBytes = memoryMb * 1024 * 1024,
-                DiskBytes = diskGb * 1024 * 1024 * 1024,
+                MemoryBytes = memoryBytes,
+                DiskBytes = diskBytes,
                 BaseImageUrl = imageUrl,
                 BaseImageHash = "",
                 SshPublicKey = sshPublicKey,
-                TenantId = "orchestrator",
-                LeaseId = vmId
+                TenantId = tenantId,
+                LeaseId = leaseId
             };
 
-            _logger.LogInformation("Creating VM {VmId}: {VCpus} vCPUs, {MemoryMb}MB RAM, image: {ImageId}",
-                vmId, cpuCores, memoryMb, imageId);
+            _logger.LogInformation("Creating VM {VmId}: {VCpus} vCPUs, {MemoryMB}MB RAM, {DiskGB}GB disk, image: {ImageUrl}, SSH key: {HasKey}",
+                vmId, cpuCores, memoryBytes / 1024 / 1024, diskBytes / 1024 / 1024 / 1024, imageUrl,
+                !string.IsNullOrEmpty(sshPublicKey) ? "yes" : "no");
 
             var result = await _vmManager.CreateVmAsync(vmSpec, ct);
 
             if (result.Success)
             {
-                _logger.LogInformation("VM {VmId} created, starting...", vmId);
+                _logger.LogInformation("VM {VmId} created successfully, starting...", vmId);
                 var startResult = await _vmManager.StartVmAsync(vmId, ct);
 
                 if (startResult.Success)
@@ -193,9 +238,10 @@ public class CommandProcessorService : BackgroundService
     private async Task<bool> HandleStartVmAsync(string payload, CancellationToken ct)
     {
         using var doc = JsonDocument.Parse(payload);
-        var vmId = doc.RootElement.GetProperty("VmId").GetString();
+        var vmId = GetStringProperty(doc.RootElement, "VmId", "vmId");
         if (string.IsNullOrEmpty(vmId)) return false;
 
+        _logger.LogInformation("Starting VM {VmId}", vmId);
         var result = await _vmManager.StartVmAsync(vmId, ct);
         return result.Success;
     }
@@ -203,10 +249,11 @@ public class CommandProcessorService : BackgroundService
     private async Task<bool> HandleStopVmAsync(string payload, CancellationToken ct)
     {
         using var doc = JsonDocument.Parse(payload);
-        var vmId = doc.RootElement.GetProperty("VmId").GetString();
+        var vmId = GetStringProperty(doc.RootElement, "VmId", "vmId");
         var force = doc.RootElement.TryGetProperty("Force", out var forceProp) && forceProp.GetBoolean();
         if (string.IsNullOrEmpty(vmId)) return false;
 
+        _logger.LogInformation("Stopping VM {VmId} (force={Force})", vmId, force);
         var result = await _vmManager.StopVmAsync(vmId, force, ct);
         return result.Success;
     }
@@ -214,9 +261,10 @@ public class CommandProcessorService : BackgroundService
     private async Task<bool> HandleDeleteVmAsync(string payload, CancellationToken ct)
     {
         using var doc = JsonDocument.Parse(payload);
-        var vmId = doc.RootElement.GetProperty("VmId").GetString();
+        var vmId = GetStringProperty(doc.RootElement, "VmId", "vmId");
         if (string.IsNullOrEmpty(vmId)) return false;
 
+        _logger.LogInformation("Deleting VM {VmId}", vmId);
         var result = await _vmManager.DeleteVmAsync(vmId, ct);
         return result.Success;
     }
@@ -227,5 +275,42 @@ public class CommandProcessorService : BackgroundService
         var resources = await _resourceDiscovery.DiscoverAllAsync(ct);
         _logger.LogInformation("Benchmark complete");
         return true;
+    }
+
+    // Helper methods to handle case-insensitive property names
+    private static string? GetStringProperty(JsonElement element, params string[] propertyNames)
+    {
+        foreach (var name in propertyNames)
+        {
+            if (element.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.String)
+            {
+                return prop.GetString();
+            }
+        }
+        return null;
+    }
+
+    private static int? GetIntProperty(JsonElement element, params string[] propertyNames)
+    {
+        foreach (var name in propertyNames)
+        {
+            if (element.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.Number)
+            {
+                return prop.GetInt32();
+            }
+        }
+        return null;
+    }
+
+    private static long? GetLongProperty(JsonElement element, params string[] propertyNames)
+    {
+        foreach (var name in propertyNames)
+        {
+            if (element.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.Number)
+            {
+                return prop.GetInt64();
+            }
+        }
+        return null;
     }
 }
