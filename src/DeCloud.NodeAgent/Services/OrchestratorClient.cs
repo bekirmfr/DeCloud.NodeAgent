@@ -69,13 +69,25 @@ public class OrchestratorClient : IOrchestratorClient
     {
         try
         {
-            // TODO: Replace with real API call
-            // var response = await _httpClient.PostAsJsonAsync("/api/v1/nodes/heartbeat", heartbeat, ct);
-            // return response.IsSuccessStatusCode;
+            // Use the nodeId from the heartbeat
+            var nodeId = heartbeat.NodeId;
 
-            // Stub: Log and succeed
-            _logger.LogDebug("Heartbeat sent (stub mode): {VmCount} VMs", heartbeat.ActiveVms.Count);
-            return true;
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/nodes/{nodeId}/heartbeat");
+            request.Content = JsonContent.Create(heartbeat);
+
+            // Add auth token header (you'll need to store this from registration)
+            // request.Headers.Add("X-Node-Token", _authToken);
+
+            var response = await _httpClient.SendAsync(request, ct);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogDebug("Heartbeat sent successfully: {VmCount} VMs", heartbeat.ActiveVms.Count);
+                return true;
+            }
+
+            _logger.LogWarning("Heartbeat failed with status: {Status}", response.StatusCode);
+            return false;
         }
         catch (Exception ex)
         {
