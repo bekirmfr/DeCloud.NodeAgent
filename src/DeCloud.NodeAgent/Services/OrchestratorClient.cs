@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Collections.Concurrent;
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Options;
@@ -20,9 +21,11 @@ public class OrchestratorClient : IOrchestratorClient
     private readonly ILogger<OrchestratorClient> _logger;
     private readonly OrchestratorClientOptions _options;
 
-    // Registration credentials - set after successful registration
     private string? _nodeId;
     private string? _authToken;
+
+    // Queue for pending commands received from heartbeat responses
+    private readonly ConcurrentQueue<PendingCommand> _pendingCommands = new();
 
     public string? NodeId => _nodeId;
     public bool IsRegistered => !string.IsNullOrEmpty(_nodeId) && !string.IsNullOrEmpty(_authToken);
@@ -121,8 +124,12 @@ public class OrchestratorClient : IOrchestratorClient
                 {
                     timestamp = DateTime.UtcNow,
                     cpuUsagePercent = heartbeat.Resources.CpuUsagePercent,
-                    memoryUsagePercent = (double)heartbeat.Resources.UsedMemoryBytes / heartbeat.Resources.TotalMemoryBytes * 100,
-                    storageUsagePercent = (double)heartbeat.Resources.UsedStorageBytes / heartbeat.Resources.TotalStorageBytes * 100,
+                    memoryUsagePercent = heartbeat.Resources.TotalMemoryBytes > 0
+                        ? (double)heartbeat.Resources.UsedMemoryBytes / heartbeat.Resources.TotalMemoryBytes * 100
+                        : 0,
+                    storageUsagePercent = heartbeat.Resources.TotalStorageBytes > 0
+                        ? (double)heartbeat.Resources.UsedStorageBytes / heartbeat.Resources.TotalStorageBytes * 100
+                        : 0,
                     networkInMbps = 0,
                     networkOutMbps = 0,
                     activeVmCount = heartbeat.ActiveVms.Count,
@@ -144,6 +151,10 @@ public class OrchestratorClient : IOrchestratorClient
 
             if (response.IsSuccessStatusCode)
             {
+                // Parse response for pending commands
+                var content = await response.Content.ReadAsStringAsync(ct);
+                await ProcessHeartbeatResponseAsync(content, ct);
+
                 _logger.LogDebug("Heartbeat sent successfully: {VmCount} VMs", heartbeat.ActiveVms.Count);
                 return true;
             }
@@ -158,6 +169,59 @@ public class OrchestratorClient : IOrchestratorClient
         }
     }
 
+    private Task ProcessHeartbeatResponseAsync(string content, CancellationToken ct)
+    {
+        try
+        {
+            var json = JsonDocument.Parse(content);
+
+            if (json.RootElement.TryGetProperty("data", out var data) &&
+                data.TryGetProperty("pendingCommands", out var commands) &&
+                commands.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var cmd in commands.EnumerateArray())
+                {
+                    var commandId = cmd.GetProperty("commandId").GetString() ?? "";
+                    var typeStr = cmd.GetProperty("type").GetString() ?? "";
+                    var payload = cmd.GetProperty("payload").GetString() ?? "{}";
+
+                    if (Enum.TryParse<CommandType>(typeStr, true, out var commandType))
+                    {
+                        var pendingCommand = new PendingCommand
+                        {
+                            CommandId = commandId,
+                            Type = commandType,
+                            Payload = payload,
+                            IssuedAt = DateTime.UtcNow
+                        };
+
+                        _pendingCommands.Enqueue(pendingCommand);
+                        _logger.LogInformation("Received command from orchestrator: {Type} ({CommandId})",
+                            commandType, commandId);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse heartbeat response for commands");
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public Task<List<PendingCommand>> GetPendingCommandsAsync(CancellationToken ct = default)
+    {
+        var commands = new List<PendingCommand>();
+
+        while (_pendingCommands.TryDequeue(out var cmd))
+        {
+            commands.Add(cmd);
+        }
+
+        return Task.FromResult(commands);
+    }
+
     public async Task<bool> ReportVmStateChangeAsync(string vmId, VmState newState, CancellationToken ct = default)
     {
         if (!IsRegistered)
@@ -169,7 +233,7 @@ public class OrchestratorClient : IOrchestratorClient
         try
         {
             _logger.LogInformation("Reporting VM {VmId} state change to {State}", vmId, newState);
-            // TODO: Implement when Orchestrator has this endpoint
+            // The state will be reported in the next heartbeat via ActiveVms
             return true;
         }
         catch (Exception ex)
@@ -179,15 +243,9 @@ public class OrchestratorClient : IOrchestratorClient
         }
     }
 
-    public Task<List<PendingCommand>> GetPendingCommandsAsync(CancellationToken ct = default)
+    public async Task AcknowledgeCommandAsync(string commandId, bool success, string? error = null, CancellationToken ct = default)
     {
-        // Commands come back with heartbeat response
-        return Task.FromResult(new List<PendingCommand>());
-    }
-
-    public Task AcknowledgeCommandAsync(string commandId, bool success, string? error = null, CancellationToken ct = default)
-    {
-        _logger.LogInformation("Command {CommandId} acknowledged: {Success}", commandId, success);
-        return Task.CompletedTask;
+        _logger.LogInformation("Command {CommandId} acknowledged: {Success} {Error}", commandId, success, error ?? "");
+        // Commands are acknowledged implicitly via VM status in heartbeats
     }
 }

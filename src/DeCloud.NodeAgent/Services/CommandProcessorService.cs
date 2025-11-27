@@ -10,9 +10,6 @@ public class CommandProcessorOptions
     public TimeSpan PollInterval { get; set; } = TimeSpan.FromSeconds(5);
 }
 
-/// <summary>
-/// Polls for and executes commands from the orchestrator
-/// </summary>
 public class CommandProcessorService : BackgroundService
 {
     private readonly IOrchestratorClient _orchestratorClient;
@@ -20,6 +17,14 @@ public class CommandProcessorService : BackgroundService
     private readonly IResourceDiscoveryService _resourceDiscovery;
     private readonly ILogger<CommandProcessorService> _logger;
     private readonly CommandProcessorOptions _options;
+
+    // Default base image URLs
+    private static readonly Dictionary<string, string> ImageUrls = new()
+    {
+        ["ubuntu-24.04"] = "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
+        ["ubuntu-22.04"] = "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
+        ["debian-12"] = "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2"
+    };
 
     public CommandProcessorService(
         IOrchestratorClient orchestratorClient,
@@ -40,8 +45,8 @@ public class CommandProcessorService : BackgroundService
         _logger.LogInformation("Command processor starting with poll interval {Interval}s",
             _options.PollInterval.TotalSeconds);
 
-        // Wait for heartbeat service to initialize
-        await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+        // Wait for heartbeat service to initialize and register
+        await Task.Delay(TimeSpan.FromSeconds(15), stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -64,7 +69,7 @@ public class CommandProcessorService : BackgroundService
 
         foreach (var command in commands)
         {
-            _logger.LogInformation("Processing command {CommandId}: {Type}", 
+            _logger.LogInformation("Processing command {CommandId}: {Type}",
                 command.CommandId, command.Type);
 
             try
@@ -109,69 +114,118 @@ public class CommandProcessorService : BackgroundService
 
     private async Task<bool> HandleCreateVmAsync(string payload, CancellationToken ct)
     {
-        var spec = JsonSerializer.Deserialize<VmSpec>(payload);
-        if (spec == null)
+        try
         {
-            _logger.LogError("Invalid CreateVm payload");
+            _logger.LogInformation("Handling CreateVm command: {Payload}", payload);
+
+            using var doc = JsonDocument.Parse(payload);
+            var root = doc.RootElement;
+
+            var vmId = root.GetProperty("VmId").GetString() ?? Guid.NewGuid().ToString();
+            var name = root.GetProperty("Name").GetString() ?? vmId;
+
+            // Parse spec
+            var spec = root.GetProperty("Spec");
+            var cpuCores = spec.GetProperty("cpuCores").GetInt32();
+            var memoryMb = spec.GetProperty("memoryMb").GetInt64();
+            var diskGb = spec.GetProperty("diskGb").GetInt64();
+            var imageId = spec.GetProperty("imageId").GetString() ?? "ubuntu-22.04";
+
+            // Get SSH key if provided
+            string? sshPublicKey = null;
+            if (spec.TryGetProperty("sshPublicKey", out var sshKeyProp) &&
+                sshKeyProp.ValueKind == JsonValueKind.String)
+            {
+                sshPublicKey = sshKeyProp.GetString();
+            }
+
+            // Get image URL
+            var imageUrl = spec.TryGetProperty("imageUrl", out var urlProp) &&
+                          urlProp.ValueKind == JsonValueKind.String &&
+                          !string.IsNullOrEmpty(urlProp.GetString())
+                ? urlProp.GetString()!
+                : ImageUrls.GetValueOrDefault(imageId, ImageUrls["ubuntu-22.04"]);
+
+            var vmSpec = new VmSpec
+            {
+                VmId = vmId,
+                Name = name,
+                VCpus = cpuCores,
+                MemoryBytes = memoryMb * 1024 * 1024,
+                DiskBytes = diskGb * 1024 * 1024 * 1024,
+                BaseImageUrl = imageUrl,
+                BaseImageHash = "",
+                SshPublicKey = sshPublicKey,
+                TenantId = "orchestrator",
+                LeaseId = vmId
+            };
+
+            _logger.LogInformation("Creating VM {VmId}: {VCpus} vCPUs, {MemoryMb}MB RAM, image: {ImageId}",
+                vmId, cpuCores, memoryMb, imageId);
+
+            var result = await _vmManager.CreateVmAsync(vmSpec, ct);
+
+            if (result.Success)
+            {
+                _logger.LogInformation("VM {VmId} created, starting...", vmId);
+                var startResult = await _vmManager.StartVmAsync(vmId, ct);
+
+                if (startResult.Success)
+                {
+                    _logger.LogInformation("VM {VmId} started successfully", vmId);
+                    return true;
+                }
+
+                _logger.LogError("Failed to start VM {VmId}: {Error}", vmId, startResult.ErrorMessage);
+                return false;
+            }
+
+            _logger.LogError("CreateVm failed: {Error}", result.ErrorMessage);
             return false;
         }
-
-        var result = await _vmManager.CreateVmAsync(spec, ct);
-        
-        if (result.Success)
+        catch (Exception ex)
         {
-            // Auto-start the VM
-            var startResult = await _vmManager.StartVmAsync(spec.VmId, ct);
-            return startResult.Success;
+            _logger.LogError(ex, "Error handling CreateVm command");
+            return false;
         }
-
-        _logger.LogError("CreateVm failed: {Error}", result.ErrorMessage);
-        return false;
     }
 
     private async Task<bool> HandleStartVmAsync(string payload, CancellationToken ct)
     {
-        var request = JsonSerializer.Deserialize<VmCommandPayload>(payload);
-        if (request == null) return false;
+        using var doc = JsonDocument.Parse(payload);
+        var vmId = doc.RootElement.GetProperty("VmId").GetString();
+        if (string.IsNullOrEmpty(vmId)) return false;
 
-        var result = await _vmManager.StartVmAsync(request.VmId, ct);
+        var result = await _vmManager.StartVmAsync(vmId, ct);
         return result.Success;
     }
 
     private async Task<bool> HandleStopVmAsync(string payload, CancellationToken ct)
     {
-        var request = JsonSerializer.Deserialize<VmCommandPayload>(payload);
-        if (request == null) return false;
+        using var doc = JsonDocument.Parse(payload);
+        var vmId = doc.RootElement.GetProperty("VmId").GetString();
+        var force = doc.RootElement.TryGetProperty("Force", out var forceProp) && forceProp.GetBoolean();
+        if (string.IsNullOrEmpty(vmId)) return false;
 
-        var result = await _vmManager.StopVmAsync(request.VmId, request.Force, ct);
+        var result = await _vmManager.StopVmAsync(vmId, force, ct);
         return result.Success;
     }
 
     private async Task<bool> HandleDeleteVmAsync(string payload, CancellationToken ct)
     {
-        var request = JsonSerializer.Deserialize<VmCommandPayload>(payload);
-        if (request == null) return false;
+        using var doc = JsonDocument.Parse(payload);
+        var vmId = doc.RootElement.GetProperty("VmId").GetString();
+        if (string.IsNullOrEmpty(vmId)) return false;
 
-        var result = await _vmManager.DeleteVmAsync(request.VmId, ct);
+        var result = await _vmManager.DeleteVmAsync(vmId, ct);
         return result.Success;
     }
 
     private async Task<bool> HandleBenchmarkAsync(CancellationToken ct)
     {
         _logger.LogInformation("Running benchmark...");
-        
-        // Re-discover resources to update benchmarks
         var resources = await _resourceDiscovery.DiscoverAllAsync(ct);
-        
-        // TODO: Run actual benchmarks (sysbench, fio, etc.)
-        
         _logger.LogInformation("Benchmark complete");
         return true;
-    }
-
-    private class VmCommandPayload
-    {
-        public string VmId { get; set; } = string.Empty;
-        public bool Force { get; set; }
     }
 }
