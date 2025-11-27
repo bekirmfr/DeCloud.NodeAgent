@@ -46,12 +46,19 @@ public class HeartbeatService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("Heartbeat service starting with interval {Interval}s", 
+        _logger.LogInformation("Heartbeat service starting with interval {Interval}s",
             _options.Interval.TotalSeconds);
 
         // Initial delay to let other services start
         await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
-        
+
+        // Register with orchestrator
+        var orchestratorClient = _orchestratorClient as OrchestratorClient;
+        if (orchestratorClient != null && !orchestratorClient.IsRegistered)
+        {
+            await RegisterWithOrchestratorAsync(stoppingToken);
+        }
+
         _currentStatus = NodeStatus.Online;
 
         while (!stoppingToken.IsCancellationRequested)
@@ -69,6 +76,50 @@ public class HeartbeatService : BackgroundService
         }
 
         _logger.LogInformation("Heartbeat service stopping");
+    }
+
+    private async Task RegisterWithOrchestratorAsync(CancellationToken ct)
+    {
+        var maxRetries = 5;
+        var retryDelay = TimeSpan.FromSeconds(10);
+
+        for (var i = 0; i < maxRetries; i++)
+        {
+            try
+            {
+                _logger.LogInformation("Attempting to register with orchestrator (attempt {Attempt}/{Max})", i + 1, maxRetries);
+
+                var resources = await _resourceDiscovery.DiscoverAllAsync(ct);
+
+                var registration = new NodeRegistration
+                {
+                    NodeId = _nodeId,
+                    Resources = resources,
+                    Endpoint = $"{resources.Network.PublicIp}:5100",
+                    WalletAddress = "0x0000000000000000000000000000000000000000"
+                };
+
+                var success = await _orchestratorClient.RegisterNodeAsync(registration, ct);
+
+                if (success)
+                {
+                    _logger.LogInformation("Successfully registered with orchestrator");
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Registration attempt {Attempt} failed", i + 1);
+            }
+
+            if (i < maxRetries - 1)
+            {
+                _logger.LogInformation("Retrying in {Delay} seconds...", retryDelay.TotalSeconds);
+                await Task.Delay(retryDelay, ct);
+            }
+        }
+
+        _logger.LogError("Failed to register with orchestrator after {MaxRetries} attempts", maxRetries);
     }
 
     private async Task SendHeartbeatAsync(CancellationToken ct)
