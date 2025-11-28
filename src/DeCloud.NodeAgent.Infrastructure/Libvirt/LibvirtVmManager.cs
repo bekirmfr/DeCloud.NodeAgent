@@ -57,10 +57,6 @@ public class LibvirtVmManager : IVmManager
         }
     }
 
-    /// <summary>
-    /// Initialize the VM manager and reconcile with libvirt state.
-    /// Should be called on startup before processing any commands.
-    /// </summary>
     public async Task InitializeAsync(CancellationToken ct = default)
     {
         if (_initialized || _isWindows)
@@ -85,17 +81,12 @@ public class LibvirtVmManager : IVmManager
         }
     }
 
-    /// <summary>
-    /// Reconcile in-memory VM tracking with actual libvirt state.
-    /// This discovers VMs that exist in libvirt but aren't in our tracking.
-    /// </summary>
     public async Task ReconcileWithLibvirtAsync(CancellationToken ct = default)
     {
         _logger.LogInformation("Reconciling VM state with libvirt...");
 
         try
         {
-            // Get all VMs from libvirt
             var listResult = await _executor.ExecuteAsync("virsh", "list --all --uuid", ct);
             if (!listResult.Success)
             {
@@ -115,14 +106,12 @@ public class LibvirtVmManager : IVmManager
             {
                 if (_vms.ContainsKey(vmId))
                 {
-                    // Already tracking - just update state
                     var state = await GetVmStateFromLibvirtAsync(vmId, ct);
                     _vms[vmId].State = state;
                     _logger.LogDebug("Updated existing VM {VmId} state to {State}", vmId, state);
                 }
                 else
                 {
-                    // Not tracking - reconstruct from libvirt
                     var vmInstance = await ReconstructVmInstanceAsync(vmId, ct);
                     if (vmInstance != null)
                     {
@@ -133,7 +122,6 @@ public class LibvirtVmManager : IVmManager
                 }
             }
 
-            // Check for VMs we're tracking that no longer exist in libvirt
             var orphanedTracking = _vms.Keys.Except(libvirtVmIds).ToList();
             foreach (var vmId in orphanedTracking)
             {
@@ -141,9 +129,7 @@ public class LibvirtVmManager : IVmManager
                 _vms.Remove(vmId);
             }
 
-            // Update next VNC port based on what's in use
             await UpdateNextVncPortAsync(ct);
-
             _logger.LogInformation("Reconciliation complete: tracking {Count} VMs", _vms.Count);
         }
         catch (Exception ex)
@@ -152,14 +138,10 @@ public class LibvirtVmManager : IVmManager
         }
     }
 
-    /// <summary>
-    /// Reconstruct a VmInstance from libvirt domain XML
-    /// </summary>
     private async Task<VmInstance?> ReconstructVmInstanceAsync(string vmId, CancellationToken ct)
     {
         try
         {
-            // Get domain XML
             var xmlResult = await _executor.ExecuteAsync("virsh", $"dumpxml {vmId}", ct);
             if (!xmlResult.Success)
             {
@@ -171,30 +153,26 @@ public class LibvirtVmManager : IVmManager
             var domain = xml.Element("domain");
             if (domain == null) return null;
 
-            // Parse resources from XML
             var vcpus = int.TryParse(domain.Element("vcpu")?.Value, out var v) ? v : 1;
             var memoryKiB = long.TryParse(domain.Element("memory")?.Value, out var m) ? m : 1048576;
             var memoryBytes = memoryKiB * 1024;
 
-            // Find disk path
             var diskPath = domain.Descendants("disk")
                 .Where(d => d.Attribute("device")?.Value == "disk")
                 .SelectMany(d => d.Elements("source"))
                 .Select(s => s.Attribute("file")?.Value)
                 .FirstOrDefault();
 
-            // Find VNC port
             var graphics = domain.Descendants("graphics")
                 .FirstOrDefault(g => g.Attribute("type")?.Value == "vnc");
             var vncPort = graphics?.Attribute("port")?.Value;
 
-            // Get current state
             var state = await GetVmStateFromLibvirtAsync(vmId, ct);
 
-            // Check for cloud-init metadata in VM directory
             var vmDir = Path.Combine(_options.VmStoragePath, vmId);
             string? tenantId = null;
             string? leaseId = null;
+            string? vmName = null;
 
             var metadataPath = Path.Combine(vmDir, "metadata.json");
             if (File.Exists(metadataPath))
@@ -205,17 +183,19 @@ public class LibvirtVmManager : IVmManager
                         await File.ReadAllTextAsync(metadataPath, ct));
                     tenantId = metadata.RootElement.TryGetProperty("tenantId", out var t) ? t.GetString() : null;
                     leaseId = metadata.RootElement.TryGetProperty("leaseId", out var l) ? l.GetString() : null;
+                    vmName = metadata.RootElement.TryGetProperty("name", out var n) ? n.GetString() : null;
                 }
-                catch { /* ignore metadata parse errors */ }
+                catch { }
             }
 
             var instance = new VmInstance
             {
                 VmId = vmId,
+                Name = vmName ?? domain.Element("name")?.Value ?? vmId,
                 Spec = new VmSpec
                 {
                     VmId = vmId,
-                    Name = domain.Element("name")?.Value ?? vmId,
+                    Name = vmName ?? domain.Element("name")?.Value ?? vmId,
                     VCpus = vcpus,
                     MemoryBytes = memoryBytes,
                     DiskBytes = await GetDiskSizeAsync(diskPath, ct),
@@ -244,7 +224,7 @@ public class LibvirtVmManager : IVmManager
     private async Task<long> GetDiskSizeAsync(string? diskPath, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(diskPath) || !File.Exists(diskPath))
-            return 10L * 1024 * 1024 * 1024; // Default 10GB
+            return 0;
 
         try
         {
@@ -258,7 +238,7 @@ public class LibvirtVmManager : IVmManager
                 }
             }
         }
-        catch { /* ignore */ }
+        catch { }
 
         return new FileInfo(diskPath).Length;
     }
@@ -266,7 +246,6 @@ public class LibvirtVmManager : IVmManager
     private async Task UpdateNextVncPortAsync(CancellationToken ct)
     {
         var maxPort = _options.VncPortStart;
-
         foreach (var vm in _vms.Values)
         {
             if (int.TryParse(vm.VncPort, out var port) && port >= maxPort)
@@ -274,7 +253,6 @@ public class LibvirtVmManager : IVmManager
                 maxPort = port + 1;
             }
         }
-
         _nextVncPort = maxPort;
         _logger.LogDebug("Next VNC port set to {Port}", _nextVncPort);
     }
@@ -305,7 +283,6 @@ public class LibvirtVmManager : IVmManager
                 "VM creation requires Linux with KVM/libvirt. Windows detected.", "PLATFORM_UNSUPPORTED");
         }
 
-        // Ensure initialized
         if (!_initialized)
         {
             await InitializeAsync(ct);
@@ -317,7 +294,21 @@ public class LibvirtVmManager : IVmManager
             _logger.LogInformation("Creating VM {VmId}: {VCpus} vCPUs, {MemMB}MB RAM, {DiskGB}GB disk",
                 spec.VmId, spec.VCpus, spec.MemoryBytes / 1024 / 1024, spec.DiskBytes / 1024 / 1024 / 1024);
 
-            // 1. Create VM directory
+            // Log authentication method
+            if (!string.IsNullOrEmpty(spec.SshPublicKey))
+            {
+                _logger.LogInformation("VM {VmId} will use SSH key authentication ({KeyLength} chars)",
+                    spec.VmId, spec.SshPublicKey.Length);
+            }
+            else if (!string.IsNullOrEmpty(spec.Password))
+            {
+                _logger.LogInformation("VM {VmId} will use password authentication", spec.VmId);
+            }
+            else
+            {
+                _logger.LogWarning("VM {VmId} has no SSH key or password - will use fallback password 'decloud'", spec.VmId);
+            }
+
             var vmDir = Path.Combine(_options.VmStoragePath, spec.VmId);
             Directory.CreateDirectory(vmDir);
 
@@ -330,19 +321,16 @@ public class LibvirtVmManager : IVmManager
             };
             _vms[spec.VmId] = instance;
 
-            // Save metadata for recovery
             await SaveVmMetadataAsync(vmDir, spec, ct);
 
-            // 2. Download/prepare base image using IImageManager
             _logger.LogInformation("Preparing base image from {ImageUrl}", spec.BaseImageUrl);
 
             string baseImagePath;
             try
             {
-                // Use EnsureImageAvailableAsync - pass empty hash to skip verification
                 baseImagePath = await _imageManager.EnsureImageAvailableAsync(
                     spec.BaseImageUrl ?? "",
-                    string.Empty, // No hash verification for now
+                    string.Empty,
                     ct);
             }
             catch (Exception ex)
@@ -358,7 +346,6 @@ public class LibvirtVmManager : IVmManager
                 return VmOperationResult.Fail(spec.VmId, "Failed to download base image", "IMAGE_DOWNLOAD_FAILED");
             }
 
-            // 3. Create disk overlay using IImageManager
             string diskPath;
             try
             {
@@ -373,10 +360,8 @@ public class LibvirtVmManager : IVmManager
 
             instance.DiskPath = diskPath;
 
-            // 4. Always generate cloud-init ISO (for network config at minimum)
             var cloudInitIso = await CreateCloudInitIsoAsync(spec, vmDir, ct);
 
-            // 5. Generate libvirt XML
             var vncPort = Interlocked.Increment(ref _nextVncPort);
             instance.VncPort = vncPort.ToString();
 
@@ -384,9 +369,7 @@ public class LibvirtVmManager : IVmManager
             instance.ConfigPath = Path.Combine(vmDir, "domain.xml");
             await File.WriteAllTextAsync(instance.ConfigPath, xml, ct);
 
-            // 6. Define domain with virsh
-            var defineResult = await _executor.ExecuteAsync("virsh",
-                $"define {instance.ConfigPath}", ct);
+            var defineResult = await _executor.ExecuteAsync("virsh", $"define {instance.ConfigPath}", ct);
 
             if (!defineResult.Success)
             {
@@ -430,10 +413,8 @@ public class LibvirtVmManager : IVmManager
 
     public async Task<VmOperationResult> StartVmAsync(string vmId, CancellationToken ct = default)
     {
-        // Ensure initialized
         if (!_initialized) await InitializeAsync(ct);
 
-        // Check libvirt directly if not in tracking
         if (!_vms.TryGetValue(vmId, out var instance))
         {
             if (!await VmExistsAsync(vmId, ct))
@@ -441,7 +422,6 @@ public class LibvirtVmManager : IVmManager
                 return VmOperationResult.Fail(vmId, "VM not found", "NOT_FOUND");
             }
 
-            // Reconcile this specific VM
             instance = await ReconstructVmInstanceAsync(vmId, ct);
             if (instance != null)
             {
@@ -464,7 +444,6 @@ public class LibvirtVmManager : IVmManager
             return VmOperationResult.Ok(vmId, VmState.Running);
         }
 
-        // Check if already running
         if (result.StandardError.Contains("already active"))
         {
             instance.State = VmState.Running;
@@ -478,12 +457,10 @@ public class LibvirtVmManager : IVmManager
 
     public async Task<VmOperationResult> StopVmAsync(string vmId, bool force = false, CancellationToken ct = default)
     {
-        // Ensure initialized
         if (!_initialized) await InitializeAsync(ct);
 
         _logger.LogInformation("Stopping VM {VmId} (force={Force})", vmId, force);
 
-        // Check libvirt directly - don't require in-memory tracking
         var existsInLibvirt = await VmExistsAsync(vmId, ct);
         if (!existsInLibvirt)
         {
@@ -491,7 +468,6 @@ public class LibvirtVmManager : IVmManager
             return VmOperationResult.Fail(vmId, "VM not found in libvirt", "NOT_FOUND");
         }
 
-        // Update tracking if we have it
         if (_vms.TryGetValue(vmId, out var instance))
         {
             instance.State = VmState.Stopping;
@@ -502,7 +478,6 @@ public class LibvirtVmManager : IVmManager
 
         if (result.Success)
         {
-            // Wait for actual shutdown if graceful
             if (!force)
             {
                 for (var i = 0; i < 30; i++)
@@ -521,7 +496,6 @@ public class LibvirtVmManager : IVmManager
             return VmOperationResult.Ok(vmId, VmState.Stopped);
         }
 
-        // Check if already stopped
         if (result.StandardError.Contains("not running") || result.StandardError.Contains("shut off"))
         {
             if (instance != null)
@@ -538,64 +512,48 @@ public class LibvirtVmManager : IVmManager
 
     public async Task<VmOperationResult> DeleteVmAsync(string vmId, CancellationToken ct = default)
     {
-        // Ensure initialized
         if (!_initialized) await InitializeAsync(ct);
 
         _logger.LogInformation("Deleting VM {VmId}", vmId);
 
-        // Check if VM exists in libvirt (not just our in-memory tracking)
         var existsInLibvirt = await VmExistsAsync(vmId, ct);
 
         if (!existsInLibvirt)
         {
-            // Not in libvirt - just clean up our tracking if present
             _vms.Remove(vmId);
-
-            // Also clean up directory if it exists
-            var vmDir = Path.Combine(_options.VmStoragePath, vmId);
-            if (Directory.Exists(vmDir))
+            var vmDirectory = Path.Combine(_options.VmStoragePath, vmId);
+            if (Directory.Exists(vmDirectory))
             {
                 try
                 {
-                    Directory.Delete(vmDir, recursive: true);
-                    _logger.LogInformation("Cleaned up orphaned VM directory: {VmDir}", vmDir);
+                    Directory.Delete(vmDirectory, recursive: true);
+                    _logger.LogInformation("Cleaned up orphaned VM directory: {VmDir}", vmDirectory);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Failed to delete VM directory {VmDir}", vmDir);
+                    _logger.LogWarning(ex, "Failed to delete VM directory {VmDir}", vmDirectory);
                 }
             }
-
-            _logger.LogInformation("VM {VmId} not found in libvirt, cleaned up tracking", vmId);
             return VmOperationResult.Ok(vmId, VmState.Stopped);
         }
 
-        // Stop if running - use virsh directly instead of StopVmAsync to ensure it works
-        // even if VM isn't in our tracking dictionary
         var state = await GetVmStateFromLibvirtAsync(vmId, ct);
         if (state == VmState.Running || state == VmState.Paused)
         {
-            _logger.LogInformation("VM {VmId} is {State}, forcing shutdown", vmId, state);
+            _logger.LogInformation("VM {VmId} is running, destroying first", vmId);
             var destroyResult = await _executor.ExecuteAsync("virsh", $"destroy {vmId}", ct);
-            if (!destroyResult.Success && !destroyResult.StandardError.Contains("not running"))
+            if (!destroyResult.Success)
             {
                 _logger.LogWarning("Failed to destroy VM {VmId}: {Error}", vmId, destroyResult.StandardError);
-                // Continue anyway - undefine might still work
             }
-
-            // Wait a moment for the destroy to complete
             await Task.Delay(500, ct);
         }
 
-        // Undefine domain with --remove-all-storage to clean up disks
-        var undefResult = await _executor.ExecuteAsync("virsh",
-            $"undefine {vmId} --remove-all-storage --nvram", ct);
+        var undefResult = await _executor.ExecuteAsync("virsh", $"undefine {vmId} --remove-all-storage --nvram", ct);
 
         if (!undefResult.Success)
         {
-            // Try without --nvram (some VMs don't have NVRAM)
-            undefResult = await _executor.ExecuteAsync("virsh",
-                $"undefine {vmId} --remove-all-storage", ct);
+            undefResult = await _executor.ExecuteAsync("virsh", $"undefine {vmId} --remove-all-storage", ct);
         }
 
         if (!undefResult.Success && !undefResult.StandardError.Contains("not found"))
@@ -604,22 +562,20 @@ public class LibvirtVmManager : IVmManager
             return VmOperationResult.Fail(vmId, undefResult.StandardError, "UNDEFINE_FAILED");
         }
 
-        // Clean up our VM directory (cloud-init, metadata, etc.)
-        var vmDirectory = Path.Combine(_options.VmStoragePath, vmId);
-        if (Directory.Exists(vmDirectory))
+        var vmDir = Path.Combine(_options.VmStoragePath, vmId);
+        if (Directory.Exists(vmDir))
         {
             try
             {
-                Directory.Delete(vmDirectory, recursive: true);
-                _logger.LogInformation("Cleaned up VM directory: {VmDir}", vmDirectory);
+                Directory.Delete(vmDir, recursive: true);
+                _logger.LogInformation("Cleaned up VM directory: {VmDir}", vmDir);
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to delete VM directory {VmDir}", vmDirectory);
+                _logger.LogWarning(ex, "Failed to delete VM directory {VmDir}", vmDir);
             }
         }
 
-        // Also clean up disk via IImageManager if it still exists
         if (_vms.TryGetValue(vmId, out var vmInstance) && !string.IsNullOrEmpty(vmInstance.DiskPath))
         {
             try
@@ -632,7 +588,6 @@ public class LibvirtVmManager : IVmManager
             }
         }
 
-        // Remove from tracking
         _vms.Remove(vmId);
         _logger.LogInformation("VM {VmId} deleted successfully", vmId);
 
@@ -641,9 +596,16 @@ public class LibvirtVmManager : IVmManager
 
     public async Task<VmOperationResult> PauseVmAsync(string vmId, CancellationToken ct = default)
     {
+        if (!_initialized) await InitializeAsync(ct);
+
+        if (!_vms.TryGetValue(vmId, out var instance))
+        {
+            return VmOperationResult.Fail(vmId, "VM not found", "NOT_FOUND");
+        }
+
         var result = await _executor.ExecuteAsync("virsh", $"suspend {vmId}", ct);
 
-        if (result.Success && _vms.TryGetValue(vmId, out var instance))
+        if (result.Success)
         {
             instance.State = VmState.Paused;
             return VmOperationResult.Ok(vmId, VmState.Paused);
@@ -654,9 +616,16 @@ public class LibvirtVmManager : IVmManager
 
     public async Task<VmOperationResult> ResumeVmAsync(string vmId, CancellationToken ct = default)
     {
+        if (!_initialized) await InitializeAsync(ct);
+
+        if (!_vms.TryGetValue(vmId, out var instance))
+        {
+            return VmOperationResult.Fail(vmId, "VM not found", "NOT_FOUND");
+        }
+
         var result = await _executor.ExecuteAsync("virsh", $"resume {vmId}", ct);
 
-        if (result.Success && _vms.TryGetValue(vmId, out var instance))
+        if (result.Success)
         {
             instance.State = VmState.Running;
             return VmOperationResult.Ok(vmId, VmState.Running);
@@ -680,72 +649,57 @@ public class LibvirtVmManager : IVmManager
     {
         var usage = new VmResourceUsage { MeasuredAt = DateTime.UtcNow };
 
-        // Get CPU stats - calculate percentage from cpu_time
-        var cpuResult = await _executor.ExecuteAsync("virsh", $"cpu-stats {vmId} --total", ct);
+        if (!_vms.TryGetValue(vmId, out var vm) || vm.State != VmState.Running)
+        {
+            return usage;
+        }
+
+        var cpuResult = await _executor.ExecuteAsync("virsh", $"domstats {vmId} --cpu-total", ct);
         if (cpuResult.Success)
         {
-            // Try to get CPU percentage from domstats instead
-            var statsResult = await _executor.ExecuteAsync("virsh", $"domstats {vmId} --cpu-total", ct);
-            if (statsResult.Success)
+            var match = Regex.Match(cpuResult.StandardOutput, @"cpu\.time=(\d+)");
+            if (match.Success && long.TryParse(match.Groups[1].Value, out var cpuTime))
             {
-                // Parse cpu.time and calculate approximate percentage
-                var match = Regex.Match(statsResult.StandardOutput, @"cpu\.time=(\d+)");
-                if (match.Success && long.TryParse(match.Groups[1].Value, out var cpuTimeNs))
-                {
-                    // Get VM's vCPU count to estimate usage
-                    if (_vms.TryGetValue(vmId, out var vm))
-                    {
-                        // This is a rough estimate - for accurate %, would need to track delta over time
-                        // For now, just report a placeholder based on whether VM is active
-                        usage.CpuPercent = cpuTimeNs > 0 ? 5.0 : 0.0; // Placeholder
-                    }
-                }
+                usage.CpuPercent = (cpuTime / 1_000_000_000.0) % 100;
             }
         }
 
-        // Get memory stats
         var memResult = await _executor.ExecuteAsync("virsh", $"dommemstat {vmId}", ct);
         if (memResult.Success)
         {
             foreach (var line in memResult.StandardOutput.Split('\n'))
             {
-                if (line.StartsWith("rss"))
+                if (line.StartsWith("actual"))
                 {
                     var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    if (parts.Length >= 2 && long.TryParse(parts[1], out var kib))
+                    if (parts.Length >= 2 && long.TryParse(parts[1], out var actualKb))
                     {
-                        usage.MemoryUsedBytes = kib * 1024;
+                        usage.MemoryUsedBytes = actualKb * 1024;
                     }
                 }
             }
         }
 
-        // Get block stats
-        var blkResult = await _executor.ExecuteAsync("virsh", $"domblkstat {vmId} vda", ct);
-        if (blkResult.Success)
+        var blockResult = await _executor.ExecuteAsync("virsh", $"domblkstat {vmId} vda", ct);
+        if (blockResult.Success)
         {
-            foreach (var line in blkResult.StandardOutput.Split('\n'))
+            foreach (var line in blockResult.StandardOutput.Split('\n'))
             {
-                if (line.Contains("rd_bytes"))
+                var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 2)
                 {
-                    var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    if (parts.Length >= 2 && long.TryParse(parts.Last(), out var rb))
-                        usage.DiskReadBytes = rb;
-                }
-                if (line.Contains("wr_bytes"))
-                {
-                    var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    if (parts.Length >= 2 && long.TryParse(parts.Last(), out var wb))
-                        usage.DiskWriteBytes = wb;
+                    if (parts[0].EndsWith("rd_bytes") && long.TryParse(parts[1], out var rd))
+                        usage.DiskReadBytes = rd;
+                    if (parts[0].EndsWith("wr_bytes") && long.TryParse(parts[1], out var wr))
+                        usage.DiskWriteBytes = wr;
                 }
             }
         }
 
-        // Get network stats - try different interface names
-        foreach (var ifName in new[] { "vnet0", "virbr0-nic", "default" })
+        foreach (var iface in new[] { "vnet0", "vnet1", "vnet2", "vnet3", "vnet4", "vnet5", "vnet6", "vnet7", "vnet8", "vnet9" })
         {
-            var netResult = await _executor.ExecuteAsync("virsh", $"domifstat {vmId} {ifName}", ct);
-            if (netResult.Success)
+            var netResult = await _executor.ExecuteAsync("virsh", $"domifstat {vmId} {iface}", ct);
+            if (netResult.Success && !netResult.StandardOutput.Contains("error"))
             {
                 foreach (var line in netResult.StandardOutput.Split('\n'))
                 {
@@ -762,7 +716,7 @@ public class LibvirtVmManager : IVmManager
                             usage.NetworkTxBytes = tx;
                     }
                 }
-                break; // Found working interface
+                break;
             }
         }
 
@@ -777,12 +731,9 @@ public class LibvirtVmManager : IVmManager
 
     public async Task<string?> GetVmIpAddressAsync(string vmId, CancellationToken ct = default)
     {
-        // Try to get IP from DHCP leases
         var result = await _executor.ExecuteAsync("virsh", "net-dhcp-leases default", ct);
         if (!result.Success) return null;
 
-        // Parse output looking for our VM's MAC address
-        // First get the VM's MAC
         var domiflistResult = await _executor.ExecuteAsync("virsh", $"domiflist {vmId}", ct);
         if (!domiflistResult.Success) return null;
 
@@ -792,7 +743,6 @@ public class LibvirtVmManager : IVmManager
 
         var vmMac = macMatch.Value.ToLower();
 
-        // Find IP for this MAC in DHCP leases
         foreach (var line in result.StandardOutput.Split('\n'))
         {
             if (line.ToLower().Contains(vmMac))
@@ -808,6 +758,9 @@ public class LibvirtVmManager : IVmManager
         return null;
     }
 
+    /// <summary>
+    /// Create cloud-init ISO with proper network config and authentication
+    /// </summary>
     private async Task<string> CreateCloudInitIsoAsync(VmSpec spec, string vmDir, CancellationToken ct)
     {
         var metaDataPath = Path.Combine(vmDir, "meta-data");
@@ -815,85 +768,103 @@ public class LibvirtVmManager : IVmManager
         var networkConfigPath = Path.Combine(vmDir, "network-config");
         var isoPath = Path.Combine(vmDir, "cloud-init.iso");
 
-        // meta-data (instance identity)
+        // meta-data
         var metaData = $@"instance-id: {spec.VmId}
 local-hostname: {spec.Name}
 ";
         await File.WriteAllTextAsync(metaDataPath, metaData, ct);
 
-        // network-config (always enable DHCP)
+        // ===========================================
+        // FIXED: Network config with multiple interface names
+        // Ubuntu cloud images use different names depending on version
+        // ===========================================
         var networkConfig = @"version: 2
 ethernets:
-  id0:
-    match:
-      driver: virtio
+  ens3:
     dhcp4: true
     dhcp6: false
+    optional: true
+  enp1s0:
+    dhcp4: true
+    dhcp6: false
+    optional: true
+  eth0:
+    dhcp4: true
+    dhcp6: false
+    optional: true
 ";
         await File.WriteAllTextAsync(networkConfigPath, networkConfig, ct);
 
-        // user-data (SSH key OR password)
+        // user-data
         var userDataBuilder = new StringBuilder();
         userDataBuilder.AppendLine("#cloud-config");
-
-        // Set hostname
         userDataBuilder.AppendLine($"hostname: {spec.Name}");
         userDataBuilder.AppendLine("manage_etc_hosts: true");
         userDataBuilder.AppendLine();
 
-        // Default user configuration
+        // User configuration
         userDataBuilder.AppendLine("users:");
         userDataBuilder.AppendLine("  - name: ubuntu");
         userDataBuilder.AppendLine("    sudo: ALL=(ALL) NOPASSWD:ALL");
         userDataBuilder.AppendLine("    shell: /bin/bash");
-        userDataBuilder.AppendLine("    groups: [adm, sudo, docker]");
+        userDataBuilder.AppendLine("    groups: [adm, sudo]");
 
         if (!string.IsNullOrEmpty(spec.SshPublicKey))
         {
-            // SSH key authentication
             userDataBuilder.AppendLine("    lock_passwd: true");
             userDataBuilder.AppendLine("    ssh_authorized_keys:");
             foreach (var key in spec.SshPublicKey.Split('\n', StringSplitOptions.RemoveEmptyEntries))
             {
-                userDataBuilder.AppendLine($"      - {key.Trim()}");
+                var trimmedKey = key.Trim();
+                if (!string.IsNullOrEmpty(trimmedKey))
+                {
+                    userDataBuilder.AppendLine($"      - {trimmedKey}");
+                }
             }
+            _logger.LogDebug("VM {VmId} cloud-init: SSH key configured", spec.VmId);
         }
         else if (!string.IsNullOrEmpty(spec.Password))
         {
-            // Password authentication
             userDataBuilder.AppendLine("    lock_passwd: false");
             userDataBuilder.AppendLine($"    plain_text_passwd: {spec.Password}");
             userDataBuilder.AppendLine();
-            userDataBuilder.AppendLine("ssh_pwauth: true");  // Enable SSH password auth
+            userDataBuilder.AppendLine("ssh_pwauth: true");
+            _logger.LogDebug("VM {VmId} cloud-init: password configured", spec.VmId);
         }
         else
         {
-            // Fallback: no auth configured (shouldn't happen, but be safe)
-            _logger.LogWarning("VM {VmId} created without SSH key or password", spec.VmId);
-            userDataBuilder.AppendLine("    lock_passwd: true");
+            // FALLBACK: Set default password when nothing provided
+            userDataBuilder.AppendLine("    lock_passwd: false");
+            userDataBuilder.AppendLine("    plain_text_passwd: decloud");
+            userDataBuilder.AppendLine();
+            userDataBuilder.AppendLine("ssh_pwauth: true");
+            _logger.LogWarning("VM {VmId} cloud-init: using fallback password 'decloud'", spec.VmId);
         }
 
         userDataBuilder.AppendLine();
 
-        // Add any custom user data
+        // Ensure network comes up
+        userDataBuilder.AppendLine("runcmd:");
+        userDataBuilder.AppendLine("  - netplan generate || true");
+        userDataBuilder.AppendLine("  - netplan apply || true");
+        userDataBuilder.AppendLine("  - dhclient -v 2>/dev/null || dhclient ens3 2>/dev/null || dhclient enp1s0 2>/dev/null || dhclient eth0 2>/dev/null || true");
+
         if (!string.IsNullOrEmpty(spec.CloudInitUserData))
         {
+            userDataBuilder.AppendLine();
             userDataBuilder.AppendLine("# Custom user data");
             userDataBuilder.AppendLine(spec.CloudInitUserData);
         }
 
-        // Package updates (optional, can slow down boot)
         userDataBuilder.AppendLine();
         userDataBuilder.AppendLine("package_update: false");
         userDataBuilder.AppendLine("package_upgrade: false");
-
-        // Final message
         userDataBuilder.AppendLine();
         userDataBuilder.AppendLine("final_message: \"DeCloud VM ready after $UPTIME seconds\"");
 
         await File.WriteAllTextAsync(userDataPath, userDataBuilder.ToString(), ct);
 
-        // Generate ISO using cloud-localds or genisoimage
+        // Generate ISO
         var result = await _executor.ExecuteAsync(
             "cloud-localds",
             $"-N {networkConfigPath} {isoPath} {userDataPath} {metaDataPath}",
@@ -901,7 +872,6 @@ ethernets:
 
         if (!result.Success)
         {
-            // Fallback to genisoimage
             result = await _executor.ExecuteAsync(
                 "genisoimage",
                 $"-output {isoPath} -volid cidata -joliet -rock {userDataPath} {metaDataPath} {networkConfigPath}",
