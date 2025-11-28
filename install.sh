@@ -391,6 +391,130 @@ install_wireguard() {
     log_success "WireGuard installed"
 }
 
+check_wireguard_conflicts() {
+    log_step "Checking for WireGuard conflicts..."
+    
+    # Check if our interface already exists
+    if ip link show "$WIREGUARD_INTERFACE" &> /dev/null; then
+        log_info "Interface $WIREGUARD_INTERFACE already exists"
+        
+        # Check if it's ours (has our config)
+        if [ -f "$WG_DIR/$WIREGUARD_INTERFACE.conf" ]; then
+            log_info "Found existing DeCloud WireGuard config, will update"
+            wg-quick down "$WIREGUARD_INTERFACE" 2>/dev/null || true
+        else
+            log_warn "Interface $WIREGUARD_INTERFACE exists but no config found"
+        fi
+    fi
+    
+    # Check if port is in use by another WireGuard interface
+    local port_in_use=false
+    local existing_interfaces=$(wg show interfaces 2>/dev/null || echo "")
+    
+    for iface in $existing_interfaces; do
+        local iface_port=$(wg show "$iface" listen-port 2>/dev/null || echo "")
+        if [ "$iface_port" = "$WIREGUARD_PORT" ] && [ "$iface" != "$WIREGUARD_INTERFACE" ]; then
+            port_in_use=true
+            log_warn "Port $WIREGUARD_PORT already in use by interface: $iface"
+            break
+        fi
+    done
+    
+    # Also check if port is in use by any other process
+    if [ "$port_in_use" = false ]; then
+        if ss -uln | grep -q ":${WIREGUARD_PORT} " 2>/dev/null; then
+            # Double check it's not our own interface
+            if ! wg show "$WIREGUARD_INTERFACE" listen-port 2>/dev/null | grep -q "$WIREGUARD_PORT"; then
+                port_in_use=true
+                log_warn "Port $WIREGUARD_PORT already in use by another process"
+            fi
+        fi
+    fi
+    
+    # If port is in use, find an available one
+    if [ "$port_in_use" = true ]; then
+        log_info "Finding available port..."
+        
+        local new_port=$((WIREGUARD_PORT + 1))
+        local max_port=$((WIREGUARD_PORT + 100))
+        
+        while [ $new_port -le $max_port ]; do
+            local port_free=true
+            
+            # Check WireGuard interfaces
+            for iface in $existing_interfaces; do
+                local iface_port=$(wg show "$iface" listen-port 2>/dev/null || echo "")
+                if [ "$iface_port" = "$new_port" ]; then
+                    port_free=false
+                    break
+                fi
+            done
+            
+            # Check other processes
+            if [ "$port_free" = true ]; then
+                if ss -uln | grep -q ":${new_port} " 2>/dev/null; then
+                    port_free=false
+                fi
+            fi
+            
+            if [ "$port_free" = true ]; then
+                WIREGUARD_PORT=$new_port
+                log_success "Using available port: $WIREGUARD_PORT"
+                break
+            fi
+            
+            ((new_port++))
+        done
+        
+        if [ $new_port -gt $max_port ]; then
+            log_error "Could not find available port in range $((WIREGUARD_PORT - 100 + 1))-$max_port"
+            log_error "Specify a port manually with --wg-port or use --skip-wireguard"
+            return 1
+        fi
+    else
+        log_success "Port $WIREGUARD_PORT is available"
+    fi
+    
+    # Check for IP address conflicts
+    local ip_in_use=false
+    
+    if ip addr show | grep -q "inet ${WIREGUARD_HUB_IP}/" 2>/dev/null; then
+        # Check if it's on our interface
+        if ! ip addr show "$WIREGUARD_INTERFACE" 2>/dev/null | grep -q "inet ${WIREGUARD_HUB_IP}/"; then
+            ip_in_use=true
+            log_warn "IP $WIREGUARD_HUB_IP already in use by another interface"
+        fi
+    fi
+    
+    if [ "$ip_in_use" = true ]; then
+        log_info "Finding available IP in 10.10.x.1 range..."
+        
+        local subnet=0
+        while [ $subnet -le 255 ]; do
+            local test_ip="10.10.${subnet}.1"
+            
+            if ! ip addr show | grep -q "inet ${test_ip}/" 2>/dev/null; then
+                WIREGUARD_HUB_IP="$test_ip"
+                WIREGUARD_NETWORK="10.10.${subnet}.0/24"
+                log_success "Using available IP: $WIREGUARD_HUB_IP"
+                break
+            fi
+            
+            ((subnet++))
+        done
+        
+        if [ $subnet -gt 255 ]; then
+            log_error "Could not find available IP in 10.10.x.1 range"
+            log_error "Specify an IP manually with --wg-ip or use --skip-wireguard"
+            return 1
+        fi
+    else
+        log_success "IP $WIREGUARD_HUB_IP is available"
+    fi
+    
+    return 0
+}
+
 configure_wireguard_hub() {
     log_step "Configuring WireGuard hub for external VM access..."
     
@@ -406,10 +530,17 @@ configure_wireguard_hub() {
     WG_DIR="/etc/wireguard"
     mkdir -p "$WG_DIR"
     
+    # Check for conflicts and find available port/IP
+    if ! check_wireguard_conflicts; then
+        log_error "WireGuard configuration failed due to conflicts"
+        log_warn "You can skip WireGuard with --skip-wireguard and configure manually later"
+        return 1
+    fi
+    
     # Generate keys if they don't exist
     if [ ! -f "$WG_DIR/node_private.key" ]; then
+        umask 077
         wg genkey > "$WG_DIR/node_private.key"
-        chmod 600 "$WG_DIR/node_private.key"
         cat "$WG_DIR/node_private.key" | wg pubkey > "$WG_DIR/node_public.key"
         log_info "Generated WireGuard keypair"
     fi
@@ -426,7 +557,7 @@ configure_wireguard_hub() {
 #   decloud-wg add <CLIENT_PUBKEY> <CLIENT_IP>
 #
 # Example:
-#   decloud-wg add ABC123... 10.10.0.2
+#   decloud-wg add ABC123... ${WIREGUARD_HUB_IP%.*}.2
 
 [Interface]
 PrivateKey = $WG_PRIVATE_KEY
@@ -651,13 +782,61 @@ create_client_helper_script() {
 WG_INTERFACE="wg-decloud"
 WG_DIR="/etc/wireguard"
 
+# Read config to get actual values
+get_config_value() {
+    local key="$1"
+    local default="$2"
+    local config_file="$WG_DIR/$WG_INTERFACE.conf"
+    
+    if [ -f "$config_file" ]; then
+        local value=$(grep "^${key}" "$config_file" 2>/dev/null | awk '{print $3}' | head -1)
+        if [ -n "$value" ]; then
+            echo "$value"
+            return
+        fi
+    fi
+    echo "$default"
+}
+
+# Get hub IP from config (strip /24)
+get_hub_ip() {
+    local addr=$(get_config_value "Address" "10.10.0.1/24")
+    echo "${addr%/*}"
+}
+
+# Get network from hub IP
+get_network() {
+    local hub_ip=$(get_hub_ip)
+    local prefix="${hub_ip%.*}"
+    echo "${prefix}.0/24"
+}
+
+# Suggest next client IP
+suggest_client_ip() {
+    local hub_ip=$(get_hub_ip)
+    local prefix="${hub_ip%.*}"
+    local suggested=2
+    
+    # Find next available IP by checking existing peers
+    while wg show $WG_INTERFACE allowed-ips 2>/dev/null | grep -q "${prefix}.${suggested}/32"; do
+        ((suggested++))
+        if [ $suggested -gt 254 ]; then
+            suggested=2
+            break
+        fi
+    done
+    
+    echo "${prefix}.${suggested}"
+}
+
 case "${1:-help}" in
     add)
         PUBKEY="$2"
         CLIENT_IP="$3"
         if [ -z "$PUBKEY" ] || [ -z "$CLIENT_IP" ]; then
+            SUGGESTED=$(suggest_client_ip)
             echo "Usage: decloud-wg add <public-key> <client-ip>"
-            echo "Example: decloud-wg add ABC123...xyz 10.10.0.2"
+            echo "Example: decloud-wg add ABC123...xyz $SUGGESTED"
             exit 1
         fi
         wg set $WG_INTERFACE peer "$PUBKEY" allowed-ips "$CLIENT_IP/32"
@@ -683,10 +862,11 @@ case "${1:-help}" in
         ;;
         
     client-config)
-        CLIENT_IP="${2:-10.10.0.2}"
+        CLIENT_IP="${2:-$(suggest_client_ip)}"
         HUB_PUBKEY=$(cat $WG_DIR/node_public.key 2>/dev/null)
         PUBLIC_IP=$(curl -s https://api.ipify.org 2>/dev/null)
-        WG_PORT=$(grep ListenPort $WG_DIR/$WG_INTERFACE.conf 2>/dev/null | awk '{print $3}')
+        WG_PORT=$(get_config_value "ListenPort" "51820")
+        WG_NETWORK=$(get_network)
         
         if [ -z "$HUB_PUBKEY" ]; then
             echo "Error: WireGuard not configured on this node"
@@ -711,8 +891,8 @@ case "${1:-help}" in
         echo ""
         echo "[Peer]"
         echo "PublicKey = $HUB_PUBKEY"
-        echo "Endpoint = $PUBLIC_IP:${WG_PORT:-51820}"
-        echo "AllowedIPs = 10.10.0.0/24, 192.168.122.0/24"
+        echo "Endpoint = $PUBLIC_IP:$WG_PORT"
+        echo "AllowedIPs = $WG_NETWORK, 192.168.122.0/24"
         echo "PersistentKeepalive = 25"
         echo ""
         ;;
@@ -722,6 +902,9 @@ case "${1:-help}" in
         echo ""
         if wg show $WG_INTERFACE &>/dev/null; then
             wg show $WG_INTERFACE
+            echo ""
+            echo "Hub IP: $(get_hub_ip)"
+            echo "Network: $(get_network)"
         else
             echo "Interface $WG_INTERFACE not running"
         fi
@@ -732,20 +915,21 @@ case "${1:-help}" in
         ;;
         
     *)
+        SUGGESTED=$(suggest_client_ip 2>/dev/null || echo "10.10.0.2")
         echo "DeCloud WireGuard Client Management"
         echo ""
         echo "Usage: decloud-wg <command> [args]"
         echo ""
         echo "Commands:"
-        echo "  add <pubkey> <ip>    Add a client (e.g., add ABC... 10.10.0.2)"
+        echo "  add <pubkey> <ip>    Add a client (e.g., add ABC... $SUGGESTED)"
         echo "  remove <pubkey>      Remove a client"
         echo "  list                 List all connected clients"
         echo "  client-config [ip]   Generate client config template"
         echo "  status               Show WireGuard status and hub public key"
         echo ""
         echo "Examples:"
-        echo "  decloud-wg client-config 10.10.0.2"
-        echo "  decloud-wg add aBcDeFg123... 10.10.0.2"
+        echo "  decloud-wg client-config $SUGGESTED"
+        echo "  decloud-wg add aBcDeFg123... $SUGGESTED"
         echo "  decloud-wg list"
         echo ""
         ;;
