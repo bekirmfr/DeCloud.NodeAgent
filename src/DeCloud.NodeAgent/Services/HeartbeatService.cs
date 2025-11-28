@@ -127,14 +127,26 @@ public class HeartbeatService : BackgroundService
         var snapshot = await _resourceDiscovery.GetCurrentSnapshotAsync(ct);
         var vms = await _vmManager.GetAllVmsAsync(ct);
 
-        var heartbeat = new Heartbeat
+        // Build VM summaries with IP addresses
+        var vmSummaries = new List<VmSummary>();
+        foreach (var vm in vms)
         {
-            NodeId = _nodeId,
-            Timestamp = DateTime.UtcNow,
-            Status = _currentStatus,
-            Health = await PerformHealthChecksAsync(ct),
-            Resources = snapshot,
-            ActiveVms = vms.Select(vm => new VmSummary
+            string? ipAddress = null;
+
+            // Try to get IP for running VMs
+            if (vm.State == VmState.Running)
+            {
+                try
+                {
+                    ipAddress = await _vmManager.GetVmIpAddressAsync(vm.VmId, ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug("Could not get IP for VM {VmId}: {Error}", vm.VmId, ex.Message);
+                }
+            }
+
+            vmSummaries.Add(new VmSummary
             {
                 VmId = vm.VmId,
                 TenantId = vm.Spec.TenantId,
@@ -143,8 +155,19 @@ public class HeartbeatService : BackgroundService
                 VCpus = vm.Spec.VCpus,
                 MemoryBytes = vm.Spec.MemoryBytes,
                 CpuUsagePercent = vm.CurrentUsage.CpuPercent,
-                StartedAt = vm.StartedAt ?? vm.CreatedAt
-            }).ToList()
+                StartedAt = vm.StartedAt ?? vm.CreatedAt,
+                IpAddress = ipAddress  // Include IP address
+            });
+        }
+
+        var heartbeat = new Heartbeat
+        {
+            NodeId = _nodeId,
+            Timestamp = DateTime.UtcNow,
+            Status = _currentStatus,
+            Health = await PerformHealthChecksAsync(ct),
+            Resources = snapshot,
+            ActiveVms = vmSummaries
         };
 
         // Update resource usage based on running VMs
@@ -152,7 +175,7 @@ public class HeartbeatService : BackgroundService
         heartbeat.Resources.UsedMemoryBytes = vms.Where(v => v.State == VmState.Running).Sum(v => v.Spec.MemoryBytes);
 
         var success = await _orchestratorClient.SendHeartbeatAsync(heartbeat, ct);
-        
+
         if (success)
         {
             _logger.LogDebug("Heartbeat sent: {VmCount} VMs, {CpuAvail} vCPUs available",

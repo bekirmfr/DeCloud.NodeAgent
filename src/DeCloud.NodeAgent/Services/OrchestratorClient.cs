@@ -114,15 +114,15 @@ public class OrchestratorClient : IOrchestratorClient
 
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/nodes/{_nodeId}/heartbeat");
+            var request = new HttpRequestMessage(HttpMethod.Post, $"/api/nodes/{_nodeId}/heartbeat");
             request.Headers.Add("X-Node-Token", _authToken);
 
             var payload = new
             {
-                nodeId = _nodeId,
+                nodeId = heartbeat.NodeId,
                 metrics = new
                 {
-                    timestamp = DateTime.UtcNow,
+                    timestamp = heartbeat.Timestamp,
                     cpuUsagePercent = heartbeat.Resources.CpuUsagePercent,
                     memoryUsagePercent = heartbeat.Resources.TotalMemoryBytes > 0
                         ? (double)heartbeat.Resources.UsedMemoryBytes / heartbeat.Resources.TotalMemoryBytes * 100
@@ -142,7 +142,17 @@ public class OrchestratorClient : IOrchestratorClient
                     storageGb = heartbeat.Resources.AvailableStorageBytes / 1024 / 1024 / 1024,
                     bandwidthMbps = 1000
                 },
-                activeVmIds = heartbeat.ActiveVms.Select(v => v.VmId).ToList()
+                // Keep for backwards compatibility
+                activeVmIds = heartbeat.ActiveVms.Select(v => v.VmId).ToList(),
+                // NEW: Send full VM details with state and IP
+                activeVms = heartbeat.ActiveVms.Select(v => new
+                {
+                    vmId = v.VmId,
+                    state = v.State.ToString(),
+                    ipAddress = v.IpAddress,
+                    cpuUsagePercent = v.CpuUsagePercent,
+                    startedAt = v.StartedAt
+                }).ToList()
             };
 
             request.Content = JsonContent.Create(payload);
@@ -151,10 +161,8 @@ public class OrchestratorClient : IOrchestratorClient
 
             if (response.IsSuccessStatusCode)
             {
-                // Parse response for pending commands
                 var content = await response.Content.ReadAsStringAsync(ct);
                 await ProcessHeartbeatResponseAsync(content, ct);
-
                 _logger.LogDebug("Heartbeat sent successfully: {VmCount} VMs", heartbeat.ActiveVms.Count);
                 return true;
             }

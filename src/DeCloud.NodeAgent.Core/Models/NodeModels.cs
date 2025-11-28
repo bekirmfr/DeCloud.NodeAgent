@@ -76,6 +76,7 @@ public class VmSummary
     public int VCpus { get; set; }
     public long MemoryBytes { get; set; }
     public double CpuUsagePercent { get; set; }
+    public string? IpAddress { get; set; }
     public DateTime StartedAt { get; set; }
 }
 

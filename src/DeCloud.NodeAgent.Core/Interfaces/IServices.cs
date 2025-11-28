@@ -33,6 +33,7 @@ public interface IVmManager
     Task<VmResourceUsage> GetVmUsageAsync(string vmId, CancellationToken ct = default);
     
     Task<bool> VmExistsAsync(string vmId, CancellationToken ct = default);
+    Task<string?> GetVmIpAddressAsync(string vmId, CancellationToken ct = default);
 }
 
 /// <summary>
