@@ -26,7 +26,8 @@ public class VmSpec
     // Cloud-init configuration (optional)
     public string? CloudInitUserData { get; set; }
     public string? SshPublicKey { get; set; }
-    
+    public string? Password { get; set; }
+
     // Billing
     public string TenantId { get; set; } = string.Empty;
     public string LeaseId { get; set; } = string.Empty;  // On-chain lease reference

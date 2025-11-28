@@ -1,10 +1,10 @@
-using System.Text;
-using System.Text.RegularExpressions;
-using System.Xml.Linq;
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Xml.Linq;
 
 namespace DeCloud.NodeAgent.Infrastructure.Libvirt;
 
@@ -373,12 +373,8 @@ public class LibvirtVmManager : IVmManager
 
             instance.DiskPath = diskPath;
 
-            // 4. Create cloud-init ISO if SSH key provided
-            string? cloudInitIso = null;
-            if (!string.IsNullOrEmpty(spec.SshPublicKey))
-            {
-                cloudInitIso = await CreateCloudInitIsoAsync(vmDir, spec, ct);
-            }
+            // 4. Always generate cloud-init ISO (for network config at minimum)
+            var cloudInitIso = await CreateCloudInitIsoAsync(spec, vmDir, ct);
 
             // 5. Generate libvirt XML
             var vncPort = Interlocked.Increment(ref _nextVncPort);
@@ -812,51 +808,112 @@ public class LibvirtVmManager : IVmManager
         return null;
     }
 
-    private async Task<string?> CreateCloudInitIsoAsync(string vmDir, VmSpec spec, CancellationToken ct)
+    private async Task<string> CreateCloudInitIsoAsync(VmSpec spec, string vmDir, CancellationToken ct)
     {
-        var metaData = $@"instance-id: {spec.VmId}
-local-hostname: {spec.Name?.Replace(" ", "-").ToLower() ?? spec.VmId[..8]}
-";
-
-        var userData = $@"#cloud-config
-users:
-  - name: ubuntu
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    shell: /bin/bash
-    ssh_authorized_keys:
-      - {spec.SshPublicKey}
-  - name: root
-    ssh_authorized_keys:
-      - {spec.SshPublicKey}
-
-package_update: true
-package_upgrade: false
-
-runcmd:
-  - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-  - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-  - systemctl restart sshd || systemctl restart ssh
-";
-
         var metaDataPath = Path.Combine(vmDir, "meta-data");
         var userDataPath = Path.Combine(vmDir, "user-data");
+        var networkConfigPath = Path.Combine(vmDir, "network-config");
         var isoPath = Path.Combine(vmDir, "cloud-init.iso");
 
+        // meta-data (instance identity)
+        var metaData = $@"instance-id: {spec.VmId}
+local-hostname: {spec.Name}
+";
         await File.WriteAllTextAsync(metaDataPath, metaData, ct);
-        await File.WriteAllTextAsync(userDataPath, userData, ct);
 
-        // Create ISO
-        var result = await _executor.ExecuteAsync("genisoimage",
-            $"-output {isoPath} -volid cidata -joliet -rock {userDataPath} {metaDataPath}", ct);
+        // network-config (always enable DHCP)
+        var networkConfig = @"version: 2
+ethernets:
+  id0:
+    match:
+      driver: virtio
+    dhcp4: true
+    dhcp6: false
+";
+        await File.WriteAllTextAsync(networkConfigPath, networkConfig, ct);
+
+        // user-data (SSH key OR password)
+        var userDataBuilder = new StringBuilder();
+        userDataBuilder.AppendLine("#cloud-config");
+
+        // Set hostname
+        userDataBuilder.AppendLine($"hostname: {spec.Name}");
+        userDataBuilder.AppendLine("manage_etc_hosts: true");
+        userDataBuilder.AppendLine();
+
+        // Default user configuration
+        userDataBuilder.AppendLine("users:");
+        userDataBuilder.AppendLine("  - name: ubuntu");
+        userDataBuilder.AppendLine("    sudo: ALL=(ALL) NOPASSWD:ALL");
+        userDataBuilder.AppendLine("    shell: /bin/bash");
+        userDataBuilder.AppendLine("    groups: [adm, sudo, docker]");
+
+        if (!string.IsNullOrEmpty(spec.SshPublicKey))
+        {
+            // SSH key authentication
+            userDataBuilder.AppendLine("    lock_passwd: true");
+            userDataBuilder.AppendLine("    ssh_authorized_keys:");
+            foreach (var key in spec.SshPublicKey.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                userDataBuilder.AppendLine($"      - {key.Trim()}");
+            }
+        }
+        else if (!string.IsNullOrEmpty(spec.Password))
+        {
+            // Password authentication
+            userDataBuilder.AppendLine("    lock_passwd: false");
+            userDataBuilder.AppendLine($"    plain_text_passwd: {spec.Password}");
+            userDataBuilder.AppendLine();
+            userDataBuilder.AppendLine("ssh_pwauth: true");  // Enable SSH password auth
+        }
+        else
+        {
+            // Fallback: no auth configured (shouldn't happen, but be safe)
+            _logger.LogWarning("VM {VmId} created without SSH key or password", spec.VmId);
+            userDataBuilder.AppendLine("    lock_passwd: true");
+        }
+
+        userDataBuilder.AppendLine();
+
+        // Add any custom user data
+        if (!string.IsNullOrEmpty(spec.CloudInitUserData))
+        {
+            userDataBuilder.AppendLine("# Custom user data");
+            userDataBuilder.AppendLine(spec.CloudInitUserData);
+        }
+
+        // Package updates (optional, can slow down boot)
+        userDataBuilder.AppendLine();
+        userDataBuilder.AppendLine("package_update: false");
+        userDataBuilder.AppendLine("package_upgrade: false");
+
+        // Final message
+        userDataBuilder.AppendLine();
+        userDataBuilder.AppendLine("final_message: \"DeCloud VM ready after $UPTIME seconds\"");
+
+        await File.WriteAllTextAsync(userDataPath, userDataBuilder.ToString(), ct);
+
+        // Generate ISO using cloud-localds or genisoimage
+        var result = await _executor.ExecuteAsync(
+            "cloud-localds",
+            $"-N {networkConfigPath} {isoPath} {userDataPath} {metaDataPath}",
+            ct);
 
         if (!result.Success)
         {
-            // Try cloud-localds as alternative
-            result = await _executor.ExecuteAsync("cloud-localds",
-                $"{isoPath} {userDataPath} {metaDataPath}", ct);
+            // Fallback to genisoimage
+            result = await _executor.ExecuteAsync(
+                "genisoimage",
+                $"-output {isoPath} -volid cidata -joliet -rock {userDataPath} {metaDataPath} {networkConfigPath}",
+                ct);
         }
 
-        return result.Success ? isoPath : null;
+        if (!result.Success)
+        {
+            throw new InvalidOperationException($"Failed to create cloud-init ISO: {result.StandardError}");
+        }
+
+        return isoPath;
     }
 
     private string GenerateLibvirtXml(VmSpec spec, string diskPath, string? cloudInitIso, int vncPort)
