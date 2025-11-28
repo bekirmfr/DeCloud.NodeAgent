@@ -24,13 +24,14 @@ builder.Services.Configure<OrchestratorClientOptions>(
 builder.Services.AddSingleton<ICommandExecutor, CommandExecutor>();
 builder.Services.AddSingleton<IResourceDiscoveryService, ResourceDiscoveryService>();
 builder.Services.AddSingleton<IImageManager, ImageManager>();
-builder.Services.AddSingleton<IVmManager, LibvirtVmManager>();
+builder.Services.AddSingleton<LibvirtVmManager>();  // Register concrete type for initialization
+builder.Services.AddSingleton<IVmManager>(sp => sp.GetRequiredService<LibvirtVmManager>());  // Alias to interface
 builder.Services.AddSingleton<INetworkManager, WireGuardNetworkManager>();
 
 // HTTP client for image downloads and orchestrator communication
 builder.Services.AddHttpClient<IImageManager, ImageManager>();
 builder.Services.AddHttpClient<OrchestratorClient>();
-builder.Services.AddSingleton<IOrchestratorClient>(sp => 
+builder.Services.AddSingleton<IOrchestratorClient>(sp =>
     sp.GetRequiredService<OrchestratorClient>());
 
 // Background services
@@ -42,9 +43,9 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
-    c.SwaggerDoc("v1", new() 
-    { 
-        Title = "DeCloud Node Agent API", 
+    c.SwaggerDoc("v1", new()
+    {
+        Title = "DeCloud Node Agent API",
         Version = "v1",
         Description = "Local API for managing VMs and monitoring node resources"
     });
@@ -56,7 +57,26 @@ var app = builder.Build();
 using (var scope = app.Services.CreateScope())
 {
     var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
-    
+
+    // Initialize LibvirtVmManager - reconcile with libvirt state
+    var vmManager = scope.ServiceProvider.GetRequiredService<LibvirtVmManager>();
+    try
+    {
+        logger.LogInformation("Initializing VM Manager and reconciling with libvirt...");
+        await vmManager.InitializeAsync();
+        var vms = await vmManager.GetAllVmsAsync();
+        logger.LogInformation("VM Manager initialized with {Count} existing VMs", vms.Count);
+
+        foreach (var vm in vms)
+        {
+            logger.LogInformation("  - VM {VmId}: {State}", vm.VmId, vm.State);
+        }
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to initialize VM Manager");
+    }
+
     // Initialize WireGuard
     var networkManager = scope.ServiceProvider.GetRequiredService<INetworkManager>();
     try
@@ -69,50 +89,25 @@ using (var scope = app.Services.CreateScope())
         }
         else
         {
-            logger.LogWarning("WireGuard initialization failed - network features limited");
+            logger.LogWarning("WireGuard initialization failed - overlay networking will be unavailable");
         }
     }
     catch (Exception ex)
     {
-        logger.LogWarning(ex, "WireGuard initialization failed - continuing without overlay network");
-    }
-
-    // Discover initial resources
-    var resourceDiscovery = scope.ServiceProvider.GetRequiredService<IResourceDiscoveryService>();
-    try
-    {
-        var resources = await resourceDiscovery.DiscoverAllAsync();
-        logger.LogInformation(
-            "Node resources: {Cores} cores, {MemoryGB}GB RAM, {Gpus} GPUs, Virtualization: {VirtSupport}",
-            resources.Cpu.LogicalCores,
-            resources.Memory.TotalBytes / 1024 / 1024 / 1024,
-            resources.Gpus.Count,
-            resources.Cpu.SupportsVirtualization ? "Yes" : "No");
-    }
-    catch (Exception ex)
-    {
-        logger.LogError(ex, "Failed to discover resources");
+        logger.LogWarning(ex, "WireGuard initialization error - continuing without overlay networking");
     }
 }
 
-// Configure pipeline - Enable Swagger in all environments
-app.UseSwagger();
-app.UseSwaggerUI(c =>
+// Configure pipeline
+if (app.Environment.IsDevelopment())
 {
-    c.SwaggerEndpoint("/swagger/v1/swagger.json", "DeCloud Node Agent API v1");
-    c.RoutePrefix = "swagger";
-});
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
 
-app.UseAuthorization();
 app.MapControllers();
 
-// Health endpoint at root
-app.MapGet("/", () => Results.Ok(new 
-{ 
-    service = "DeCloud Node Agent",
-    version = "1.0.0",
-    status = "running",
-    timestamp = DateTime.UtcNow
-}));
+// Health check endpoint
+app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }));
 
 app.Run();
