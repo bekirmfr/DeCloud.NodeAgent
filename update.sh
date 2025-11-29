@@ -13,7 +13,7 @@
 
 set -e
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 # Colors
 RED='\033[0;31m'
@@ -159,6 +159,14 @@ check_dependencies() {
         deps_missing=true
     fi
     
+    # Check openssh-client (for ssh-keygen - ephemeral key generation)
+    if command -v ssh-keygen &> /dev/null; then
+        log_success "openssh-client: installed (ssh-keygen available)"
+    else
+        log_warn "openssh-client not found (needed for ephemeral SSH keys)"
+        deps_missing=true
+    fi
+    
     # Check git
     if command -v git &> /dev/null; then
         log_success "git: installed"
@@ -248,6 +256,13 @@ install_dependencies() {
         modprobe nbd max_part=8 2>/dev/null || true
         echo "nbd" >> /etc/modules-load.d/decloud.conf 2>/dev/null || true
         log_success "libguestfs-tools installed"
+    fi
+    
+    # openssh-client (for ssh-keygen - ephemeral key generation)
+    if ! command -v ssh-keygen &> /dev/null; then
+        log_info "Installing openssh-client..."
+        apt-get install -y -qq openssh-client > /dev/null 2>&1
+        log_success "openssh-client installed"
     fi
 }
 
@@ -374,9 +389,9 @@ verify_health() {
 
 show_status() {
     echo ""
-    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "╔═══════════════════════════════════════════════════════════════╗"
     echo "║                    Node Agent Status                         ║"
-    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo "╚═══════════════════════════════════════════════════════════════╝"
     echo ""
     
     # Service status
@@ -418,9 +433,9 @@ show_status() {
 # ============================================================
 main() {
     echo ""
-    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "╔═══════════════════════════════════════════════════════════════╗"
     echo "║         DeCloud Node Agent Update Script v${VERSION}              ║"
-    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo "╚═══════════════════════════════════════════════════════════════╝"
     echo ""
     
     parse_args "$@"

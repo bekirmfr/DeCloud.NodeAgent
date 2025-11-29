@@ -7,6 +7,8 @@
 # - KVM/QEMU/libvirt for virtualization
 # - WireGuard for overlay networking (with hub auto-configuration)
 # - cloud-init tools for VM provisioning
+# - libguestfs-tools for cloud-init state cleaning
+# - openssh-client for ephemeral terminal key generation
 #
 # Usage:
 #   curl -sSL https://raw.githubusercontent.com/bekirmfr/DeCloud.NodeAgent/master/install.sh | sudo bash -s -- --orchestrator http://IP:5050
@@ -14,7 +16,7 @@
 
 set -e
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 
 # Colors
 RED='\033[0;31m'
@@ -197,31 +199,30 @@ check_os() {
                 log_error "Ubuntu 20.04 or later required. Found: $VERSION_ID"
                 exit 1
             fi
+            log_success "Ubuntu $VERSION_ID detected"
             ;;
         debian)
             if [[ "${VERSION_ID%%.*}" -lt 11 ]]; then
                 log_error "Debian 11 or later required. Found: $VERSION_ID"
                 exit 1
             fi
+            log_success "Debian $VERSION_ID detected"
             ;;
         *)
-            log_warn "Unsupported OS: $OS. Proceeding anyway, but issues may occur."
+            log_warn "Untested OS: $OS $VERSION_ID. Continuing anyway..."
             ;;
     esac
-    
-    log_success "OS: $OS $VERSION_ID"
 }
 
 check_architecture() {
     log_step "Checking architecture..."
     
     ARCH=$(uname -m)
-    if [ "$ARCH" != "x86_64" ] && [ "$ARCH" != "aarch64" ]; then
-        log_error "Unsupported architecture: $ARCH. Only x86_64 and aarch64 are supported."
+    if [ "$ARCH" != "x86_64" ]; then
+        log_error "Only x86_64 architecture is supported. Found: $ARCH"
         exit 1
     fi
-    
-    log_success "Architecture: $ARCH"
+    log_success "Architecture: x86_64"
 }
 
 check_virtualization() {
@@ -232,87 +233,75 @@ check_virtualization() {
         return
     fi
     
-    # Check for KVM support
-    if [ ! -e /dev/kvm ]; then
-        # Try loading the module
-        modprobe kvm 2>/dev/null || true
-        modprobe kvm_intel 2>/dev/null || modprobe kvm_amd 2>/dev/null || true
-        
-        if [ ! -e /dev/kvm ]; then
-            log_error "KVM not available. Enable virtualization in BIOS/UEFI."
-            log_error "Check with: lscpu | grep Virtualization"
-            exit 1
-        fi
-    fi
-    
-    # Check CPU flags
-    if ! grep -qE '(vmx|svm)' /proc/cpuinfo; then
-        log_error "CPU does not support hardware virtualization (VT-x/AMD-V)"
+    # Check CPU virtualization
+    if grep -E 'vmx|svm' /proc/cpuinfo > /dev/null 2>&1; then
+        log_success "Hardware virtualization supported"
+    else
+        log_error "Hardware virtualization (VT-x/AMD-V) not detected"
+        log_error "Enable it in BIOS or check if running in a nested VM"
         exit 1
     fi
     
-    log_success "KVM virtualization available"
+    # Check KVM availability
+    if [ -c /dev/kvm ]; then
+        log_success "KVM available"
+    else
+        log_warn "KVM not available. Will try to enable after installing packages."
+    fi
 }
 
 check_resources() {
     log_step "Checking system resources..."
     
-    # CPU cores
+    # CPU
     CPU_CORES=$(nproc)
     if [ "$CPU_CORES" -lt "$MIN_CPU_CORES" ]; then
-        log_error "Minimum $MIN_CPU_CORES CPU cores required. Found: $CPU_CORES"
-        exit 1
+        log_warn "Found $CPU_CORES CPU cores. Recommended: $MIN_CPU_CORES+"
+    else
+        log_success "CPU cores: $CPU_CORES"
     fi
-    log_success "CPU cores: $CPU_CORES"
     
     # Memory
-    MEMORY_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    MEMORY_MB=$((MEMORY_KB / 1024))
+    MEMORY_MB=$(free -m | awk '/^Mem:/{print $2}')
     if [ "$MEMORY_MB" -lt "$MIN_MEMORY_MB" ]; then
-        log_error "Minimum ${MIN_MEMORY_MB}MB RAM required. Found: ${MEMORY_MB}MB"
-        exit 1
+        log_warn "Found ${MEMORY_MB}MB RAM. Recommended: ${MIN_MEMORY_MB}MB+"
+    else
+        log_success "Memory: ${MEMORY_MB}MB"
     fi
-    log_success "Memory: ${MEMORY_MB}MB"
     
-    # Disk space
-    DISK_KB=$(df /var | tail -1 | awk '{print $4}')
-    DISK_GB=$((DISK_KB / 1024 / 1024))
+    # Disk
+    DISK_GB=$(df -BG / | awk 'NR==2{print $4}' | tr -d 'G')
     if [ "$DISK_GB" -lt "$MIN_DISK_GB" ]; then
-        log_error "Minimum ${MIN_DISK_GB}GB free disk space required. Found: ${DISK_GB}GB"
-        exit 1
+        log_warn "Found ${DISK_GB}GB free disk. Recommended: ${MIN_DISK_GB}GB+"
+    else
+        log_success "Free disk: ${DISK_GB}GB"
     fi
-    log_success "Free disk: ${DISK_GB}GB"
 }
 
 check_network() {
-    log_step "Checking network connectivity..."
-    
-    # Check internet access
-    if ! ping -c 1 -W 5 8.8.8.8 &> /dev/null; then
-        log_error "No internet connectivity"
-        exit 1
-    fi
-    log_success "Internet connectivity OK"
-    
-    # Check orchestrator reachability
-    if [ -n "$ORCHESTRATOR_URL" ]; then
-        if curl -s --max-time 10 "${ORCHESTRATOR_URL}/health" > /dev/null 2>&1; then
-            log_success "Orchestrator reachable at $ORCHESTRATOR_URL"
-        else
-            log_warn "Cannot reach orchestrator at $ORCHESTRATOR_URL (may be OK if not started yet)"
-        fi
-    fi
+    log_step "Checking network..."
     
     # Detect public IP
-    PUBLIC_IP=$(curl -s --max-time 10 https://api.ipify.org 2>/dev/null || \
-                curl -s --max-time 10 https://ifconfig.me 2>/dev/null || \
+    PUBLIC_IP=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || \
+                curl -s --max-time 5 https://ifconfig.me 2>/dev/null || \
                 hostname -I | awk '{print $1}')
     
     if [ -z "$PUBLIC_IP" ]; then
         log_warn "Could not detect public IP. Using hostname IP."
         PUBLIC_IP=$(hostname -I | awk '{print $1}')
     fi
+    
     log_success "Public IP: $PUBLIC_IP"
+    
+    # Test orchestrator connectivity
+    if [ -n "$ORCHESTRATOR_URL" ]; then
+        if curl -s --max-time 5 "$ORCHESTRATOR_URL/health" > /dev/null 2>&1; then
+            log_success "Orchestrator reachable: $ORCHESTRATOR_URL"
+        else
+            log_warn "Cannot reach orchestrator at $ORCHESTRATOR_URL"
+            log_warn "Make sure the orchestrator is running and accessible"
+        fi
+    fi
 }
 
 # ============================================================
@@ -322,9 +311,16 @@ install_base_dependencies() {
     log_step "Installing base dependencies..."
     
     apt-get update -qq
-    
-    PACKAGES="curl wget git jq apt-transport-https ca-certificates gnupg lsb-release"
-    apt-get install -y -qq $PACKAGES > /dev/null 2>&1
+    apt-get install -y -qq \
+        curl \
+        wget \
+        git \
+        jq \
+        apt-transport-https \
+        ca-certificates \
+        gnupg \
+        lsb-release \
+        > /dev/null 2>&1
     
     log_success "Base dependencies installed"
 }
@@ -332,8 +328,9 @@ install_base_dependencies() {
 install_dotnet() {
     log_step "Installing .NET 8 SDK..."
     
+    # Check if already installed
     if command -v dotnet &> /dev/null; then
-        DOTNET_VERSION=$(dotnet --version 2>/dev/null | head -1)
+        DOTNET_VERSION=$(dotnet --version 2>/dev/null || echo "0")
         if [[ "$DOTNET_VERSION" == 8.* ]]; then
             log_success ".NET 8 already installed: $DOTNET_VERSION"
             return
@@ -352,35 +349,59 @@ install_dotnet() {
 }
 
 install_libvirt() {
-    log_step "Installing libvirt/KVM..."
+    log_step "Installing libvirt/KVM and virtualization tools..."
     
     if [ "$SKIP_LIBVIRT" = true ]; then
         log_warn "Skipping libvirt installation (--skip-libvirt)"
         return
     fi
     
+    # Check if running in a VM (nested virtualization)
+    if [ -f /sys/module/kvm_intel/parameters/nested ]; then
+        NESTED=$(cat /sys/module/kvm_intel/parameters/nested)
+        if [ "$NESTED" != "Y" ] && [ "$NESTED" != "1" ]; then
+            log_warn "Nested virtualization may not be enabled"
+            log_warn "Performance may be reduced if running inside a VM"
+        fi
+    fi
+    
+    # Core virtualization packages
     PACKAGES="qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virtinst"
+    
+    # Cloud-init and disk tools
     PACKAGES="$PACKAGES cloud-image-utils genisoimage qemu-utils"
-    PACKAGES="$PACKAGES libguestfs-tools"  # For cleaning cloud-init state from base images
+    
+    # libguestfs for cleaning cloud-init state from base images
+    PACKAGES="$PACKAGES libguestfs-tools"
+    
+    # openssh-client for ssh-keygen (ephemeral terminal key generation)
+    PACKAGES="$PACKAGES openssh-client"
     
     apt-get install -y -qq $PACKAGES > /dev/null 2>&1
     
-    # Load nbd module for qemu-nbd (fallback cloud-init cleaner method)
+    # Load nbd module for qemu-nbd fallback method (cloud-init cleaning)
     modprobe nbd max_part=8 2>/dev/null || true
-    echo "nbd" >> /etc/modules-load.d/decloud.conf 2>/dev/null || true
+    if [ ! -f /etc/modules-load.d/decloud.conf ] || ! grep -q "nbd" /etc/modules-load.d/decloud.conf 2>/dev/null; then
+        echo "nbd" >> /etc/modules-load.d/decloud.conf
+    fi
     
     # Enable and start libvirtd
-    systemctl enable libvirtd --quiet
-    systemctl start libvirtd
+    systemctl enable libvirtd --quiet 2>/dev/null || true
+    systemctl start libvirtd 2>/dev/null || true
     
-    # Ensure default network exists and is active
-    if ! virsh net-info default &> /dev/null; then
+    # Setup default network
+    if ! virsh net-list --all | grep -q "default"; then
+        log_info "Creating default network..."
         virsh net-define /usr/share/libvirt/networks/default.xml > /dev/null 2>&1 || true
     fi
+    
     virsh net-autostart default > /dev/null 2>&1 || true
     virsh net-start default > /dev/null 2>&1 || true
     
-    log_success "libvirt/KVM installed and configured"
+    # Create QEMU guest agent channel directory (for ephemeral key injection)
+    mkdir -p /var/lib/libvirt/qemu/channel/target
+    
+    log_success "Libvirt/KVM installed and configured"
 }
 
 install_wireguard() {
@@ -396,208 +417,69 @@ install_wireguard() {
     log_success "WireGuard installed"
 }
 
-check_wireguard_conflicts() {
-    log_step "Checking for WireGuard conflicts..."
-    
-    # Check if our interface already exists
-    if ip link show "$WIREGUARD_INTERFACE" &> /dev/null; then
-        log_info "Interface $WIREGUARD_INTERFACE already exists"
-        
-        # Check if it's ours (has our config)
-        if [ -f "$WG_DIR/$WIREGUARD_INTERFACE.conf" ]; then
-            log_info "Found existing DeCloud WireGuard config, will update"
-            wg-quick down "$WIREGUARD_INTERFACE" 2>/dev/null || true
-        else
-            log_warn "Interface $WIREGUARD_INTERFACE exists but no config found"
-        fi
-    fi
-    
-    # Check if port is in use by another WireGuard interface
-    local port_in_use=false
-    local existing_interfaces=$(wg show interfaces 2>/dev/null || echo "")
-    
-    for iface in $existing_interfaces; do
-        local iface_port=$(wg show "$iface" listen-port 2>/dev/null || echo "")
-        if [ "$iface_port" = "$WIREGUARD_PORT" ] && [ "$iface" != "$WIREGUARD_INTERFACE" ]; then
-            port_in_use=true
-            log_warn "Port $WIREGUARD_PORT already in use by interface: $iface"
-            break
-        fi
-    done
-    
-    # Also check if port is in use by any other process
-    if [ "$port_in_use" = false ]; then
-        if ss -uln | grep -q ":${WIREGUARD_PORT} " 2>/dev/null; then
-            # Double check it's not our own interface
-            if ! wg show "$WIREGUARD_INTERFACE" listen-port 2>/dev/null | grep -q "$WIREGUARD_PORT"; then
-                port_in_use=true
-                log_warn "Port $WIREGUARD_PORT already in use by another process"
-            fi
-        fi
-    fi
-    
-    # If port is in use, find an available one
-    if [ "$port_in_use" = true ]; then
-        log_info "Finding available port..."
-        
-        local new_port=$((WIREGUARD_PORT + 1))
-        local max_port=$((WIREGUARD_PORT + 100))
-        
-        while [ $new_port -le $max_port ]; do
-            local port_free=true
-            
-            # Check WireGuard interfaces
-            for iface in $existing_interfaces; do
-                local iface_port=$(wg show "$iface" listen-port 2>/dev/null || echo "")
-                if [ "$iface_port" = "$new_port" ]; then
-                    port_free=false
-                    break
-                fi
-            done
-            
-            # Check other processes
-            if [ "$port_free" = true ]; then
-                if ss -uln | grep -q ":${new_port} " 2>/dev/null; then
-                    port_free=false
-                fi
-            fi
-            
-            if [ "$port_free" = true ]; then
-                WIREGUARD_PORT=$new_port
-                log_success "Using available port: $WIREGUARD_PORT"
-                break
-            fi
-            
-            ((new_port++))
-        done
-        
-        if [ $new_port -gt $max_port ]; then
-            log_error "Could not find available port in range $((WIREGUARD_PORT - 100 + 1))-$max_port"
-            log_error "Specify a port manually with --wg-port or use --skip-wireguard"
-            return 1
-        fi
-    else
-        log_success "Port $WIREGUARD_PORT is available"
-    fi
-    
-    # Check for IP address conflicts
-    local ip_in_use=false
-    
-    if ip addr show | grep -q "inet ${WIREGUARD_HUB_IP}/" 2>/dev/null; then
-        # Check if it's on our interface
-        if ! ip addr show "$WIREGUARD_INTERFACE" 2>/dev/null | grep -q "inet ${WIREGUARD_HUB_IP}/"; then
-            ip_in_use=true
-            log_warn "IP $WIREGUARD_HUB_IP already in use by another interface"
-        fi
-    fi
-    
-    if [ "$ip_in_use" = true ]; then
-        log_info "Finding available IP in 10.10.x.1 range..."
-        
-        local subnet=0
-        while [ $subnet -le 255 ]; do
-            local test_ip="10.10.${subnet}.1"
-            
-            if ! ip addr show | grep -q "inet ${test_ip}/" 2>/dev/null; then
-                WIREGUARD_HUB_IP="$test_ip"
-                WIREGUARD_NETWORK="10.10.${subnet}.0/24"
-                log_success "Using available IP: $WIREGUARD_HUB_IP"
-                break
-            fi
-            
-            ((subnet++))
-        done
-        
-        if [ $subnet -gt 255 ]; then
-            log_error "Could not find available IP in 10.10.x.1 range"
-            log_error "Specify an IP manually with --wg-ip or use --skip-wireguard"
-            return 1
-        fi
-    else
-        log_success "IP $WIREGUARD_HUB_IP is available"
-    fi
-    
-    return 0
-}
-
 configure_wireguard_hub() {
-    log_step "Configuring WireGuard hub for external VM access..."
-    
-    if [ "$SKIP_WIREGUARD" = true ]; then
+    if [ "$SKIP_WIREGUARD" = true ] || [ "$ENABLE_WIREGUARD_HUB" = false ]; then
         return
     fi
     
-    if [ "$ENABLE_WIREGUARD_HUB" = false ]; then
-        log_warn "Skipping WireGuard hub configuration (--no-wireguard-hub)"
-        return
-    fi
+    log_step "Configuring WireGuard hub..."
     
-    WG_DIR="/etc/wireguard"
-    mkdir -p "$WG_DIR"
+    # Generate keys
+    WG_PRIVATE_KEY=$(wg genkey)
+    WG_PUBLIC_KEY=$(echo "$WG_PRIVATE_KEY" | wg pubkey)
     
-    # Check for conflicts and find available port/IP
-    if ! check_wireguard_conflicts; then
-        log_error "WireGuard configuration failed due to conflicts"
-        log_warn "You can skip WireGuard with --skip-wireguard and configure manually later"
-        return 1
-    fi
+    mkdir -p /etc/wireguard
     
-    # Generate keys if they don't exist
-    if [ ! -f "$WG_DIR/node_private.key" ]; then
-        umask 077
-        wg genkey > "$WG_DIR/node_private.key"
-        cat "$WG_DIR/node_private.key" | wg pubkey > "$WG_DIR/node_public.key"
-        log_info "Generated WireGuard keypair"
-    fi
+    # Save keys
+    echo "$WG_PRIVATE_KEY" > /etc/wireguard/node_private.key
+    echo "$WG_PUBLIC_KEY" > /etc/wireguard/node_public.key
+    chmod 600 /etc/wireguard/node_private.key
     
-    WG_PRIVATE_KEY=$(cat "$WG_DIR/node_private.key")
-    WG_PUBLIC_KEY=$(cat "$WG_DIR/node_public.key")
-    
-    # Create WireGuard hub configuration
-    cat > "$WG_DIR/$WIREGUARD_INTERFACE.conf" << EOF
-# DeCloud WireGuard Hub Configuration
-# Generated by install.sh v${VERSION}
-# 
-# To add a client:
-#   decloud-wg add <CLIENT_PUBKEY> <CLIENT_IP>
-#
-# Example:
-#   decloud-wg add ABC123... ${WIREGUARD_HUB_IP%.*}.2
-
+    # Create WireGuard config
+    cat > /etc/wireguard/${WIREGUARD_INTERFACE}.conf << EOF
 [Interface]
-PrivateKey = $WG_PRIVATE_KEY
-Address = $WIREGUARD_HUB_IP/24
-ListenPort = $WIREGUARD_PORT
-SaveConfig = false
+Address = ${WIREGUARD_HUB_IP}/24
+ListenPort = ${WIREGUARD_PORT}
+PrivateKey = ${WG_PRIVATE_KEY}
 
-# Enable IP forwarding and NAT for VM network access
+# Enable IP forwarding for VM access
 PostUp = sysctl -w net.ipv4.ip_forward=1
-PostUp = iptables -t nat -A POSTROUTING -s $WIREGUARD_NETWORK -d $VM_NETWORK -j MASQUERADE
+PostUp = iptables -A FORWARD -i %i -j ACCEPT
+PostUp = iptables -A FORWARD -o %i -j ACCEPT
+PostUp = iptables -t nat -A POSTROUTING -s ${WIREGUARD_NETWORK} -o eth0 -j MASQUERADE
+PostUp = iptables -t nat -A POSTROUTING -s ${WIREGUARD_NETWORK} -o ens3 -j MASQUERADE
 PostUp = iptables -A FORWARD -i %i -o virbr0 -j ACCEPT
-PostUp = iptables -A FORWARD -i virbr0 -o %i -m state --state RELATED,ESTABLISHED -j ACCEPT
+PostUp = iptables -A FORWARD -i virbr0 -o %i -j ACCEPT
 
-PostDown = iptables -t nat -D POSTROUTING -s $WIREGUARD_NETWORK -d $VM_NETWORK -j MASQUERADE || true
-PostDown = iptables -D FORWARD -i %i -o virbr0 -j ACCEPT || true
-PostDown = iptables -D FORWARD -i virbr0 -o %i -m state --state RELATED,ESTABLISHED -j ACCEPT || true
+PostDown = iptables -D FORWARD -i %i -j ACCEPT
+PostDown = iptables -D FORWARD -o %i -j ACCEPT
+PostDown = iptables -t nat -D POSTROUTING -s ${WIREGUARD_NETWORK} -o eth0 -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -t nat -D POSTROUTING -s ${WIREGUARD_NETWORK} -o ens3 -j MASQUERADE 2>/dev/null || true
+PostDown = iptables -D FORWARD -i %i -o virbr0 -j ACCEPT 2>/dev/null || true
+PostDown = iptables -D FORWARD -i virbr0 -o %i -j ACCEPT 2>/dev/null || true
 
-# Clients are added dynamically using 'decloud-wg add' command
+# Peers will be added dynamically
 EOF
+
+    chmod 600 /etc/wireguard/${WIREGUARD_INTERFACE}.conf
     
-    chmod 600 "$WG_DIR/$WIREGUARD_INTERFACE.conf"
-    
-    # Open firewall port
-    if command -v ufw &> /dev/null; then
-        ufw allow $WIREGUARD_PORT/udp > /dev/null 2>&1 || true
+    # Enable IP forwarding permanently
+    if ! grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf; then
+        echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
     fi
-    iptables -I INPUT -p udp --dport $WIREGUARD_PORT -j ACCEPT 2>/dev/null || true
+    sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
     
-    # Enable and start WireGuard
-    systemctl enable wg-quick@$WIREGUARD_INTERFACE --quiet 2>/dev/null || true
-    wg-quick down $WIREGUARD_INTERFACE 2>/dev/null || true
-    wg-quick up $WIREGUARD_INTERFACE
+    # Start WireGuard
+    systemctl enable wg-quick@${WIREGUARD_INTERFACE} --quiet 2>/dev/null || true
+    systemctl start wg-quick@${WIREGUARD_INTERFACE} 2>/dev/null || true
     
-    log_success "WireGuard hub configured"
-    log_info "WireGuard public key: ${WG_PUBLIC_KEY:0:20}..."
+    # Configure firewall for WireGuard
+    if command -v ufw &> /dev/null; then
+        ufw allow ${WIREGUARD_PORT}/udp > /dev/null 2>&1 || true
+    fi
+    iptables -I INPUT -p udp --dport ${WIREGUARD_PORT} -j ACCEPT 2>/dev/null || true
+    
+    log_success "WireGuard hub configured (${WIREGUARD_HUB_IP})"
 }
 
 # ============================================================
@@ -610,6 +492,7 @@ create_directories() {
     mkdir -p $DATA_DIR/vms
     mkdir -p $DATA_DIR/images
     mkdir -p $CONFIG_DIR
+    mkdir -p /var/log/decloud
     
     log_success "Directories created"
 }
@@ -654,6 +537,26 @@ create_configuration() {
       "DeCloud": "Information"
     }
   },
+  "Serilog": {
+    "MinimumLevel": {
+      "Default": "Information",
+      "Override": {
+        "Microsoft": "Warning",
+        "System": "Warning"
+      }
+    },
+    "WriteTo": [
+      { "Name": "Console" },
+      {
+        "Name": "File",
+        "Args": {
+          "path": "/var/log/decloud/node-agent-.log",
+          "rollingInterval": "Day",
+          "retainedFileCountLimit": 7
+        }
+      }
+    ]
+  },
   "AllowedHosts": "*",
   "Kestrel": {
     "Endpoints": {
@@ -672,7 +575,8 @@ create_configuration() {
     "VmStoragePath": "${DATA_DIR}/vms",
     "ImageCachePath": "${DATA_DIR}/images",
     "LibvirtUri": "qemu:///system",
-    "VncPortStart": 5900
+    "VncPortStart": 5900,
+    "ReconcileOnStartup": true
   },
   "Images": {
     "CachePath": "${DATA_DIR}/images",
@@ -820,138 +724,122 @@ get_network() {
 suggest_client_ip() {
     local hub_ip=$(get_hub_ip)
     local prefix="${hub_ip%.*}"
-    local suggested=2
+    local last_octet=2
     
-    # Find next available IP by checking existing peers
-    while wg show $WG_INTERFACE allowed-ips 2>/dev/null | grep -q "${prefix}.${suggested}/32"; do
-        ((suggested++))
-        if [ $suggested -gt 254 ]; then
-            suggested=2
-            break
+    # Find highest used IP
+    for conf in $WG_DIR/clients/*.conf 2>/dev/null; do
+        if [ -f "$conf" ]; then
+            local ip=$(grep "Address" "$conf" | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1)
+            if [ -n "$ip" ]; then
+                local octet="${ip##*.}"
+                if [ "$octet" -ge "$last_octet" ]; then
+                    last_octet=$((octet + 1))
+                fi
+            fi
         fi
     done
     
-    echo "${prefix}.${suggested}"
+    echo "${prefix}.${last_octet}"
 }
 
 case "${1:-help}" in
+    status)
+        echo "=== WireGuard Status ==="
+        wg show $WG_INTERFACE 2>/dev/null || echo "Interface not running"
+        echo ""
+        echo "=== Clients ==="
+        ls -1 $WG_DIR/clients/ 2>/dev/null | sed 's/.conf$//' || echo "No clients configured"
+        ;;
+    
     add)
-        PUBKEY="$2"
+        if [ -z "$2" ] || [ -z "$3" ]; then
+            echo "Usage: $0 add <client_pubkey> <client_ip>"
+            echo "Example: $0 add ABC123...= 10.10.0.2"
+            exit 1
+        fi
+        
+        CLIENT_PUBKEY="$2"
         CLIENT_IP="$3"
-        if [ -z "$PUBKEY" ] || [ -z "$CLIENT_IP" ]; then
-            SUGGESTED=$(suggest_client_ip)
-            echo "Usage: decloud-wg add <public-key> <client-ip>"
-            echo "Example: decloud-wg add ABC123...xyz $SUGGESTED"
-            exit 1
-        fi
-        wg set $WG_INTERFACE peer "$PUBKEY" allowed-ips "$CLIENT_IP/32"
-        echo "✓ Added client $CLIENT_IP"
-        echo ""
-        echo "Client can now connect to VMs via 192.168.122.x"
-        ;;
+        VM_NET="192.168.122.0/24"
         
+        wg set $WG_INTERFACE peer "$CLIENT_PUBKEY" allowed-ips "${CLIENT_IP}/32,${VM_NET}"
+        wg-quick save $WG_INTERFACE 2>/dev/null || true
+        
+        echo "Added peer: $CLIENT_IP"
+        ;;
+    
     remove)
-        PUBKEY="$2"
-        if [ -z "$PUBKEY" ]; then
-            echo "Usage: decloud-wg remove <public-key>"
+        if [ -z "$2" ]; then
+            echo "Usage: $0 remove <client_pubkey>"
             exit 1
         fi
-        wg set $WG_INTERFACE peer "$PUBKEY" remove
-        echo "✓ Removed client"
-        ;;
         
-    list)
-        echo "WireGuard Peers:"
-        echo ""
-        wg show $WG_INTERFACE
-        ;;
+        wg set $WG_INTERFACE peer "$2" remove
+        wg-quick save $WG_INTERFACE 2>/dev/null || true
         
+        echo "Removed peer"
+        ;;
+    
     client-config)
         CLIENT_IP="${2:-$(suggest_client_ip)}"
-        HUB_PUBKEY=$(cat $WG_DIR/node_public.key 2>/dev/null)
-        PUBLIC_IP=$(curl -s https://api.ipify.org 2>/dev/null)
-        WG_PORT=$(get_config_value "ListenPort" "51820")
-        WG_NETWORK=$(get_network)
+        HUB_IP=$(get_hub_ip)
+        HUB_ENDPOINT="${3:-$(curl -s https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')}"
+        HUB_PORT=$(get_config_value "ListenPort" "51820")
+        HUB_PUBKEY=$(cat $WG_DIR/node_public.key 2>/dev/null || echo "HUB_PUBLIC_KEY_HERE")
         
-        if [ -z "$HUB_PUBKEY" ]; then
-            echo "Error: WireGuard not configured on this node"
-            exit 1
-        fi
+        # Generate client keys
+        CLIENT_PRIVKEY=$(wg genkey)
+        CLIENT_PUBKEY=$(echo "$CLIENT_PRIVKEY" | wg pubkey)
         
+        # Save client config
+        mkdir -p $WG_DIR/clients
+        cat > $WG_DIR/clients/${CLIENT_IP}.conf << EOF
+[Interface]
+PrivateKey = ${CLIENT_PRIVKEY}
+Address = ${CLIENT_IP}/24
+
+[Peer]
+PublicKey = ${HUB_PUBKEY}
+Endpoint = ${HUB_ENDPOINT}:${HUB_PORT}
+AllowedIPs = ${HUB_IP}/32, 192.168.122.0/24
+PersistentKeepalive = 25
+EOF
+        
+        echo "=== Client Config for ${CLIENT_IP} ==="
         echo ""
-        echo "# ============================================"
-        echo "# DeCloud WireGuard Client Configuration"
-        echo "# ============================================"
-        echo "# "
-        echo "# 1. Save this as: wg-decloud.conf"
-        echo "# 2. Generate your private key: wg genkey"
-        echo "# 3. Replace <YOUR_PRIVATE_KEY> below"
-        echo "# 4. Import into WireGuard app"
-        echo "# 5. Run on this server: decloud-wg add <YOUR_PUBKEY> $CLIENT_IP"
-        echo "#"
+        cat $WG_DIR/clients/${CLIENT_IP}.conf
         echo ""
-        echo "[Interface]"
-        echo "PrivateKey = <YOUR_PRIVATE_KEY>"
-        echo "Address = $CLIENT_IP/24"
+        echo "=== Next Steps ==="
+        echo "1. Copy the config above to your client"
+        echo "2. Add client to hub: $0 add ${CLIENT_PUBKEY} ${CLIENT_IP}"
         echo ""
-        echo "[Peer]"
-        echo "PublicKey = $HUB_PUBKEY"
-        echo "Endpoint = $PUBLIC_IP:$WG_PORT"
-        echo "AllowedIPs = $WG_NETWORK, 192.168.122.0/24"
-        echo "PersistentKeepalive = 25"
-        echo ""
+        echo "Client Public Key: ${CLIENT_PUBKEY}"
         ;;
-        
-    status)
-        echo "WireGuard Status:"
-        echo ""
-        if wg show $WG_INTERFACE &>/dev/null; then
-            wg show $WG_INTERFACE
-            echo ""
-            echo "Hub IP: $(get_hub_ip)"
-            echo "Network: $(get_network)"
-        else
-            echo "Interface $WG_INTERFACE not running"
-        fi
-        echo ""
-        if [ -f "$WG_DIR/node_public.key" ]; then
-            echo "Hub Public Key: $(cat $WG_DIR/node_public.key)"
-        fi
-        ;;
-        
-    *)
-        SUGGESTED=$(suggest_client_ip 2>/dev/null || echo "10.10.0.2")
+    
+    help|*)
         echo "DeCloud WireGuard Client Management"
         echo ""
-        echo "Usage: decloud-wg <command> [args]"
+        echo "Usage: $0 <command> [args]"
         echo ""
         echo "Commands:"
-        echo "  add <pubkey> <ip>    Add a client (e.g., add ABC... $SUGGESTED)"
-        echo "  remove <pubkey>      Remove a client"
-        echo "  list                 List all connected clients"
-        echo "  client-config [ip]   Generate client config template"
-        echo "  status               Show WireGuard status and hub public key"
-        echo ""
-        echo "Examples:"
-        echo "  decloud-wg client-config $SUGGESTED"
-        echo "  decloud-wg add aBcDeFg123... $SUGGESTED"
-        echo "  decloud-wg list"
+        echo "  status                  Show WireGuard status and clients"
+        echo "  add <pubkey> <ip>       Add a client peer"
+        echo "  remove <pubkey>         Remove a client peer"
+        echo "  client-config [ip]      Generate client config"
         echo ""
         ;;
 esac
 SCRIPT_EOF
 
     chmod +x /usr/local/bin/decloud-wg
-    log_success "Helper script created: decloud-wg"
+    
+    log_success "WireGuard helper script created: decloud-wg"
 }
 
-# ============================================================
-# Summary
-# ============================================================
 print_summary() {
     echo ""
     echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║       DeCloud Node Agent Installation Complete!              ║"
+    echo "║              Installation Complete!                          ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo ""
     log_success "Node Agent v${VERSION} installed successfully!"
@@ -995,6 +883,10 @@ print_summary() {
     echo "  CPU Cores:       ${CPU_CORES}"
     echo "  Memory:          ${MEMORY_MB}MB"
     echo "  Free Disk:       ${DISK_GB}GB"
+    echo ""
+    echo "Installed tools:"
+    echo "  virt-customize:  $(which virt-customize 2>/dev/null && echo '✓' || echo '✗')"
+    echo "  ssh-keygen:      $(which ssh-keygen 2>/dev/null && echo '✓' || echo '✗')"
     echo ""
 }
 

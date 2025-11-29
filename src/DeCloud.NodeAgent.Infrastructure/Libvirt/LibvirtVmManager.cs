@@ -68,6 +68,14 @@ public class LibvirtVmManager : IVmManager
         await _lock.WaitAsync(ct);
         try
         {
+            // Ensure QEMU guest agent channel directory exists
+            var channelDir = "/var/lib/libvirt/qemu/channel/target";
+            if (Directory.Exists("/var/lib/libvirt") && !Directory.Exists(channelDir))
+            {
+                Directory.CreateDirectory(channelDir);
+                _logger.LogDebug("Created QEMU guest agent channel directory");
+            }
+
             if (_options.ReconcileOnStartup)
             {
                 await ReconcileWithLibvirtAsync(ct);
@@ -763,126 +771,82 @@ public class LibvirtVmManager : IVmManager
     /// </summary>
     private async Task<string> CreateCloudInitIsoAsync(VmSpec spec, string vmDir, CancellationToken ct)
     {
-        var metaDataPath = Path.Combine(vmDir, "meta-data");
-        var userDataPath = Path.Combine(vmDir, "user-data");
-        var networkConfigPath = Path.Combine(vmDir, "network-config");
-        var isoPath = Path.Combine(vmDir, "cloud-init.iso");
+        // Determine authentication method
+        var hasPassword = !string.IsNullOrEmpty(spec.Password);
+        var hasSshKey = !string.IsNullOrEmpty(spec.SshPublicKey);
 
-        // meta-data
+        // Default password for fallback
+        var password = hasPassword ? spec.Password : "decloud";
+
+        // Build user configuration
+        var passwordConfig = hasSshKey
+            ? "lock_passwd: true"
+            : $@"lock_passwd: false
+    plain_text_passwd: {password}";
+
+        var sshKeyConfig = hasSshKey
+            ? $@"ssh_authorized_keys:
+      - {spec.SshPublicKey}"
+            : "";
+
+        // Build cloud-init user-data
+        var userData = $@"#cloud-config
+hostname: {spec.Name}
+manage_etc_hosts: true
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    groups: [adm, sudo]
+    {passwordConfig}
+    {sshKeyConfig}
+packages:
+  - qemu-guest-agent
+runcmd:
+  - systemctl enable qemu-guest-agent
+  - systemctl start qemu-guest-agent
+  - netplan generate || true
+  - netplan apply || true
+  - dhclient -v 2>/dev/null || dhclient ens3 2>/dev/null || dhclient enp1s0 2>/dev/null || dhclient eth0 2>/dev/null || true
+package_update: false
+package_upgrade: false
+final_message: ""DeCloud VM ready after $UPTIME seconds""
+";
+
+        // Write files
+        var userDataPath = Path.Combine(vmDir, "user-data");
+        var metaDataPath = Path.Combine(vmDir, "meta-data");
+
+        await File.WriteAllTextAsync(userDataPath, userData, ct);
+
         var metaData = $@"instance-id: {spec.VmId}
 local-hostname: {spec.Name}
 ";
         await File.WriteAllTextAsync(metaDataPath, metaData, ct);
 
-        // ===========================================
-        // FIXED: Network config with multiple interface names
-        // Ubuntu cloud images use different names depending on version
-        // ===========================================
-        var networkConfig = @"version: 2
-ethernets:
-  ens3:
-    dhcp4: true
-    dhcp6: false
-    optional: true
-  enp1s0:
-    dhcp4: true
-    dhcp6: false
-    optional: true
-  eth0:
-    dhcp4: true
-    dhcp6: false
-    optional: true
-";
-        await File.WriteAllTextAsync(networkConfigPath, networkConfig, ct);
-
-        // user-data
-        var userDataBuilder = new StringBuilder();
-        userDataBuilder.AppendLine("#cloud-config");
-        userDataBuilder.AppendLine($"hostname: {spec.Name}");
-        userDataBuilder.AppendLine("manage_etc_hosts: true");
-        userDataBuilder.AppendLine();
-
-        // User configuration
-        userDataBuilder.AppendLine("users:");
-        userDataBuilder.AppendLine("  - name: ubuntu");
-        userDataBuilder.AppendLine("    sudo: ALL=(ALL) NOPASSWD:ALL");
-        userDataBuilder.AppendLine("    shell: /bin/bash");
-        userDataBuilder.AppendLine("    groups: [adm, sudo]");
-
-        if (!string.IsNullOrEmpty(spec.SshPublicKey))
-        {
-            userDataBuilder.AppendLine("    lock_passwd: true");
-            userDataBuilder.AppendLine("    ssh_authorized_keys:");
-            foreach (var key in spec.SshPublicKey.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-            {
-                var trimmedKey = key.Trim();
-                if (!string.IsNullOrEmpty(trimmedKey))
-                {
-                    userDataBuilder.AppendLine($"      - {trimmedKey}");
-                }
-            }
-            _logger.LogDebug("VM {VmId} cloud-init: SSH key configured", spec.VmId);
-        }
-        else if (!string.IsNullOrEmpty(spec.Password))
-        {
-            userDataBuilder.AppendLine("    lock_passwd: false");
-            userDataBuilder.AppendLine($"    plain_text_passwd: {spec.Password}");
-            userDataBuilder.AppendLine();
-            userDataBuilder.AppendLine("ssh_pwauth: true");
-            _logger.LogDebug("VM {VmId} cloud-init: password configured", spec.VmId);
-        }
-        else
-        {
-            // FALLBACK: Set default password when nothing provided
-            userDataBuilder.AppendLine("    lock_passwd: false");
-            userDataBuilder.AppendLine("    plain_text_passwd: decloud");
-            userDataBuilder.AppendLine();
-            userDataBuilder.AppendLine("ssh_pwauth: true");
-            _logger.LogWarning("VM {VmId} cloud-init: using fallback password 'decloud'", spec.VmId);
-        }
-
-        userDataBuilder.AppendLine();
-
-        // Ensure network comes up
-        userDataBuilder.AppendLine("runcmd:");
-        userDataBuilder.AppendLine("  - netplan generate || true");
-        userDataBuilder.AppendLine("  - netplan apply || true");
-        userDataBuilder.AppendLine("  - dhclient -v 2>/dev/null || dhclient ens3 2>/dev/null || dhclient enp1s0 2>/dev/null || dhclient eth0 2>/dev/null || true");
-
-        if (!string.IsNullOrEmpty(spec.CloudInitUserData))
-        {
-            userDataBuilder.AppendLine();
-            userDataBuilder.AppendLine("# Custom user data");
-            userDataBuilder.AppendLine(spec.CloudInitUserData);
-        }
-
-        userDataBuilder.AppendLine();
-        userDataBuilder.AppendLine("package_update: false");
-        userDataBuilder.AppendLine("package_upgrade: false");
-        userDataBuilder.AppendLine();
-        userDataBuilder.AppendLine("final_message: \"DeCloud VM ready after $UPTIME seconds\"");
-
-        await File.WriteAllTextAsync(userDataPath, userDataBuilder.ToString(), ct);
-
-        // Generate ISO
+        // Create ISO
+        var isoPath = Path.Combine(vmDir, "cloud-init.iso");
         var result = await _executor.ExecuteAsync(
-            "cloud-localds",
-            $"-N {networkConfigPath} {isoPath} {userDataPath} {metaDataPath}",
+            "genisoimage",
+            $"-output {isoPath} -volid cidata -joliet -rock {userDataPath} {metaDataPath}",
             ct);
 
         if (!result.Success)
         {
+            // Try cloud-localds as fallback
             result = await _executor.ExecuteAsync(
-                "genisoimage",
-                $"-output {isoPath} -volid cidata -joliet -rock {userDataPath} {metaDataPath} {networkConfigPath}",
+                "cloud-localds",
+                $"{isoPath} {userDataPath} {metaDataPath}",
                 ct);
         }
 
         if (!result.Success)
         {
-            throw new InvalidOperationException($"Failed to create cloud-init ISO: {result.StandardError}");
+            _logger.LogWarning("Failed to create cloud-init ISO: {Error}", result.StandardError);
+            return string.Empty;
         }
 
+        _logger.LogDebug("Created cloud-init ISO at {Path}", isoPath);
         return isoPath;
     }
 
@@ -944,6 +908,10 @@ ethernets:
     <rng model='virtio'>
       <backend model='random'>/dev/urandom</backend>
     </rng>
+    <channel type='unix'>
+      <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.VmId}.org.qemu.guest_agent.0'/>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+    </channel>
   </devices>
 </domain>";
     }

@@ -28,6 +28,7 @@ builder.Services.AddSingleton<LibvirtVmManager>();  // Register concrete type fo
 builder.Services.AddSingleton<IVmManager>(sp => sp.GetRequiredService<LibvirtVmManager>());  // Alias to interface
 builder.Services.AddSingleton<INetworkManager, WireGuardNetworkManager>();
 builder.Services.AddSingleton<ICloudInitCleaner, CloudInitCleaner>();
+builder.Services.AddSingleton<IEphemeralSshKeyService, EphemeralSshKeyService>();
 
 // HTTP client for image downloads and orchestrator communication
 builder.Services.AddHttpClient<IImageManager, ImageManager>();
