@@ -293,8 +293,13 @@ public class SshProxyController : ControllerBase
 
     private class ResizeCommand
     {
+        [System.Text.Json.Serialization.JsonPropertyName("type")]
         public string Type { get; set; } = "";
+
+        [System.Text.Json.Serialization.JsonPropertyName("cols")]
         public int Cols { get; set; }
+
+        [System.Text.Json.Serialization.JsonPropertyName("rows")]
         public int Rows { get; set; }
     }
 }
