@@ -143,6 +143,7 @@ public class CommandProcessorService : BackgroundService
             string? imageUrl;
             string? imageId = null;
             string? sshPublicKey;
+            string? password;
             string? tenantId;
             string? leaseId;
 
@@ -154,6 +155,7 @@ public class CommandProcessorService : BackgroundService
                 diskBytes = GetLongProperty(root, "DiskBytes", "diskBytes") ?? 10L * 1024L * 1024L * 1024L;
                 imageUrl = GetStringProperty(root, "BaseImageUrl", "baseImageUrl");
                 sshPublicKey = GetStringProperty(root, "SshPublicKey", "sshPublicKey");
+                password = GetStringProperty(root, "Password", "password");
                 tenantId = GetStringProperty(root, "TenantId", "tenantId") ?? "orchestrator";
                 leaseId = GetStringProperty(root, "LeaseId", "leaseId") ?? vmId;
 
@@ -171,6 +173,7 @@ public class CommandProcessorService : BackgroundService
                 imageId = GetStringProperty(spec, "imageId", "ImageId");
                 imageUrl = GetStringProperty(spec, "imageUrl", "ImageUrl");
                 sshPublicKey = GetStringProperty(spec, "sshPublicKey", "SshPublicKey");
+                password = GetStringProperty(root, "Password", "password");
                 tenantId = "orchestrator";
                 leaseId = vmId;
 
@@ -200,6 +203,7 @@ public class CommandProcessorService : BackgroundService
                 BaseImageUrl = imageUrl,
                 BaseImageHash = "",
                 SshPublicKey = sshPublicKey,
+                Password = password,
                 TenantId = tenantId,
                 LeaseId = leaseId
             };
