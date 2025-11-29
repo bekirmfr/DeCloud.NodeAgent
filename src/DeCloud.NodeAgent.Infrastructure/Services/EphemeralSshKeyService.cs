@@ -286,8 +286,54 @@ chown -R {username}:{username} /home/{username}/.ssh
             return false;
         }
 
-        _logger.LogDebug("QEMU Guest Agent injection succeeded for VM {VmId}", vmId);
-        return true;
+        // Check if we got a PID back (indicates command was accepted)
+        if (execResult.StandardOutput.Contains("pid"))
+        {
+            // Extract PID and wait for completion
+            try
+            {
+                var pidMatch = System.Text.RegularExpressions.Regex.Match(
+                    execResult.StandardOutput, @"""pid""\s*:\s*(\d+)");
+                if (pidMatch.Success)
+                {
+                    var pid = pidMatch.Groups[1].Value;
+                    // Wait for command to complete (poll guest-exec-status)
+                    for (int i = 0; i < 10; i++)  // Max 5 seconds
+                    {
+                        await Task.Delay(500);
+                        var statusJson = $"{{\"execute\":\"guest-exec-status\",\"arguments\":{{\"pid\":{pid}}}}}";
+                        var statusJsonPath = Path.Combine(Path.GetTempPath(), $"qemu-status-{Guid.NewGuid()}.json");
+                        try
+                        {
+                            await File.WriteAllTextAsync(statusJsonPath, statusJson, ct);
+                            var statusResult = await _executor.ExecuteAsync(
+                                "bash",
+                                $"-c \"virsh qemu-agent-command {vmId} '{statusJson.Replace("\"", "\\\"")}' \"",
+                                TimeSpan.FromSeconds(5),
+                                ct);
+                            if (statusResult.Success && statusResult.StandardOutput.Contains("\"exited\":true"))
+                            {
+                                break;  // Command completed
+                            }
+                        }
+                        finally
+                        {
+                            try { File.Delete(statusJsonPath); } catch { }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Failed to wait for guest-exec completion, proceeding anyway");
+            }
+
+            _logger.LogDebug("QEMU Guest Agent injection succeeded for VM {VmId}", vmId);
+            return true;
+        }
+        // If no PID in response, the command may have failed silently
+        _logger.LogDebug("QEMU Guest Agent exec didn't return PID for VM {VmId}", vmId);
+        return false;
     }
 
     /// <summary>
