@@ -771,49 +771,61 @@ public class LibvirtVmManager : IVmManager
     /// </summary>
     private async Task<string> CreateCloudInitIsoAsync(VmSpec spec, string vmDir, CancellationToken ct)
     {
-        // Determine authentication method
         var hasPassword = !string.IsNullOrEmpty(spec.Password);
         var hasSshKey = !string.IsNullOrEmpty(spec.SshPublicKey);
 
-        // Default password for fallback
-        var password = hasPassword ? spec.Password : "decloud";
+        // Build the user-data YAML - NO leading spaces!
+        var sb = new StringBuilder();
+        sb.AppendLine("#cloud-config");
+        sb.AppendLine($"hostname: {spec.Name}");
+        sb.AppendLine("manage_etc_hosts: true");
+        sb.AppendLine();
+        sb.AppendLine("# Regenerate machine-id before DHCP to prevent IP collisions");
+        sb.AppendLine("bootcmd:");
+        sb.AppendLine("  - rm -f /etc/machine-id /var/lib/dbus/machine-id");
+        sb.AppendLine("  - systemd-machine-id-setup");
+        sb.AppendLine("  - rm -f /var/lib/dhcp/*");
+        sb.AppendLine();
+        sb.AppendLine("users:");
+        sb.AppendLine("  - name: ubuntu");
+        sb.AppendLine("    sudo: ALL=(ALL) NOPASSWD:ALL");
+        sb.AppendLine("    shell: /bin/bash");
 
-        // Build user configuration
-        var passwordConfig = hasSshKey
-            ? "lock_passwd: true"
-            : $@"lock_passwd: false
-                plain_text_passwd: {password}";
+        if (hasPassword)
+        {
+            sb.AppendLine("    lock_passwd: false");
+        }
+        else
+        {
+            sb.AppendLine("    lock_passwd: true");
+        }
 
-        var sshKeyConfig = hasSshKey
-            ? $@"ssh_authorized_keys:
-      - {spec.SshPublicKey}"
-            : "";
+        if (hasSshKey)
+        {
+            sb.AppendLine("    ssh_authorized_keys:");
+            sb.AppendLine($"      - {spec.SshPublicKey}");
+        }
 
-        // Build cloud-init user-data
-        var userData = $@"#cloud-config
-            hostname: {spec.Name}
-            manage_etc_hosts: true
-            bootcmd:
-              - rm -f /etc/machine-id /var/lib/dbus/machine-id
-              - systemd-machine-id-setup
-            users:
-              - name: ubuntu
-                sudo: ALL=(ALL) NOPASSWD:ALL
-                shell: /bin/bash
-                {(hasPassword ? "lock_passwd: false" : "lock_passwd: true")}
-                {(hasSshKey && !string.IsNullOrEmpty(spec.SshPublicKey) ? $@"ssh_authorized_keys:
-                  - {spec.SshPublicKey}" : "")}
-            {(hasPassword ? $@"chpasswd:
-              list: |
-                ubuntu:{spec.Password}
-              expire: false
-            ssh_pwauth: true" : "")}
-            packages:
-              - qemu-guest-agent
-            runcmd:
-              - systemctl enable qemu-guest-agent
-              - systemctl start qemu-guest-agent
-            ";
+        sb.AppendLine();
+
+        if (hasPassword)
+        {
+            sb.AppendLine("chpasswd:");
+            sb.AppendLine("  list: |");
+            sb.AppendLine($"    ubuntu:{spec.Password}");
+            sb.AppendLine("  expire: false");
+            sb.AppendLine("ssh_pwauth: true");
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("packages:");
+        sb.AppendLine("  - qemu-guest-agent");
+        sb.AppendLine();
+        sb.AppendLine("runcmd:");
+        sb.AppendLine("  - systemctl enable qemu-guest-agent");
+        sb.AppendLine("  - systemctl start qemu-guest-agent");
+
+        var userData = sb.ToString();
 
         // Write files
         var userDataPath = Path.Combine(vmDir, "user-data");
@@ -835,7 +847,6 @@ local-hostname: {spec.Name}
 
         if (!result.Success)
         {
-            // Try cloud-localds as fallback
             result = await _executor.ExecuteAsync(
                 "cloud-localds",
                 $"{isoPath} {userDataPath} {metaDataPath}",
