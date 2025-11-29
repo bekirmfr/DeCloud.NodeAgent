@@ -170,8 +170,8 @@ public class SshProxyController : ControllerBase
     /// </summary>
     [HttpPost("{vmId}/terminal/connect")]
     public async Task<ActionResult<TerminalConnectResponse>> InitiateTerminal(
-        string vmId,
-        [FromBody] TerminalConnectRequest request)
+    string vmId,
+    [FromBody] TerminalConnectRequest request)
     {
         _logger.LogInformation("Initiating terminal connection for VM {VmId}", vmId);
 
@@ -186,28 +186,47 @@ public class SshProxyController : ControllerBase
                 request.Username ?? "ubuntu",
                 TimeSpan.FromSeconds(request.TtlSeconds > 0 ? request.TtlSeconds : 300));
 
-            if (!injectResult.Success)
+            if (injectResult.Success)
             {
-                return StatusCode(500, new TerminalConnectResponse
+                // Build WebSocket URL with private key
+                var privateKeyBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(keypair.PrivateKey));
+                var wsUrl = $"/api/vms/{vmId}/terminal?ip={request.VmIp}&user={request.Username ?? "ubuntu"}&port={request.Port}";
+
+                return Ok(new TerminalConnectResponse
                 {
-                    Success = false,
-                    Error = $"Failed to inject key: {injectResult.Error}"
+                    Success = true,
+                    WebSocketPath = wsUrl,
+                    PrivateKey = keypair.PrivateKey,
+                    PrivateKeyBase64 = privateKeyBase64,
+                    Fingerprint = keypair.Fingerprint,
+                    ExpiresAt = injectResult.ExpiresAt,
+                    MethodUsed = injectResult.MethodUsed.ToString()
                 });
             }
 
-            // Build WebSocket URL with private key
-            var privateKeyBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(keypair.PrivateKey));
-            var wsUrl = $"/api/vms/{vmId}/terminal?ip={request.VmIp}&user={request.Username ?? "ubuntu"}&port={request.Port}";
+            // Ephemeral key failed - fall back to password if available
+            _logger.LogWarning("Ephemeral key injection failed for VM {VmId}: {Error}. Checking for password fallback.",
+                vmId, injectResult.Error);
 
-            return Ok(new TerminalConnectResponse
+            if (!string.IsNullOrEmpty(request.Password))
             {
-                Success = true,
-                WebSocketPath = wsUrl,
-                PrivateKey = keypair.PrivateKey,
-                PrivateKeyBase64 = privateKeyBase64,
-                Fingerprint = keypair.Fingerprint,
-                ExpiresAt = injectResult.ExpiresAt,
-                MethodUsed = injectResult.MethodUsed.ToString()
+                _logger.LogInformation("Using password fallback for VM {VmId}", vmId);
+                var wsUrl = $"/api/vms/{vmId}/terminal?ip={request.VmIp}&user={request.Username ?? "ubuntu"}&port={request.Port}";
+
+                return Ok(new TerminalConnectResponse
+                {
+                    Success = true,
+                    WebSocketPath = wsUrl,
+                    Password = request.Password,
+                    MethodUsed = "PasswordFallback"
+                });
+            }
+
+            // No fallback available
+            return StatusCode(500, new TerminalConnectResponse
+            {
+                Success = false,
+                Error = $"Failed to inject key: {injectResult.Error}. No password fallback available."
             });
         }
         catch (Exception ex)
@@ -414,6 +433,7 @@ public class TerminalConnectRequest
     public string? Username { get; init; }
     public int Port { get; init; } = 22;
     public int TtlSeconds { get; init; } = 300;
+    public string? Password { get; init; }
 }
 
 public class TerminalConnectResponse
@@ -426,4 +446,5 @@ public class TerminalConnectResponse
     public string Fingerprint { get; init; } = "";
     public DateTime? ExpiresAt { get; init; }
     public string? MethodUsed { get; init; }
+    public string? Password { get; init; }
 }
