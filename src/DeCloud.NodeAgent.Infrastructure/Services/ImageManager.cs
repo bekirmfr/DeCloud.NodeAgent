@@ -104,7 +104,6 @@ public class ImageManager : IImageManager
             _downloadLock.Release();
         }
     }
-}
 
     public async Task<bool> VerifyImageAsync(string imagePath, string expectedHash, CancellationToken ct = default)
     {
