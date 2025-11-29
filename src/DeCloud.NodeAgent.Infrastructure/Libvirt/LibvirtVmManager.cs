@@ -791,27 +791,29 @@ public class LibvirtVmManager : IVmManager
 
         // Build cloud-init user-data
         var userData = $@"#cloud-config
-hostname: {spec.Name}
-manage_etc_hosts: true
-users:
-  - name: ubuntu
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    shell: /bin/bash
-    groups: [adm, sudo]
-    {passwordConfig}
-    {sshKeyConfig}
-packages:
-  - qemu-guest-agent
-runcmd:
-  - systemctl enable qemu-guest-agent
-  - systemctl start qemu-guest-agent
-  - netplan generate || true
-  - netplan apply || true
-  - dhclient -v 2>/dev/null || dhclient ens3 2>/dev/null || dhclient enp1s0 2>/dev/null || dhclient eth0 2>/dev/null || true
-package_update: false
-package_upgrade: false
-final_message: ""DeCloud VM ready after $UPTIME seconds""
-";
+            hostname: {spec.Name}
+            manage_etc_hosts: true
+            users:
+              - name: ubuntu
+                sudo: ALL=(ALL) NOPASSWD:ALL
+                shell: /bin/bash
+                {(hasPassword ? $"lock_passwd: false" : "lock_passwd: true")}
+                {(hasSshKey && !string.IsNullOrEmpty(spec.SshPublicKey) ? $@"ssh_authorized_keys:
+                  - {spec.SshPublicKey}" : "")}
+            {(hasPassword ? $@"chpasswd:
+              list: |
+                ubuntu:{spec.Password}
+              expire: false
+            ssh_pwauth: true" : "")}
+            packages:
+              - qemu-guest-agent
+            runcmd:
+              - rm -f /etc/machine-id /var/lib/dbus/machine-id
+              - systemd-machine-id-setup
+              - dhclient -r && dhclient || netplan apply || true
+              - systemctl enable qemu-guest-agent
+              - systemctl start qemu-guest-agent
+            ";
 
         // Write files
         var userDataPath = Path.Combine(vmDir, "user-data");
