@@ -782,7 +782,7 @@ public class LibvirtVmManager : IVmManager
         var passwordConfig = hasSshKey
             ? "lock_passwd: true"
             : $@"lock_passwd: false
-    plain_text_passwd: {password}";
+                plain_text_passwd: {password}";
 
         var sshKeyConfig = hasSshKey
             ? $@"ssh_authorized_keys:
@@ -793,11 +793,14 @@ public class LibvirtVmManager : IVmManager
         var userData = $@"#cloud-config
             hostname: {spec.Name}
             manage_etc_hosts: true
+            bootcmd:
+              - rm -f /etc/machine-id /var/lib/dbus/machine-id
+              - systemd-machine-id-setup
             users:
               - name: ubuntu
                 sudo: ALL=(ALL) NOPASSWD:ALL
                 shell: /bin/bash
-                {(hasPassword ? $"lock_passwd: false" : "lock_passwd: true")}
+                {(hasPassword ? "lock_passwd: false" : "lock_passwd: true")}
                 {(hasSshKey && !string.IsNullOrEmpty(spec.SshPublicKey) ? $@"ssh_authorized_keys:
                   - {spec.SshPublicKey}" : "")}
             {(hasPassword ? $@"chpasswd:
@@ -808,9 +811,6 @@ public class LibvirtVmManager : IVmManager
             packages:
               - qemu-guest-agent
             runcmd:
-              - rm -f /etc/machine-id /var/lib/dbus/machine-id
-              - systemd-machine-id-setup
-              - dhclient -r && dhclient || netplan apply || true
               - systemctl enable qemu-guest-agent
               - systemctl start qemu-guest-agent
             ";
