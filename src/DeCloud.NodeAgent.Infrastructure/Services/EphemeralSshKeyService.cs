@@ -247,8 +247,8 @@ public class EphemeralSshKeyService : IEphemeralSshKeyService
 
         // Check if guest agent is available
         var checkResult = await _executor.ExecuteAsync(
-            "virsh",
-            $"qemu-agent-command {vmId} '{{\"execute\":\"guest-ping\"}}'",
+            "bash",
+            $"-c \"virsh qemu-agent-command {vmId} '{{\\\"execute\\\":\\\"guest-ping\\\"}}' \"",
             TimeSpan.FromSeconds(5),
             ct);
 
@@ -275,8 +275,8 @@ chown -R {username}:{username} /home/{username}/.ssh
         var execCmd = $@"{{""execute"":""guest-exec"",""arguments"":{{""path"":""/bin/bash"",""arg"":[""-c"",""echo {base64Script} | base64 -d | bash""],""capture-output"":true}}}}";
 
         var execResult = await _executor.ExecuteAsync(
-            "virsh",
-            $"qemu-agent-command {vmId} '{execCmd}'",
+            "bash",
+            $"-c \"virsh qemu-agent-command {vmId} '{execCmd.Replace("\"", "\\\"")}' \"",
             TimeSpan.FromSeconds(30),
             ct);
 
@@ -390,8 +390,8 @@ chown -R {username}:{username} /home/{username}/.ssh
         var execCmd = $@"{{""execute"":""guest-exec"",""arguments"":{{""path"":""/bin/bash"",""arg"":[""-c"",""echo {base64Script} | base64 -d | bash""],""capture-output"":true}}}}";
 
         var result = await _executor.ExecuteAsync(
-            "virsh",
-            $"qemu-agent-command {vmId} '{execCmd}'",
+            "bash",
+            $"-c \"virsh qemu-agent-command {vmId} '{execCmd.Replace("\"", "\\\"")}' \"",
             TimeSpan.FromSeconds(30),
             ct);
 
