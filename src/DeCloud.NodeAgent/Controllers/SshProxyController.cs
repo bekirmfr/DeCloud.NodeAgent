@@ -23,6 +23,9 @@ public class SshProxyController : ControllerBase
     private const int TerminalCols = 120;
     private const int TerminalRows = 40;
 
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string PrivateKey, DateTime ExpiresAt)>
+        _ephemeralKeyCache = new();
+
     public SshProxyController(
         IEphemeralSshKeyService ephemeralKeyService,
         ILogger<SshProxyController> logger,
@@ -50,6 +53,7 @@ public class SshProxyController : ControllerBase
         [FromQuery] int port = 22,
         [FromQuery] string? password = null,
         [FromQuery] string? privateKey = null,
+        [FromQuery] string? keyRef = null,
         [FromQuery] bool ephemeral = false)
     {
         if (!HttpContext.WebSockets.IsWebSocketRequest)
@@ -66,9 +70,31 @@ public class SshProxyController : ControllerBase
             return;
         }
 
+        // Try to get key from cache if keyRef provided
+        if (!string.IsNullOrEmpty(keyRef) && string.IsNullOrEmpty(privateKey))
+        {
+            if (_ephemeralKeyCache.TryRemove(keyRef, out var cached) && cached.ExpiresAt > DateTime.UtcNow)
+            {
+                privateKey = Convert.ToBase64String(Encoding.UTF8.GetBytes(cached.PrivateKey));
+                _logger.LogDebug("Retrieved cached ephemeral key for VM {VmId}", vmId);
+            }
+        }
+
         // Get credentials from headers if not in query
         password ??= HttpContext.Request.Headers["X-SSH-Password"].FirstOrDefault();
         privateKey ??= HttpContext.Request.Headers["X-SSH-PrivateKey"].FirstOrDefault();
+
+        _logger.LogInformation(
+            "SSH terminal requested for VM {VmId} at {Ip}:{Port} as {User}, ephemeral={Ephemeral}, hasPrivateKey={HasKey}, hasPassword={HasPwd}",
+            vmId, ip, port, user, ephemeral,
+            !string.IsNullOrEmpty(privateKey),
+            !string.IsNullOrEmpty(password));
+
+        // Log key length if present
+        if (!string.IsNullOrEmpty(privateKey))
+        {
+            _logger.LogDebug("Private key received, length: {Length}", privateKey.Length);
+        }
 
         // Check for ephemeral key request header
         if (!ephemeral && HttpContext.Request.Headers.ContainsKey("X-Use-Ephemeral-Key"))
@@ -188,9 +214,12 @@ public class SshProxyController : ControllerBase
 
             if (injectResult.Success)
             {
-                // Build WebSocket URL with private key
+                // Store the private key for the WebSocket connection
+                var cacheKey = $"{vmId}-{keypair.Fingerprint}";
+                _ephemeralKeyCache[cacheKey] = (keypair.PrivateKey, DateTime.UtcNow.AddMinutes(5));
+
                 var privateKeyBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(keypair.PrivateKey));
-                var wsUrl = $"/api/vms/{vmId}/terminal?ip={request.VmIp}&user={request.Username ?? "ubuntu"}&port={request.Port}";
+                var wsUrl = $"/api/vms/{vmId}/terminal?ip={request.VmIp}&user={request.Username ?? "ubuntu"}&port={request.Port}&keyRef={Uri.EscapeDataString(cacheKey)}";
 
                 return Ok(new TerminalConnectResponse
                 {
