@@ -1,4 +1,4 @@
-using DeCloud.NodeAgent.Core.Interfaces;
+﻿using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using DeCloud.NodeAgent.Infrastructure.Network;
 using DeCloud.NodeAgent.Infrastructure.Services;
@@ -27,6 +27,7 @@ builder.Services.AddSingleton<IImageManager, ImageManager>();
 builder.Services.AddSingleton<LibvirtVmManager>();  // Register concrete type for initialization
 builder.Services.AddSingleton<IVmManager>(sp => sp.GetRequiredService<LibvirtVmManager>());  // Alias to interface
 builder.Services.AddSingleton<INetworkManager, WireGuardNetworkManager>();
+builder.Services.AddSingleton<ICloudInitCleaner, CloudInitCleaner>();
 
 // HTTP client for image downloads and orchestrator communication
 builder.Services.AddHttpClient<IImageManager, ImageManager>();
@@ -52,6 +53,30 @@ builder.Services.AddSwaggerGen(c =>
 });
 
 var app = builder.Build();
+
+// Check cloud-init cleaner tools on startup
+using (var scope = app.Services.CreateScope())
+{
+    var cleaner = scope.ServiceProvider.GetRequiredService<ICloudInitCleaner>();
+    var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+
+    var tools = await cleaner.CheckToolsAsync(CancellationToken.None);
+    if (!tools.AnyToolAvailable)
+    {
+        logger.LogWarning(
+            "⚠️  Cloud-init cleaning tools not found! VMs may boot with stale configuration. " +
+            "Install with: {Command}",
+            tools.RecommendedInstallCommand);
+    }
+    else
+    {
+        logger.LogInformation(
+            "Cloud-init tools available: virt-customize={Virt}, guestmount={Guest}, qemu-nbd={Nbd}",
+            tools.VirtCustomizeAvailable,
+            tools.GuestMountAvailable,
+            tools.QemuNbdAvailable);
+    }
+}
 
 // Initialize services on startup
 using (var scope = app.Services.CreateScope())

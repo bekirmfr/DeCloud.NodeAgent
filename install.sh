@@ -361,8 +361,13 @@ install_libvirt() {
     
     PACKAGES="qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virtinst"
     PACKAGES="$PACKAGES cloud-image-utils genisoimage qemu-utils"
+    PACKAGES="$PACKAGES libguestfs-tools"  # For cleaning cloud-init state from base images
     
     apt-get install -y -qq $PACKAGES > /dev/null 2>&1
+    
+    # Load nbd module for qemu-nbd (fallback cloud-init cleaner method)
+    modprobe nbd max_part=8 2>/dev/null || true
+    echo "nbd" >> /etc/modules-load.d/decloud.conf 2>/dev/null || true
     
     # Enable and start libvirtd
     systemctl enable libvirtd --quiet

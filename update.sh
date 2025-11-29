@@ -151,6 +151,14 @@ check_dependencies() {
         deps_missing=true
     fi
     
+    # Check libguestfs-tools (for cloud-init state cleaning)
+    if command -v virt-customize &> /dev/null; then
+        log_success "libguestfs-tools: installed"
+    else
+        log_warn "libguestfs-tools not found (needed for cloud-init cleaning)"
+        deps_missing=true
+    fi
+    
     # Check git
     if command -v git &> /dev/null; then
         log_success "git: installed"
@@ -230,6 +238,16 @@ install_dependencies() {
         log_info "Installing cloud-image-utils..."
         apt-get install -y -qq cloud-image-utils genisoimage > /dev/null 2>&1
         log_success "cloud-image-utils installed"
+    fi
+    
+    # libguestfs-tools (for cleaning cloud-init state from base images)
+    if ! command -v virt-customize &> /dev/null; then
+        log_info "Installing libguestfs-tools..."
+        apt-get install -y -qq libguestfs-tools > /dev/null 2>&1
+        # Load nbd module for qemu-nbd fallback
+        modprobe nbd max_part=8 2>/dev/null || true
+        echo "nbd" >> /etc/modules-load.d/decloud.conf 2>/dev/null || true
+        log_success "libguestfs-tools installed"
     fi
 }
 

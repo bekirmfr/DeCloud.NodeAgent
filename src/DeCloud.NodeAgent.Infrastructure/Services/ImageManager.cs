@@ -15,6 +15,7 @@ public class ImageManagerOptions
 public class ImageManager : IImageManager
 {
     private readonly ICommandExecutor _executor;
+    private readonly ICloudInitCleaner _cloudInitCleaner;
     private readonly HttpClient _httpClient;
     private readonly ILogger<ImageManager> _logger;
     private readonly ImageManagerOptions _options;
@@ -22,11 +23,13 @@ public class ImageManager : IImageManager
 
     public ImageManager(
         ICommandExecutor executor,
+        ICloudInitCleaner cloudInitCleaner,
         HttpClient httpClient,
         IOptions<ImageManagerOptions> options,
         ILogger<ImageManager> logger)
     {
         _executor = executor;
+        _cloudInitCleaner = cloudInitCleaner;
         _httpClient = httpClient;
         _logger = logger;
         _options = options.Value;
@@ -44,14 +47,13 @@ public class ImageManager : IImageManager
         if (File.Exists(localPath))
         {
             _logger.LogDebug("Image found in cache: {Path}", localPath);
-            
-            // Verify hash
+
             if (await VerifyImageAsync(localPath, expectedHash, ct))
             {
-                _logger.LogDebug("Cached image hash verified");
+                // Image is cached and verified - cloud-init should already be cleaned
                 return localPath;
             }
-            
+
             _logger.LogWarning("Cached image hash mismatch, re-downloading");
             File.Delete(localPath);
         }
@@ -60,7 +62,7 @@ public class ImageManager : IImageManager
         await _downloadLock.WaitAsync(ct);
         try
         {
-            // Double-check after acquiring lock (another thread may have downloaded)
+            // Double-check after acquiring lock
             if (File.Exists(localPath) && await VerifyImageAsync(localPath, expectedHash, ct))
             {
                 return localPath;
@@ -75,6 +77,26 @@ public class ImageManager : IImageManager
                 throw new Exception($"Downloaded image hash does not match expected: {expectedHash}");
             }
 
+            // ========================================
+            // Clean cloud-init state from base image
+            // ========================================
+            var cleanResult = await _cloudInitCleaner.CleanAsync(localPath, ct);
+            if (cleanResult.Success)
+            {
+                _logger.LogInformation(
+                    "Base image cloud-init cleaned: {Method} in {Duration}ms",
+                    cleanResult.MethodUsed,
+                    cleanResult.Duration.TotalMilliseconds);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Could not clean cloud-init from base image: {Message}. " +
+                    "VMs may boot with stale configuration.",
+                    cleanResult.Message);
+            }
+            // =========================================================
+
             return localPath;
         }
         finally
@@ -82,6 +104,7 @@ public class ImageManager : IImageManager
             _downloadLock.Release();
         }
     }
+}
 
     public async Task<bool> VerifyImageAsync(string imagePath, string expectedHash, CancellationToken ct = default)
     {
