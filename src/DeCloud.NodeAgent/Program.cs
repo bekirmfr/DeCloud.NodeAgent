@@ -85,6 +85,27 @@ builder.Services.AddSingleton<VmRepository>(sp =>
 // =====================================================
 // VM Manager with Repository Integration
 // =====================================================
+// Add VmRepository as singleton
+builder.Services.AddSingleton<VmRepository>(sp =>
+{
+    var logger = sp.GetRequiredService<ILogger<VmRepository>>();
+    var options = sp.GetRequiredService<IOptions<LibvirtVmManagerOptions>>();
+    var dbPath = Path.Combine(options.Value.VmStoragePath, "vms.db");
+
+    // Optional: Generate encryption key from node config
+    var config = sp.GetRequiredService<IConfiguration>();
+    var nodeId = config.GetValue<string>("Node:Id");
+    var walletAddress = config.GetValue<string>("Orchestrator:WalletAddress");
+    string? encryptionKey = null;
+
+    if (!string.IsNullOrEmpty(nodeId) && !string.IsNullOrEmpty(walletAddress))
+    {
+        encryptionKey = VmRepository.GenerateEncryptionKey(nodeId, walletAddress);
+    }
+
+    return new VmRepository(dbPath, logger, encryptionKey);
+});
+
 builder.Services.AddSingleton<LibvirtVmManager>();
 builder.Services.AddSingleton<IVmManager>(sp => sp.GetRequiredService<LibvirtVmManager>());
 
@@ -108,6 +129,7 @@ builder.Services.AddSingleton<IOrchestratorClient>(sp =>
 // =====================================================
 builder.Services.AddHostedService<HeartbeatService>();
 builder.Services.AddHostedService<CommandProcessorService>();
+builder.Services.AddHostedService<DatabaseMaintenanceService>();
 
 // Initialize VM Manager on startup to load VMs from database
 builder.Services.AddHostedService<VmManagerInitializationService>();

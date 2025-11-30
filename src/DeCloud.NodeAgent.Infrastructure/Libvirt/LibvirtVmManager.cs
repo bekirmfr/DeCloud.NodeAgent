@@ -521,6 +521,8 @@ public class LibvirtVmManager : IVmManager
         if (!existsInLibvirt)
         {
             _vms.Remove(vmId);
+            await _repository.DeleteVmAsync(vmId);  // ✅ ADD THIS
+            _logger.LogInformation("Removed non-existent VM {VmId} from tracking and database", vmId);
             return VmOperationResult.Fail(vmId, "VM not found in libvirt", "NOT_FOUND");
         }
 
@@ -611,6 +613,7 @@ public class LibvirtVmManager : IVmManager
         if (result.Success)
         {
             instance.State = VmState.Paused;
+            await _repository.UpdateVmStateAsync(vmId, VmState.Paused);
             return VmOperationResult.Ok(vmId, VmState.Paused);
         }
 
@@ -631,6 +634,7 @@ public class LibvirtVmManager : IVmManager
         if (result.Success)
         {
             instance.State = VmState.Running;
+            await _repository.UpdateVmStateAsync(vmId, VmState.Running);
             return VmOperationResult.Ok(vmId, VmState.Running);
         }
 

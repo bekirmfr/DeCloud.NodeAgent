@@ -51,18 +51,22 @@ public class VmRepository : IDisposable
     }
 
     /// <summary>
-    /// Generate a secure encryption key from node-specific data.
-    /// This provides deterministic encryption that survives node agent restarts.
+    /// Generate a deterministic encryption key from node-specific identifiers.
+    /// This allows the same encryption key to be regenerated after restart.
+    /// SECURITY: Key is derived using PBKDF2 with 100,000 iterations.
     /// </summary>
     public static string GenerateEncryptionKey(string nodeId, string walletAddress)
     {
-        // Combine node ID and wallet for deterministic key generation
-        var input = $"{nodeId}:{walletAddress}:decloud-vm-encryption-v1";
-        var bytes = Encoding.UTF8.GetBytes(input);
+        var salt = Encoding.UTF8.GetBytes($"decloud-node-{nodeId}");
+        var password = Encoding.UTF8.GetBytes($"{walletAddress}-{nodeId}");
 
-        // Use SHA-256 to generate a 32-byte key
-        var hash = SHA256.HashData(bytes);
-        return Convert.ToBase64String(hash);
+        using var pbkdf2 = new Rfc2898DeriveBytes(
+            password,
+            salt,
+            iterations: 100_000,
+            HashAlgorithmName.SHA256);
+
+        return Convert.ToBase64String(pbkdf2.GetBytes(32));
     }
 
     private void InitializeDatabase()
