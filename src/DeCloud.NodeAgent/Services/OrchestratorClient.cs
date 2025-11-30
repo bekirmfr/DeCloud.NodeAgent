@@ -1,18 +1,21 @@
-using System.Net.Http.Json;
-using System.Text.Json;
-using System.Collections.Concurrent;
+// Sends enhanced heartbeat with detailed VM information
+
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Collections.Concurrent;
+using System.Net.Http.Json;
+using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Services;
 
 public class OrchestratorClientOptions
 {
-    public string BaseUrl { get; set; } = "http://localhost:5050";
-    public string ApiKey { get; set; } = "";
+    public string BaseUrl { get; set; } = "http://localhost:5000";
+    public string? ApiKey { get; set; }
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(30);
-    public string WalletAddress { get; set; } = "0x0000000000000000000000000000000000000000";
+    public string? WalletAddress { get; set; }
 }
 
 public class OrchestratorClient : IOrchestratorClient
@@ -29,6 +32,7 @@ public class OrchestratorClient : IOrchestratorClient
 
     public string? NodeId => _nodeId;
     public bool IsRegistered => !string.IsNullOrEmpty(_nodeId) && !string.IsNullOrEmpty(_authToken);
+    public string? WalletAddress { get; set; }
 
     public OrchestratorClient(
         HttpClient httpClient,
@@ -39,7 +43,7 @@ public class OrchestratorClient : IOrchestratorClient
         _logger = logger;
         _options = options.Value;
 
-        _httpClient.BaseAddress = new Uri(_options.BaseUrl);
+        _httpClient.BaseAddress = new Uri(_options.BaseUrl.TrimEnd('/'));
         _httpClient.Timeout = _options.Timeout;
     }
 
@@ -51,10 +55,10 @@ public class OrchestratorClient : IOrchestratorClient
 
             var request = new
             {
-                name = registration.NodeId,
-                walletAddress = _options.WalletAddress,
-                publicIp = registration.Resources.Network.PublicIp,
-                agentPort = 5100,
+                name = registration.Name,
+                walletAddress = registration.WalletAddress,
+                publicIp = registration.PublicIp,
+                agentPort = registration.AgentPort,
                 resources = new
                 {
                     cpuCores = registration.Resources.Cpu.LogicalCores,
@@ -62,18 +66,18 @@ public class OrchestratorClient : IOrchestratorClient
                     storageGb = registration.Resources.Storage.Sum(s => s.TotalBytes) / 1024 / 1024 / 1024,
                     bandwidthMbps = 1000
                 },
-                agentVersion = "1.0.0",
-                supportedImages = new[] { "ubuntu-24.04", "ubuntu-22.04", "debian-12" },
-                supportsGpu = registration.Resources.Gpus.Any(),
-                gpuInfo = registration.Resources.Gpus.FirstOrDefault() != null ? new
+                agentVersion = registration.AgentVersion,
+                supportedImages = registration.SupportedImages,
+                supportsGpu = registration.SupportsGpu,
+                gpuInfo = registration.GpuInfo != null ? new
                 {
-                    model = registration.Resources.Gpus.First().Model,
-                    vramMb = registration.Resources.Gpus.First().MemoryBytes / 1024 / 1024,
-                    count = registration.Resources.Gpus.Count,
-                    driver = registration.Resources.Gpus.First().DriverVersion
+                    model = registration.GpuInfo.Model,
+                    vramMb = registration.GpuInfo.MemoryBytes / 1024 / 1024,
+                    count = 1,
+                    driver = registration.GpuInfo.DriverVersion
                 } : null,
-                region = "default",
-                zone = "default"
+                region = registration.Region,
+                zone = registration.Zone
             };
 
             var response = await _httpClient.PostAsJsonAsync("/api/nodes/register", request, ct);
@@ -117,22 +121,27 @@ public class OrchestratorClient : IOrchestratorClient
             var request = new HttpRequestMessage(HttpMethod.Post, $"/api/nodes/{_nodeId}/heartbeat");
             request.Headers.Add("X-Node-Token", _authToken);
 
+            // Calculate resource metrics
+            var cpuUsage = heartbeat.Resources.CpuUsagePercent;
+            var memUsage = heartbeat.Resources.TotalMemoryBytes > 0
+                ? (double)heartbeat.Resources.UsedMemoryBytes / heartbeat.Resources.TotalMemoryBytes * 100
+                : 0;
+            var storageUsage = heartbeat.Resources.TotalStorageBytes > 0
+                ? (double)heartbeat.Resources.UsedStorageBytes / heartbeat.Resources.TotalStorageBytes * 100
+                : 0;
+
             var payload = new
             {
                 nodeId = heartbeat.NodeId,
                 metrics = new
                 {
-                    timestamp = heartbeat.Timestamp,
-                    cpuUsagePercent = heartbeat.Resources.CpuUsagePercent,
-                    memoryUsagePercent = heartbeat.Resources.TotalMemoryBytes > 0
-                        ? (double)heartbeat.Resources.UsedMemoryBytes / heartbeat.Resources.TotalMemoryBytes * 100
-                        : 0,
-                    storageUsagePercent = heartbeat.Resources.TotalStorageBytes > 0
-                        ? (double)heartbeat.Resources.UsedStorageBytes / heartbeat.Resources.TotalStorageBytes * 100
-                        : 0,
+                    timestamp = heartbeat.Timestamp.ToString("O"),
+                    cpuUsagePercent = cpuUsage,
+                    memoryUsagePercent = memUsage,
+                    storageUsagePercent = storageUsage,
                     networkInMbps = 0,
                     networkOutMbps = 0,
-                    activeVmCount = heartbeat.ActiveVms.Count,
+                    activeVmCount = heartbeat.ActiveVmDetails.Count,
                     loadAverage = 0.0
                 },
                 availableResources = new
@@ -142,16 +151,18 @@ public class OrchestratorClient : IOrchestratorClient
                     storageGb = heartbeat.Resources.AvailableStorageBytes / 1024 / 1024 / 1024,
                     bandwidthMbps = 1000
                 },
-                // Keep for backwards compatibility
-                activeVmIds = heartbeat.ActiveVms.Select(v => v.VmId).ToList(),
-                // NEW: Send full VM details with state and IP
-                activeVms = heartbeat.ActiveVms.Select(v => new
+                activeVms = heartbeat.ActiveVmDetails.Select(v => new
                 {
                     vmId = v.VmId,
-                    state = v.State.ToString(),
+                    name = v.Name,
+                    tenantId = v.TenantId,
+                    state = v.State,
                     ipAddress = v.IpAddress,
                     cpuUsagePercent = v.CpuUsagePercent,
-                    startedAt = v.StartedAt
+                    startedAt = v.StartedAt.ToString("O"),
+                    vCpus = v.VCpus,
+                    memoryBytes = v.MemoryBytes,
+                    diskBytes = v.DiskBytes
                 }).ToList()
             };
 
@@ -163,7 +174,13 @@ public class OrchestratorClient : IOrchestratorClient
             {
                 var content = await response.Content.ReadAsStringAsync(ct);
                 await ProcessHeartbeatResponseAsync(content, ct);
-                _logger.LogDebug("Heartbeat sent successfully: {VmCount} VMs", heartbeat.ActiveVms.Count);
+
+                if (heartbeat.ActiveVmDetails.Count > 0)
+                {
+                    _logger.LogDebug("Heartbeat sent successfully: {VmCount} VMs",
+                        heartbeat.ActiveVmDetails.Count);
+                }
+
                 return true;
             }
 
@@ -191,28 +208,18 @@ public class OrchestratorClient : IOrchestratorClient
                 {
                     var commandId = cmd.GetProperty("commandId").GetString() ?? "";
                     var typeStr = cmd.GetProperty("type").GetString() ?? "";
-                    var payload = cmd.GetProperty("payload").GetString() ?? "{}";
+                    var payload = cmd.GetProperty("payload").GetString() ?? "";
 
-                    if (Enum.TryParse<CommandType>(typeStr, true, out var commandType))
-                    {
-                        var pendingCommand = new PendingCommand
-                        {
-                            CommandId = commandId,
-                            Type = commandType,
-                            Payload = payload,
-                            IssuedAt = DateTime.UtcNow
-                        };
+                    _logger.LogInformation("Received command from orchestrator: {Type} (ID: {CommandId})",
+                        typeStr, commandId);
 
-                        _pendingCommands.Enqueue(pendingCommand);
-                        _logger.LogInformation("Received command from orchestrator: {Type} ({CommandId})",
-                            commandType, commandId);
-                    }
+                    // Commands are processed by CommandProcessorService
                 }
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to parse heartbeat response for commands");
+            _logger.LogWarning(ex, "Failed to process heartbeat response");
         }
 
         return Task.CompletedTask;
@@ -251,9 +258,52 @@ public class OrchestratorClient : IOrchestratorClient
         }
     }
 
-    public async Task AcknowledgeCommandAsync(string commandId, bool success, string? error = null, CancellationToken ct = default)
+    public async Task<bool> AcknowledgeCommandAsync(
+        string commandId,
+        bool success,
+        string? errorMessage,
+        CancellationToken ct = default)
     {
-        _logger.LogInformation("Command {CommandId} acknowledged: {Success} {Error}", commandId, success, error ?? "");
-        // Commands are acknowledged implicitly via VM status in heartbeats
+        if (!IsRegistered)
+        {
+            _logger.LogWarning("Cannot acknowledge command - node not registered");
+            return false;
+        }
+
+        try
+        {
+            var request = new HttpRequestMessage(
+                HttpMethod.Post,
+                $"/api/nodes/{_nodeId}/commands/{commandId}/acknowledge");
+
+            request.Headers.Add("X-Node-Token", _authToken);
+
+            var payload = new
+            {
+                commandId,
+                success,
+                errorMessage = errorMessage ?? string.Empty,
+                completedAt = DateTime.UtcNow.ToString("O")
+            };
+
+            request.Content = JsonContent.Create(payload);
+
+            var response = await _httpClient.SendAsync(request, ct);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogDebug("Command {CommandId} acknowledged: {Success}", commandId, success);
+                return true;
+            }
+
+            _logger.LogWarning("Failed to acknowledge command {CommandId}: {Status}",
+                commandId, response.StatusCode);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error acknowledging command {CommandId}", commandId);
+            return false;
+        }
     }
 }

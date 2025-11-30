@@ -1,5 +1,6 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Infrastructure.Persistence;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Text;
@@ -23,6 +24,7 @@ public class LibvirtVmManager : IVmManager
     private readonly IImageManager _imageManager;
     private readonly ILogger<LibvirtVmManager> _logger;
     private readonly LibvirtVmManagerOptions _options;
+    private readonly VmRepository _repository;
     private readonly bool _isWindows;
 
     // Track our VMs in memory
@@ -49,6 +51,11 @@ public class LibvirtVmManager : IVmManager
         {
             Directory.CreateDirectory(_options.VmStoragePath);
             Directory.CreateDirectory(_options.ImageCachePath);
+
+            var dbPath = Path.Combine(_options.VmStoragePath, "vms.db");
+            _repository = new VmRepository(dbPath, logger);
+
+            _logger.LogInformation("VM Manager initialized with persistent storage at {DbPath}", dbPath);
         }
         else
         {
@@ -68,6 +75,8 @@ public class LibvirtVmManager : IVmManager
         await _lock.WaitAsync(ct);
         try
         {
+            _logger.LogInformation("Initializing LibvirtVmManager with state recovery...");
+
             // Ensure QEMU guest agent channel directory exists
             var channelDir = "/var/lib/libvirt/qemu/channel/target";
             if (Directory.Exists("/var/lib/libvirt") && !Directory.Exists(channelDir))
@@ -76,10 +85,29 @@ public class LibvirtVmManager : IVmManager
                 _logger.LogDebug("Created QEMU guest agent channel directory");
             }
 
+            // Step 1 - Load VMs from SQLite database first
+            var savedVms = await _repository.LoadAllVmsAsync();
+            foreach (var vm in savedVms)
+            {
+                _vms[vm.VmId] = vm;
+                _logger.LogDebug("Loaded VM {VmId} from database (State: {State})",
+                    vm.VmId, vm.State);
+            }
+
+            if (savedVms.Any())
+            {
+                _logger.LogInformation("Recovered {Count} VMs from local database", savedVms.Count);
+            }
+
+            // Step 2 - Reconcile with libvirt to get actual runtime state
             if (_options.ReconcileOnStartup)
             {
                 await ReconcileWithLibvirtAsync(ct);
             }
+
+            // Step 3 - Update next VNC port
+            await UpdateNextVncPortAsync(ct);
+
             _initialized = true;
             _logger.LogInformation("LibvirtVmManager initialized with {Count} VMs", _vms.Count);
         }
@@ -110,39 +138,59 @@ public class LibvirtVmManager : IVmManager
 
             _logger.LogInformation("Found {Count} VMs in libvirt", libvirtVmIds.Count);
 
+            // Update state for VMs we know about
             foreach (var vmId in libvirtVmIds)
             {
+                var actualState = await GetVmStateFromLibvirtAsync(vmId, ct);
+
                 if (_vms.ContainsKey(vmId))
                 {
-                    var state = await GetVmStateFromLibvirtAsync(vmId, ct);
-                    _vms[vmId].State = state;
-                    _logger.LogDebug("Updated existing VM {VmId} state to {State}", vmId, state);
+                    var vm = _vms[vmId];
+                    if (vm.State != actualState)
+                    {
+                        _logger.LogInformation("VM {VmId} state changed: {OldState} -> {NewState}",
+                            vmId, vm.State, actualState);
+                        vm.State = actualState;
+
+                        // NEW: Persist state change
+                        await _repository.UpdateVmStateAsync(vmId, actualState);
+                    }
                 }
                 else
                 {
+                    // VM exists in libvirt but not in our tracking - attempt recovery
                     var vmInstance = await ReconstructVmInstanceAsync(vmId, ct);
                     if (vmInstance != null)
                     {
                         _vms[vmId] = vmInstance;
-                        _logger.LogInformation("Recovered VM {VmId} from libvirt (state: {State})",
+
+                        // NEW: Save recovered VM to database
+                        await _repository.SaveVmAsync(vmInstance);
+
+                        _logger.LogWarning("Recovered orphaned VM {VmId} from libvirt (state: {State})",
                             vmId, vmInstance.State);
                     }
                 }
             }
 
-            var orphanedTracking = _vms.Keys.Except(libvirtVmIds).ToList();
-            foreach (var vmId in orphanedTracking)
+            // Check for VMs in our tracking that no longer exist in libvirt
+            var missingVms = _vms.Keys.Except(libvirtVmIds).ToList();
+            foreach (var vmId in missingVms)
             {
-                _logger.LogWarning("Removing stale tracking for VM {VmId} (no longer in libvirt)", vmId);
-                _vms.Remove(vmId);
-            }
+                var vm = _vms[vmId];
+                if (vm.State != VmState.Stopped && vm.State != VmState.Failed)
+                {
+                    _logger.LogWarning("VM {VmId} missing from libvirt - marking as failed", vmId);
+                    vm.State = VmState.Failed;
 
-            await UpdateNextVncPortAsync(ct);
-            _logger.LogInformation("Reconciliation complete: tracking {Count} VMs", _vms.Count);
+                    // NEW: Update database
+                    await _repository.UpdateVmStateAsync(vmId, VmState.Failed);
+                }
+            }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error during libvirt reconciliation");
+            _logger.LogError(ex, "Failed to reconcile with libvirt");
         }
     }
 
@@ -277,7 +325,6 @@ public class LibvirtVmManager : IVmManager
             "shut off" => VmState.Stopped,
             "crashed" => VmState.Failed,
             "in shutdown" => VmState.Stopping,
-            "pmsuspended" => VmState.Paused,
             _ => VmState.Stopped
         };
     }
@@ -299,6 +346,28 @@ public class LibvirtVmManager : IVmManager
         await _lock.WaitAsync(ct);
         try
         {
+            if (_vms.ContainsKey(spec.VmId))
+            {
+                return VmOperationResult.Fail(spec.VmId, "VM already exists", "DUPLICATE");
+            }
+
+            // Create VM instance tracking object
+            var instance = new VmInstance
+            {
+                VmId = spec.VmId,
+                Name = spec.Name,
+                Spec = spec,
+                State = VmState.Creating,
+                CreatedAt = DateTime.UtcNow,
+                LastHeartbeat = DateTime.UtcNow,
+                VncPort = _nextVncPort++.ToString()
+            };
+
+            _vms[spec.VmId] = instance;
+
+            // Persist to database immediately
+            await _repository.SaveVmAsync(instance);
+
             _logger.LogInformation("Creating VM {VmId}: {VCpus} vCPUs, {MemMB}MB RAM, {DiskGB}GB disk",
                 spec.VmId, spec.VCpus, spec.MemoryBytes / 1024 / 1024, spec.DiskBytes / 1024 / 1024 / 1024);
 
@@ -320,76 +389,45 @@ public class LibvirtVmManager : IVmManager
             var vmDir = Path.Combine(_options.VmStoragePath, spec.VmId);
             Directory.CreateDirectory(vmDir);
 
-            var instance = new VmInstance
+            // After successful creation, update state
+            instance.State = VmState.Starting;
+            await _repository.UpdateVmStateAsync(spec.VmId, VmState.Starting);
+
+            // Start the VM
+            var startResult = await _executor.ExecuteAsync("virsh", $"start {spec.VmId}", ct);
+            if (startResult.Success)
             {
-                VmId = spec.VmId,
-                Spec = spec,
-                State = VmState.Creating,
-                CreatedAt = DateTime.UtcNow
-            };
-            _vms[spec.VmId] = instance;
+                instance.State = VmState.Running;
+                instance.StartedAt = DateTime.UtcNow;
 
-            await SaveVmMetadataAsync(vmDir, spec, ct);
+                // NEW: Update database
+                await _repository.UpdateVmStateAsync(spec.VmId, VmState.Running);
 
-            _logger.LogInformation("Preparing base image from {ImageUrl}", spec.BaseImageUrl);
+                _logger.LogInformation("VM {VmId} started successfully", spec.VmId);
 
-            string baseImagePath;
-            try
-            {
-                baseImagePath = await _imageManager.EnsureImageAvailableAsync(
-                    spec.BaseImageUrl ?? "",
-                    string.Empty,
-                    ct);
+                // Background task to get IP address
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(10), ct);
+                    var ip = await GetVmIpAddressAsync(spec.VmId, ct);
+                    if (!string.IsNullOrEmpty(ip))
+                    {
+                        instance.Spec.Network.IpAddress = ip;
+                        await _repository.UpdateVmIpAsync(spec.VmId, ip);
+                        _logger.LogInformation("VM {VmId} obtained IP: {Ip}", spec.VmId, ip);
+                    }
+                }, ct);
+
+                return VmOperationResult.Ok(spec.VmId, VmState.Running);
             }
-            catch (Exception ex)
+            else
             {
-                _logger.LogError(ex, "Failed to download base image");
                 instance.State = VmState.Failed;
-                return VmOperationResult.Fail(spec.VmId, $"Failed to download base image: {ex.Message}", "IMAGE_DOWNLOAD_FAILED");
+                await _repository.UpdateVmStateAsync(spec.VmId, VmState.Failed);
+
+                _logger.LogError("Failed to start VM {VmId}: {Error}", spec.VmId, startResult.StandardError);
+                return VmOperationResult.Fail(spec.VmId, startResult.StandardError, "START_FAILED");
             }
-
-            if (string.IsNullOrEmpty(baseImagePath))
-            {
-                instance.State = VmState.Failed;
-                return VmOperationResult.Fail(spec.VmId, "Failed to download base image", "IMAGE_DOWNLOAD_FAILED");
-            }
-
-            string diskPath;
-            try
-            {
-                diskPath = await _imageManager.CreateOverlayDiskAsync(baseImagePath, spec.VmId, spec.DiskBytes, ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to create disk overlay");
-                instance.State = VmState.Failed;
-                return VmOperationResult.Fail(spec.VmId, ex.Message, "DISK_CREATE_FAILED");
-            }
-
-            instance.DiskPath = diskPath;
-
-            var cloudInitIso = await CreateCloudInitIsoAsync(spec, vmDir, ct);
-
-            var vncPort = Interlocked.Increment(ref _nextVncPort);
-            instance.VncPort = vncPort.ToString();
-
-            var xml = GenerateLibvirtXml(spec, instance.DiskPath, cloudInitIso, vncPort);
-            instance.ConfigPath = Path.Combine(vmDir, "domain.xml");
-            await File.WriteAllTextAsync(instance.ConfigPath, xml, ct);
-
-            var defineResult = await _executor.ExecuteAsync("virsh", $"define {instance.ConfigPath}", ct);
-
-            if (!defineResult.Success)
-            {
-                _logger.LogError("Failed to define VM: {Error}", defineResult.StandardError);
-                instance.State = VmState.Failed;
-                return VmOperationResult.Fail(spec.VmId, defineResult.StandardError, "DEFINE_FAILED");
-            }
-
-            instance.State = VmState.Stopped;
-            _logger.LogInformation("VM {VmId} created successfully", spec.VmId);
-
-            return VmOperationResult.Ok(spec.VmId, VmState.Stopped);
         }
         finally
         {
@@ -425,19 +463,26 @@ public class LibvirtVmManager : IVmManager
 
         if (!_vms.TryGetValue(vmId, out var instance))
         {
-            if (!await VmExistsAsync(vmId, ct))
-            {
-                return VmOperationResult.Fail(vmId, "VM not found", "NOT_FOUND");
-            }
-
-            instance = await ReconstructVmInstanceAsync(vmId, ct);
+            // Try to recover from database
+            instance = await _repository.LoadVmAsync(vmId);
             if (instance != null)
             {
                 _vms[vmId] = instance;
+                _logger.LogInformation("Recovered VM {VmId} from database", vmId);
             }
-            else
+            else if (await VmExistsAsync(vmId, ct))
             {
-                return VmOperationResult.Fail(vmId, "VM not found in tracking", "NOT_FOUND");
+                instance = await ReconstructVmInstanceAsync(vmId, ct);
+                if (instance != null)
+                {
+                    _vms[vmId] = instance;
+                    await _repository.SaveVmAsync(instance);
+                }
+            }
+
+            if (instance == null)
+            {
+                return VmOperationResult.Fail(vmId, "VM not found", "NOT_FOUND");
             }
         }
 
@@ -445,17 +490,14 @@ public class LibvirtVmManager : IVmManager
 
         var result = await _executor.ExecuteAsync("virsh", $"start {vmId}", ct);
 
-        if (result.Success)
+        if (result.Success || result.StandardError.Contains("already active"))
         {
             instance.State = VmState.Running;
             instance.StartedAt = DateTime.UtcNow;
-            return VmOperationResult.Ok(vmId, VmState.Running);
-        }
 
-        if (result.StandardError.Contains("already active"))
-        {
-            instance.State = VmState.Running;
-            instance.StartedAt ??= DateTime.UtcNow;
+            // NEW: Persist state change
+            await _repository.UpdateVmStateAsync(vmId, VmState.Running);
+
             return VmOperationResult.Ok(vmId, VmState.Running);
         }
 
@@ -479,38 +521,23 @@ public class LibvirtVmManager : IVmManager
         if (_vms.TryGetValue(vmId, out var instance))
         {
             instance.State = VmState.Stopping;
+            await _repository.UpdateVmStateAsync(vmId, VmState.Stopping);
         }
 
         var command = force ? "destroy" : "shutdown";
         var result = await _executor.ExecuteAsync("virsh", $"{command} {vmId}", ct);
 
-        if (result.Success)
+        if (result.Success || result.StandardError.Contains("not running") || result.StandardError.Contains("shut off"))
         {
-            if (!force)
-            {
-                for (var i = 0; i < 30; i++)
-                {
-                    await Task.Delay(1000, ct);
-                    var state = await GetVmStateFromLibvirtAsync(vmId, ct);
-                    if (state == VmState.Stopped) break;
-                }
-            }
-
             if (instance != null)
             {
                 instance.State = VmState.Stopped;
                 instance.StoppedAt = DateTime.UtcNow;
-            }
-            return VmOperationResult.Ok(vmId, VmState.Stopped);
-        }
 
-        if (result.StandardError.Contains("not running") || result.StandardError.Contains("shut off"))
-        {
-            if (instance != null)
-            {
-                instance.State = VmState.Stopped;
-                instance.StoppedAt ??= DateTime.UtcNow;
+                // NEW: Persist state change
+                await _repository.UpdateVmStateAsync(vmId, VmState.Stopped);
             }
+
             return VmOperationResult.Ok(vmId, VmState.Stopped);
         }
 
@@ -524,80 +551,42 @@ public class LibvirtVmManager : IVmManager
 
         _logger.LogInformation("Deleting VM {VmId}", vmId);
 
-        var existsInLibvirt = await VmExistsAsync(vmId, ct);
-
-        if (!existsInLibvirt)
-        {
-            _vms.Remove(vmId);
-            var vmDirectory = Path.Combine(_options.VmStoragePath, vmId);
-            if (Directory.Exists(vmDirectory))
-            {
-                try
-                {
-                    Directory.Delete(vmDirectory, recursive: true);
-                    _logger.LogInformation("Cleaned up orphaned VM directory: {VmDir}", vmDirectory);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to delete VM directory {VmDir}", vmDirectory);
-                }
-            }
-            return VmOperationResult.Ok(vmId, VmState.Stopped);
-        }
-
+        // Stop if running
         var state = await GetVmStateFromLibvirtAsync(vmId, ct);
         if (state == VmState.Running || state == VmState.Paused)
         {
-            _logger.LogInformation("VM {VmId} is running, destroying first", vmId);
-            var destroyResult = await _executor.ExecuteAsync("virsh", $"destroy {vmId}", ct);
-            if (!destroyResult.Success)
-            {
-                _logger.LogWarning("Failed to destroy VM {VmId}: {Error}", vmId, destroyResult.StandardError);
-            }
+            await _executor.ExecuteAsync("virsh", $"destroy {vmId}", ct);
             await Task.Delay(500, ct);
         }
 
+        // Undefine from libvirt
         var undefResult = await _executor.ExecuteAsync("virsh", $"undefine {vmId} --remove-all-storage --nvram", ct);
-
-        if (!undefResult.Success)
-        {
-            undefResult = await _executor.ExecuteAsync("virsh", $"undefine {vmId} --remove-all-storage", ct);
-        }
 
         if (!undefResult.Success && !undefResult.StandardError.Contains("not found"))
         {
-            _logger.LogError("Failed to undefine VM {VmId}: {Error}", vmId, undefResult.StandardError);
-            return VmOperationResult.Fail(vmId, undefResult.StandardError, "UNDEFINE_FAILED");
+            _logger.LogWarning("Failed to undefine VM {VmId}: {Error}", vmId, undefResult.StandardError);
         }
 
-        var vmDir = Path.Combine(_options.VmStoragePath, vmId);
-        if (Directory.Exists(vmDir))
-        {
-            try
-            {
-                Directory.Delete(vmDir, recursive: true);
-                _logger.LogInformation("Cleaned up VM directory: {VmDir}", vmDir);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to delete VM directory {VmDir}", vmDir);
-            }
-        }
-
-        if (_vms.TryGetValue(vmId, out var vmInstance) && !string.IsNullOrEmpty(vmInstance.DiskPath))
-        {
-            try
-            {
-                await _imageManager.DeleteDiskAsync(vmInstance.DiskPath, ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to delete disk via ImageManager");
-            }
-        }
-
+        // Remove from tracking
         _vms.Remove(vmId);
-        _logger.LogInformation("VM {VmId} deleted successfully", vmId);
+
+        // NEW: Remove from database
+        await _repository.DeleteVmAsync(vmId);
+
+        // Clean up directory
+        var vmDirectory = Path.Combine(_options.VmStoragePath, vmId);
+        if (Directory.Exists(vmDirectory))
+        {
+            try
+            {
+                Directory.Delete(vmDirectory, recursive: true);
+                _logger.LogInformation("Deleted VM directory: {VmDir}", vmDirectory);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to delete VM directory {VmDir}", vmDirectory);
+            }
+        }
 
         return VmOperationResult.Ok(vmId, VmState.Stopped);
     }

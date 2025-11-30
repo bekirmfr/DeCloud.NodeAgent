@@ -1,6 +1,10 @@
-﻿using DeCloud.NodeAgent.Core.Interfaces;
+﻿// Updated Program.cs for Node Agent
+// Adds VmRepository registration
+
+using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using DeCloud.NodeAgent.Infrastructure.Network;
+using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.NodeAgent.Services;
 
@@ -24,8 +28,12 @@ builder.Services.Configure<OrchestratorClientOptions>(
 builder.Services.AddSingleton<ICommandExecutor, CommandExecutor>();
 builder.Services.AddSingleton<IResourceDiscoveryService, ResourceDiscoveryService>();
 builder.Services.AddSingleton<IImageManager, ImageManager>();
-builder.Services.AddSingleton<LibvirtVmManager>();  // Register concrete type for initialization
-builder.Services.AddSingleton<IVmManager>(sp => sp.GetRequiredService<LibvirtVmManager>());  // Alias to interface
+
+// VM Manager with repository
+builder.Services.AddSingleton<LibvirtVmManager>();
+builder.Services.AddSingleton<IVmManager>(sp => sp.GetRequiredService<LibvirtVmManager>());
+
+// Network services
 builder.Services.AddSingleton<INetworkManager, WireGuardNetworkManager>();
 builder.Services.AddSingleton<ICloudInitCleaner, CloudInitCleaner>();
 builder.Services.AddSingleton<IEphemeralSshKeyService, EphemeralSshKeyService>();
@@ -39,6 +47,12 @@ builder.Services.AddSingleton<IOrchestratorClient>(sp =>
 // Background services
 builder.Services.AddHostedService<HeartbeatService>();
 builder.Services.AddHostedService<CommandProcessorService>();
+
+// =====================================================
+// NEW: Initialize LibvirtVmManager on startup
+// This ensures VMs are loaded from SQLite database
+// =====================================================
+builder.Services.AddHostedService<VmManagerInitializationService>();
 
 // API
 builder.Services.AddControllers();
@@ -66,8 +80,7 @@ using (var scope = app.Services.CreateScope())
     {
         logger.LogWarning(
             "⚠️  Cloud-init cleaning tools not found! VMs may boot with stale configuration. " +
-            "Install with: {Command}",
-            tools.RecommendedInstallCommand);
+            "Install one of: virt-sysprep, guestfish, or cloud-init");
     }
     else
     {
@@ -79,62 +92,65 @@ using (var scope = app.Services.CreateScope())
     }
 }
 
-// Initialize services on startup
-using (var scope = app.Services.CreateScope())
-{
-    var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
-
-    // Initialize LibvirtVmManager - reconcile with libvirt state
-    var vmManager = scope.ServiceProvider.GetRequiredService<LibvirtVmManager>();
-    try
-    {
-        logger.LogInformation("Initializing VM Manager and reconciling with libvirt...");
-        await vmManager.InitializeAsync();
-        var vms = await vmManager.GetAllVmsAsync();
-        logger.LogInformation("VM Manager initialized with {Count} existing VMs", vms.Count);
-
-        foreach (var vm in vms)
-        {
-            logger.LogInformation("  - VM {VmId}: {State}", vm.VmId, vm.State);
-        }
-    }
-    catch (Exception ex)
-    {
-        logger.LogError(ex, "Failed to initialize VM Manager");
-    }
-
-    // Initialize WireGuard
-    var networkManager = scope.ServiceProvider.GetRequiredService<INetworkManager>();
-    try
-    {
-        var wgInitialized = await networkManager.InitializeWireGuardAsync();
-        if (wgInitialized)
-        {
-            var pubkey = await networkManager.GetWireGuardPublicKeyAsync();
-            logger.LogInformation("WireGuard initialized. Public key: {PublicKey}", pubkey);
-        }
-        else
-        {
-            logger.LogWarning("WireGuard initialization failed - overlay networking will be unavailable");
-        }
-    }
-    catch (Exception ex)
-    {
-        logger.LogWarning(ex, "WireGuard initialization error - continuing without overlay networking");
-    }
-}
-
-// Configure pipeline
+// Configure the HTTP request pipeline
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
 }
 
-app.UseWebSockets();
 app.MapControllers();
 
-// Health check endpoint
-app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }));
+app.MapGet("/health", () => new
+{
+    status = "healthy",
+    timestamp = DateTime.UtcNow,
+    version = "1.0.0"
+});
 
 app.Run();
+
+// =====================================================
+// NEW: Background service to initialize VM Manager
+// =====================================================
+public class VmManagerInitializationService : IHostedService
+{
+    private readonly IVmManager _vmManager;
+    private readonly ILogger<VmManagerInitializationService> _logger;
+
+    public VmManagerInitializationService(
+        IVmManager vmManager,
+        ILogger<VmManagerInitializationService> logger)
+    {
+        _vmManager = vmManager;
+        _logger = logger;
+    }
+
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Initializing VM Manager with state recovery...");
+
+        try
+        {
+            // Initialize will load VMs from SQLite and reconcile with libvirt
+            if (_vmManager is LibvirtVmManager libvirtManager)
+            {
+                await libvirtManager.InitializeAsync(cancellationToken);
+
+                var vms = await libvirtManager.GetAllVmsAsync(cancellationToken);
+                _logger.LogInformation(
+                    "VM Manager initialized: {VmCount} VMs recovered from database",
+                    vms.Count);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to initialize VM Manager");
+        }
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken)
+    {
+        return Task.CompletedTask;
+    }
+}

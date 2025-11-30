@@ -6,18 +6,10 @@ namespace DeCloud.NodeAgent.Core.Models;
 public class Heartbeat
 {
     public string NodeId { get; set; } = string.Empty;
-    public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+    public DateTime Timestamp { get; set; }
     public NodeStatus Status { get; set; }
-    public NodeHealth Health { get; set; } = new();
-    
-    // Resource snapshot
     public ResourceSnapshot Resources { get; set; } = new();
-    
-    // Active VMs summary
-    public List<VmSummary> ActiveVms { get; set; } = new();
-    
-    // Signature for verification (signed with node's private key)
-    public string Signature { get; set; } = string.Empty;
+    public List<VmSummary> ActiveVmDetails { get; set; } = new();
 }
 
 public enum NodeStatus
@@ -26,7 +18,8 @@ public enum NodeStatus
     Online,
     Maintenance,   // Not accepting new VMs but running existing
     Draining,      // Migrating VMs away, preparing for shutdown
-    Offline
+    Offline,
+    Degraded
 }
 
 public class NodeHealth
@@ -70,11 +63,13 @@ public class ResourceSnapshot
 public class VmSummary
 {
     public string VmId { get; set; } = string.Empty;
+    public string? Name { get; set; }
     public string TenantId { get; set; } = string.Empty;
     public string LeaseId { get; set; } = string.Empty;
     public VmState State { get; set; }
     public int VCpus { get; set; }
     public long MemoryBytes { get; set; }
+    public long? DiskBytes { get; set; }
     public double CpuUsagePercent { get; set; }
     public string? IpAddress { get; set; }
     public DateTime StartedAt { get; set; }
@@ -85,21 +80,29 @@ public class VmSummary
 /// </summary>
 public class NodeRegistration
 {
+    public string Name { get; set; } = string.Empty;
     public string NodeId { get; set; } = string.Empty;
-    public string PublicKey { get; set; } = string.Empty;  // For signature verification
-    public string WireGuardPublicKey { get; set; } = string.Empty;
-    public string Endpoint { get; set; } = string.Empty;   // IP:Port for orchestrator to reach agent
-    
+    public string PublicIp { get; set; } = string.Empty;
+    public int AgentPort { get; set; }
+
     // Full resource inventory
     public NodeResources Resources { get; set; } = new();
-    
+    public string AgentVersion { get; set; } = string.Empty;
+    public List<string> SupportedImages { get; set; } = new();
+
+    public bool SupportsGpu { get; set; }
+    public GpuInfo? GpuInfo { get; set; }
+
     // Pricing (optional, for marketplace)
     public NodePricing? Pricing { get; set; }
     
     // Staking info
     public string WalletAddress { get; set; } = string.Empty;
     public string StakingTxHash { get; set; } = string.Empty;
-    
+
+    public string Region { get; set; } = "default";
+    public string Zone { get; set; } = "default";
+
     public DateTime RegisteredAt { get; set; } = DateTime.UtcNow;
 }
 

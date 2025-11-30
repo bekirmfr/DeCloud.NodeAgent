@@ -90,11 +90,14 @@ public class WireGuardPeer
 /// </summary>
 public interface IOrchestratorClient
 {
+    string? NodeId { get; }
+    bool IsRegistered { get; }
+
     Task<bool> RegisterNodeAsync(NodeRegistration registration, CancellationToken ct = default);
     Task<bool> SendHeartbeatAsync(Heartbeat heartbeat, CancellationToken ct = default);
-    Task<bool> ReportVmStateChangeAsync(string vmId, VmState newState, CancellationToken ct = default);
+
     Task<List<PendingCommand>> GetPendingCommandsAsync(CancellationToken ct = default);
-    Task AcknowledgeCommandAsync(string commandId, bool success, string? error = null, CancellationToken ct = default);
+    Task<bool> AcknowledgeCommandAsync(string commandId, bool success, string? errorMessage, CancellationToken ct = default);
 }
 
 public class PendingCommand

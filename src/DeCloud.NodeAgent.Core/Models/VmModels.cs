@@ -81,6 +81,7 @@ public enum VmState
     Stopping,
     Stopped,
     Failed,
+    Deleted,
     Migrating
 }
 
