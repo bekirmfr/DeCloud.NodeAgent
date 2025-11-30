@@ -62,7 +62,7 @@ builder.Services.AddSingleton<VmRepository>(sp =>
         {
             // Generate deterministic encryption key using machine identifier + wallet
             // This ensures the same key is generated across node agent restarts
-            var machineId = Environment.MachineName + "-" + Environment.UserDomainName;
+            var machineId = File.ReadAllText("/etc/machine-id").Trim();
             encryptionKey = VmRepository.GenerateEncryptionKey(machineId, walletAddress);
 
             logger.LogInformation(

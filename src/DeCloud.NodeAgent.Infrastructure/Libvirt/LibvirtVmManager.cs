@@ -158,8 +158,9 @@ public class LibvirtVmManager : IVmManager
                             vmId, vm.State, actualState);
                         vm.State = actualState;
 
-                        // NEW: Persist state change
+                        // Persist state change
                         await _repository.UpdateVmStateAsync(vmId, actualState);
+                        await _repository.SaveVmAsync(_vms[vmId]);
                     }
                 }
                 else
