@@ -47,147 +47,27 @@ public class SshProxyController : ControllerBase
     /// </summary>
     [HttpGet("{vmId}/terminal")]
     public async Task Terminal(
-        string vmId,
-        [FromQuery] string ip,
-        [FromQuery] string user = "ubuntu",
-        [FromQuery] int port = 22,
-        [FromQuery] string? password = null,
-        [FromQuery] string? privateKey = null,
-        [FromQuery] string? keyRef = null,
-        [FromQuery] bool ephemeral = false)
+    string vmId,
+    [FromQuery] string ip,
+    [FromQuery] string user = "ubuntu",
+    [FromQuery] int port = 22,
+    [FromQuery] string? password = null)
     {
         if (!HttpContext.WebSockets.IsWebSocketRequest)
         {
             HttpContext.Response.StatusCode = 400;
-            await HttpContext.Response.WriteAsync("WebSocket connection required");
             return;
         }
 
-        if (string.IsNullOrEmpty(ip))
+        if (string.IsNullOrEmpty(password))
         {
-            HttpContext.Response.StatusCode = 400;
-            await HttpContext.Response.WriteAsync("VM IP address required");
+            HttpContext.Response.StatusCode = 401;
+            await HttpContext.Response.WriteAsync("Password required");
             return;
         }
 
-        // Try to get key from cache if keyRef provided
-        if (!string.IsNullOrEmpty(keyRef) && string.IsNullOrEmpty(privateKey))
-        {
-            if (_ephemeralKeyCache.TryRemove(keyRef, out var cached) && cached.ExpiresAt > DateTime.UtcNow)
-            {
-                privateKey = Convert.ToBase64String(Encoding.UTF8.GetBytes(cached.PrivateKey));
-                _logger.LogDebug("Retrieved cached ephemeral key for VM {VmId}", vmId);
-            }
-        }
-
-        // Get credentials from headers if not in query
-        password ??= HttpContext.Request.Headers["X-SSH-Password"].FirstOrDefault();
-        privateKey ??= HttpContext.Request.Headers["X-SSH-PrivateKey"].FirstOrDefault();
-
-        _logger.LogInformation(
-            "SSH terminal requested for VM {VmId} at {Ip}:{Port} as {User}, ephemeral={Ephemeral}, hasPrivateKey={HasKey}, hasPassword={HasPwd}",
-            vmId, ip, port, user, ephemeral,
-            !string.IsNullOrEmpty(privateKey),
-            !string.IsNullOrEmpty(password));
-
-        // Log key length if present
-        if (!string.IsNullOrEmpty(privateKey))
-        {
-            _logger.LogDebug("Private key received, length: {Length}", privateKey.Length);
-        }
-
-        // Check for ephemeral key request header
-        if (!ephemeral && HttpContext.Request.Headers.ContainsKey("X-Use-Ephemeral-Key"))
-        {
-            ephemeral = true;
-        }
-
-        _logger.LogInformation(
-            "SSH terminal requested for VM {VmId} at {Ip}:{Port} as {User}, ephemeral={Ephemeral}",
-            vmId, ip, port, user, ephemeral);
-
-        using var webSocket = await HttpContext.WebSockets.AcceptWebSocketAsync();
-
-        string? ephemeralFingerprint = null;
-
-        try
-        {
-            // If ephemeral mode, generate and inject key
-            if (ephemeral && string.IsNullOrEmpty(privateKey) && string.IsNullOrEmpty(password))
-            {
-                var setupMessage = Encoding.UTF8.GetBytes(
-                    "\x1b[33m[DeCloud] Setting up secure terminal access...\x1b[0m\r\n");
-                await webSocket.SendAsync(setupMessage, WebSocketMessageType.Binary, true, CancellationToken.None);
-
-                try
-                {
-                    // Generate keypair
-                    var keypair = _ephemeralKeyService.GenerateKeyPair($"terminal-{vmId[..8]}");
-
-                    // Inject into VM
-                    var injectResult = await _ephemeralKeyService.InjectKeyAsync(
-                        vmId,
-                        keypair.PublicKey,
-                        user,
-                        TimeSpan.FromMinutes(5));
-
-                    if (!injectResult.Success)
-                    {
-                        var errorMsg = Encoding.UTF8.GetBytes(
-                            $"\x1b[31m[DeCloud] Failed to setup access: {injectResult.Error}\x1b[0m\r\n" +
-                            "\x1b[33m[DeCloud] Falling back to password auth if available...\x1b[0m\r\n");
-                        await webSocket.SendAsync(errorMsg, WebSocketMessageType.Binary, true, CancellationToken.None);
-                    }
-                    else
-                    {
-                        privateKey = Convert.ToBase64String(Encoding.UTF8.GetBytes(keypair.PrivateKey));
-                        ephemeralFingerprint = keypair.Fingerprint;
-
-                        var successMsg = Encoding.UTF8.GetBytes(
-                            $"\x1b[32m[DeCloud] Secure access established (expires in 5 min)\x1b[0m\r\n");
-                        await webSocket.SendAsync(successMsg, WebSocketMessageType.Binary, true, CancellationToken.None);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Ephemeral key setup failed for VM {VmId}", vmId);
-                    var errorMsg = Encoding.UTF8.GetBytes(
-                        $"\x1b[31m[DeCloud] Key injection error: {ex.Message}\x1b[0m\r\n");
-                    await webSocket.SendAsync(errorMsg, WebSocketMessageType.Binary, true, CancellationToken.None);
-                }
-            }
-
-            await ProxySshConnection(webSocket, ip, port, user, password, privateKey, vmId);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "SSH proxy error for VM {VmId}", vmId);
-
-            if (webSocket.State == WebSocketState.Open)
-            {
-                var errorMessage = Encoding.UTF8.GetBytes(
-                    $"\r\n\x1b[31mConnection error: {ex.Message}\x1b[0m\r\n");
-                await webSocket.SendAsync(errorMessage, WebSocketMessageType.Binary, true, CancellationToken.None);
-                await webSocket.CloseAsync(WebSocketCloseStatus.InternalServerError, ex.Message, CancellationToken.None);
-            }
-        }
-        finally
-        {
-            // Cleanup ephemeral key
-            if (!string.IsNullOrEmpty(ephemeralFingerprint))
-            {
-                try
-                {
-                    await _ephemeralKeyService.RemoveKeyAsync(vmId, ephemeralFingerprint, user);
-                    _logger.LogDebug("Cleaned up ephemeral key {Fingerprint} from VM {VmId}",
-                        ephemeralFingerprint, vmId);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to cleanup ephemeral key from VM {VmId}", vmId);
-                }
-            }
-        }
+        var webSocket = await HttpContext.WebSockets.AcceptWebSocketAsync();
+        await ProxySshConnection(webSocket, ip, port, user, password);
     }
 
     /// <summary>

@@ -774,30 +774,16 @@ public class LibvirtVmManager : IVmManager
         var hasPassword = !string.IsNullOrEmpty(spec.Password);
         var hasSshKey = !string.IsNullOrEmpty(spec.SshPublicKey);
 
-        // Build the user-data YAML
         var sb = new StringBuilder();
         sb.AppendLine("#cloud-config");
         sb.AppendLine($"hostname: {spec.Name}");
         sb.AppendLine("manage_etc_hosts: true");
         sb.AppendLine();
-        sb.AppendLine("# Regenerate machine-id on first boot");
-        sb.AppendLine("bootcmd:");
-        sb.AppendLine("  - rm -f /etc/machine-id /var/lib/dbus/machine-id");
-        sb.AppendLine("  - systemd-machine-id-setup");
-        sb.AppendLine();
         sb.AppendLine("users:");
         sb.AppendLine("  - name: ubuntu");
         sb.AppendLine("    sudo: ALL=(ALL) NOPASSWD:ALL");
         sb.AppendLine("    shell: /bin/bash");
-
-        if (hasPassword)
-        {
-            sb.AppendLine("    lock_passwd: false");
-        }
-        else
-        {
-            sb.AppendLine("    lock_passwd: true");
-        }
+        sb.AppendLine(hasPassword ? "    lock_passwd: false" : "    lock_passwd: true");
 
         if (hasSshKey)
         {
@@ -805,18 +791,17 @@ public class LibvirtVmManager : IVmManager
             sb.AppendLine($"      - {spec.SshPublicKey}");
         }
 
-        sb.AppendLine();
-
         if (hasPassword)
         {
+            sb.AppendLine();
             sb.AppendLine("chpasswd:");
             sb.AppendLine("  list: |");
             sb.AppendLine($"    ubuntu:{spec.Password}");
             sb.AppendLine("  expire: false");
             sb.AppendLine("ssh_pwauth: true");
-            sb.AppendLine();
         }
 
+        sb.AppendLine();
         sb.AppendLine("packages:");
         sb.AppendLine("  - qemu-guest-agent");
         sb.AppendLine();
@@ -826,41 +811,25 @@ public class LibvirtVmManager : IVmManager
 
         var userData = sb.ToString();
 
-        // Network config - force MAC-based DHCP identifier to prevent collisions
-        var networkConfig = @"version: 2
-            ethernets:
-              id0:
-                match:
-                  driver: virtio
-                dhcp4: true
-                dhcp-identifier: mac
-            ";
-
-        // Write files
         var userDataPath = Path.Combine(vmDir, "user-data");
         var metaDataPath = Path.Combine(vmDir, "meta-data");
-        var networkConfigPath = Path.Combine(vmDir, "network-config");
 
         await File.WriteAllTextAsync(userDataPath, userData, ct);
-        await File.WriteAllTextAsync(networkConfigPath, networkConfig, ct);
 
-        var metaData = $@"instance-id: {spec.VmId}
-            local-hostname: {spec.Name}
-            ";
+        var metaData = $"instance-id: {spec.VmId}\nlocal-hostname: {spec.Name}\n";
         await File.WriteAllTextAsync(metaDataPath, metaData, ct);
 
-        // Create ISO with network-config included
         var isoPath = Path.Combine(vmDir, "cloud-init.iso");
         var result = await _executor.ExecuteAsync(
             "genisoimage",
-            $"-output {isoPath} -volid cidata -joliet -rock {userDataPath} {metaDataPath} {networkConfigPath}",
+            $"-output {isoPath} -volid cidata -joliet -rock {userDataPath} {metaDataPath}",
             ct);
 
         if (!result.Success)
         {
             result = await _executor.ExecuteAsync(
                 "cloud-localds",
-                $"{isoPath} {userDataPath} {metaDataPath} --network-config={networkConfigPath}",
+                $"{isoPath} {userDataPath} {metaDataPath}",
                 ct);
         }
 
@@ -870,7 +839,6 @@ public class LibvirtVmManager : IVmManager
             return string.Empty;
         }
 
-        _logger.LogDebug("Created cloud-init ISO at {Path}", isoPath);
         return isoPath;
     }
 
