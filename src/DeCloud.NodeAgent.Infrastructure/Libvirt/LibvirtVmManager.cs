@@ -767,7 +767,8 @@ public class LibvirtVmManager : IVmManager
     }
 
     /// <summary>
-    /// Create cloud-init ISO with proper network config and authentication
+    /// Create cloud-init ISO with proper network config and authentication.
+    /// Includes machine-id regeneration to prevent DHCP IP collisions.
     /// </summary>
     private async Task<string> CreateCloudInitIsoAsync(VmSpec spec, string vmDir, CancellationToken ct)
     {
@@ -779,18 +780,36 @@ public class LibvirtVmManager : IVmManager
         sb.AppendLine($"hostname: {spec.Name}");
         sb.AppendLine("manage_etc_hosts: true");
         sb.AppendLine();
+
+        // CRITICAL: Regenerate machine-id BEFORE networking starts
+        // This prevents DHCP collisions when VMs are cloned from the same base image
+        sb.AppendLine("bootcmd:");
+        sb.AppendLine("  - rm -f /etc/machine-id /var/lib/dbus/machine-id");
+        sb.AppendLine("  - systemd-machine-id-setup");
+        sb.AppendLine();
+
+        // User configuration
         sb.AppendLine("users:");
         sb.AppendLine("  - name: ubuntu");
         sb.AppendLine("    sudo: ALL=(ALL) NOPASSWD:ALL");
         sb.AppendLine("    shell: /bin/bash");
         sb.AppendLine(hasPassword ? "    lock_passwd: false" : "    lock_passwd: true");
 
+        // SSH key(s) - support multiple keys (newline separated)
         if (hasSshKey)
         {
             sb.AppendLine("    ssh_authorized_keys:");
-            sb.AppendLine($"      - {spec.SshPublicKey}");
+            foreach (var key in spec.SshPublicKey!.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var trimmedKey = key.Trim();
+                if (!string.IsNullOrEmpty(trimmedKey))
+                {
+                    sb.AppendLine($"      - {trimmedKey}");
+                }
+            }
         }
 
+        // Password configuration
         if (hasPassword)
         {
             sb.AppendLine();
@@ -798,6 +817,7 @@ public class LibvirtVmManager : IVmManager
             sb.AppendLine("  list: |");
             sb.AppendLine($"    ubuntu:{spec.Password}");
             sb.AppendLine("  expire: false");
+            sb.AppendLine();
             sb.AppendLine("ssh_pwauth: true");
         }
 
@@ -805,11 +825,24 @@ public class LibvirtVmManager : IVmManager
         sb.AppendLine("packages:");
         sb.AppendLine("  - qemu-guest-agent");
         sb.AppendLine();
+
+        // Runtime commands
         sb.AppendLine("runcmd:");
         sb.AppendLine("  - systemctl enable qemu-guest-agent");
         sb.AppendLine("  - systemctl start qemu-guest-agent");
 
+        // Ensure SSH allows password auth (some images disable it)
+        if (hasPassword)
+        {
+            sb.AppendLine("  - sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config");
+            sb.AppendLine("  - sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config");
+            sb.AppendLine("  - sed -i 's/^#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config");
+            sb.AppendLine("  - systemctl restart sshd || systemctl restart ssh");
+        }
+
         var userData = sb.ToString();
+
+        _logger.LogDebug("Cloud-init user-data for VM {VmId}:\n{UserData}", spec.VmId, userData);
 
         var userDataPath = Path.Combine(vmDir, "user-data");
         var metaDataPath = Path.Combine(vmDir, "meta-data");
@@ -838,6 +871,9 @@ public class LibvirtVmManager : IVmManager
             _logger.LogWarning("Failed to create cloud-init ISO: {Error}", result.StandardError);
             return string.Empty;
         }
+
+        _logger.LogInformation("Created cloud-init ISO at {Path} (password auth: {HasPassword}, ssh key: {HasSshKey})",
+            isoPath, hasPassword, hasSshKey);
 
         return isoPath;
     }
