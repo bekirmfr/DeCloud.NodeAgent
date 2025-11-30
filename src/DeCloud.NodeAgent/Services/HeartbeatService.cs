@@ -3,8 +3,6 @@
 
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace DeCloud.NodeAgent.Services;
@@ -127,6 +125,8 @@ public class HeartbeatService : BackgroundService
         _logger.LogError("Failed to register with orchestrator after {Retries} attempts", maxRetries);
     }
 
+    // HeartbeatService.cs - Updated snippet showing proper VmSummary population
+
     private async Task SendHeartbeatAsync(CancellationToken ct)
     {
         try
@@ -142,6 +142,7 @@ public class HeartbeatService : BackgroundService
 
             // =====================================================
             // Build detailed VM summaries for heartbeat
+            // UPDATED: Include VncPort, MacAddress, EncryptedPassword
             // =====================================================
             var vmSummaries = new List<VmSummary>();
 
@@ -158,44 +159,9 @@ public class HeartbeatService : BackgroundService
                     string? ipAddress = null;
                     if (vm.State == VmState.Running)
                     {
-                        // Try spec first (already set), then query
-                        ipAddress = vm.Spec.Network.IpAddress;
-                        if (string.IsNullOrEmpty(ipAddress))
-                        {
-                            try
-                            {
-                                ipAddress = await _vmManager.GetVmIpAddressAsync(vm.VmId, ct);
-                            }
-                            catch (Exception ex)
-                            {
-                                _logger.LogDebug("Could not get IP for VM {VmId}: {Error}",
-                                    vm.VmId, ex.Message);
-                            }
-                        }
+                        ipAddress = vm.Spec.Network.IpAddress ?? await _vmManager.GetVmIpAddressAsync(vm.VmId, ct);
                     }
 
-                    var vmSummary = new VmSummary
-                    {
-                        VmId = vm.VmId,
-                        Name = vm.Name,
-                        TenantId = vm.Spec.TenantId,
-                        LeaseId = vm.Spec.LeaseId,
-                        State = vm.State,
-                        VCpus = vm.Spec.VCpus,
-                        MemoryBytes = vm.Spec.MemoryBytes,
-                        DiskBytes = vm.Spec.DiskBytes,
-                        CpuUsagePercent = usage?.CpuPercent ?? 0,
-                        IpAddress = ipAddress,
-                        StartedAt = vm.StartedAt ?? vm.CreatedAt
-                    };
-
-                    vmSummaries.Add(vmSummary);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to get details for VM {VmId}", vm.VmId);
-
-                    // Add minimal info even if we can't get full details
                     vmSummaries.Add(new VmSummary
                     {
                         VmId = vm.VmId,
@@ -206,9 +172,19 @@ public class HeartbeatService : BackgroundService
                         VCpus = vm.Spec.VCpus,
                         MemoryBytes = vm.Spec.MemoryBytes,
                         DiskBytes = vm.Spec.DiskBytes,
-                        CpuUsagePercent = 0,
-                        StartedAt = vm.StartedAt ?? vm.CreatedAt
+                        IpAddress = ipAddress,
+                        CpuUsagePercent = usage?.CpuPercent ?? 0,
+                        StartedAt = vm.StartedAt ?? vm.CreatedAt,
+
+                        // ADDED: Recovery fields from VmInstance
+                        VncPort = vm.VncPort,
+                        MacAddress = vm.Spec.Network.MacAddress,
+                        EncryptedPassword = vm.Spec.EncryptedPassword
                     });
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to get details for VM {VmId}", vm.VmId);
                 }
             }
 
@@ -223,10 +199,10 @@ public class HeartbeatService : BackgroundService
                 Timestamp = DateTime.UtcNow,
                 Status = _currentStatus,
                 Resources = snapshot,
-                ActiveVmDetails = vmSummaries
+                ActiveVmDetails = vmSummaries  // Now includes VncPort, MacAddress, EncryptedPassword
             };
 
-            // Send heartbeat - OrchestratorClient will transform VmSummary to the API format
+            // Send heartbeat - OrchestratorClient will transform to API format
             var success = await _orchestratorClient.SendHeartbeatAsync(heartbeat, ct);
 
             if (success)

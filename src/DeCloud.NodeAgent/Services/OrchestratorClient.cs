@@ -2,10 +2,8 @@
 
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
-using System.Net.Http.Json;
 using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Services;
@@ -151,18 +149,23 @@ public class OrchestratorClient : IOrchestratorClient
                     storageGb = heartbeat.Resources.AvailableStorageBytes / 1024 / 1024 / 1024,
                     bandwidthMbps = 1000
                 },
+                // FIXED: Use data from VmSummary directly (populated by HeartbeatService)
                 activeVms = heartbeat.ActiveVmDetails.Select(v => new
                 {
                     vmId = v.VmId,
                     name = v.Name,
                     tenantId = v.TenantId,
-                    state = v.State,
+                    state = v.State.ToString(),  // Convert enum to string
                     ipAddress = v.IpAddress,
                     cpuUsagePercent = v.CpuUsagePercent,
                     startedAt = v.StartedAt.ToString("O"),
                     vCpus = v.VCpus,
                     memoryBytes = v.MemoryBytes,
-                    diskBytes = v.DiskBytes
+                    diskBytes = v.DiskBytes,
+                    // These fields are populated by HeartbeatService from VmInstance
+                    vncPort = v.VncPort,
+                    macAddress = v.MacAddress,
+                    encryptedPassword = v.EncryptedPassword
                 }).ToList()
             };
 

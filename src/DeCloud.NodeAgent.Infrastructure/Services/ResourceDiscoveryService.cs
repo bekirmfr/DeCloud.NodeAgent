@@ -282,57 +282,79 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     {
         var gpus = new List<GpuInfo>();
 
-        // Try nvidia-smi first (works on both Windows and Linux)
-        var nvidiaSmi = await _executor.ExecuteAsync("nvidia-smi", 
-            "--query-gpu=name,pci.bus_id,memory.total,memory.used,driver_version,utilization.gpu,utilization.memory,temperature.gpu --format=csv,noheader,nounits", 
+        // Quick check: does nvidia-smi exist?
+        if (!File.Exists("/usr/bin/nvidia-smi") &&
+            !File.Exists("/usr/local/bin/nvidia-smi"))
+        {
+            _logger.LogDebug("nvidia-smi not found - no GPU detected");
+            return gpus; // Return empty list immediately
+        }
+
+        try
+        {
+            // Try nvidia-smi first (works on both Windows and Linux)
+            var nvidiaSmi = await _executor.ExecuteAsync("nvidia-smi",
+            "--query-gpu=name,pci.bus_id,memory.total,memory.used,driver_version,utilization.gpu,utilization.memory,temperature.gpu --format=csv,noheader,nounits",
             ct);
 
-        if (nvidiaSmi.Success && !string.IsNullOrWhiteSpace(nvidiaSmi.StandardOutput))
-        {
-            foreach (var line in nvidiaSmi.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            if (!nvidiaSmi.Success)
             {
-                var parts = line.Split(',').Select(p => p.Trim()).ToArray();
-                if (parts.Length < 8) continue;
-
-                gpus.Add(new GpuInfo
-                {
-                    Vendor = "NVIDIA",
-                    Model = parts[0],
-                    PciAddress = parts[1],
-                    MemoryBytes = long.TryParse(parts[2], out var mem) ? mem * 1024 * 1024 : 0,
-                    MemoryUsedBytes = long.TryParse(parts[3], out var used) ? used * 1024 * 1024 : 0,
-                    DriverVersion = parts[4],
-                    GpuUsagePercent = double.TryParse(parts[5], out var gpuUsage) ? gpuUsage : 0,
-                    MemoryUsagePercent = double.TryParse(parts[6], out var memUsage) ? memUsage : 0,
-                    TemperatureCelsius = int.TryParse(parts[7], out var temp) ? temp : null,
-                    IsAvailableForPassthrough = !_isWindows
-                });
+                _logger.LogDebug("No NVIDIA GPUs detected");
+                return gpus;
             }
-        }
 
-        // Fallback for non-NVIDIA or if nvidia-smi failed
-        if (gpus.Count == 0 && _isWindows)
-        {
-            var wmicResult = await _executor.ExecuteAsync("powershell",
-                "-NoProfile -Command \"Get-CimInstance Win32_VideoController | Select-Object Name, AdapterRAM, DriverVersion | ConvertTo-Json\"",
-                ct);
-                
-            if (wmicResult.Success && !string.IsNullOrWhiteSpace(wmicResult.StandardOutput))
+            if (nvidiaSmi.Success && !string.IsNullOrWhiteSpace(nvidiaSmi.StandardOutput))
             {
-                var name = ExtractJsonValue(wmicResult.StandardOutput, "Name") ?? "Unknown GPU";
-                var vendor = name.Contains("NVIDIA") ? "NVIDIA" : name.Contains("AMD") ? "AMD" : "Intel";
-                
-                gpus.Add(new GpuInfo
+                foreach (var line in nvidiaSmi.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries))
                 {
-                    Vendor = vendor,
-                    Model = name,
-                    DriverVersion = ExtractJsonValue(wmicResult.StandardOutput, "DriverVersion") ?? "",
-                    MemoryBytes = long.TryParse(ExtractJsonValue(wmicResult.StandardOutput, "AdapterRAM"), out var ram) ? ram : 0
-                });
-            }
-        }
+                    var parts = line.Split(',').Select(p => p.Trim()).ToArray();
+                    if (parts.Length < 8) continue;
 
-        return gpus;
+                    gpus.Add(new GpuInfo
+                    {
+                        Vendor = "NVIDIA",
+                        Model = parts[0],
+                        PciAddress = parts[1],
+                        MemoryBytes = long.TryParse(parts[2], out var mem) ? mem * 1024 * 1024 : 0,
+                        MemoryUsedBytes = long.TryParse(parts[3], out var used) ? used * 1024 * 1024 : 0,
+                        DriverVersion = parts[4],
+                        GpuUsagePercent = double.TryParse(parts[5], out var gpuUsage) ? gpuUsage : 0,
+                        MemoryUsagePercent = double.TryParse(parts[6], out var memUsage) ? memUsage : 0,
+                        TemperatureCelsius = int.TryParse(parts[7], out var temp) ? temp : null,
+                        IsAvailableForPassthrough = !_isWindows
+                    });
+                }
+            }
+
+            // Fallback for non-NVIDIA or if nvidia-smi failed
+            if (gpus.Count == 0 && _isWindows)
+            {
+                var wmicResult = await _executor.ExecuteAsync("powershell",
+                    "-NoProfile -Command \"Get-CimInstance Win32_VideoController | Select-Object Name, AdapterRAM, DriverVersion | ConvertTo-Json\"",
+                    ct);
+
+                if (wmicResult.Success && !string.IsNullOrWhiteSpace(wmicResult.StandardOutput))
+                {
+                    var name = ExtractJsonValue(wmicResult.StandardOutput, "Name") ?? "Unknown GPU";
+                    var vendor = name.Contains("NVIDIA") ? "NVIDIA" : name.Contains("AMD") ? "AMD" : "Intel";
+
+                    gpus.Add(new GpuInfo
+                    {
+                        Vendor = vendor,
+                        Model = name,
+                        DriverVersion = ExtractJsonValue(wmicResult.StandardOutput, "DriverVersion") ?? "",
+                        MemoryBytes = long.TryParse(ExtractJsonValue(wmicResult.StandardOutput, "AdapterRAM"), out var ram) ? ram : 0
+                    });
+                }
+            }
+
+            return gpus;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "GPU detection failed (this is normal if no GPU installed)");
+            return gpus;
+        }
     }
 
     public async Task<NetworkInfo> GetNetworkInfoAsync(CancellationToken ct = default)

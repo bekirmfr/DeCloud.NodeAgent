@@ -715,28 +715,27 @@ public class LibvirtVmManager : IVmManager
             }
         }
 
-        foreach (var iface in new[] { "vnet0", "vnet1", "vnet2", "vnet3", "vnet4", "vnet5", "vnet6", "vnet7", "vnet8", "vnet9" })
+        var interfaceNames = new[] { "vnet0", "vnet1", "vnet2", "vnet3", "vnet4", "vnet5", "vnet6", "vnet7", "vnet8", "vnet9" };
+
+        foreach (var iface in interfaceNames)
         {
-            var netResult = await _executor.ExecuteAsync("virsh", $"domifstat {vmId} {iface}", ct);
-            if (netResult.Success && !netResult.StandardOutput.Contains("error"))
+            var netResult = await _executor.ExecuteAsync("virsh",
+                $"domifstat {vmId} {iface}", ct);
+
+            if (netResult.Success)
             {
-                foreach (var line in netResult.StandardOutput.Split('\n'))
+                // Found the right interface, parse stats
+                var rxMatch = Regex.Match(netResult.StandardOutput, @"rx_bytes\s+(\d+)");
+                var txMatch = Regex.Match(netResult.StandardOutput, @"tx_bytes\s+(\d+)");
+
+                if (rxMatch.Success && txMatch.Success)
                 {
-                    if (line.Contains("rx_bytes"))
-                    {
-                        var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                        if (parts.Length >= 2 && long.TryParse(parts.Last(), out var rx))
-                            usage.NetworkRxBytes = rx;
-                    }
-                    if (line.Contains("tx_bytes"))
-                    {
-                        var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                        if (parts.Length >= 2 && long.TryParse(parts.Last(), out var tx))
-                            usage.NetworkTxBytes = tx;
-                    }
+                    usage.NetworkRxBytes = long.Parse(rxMatch.Groups[1].Value);
+                    usage.NetworkTxBytes = long.Parse(txMatch.Groups[1].Value);
+                    break; // Found it, no need to try other interfaces
                 }
-                break;
             }
+            // If it fails, just try the next interface (don't log errors)
         }
 
         return usage;

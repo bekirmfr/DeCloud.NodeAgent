@@ -29,6 +29,11 @@ public class VmSpec
 
     // SECURITY: Password fields - only one should be set
     public string? Password { get; set; }              // Plaintext (transient, cleared after VM creation)
+    /// <summary>
+    /// Wallet-encrypted password (stored permanently)
+    /// Format: base64(iv):base64(ciphertext):base64(tag)
+    /// SECURITY: Only store encrypted passwords, never plaintext
+    /// </summary>
     public string? EncryptedPassword { get; set; }     // Wallet-encrypted (persistent)
 
     // Billing and ownership
@@ -55,6 +60,7 @@ public class VmInstance
     public string Name { get; set; } = string.Empty;
     public VmState State { get; set; }
     public VmSpec Spec { get; set; } = new();
+    public string? NetworkInterface { get; set; }  // e.g., "vnet0"
 
     // Runtime info
     public int? Pid { get; set; }  // QEMU process ID

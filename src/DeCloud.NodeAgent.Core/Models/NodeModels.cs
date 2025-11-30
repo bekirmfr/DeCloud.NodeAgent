@@ -72,6 +72,9 @@ public class VmSummary
     public long? DiskBytes { get; set; }
     public double CpuUsagePercent { get; set; }
     public string? IpAddress { get; set; }
+    public string? VncPort { get; set; }
+    public string? MacAddress { get; set; }
+    public string? EncryptedPassword { get; set; }
     public DateTime StartedAt { get; set; }
 }
 
