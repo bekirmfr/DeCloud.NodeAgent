@@ -9,7 +9,7 @@ namespace DeCloud.NodeAgent.Controllers;
 
 /// <summary>
 /// WebSocket-based SSH proxy for browser-based terminal access to VMs.
-/// Supports ephemeral key injection for secure access.
+/// Supports password authentication (primary) and ephemeral key injection (optional).
 /// </summary>
 [ApiController]
 [Route("api/vms")]
@@ -38,36 +38,78 @@ public class SshProxyController : ControllerBase
 
     /// <summary>
     /// WebSocket endpoint for SSH proxy to a VM.
-    /// Connect via: ws://node:5100/api/vms/{vmId}/terminal?ip={vmIp}&user={username}
+    /// Connect via: ws://node:5100/api/vms/{vmId}/terminal?ip={vmIp}&user={username}&password={password}
     /// 
     /// Authentication methods (in order of preference):
-    /// 1. ephemeral=true - Auto-generates and injects ephemeral key (most secure)
+    /// 1. password - Password auth (via query or X-SSH-Password header)
     /// 2. privateKey - Base64 encoded private key (via query or X-SSH-PrivateKey header)
-    /// 3. password - Password auth (via query or X-SSH-Password header)
     /// </summary>
     [HttpGet("{vmId}/terminal")]
     public async Task Terminal(
-    string vmId,
-    [FromQuery] string ip,
-    [FromQuery] string user = "ubuntu",
-    [FromQuery] int port = 22,
-    [FromQuery] string? password = null)
+        string vmId,
+        [FromQuery] string ip,
+        [FromQuery] string user = "ubuntu",
+        [FromQuery] int port = 22,
+        [FromQuery] string? password = null,
+        [FromQuery] string? privateKey = null,
+        [FromQuery] string? keyRef = null)
     {
         if (!HttpContext.WebSockets.IsWebSocketRequest)
         {
             HttpContext.Response.StatusCode = 400;
+            await HttpContext.Response.WriteAsync("WebSocket connection required");
             return;
         }
 
-        if (string.IsNullOrEmpty(password))
+        if (string.IsNullOrEmpty(ip))
+        {
+            HttpContext.Response.StatusCode = 400;
+            await HttpContext.Response.WriteAsync("VM IP address required");
+            return;
+        }
+
+        // Get password from query or header
+        password ??= HttpContext.Request.Headers["X-SSH-Password"].FirstOrDefault();
+
+        // Get private key from query, header, or cache
+        privateKey ??= HttpContext.Request.Headers["X-SSH-PrivateKey"].FirstOrDefault();
+
+        // Check key cache if keyRef provided
+        if (string.IsNullOrEmpty(privateKey) && !string.IsNullOrEmpty(keyRef))
+        {
+            if (_ephemeralKeyCache.TryGetValue(keyRef, out var cached) && cached.ExpiresAt > DateTime.UtcNow)
+            {
+                privateKey = Convert.ToBase64String(Encoding.UTF8.GetBytes(cached.PrivateKey));
+                _logger.LogDebug("Using cached ephemeral key for VM {VmId}", vmId);
+            }
+            else
+            {
+                _logger.LogWarning("Cached key not found or expired for keyRef {KeyRef}", keyRef);
+            }
+        }
+
+        // Require at least one auth method
+        if (string.IsNullOrEmpty(password) && string.IsNullOrEmpty(privateKey))
         {
             HttpContext.Response.StatusCode = 401;
-            await HttpContext.Response.WriteAsync("Password required");
+            await HttpContext.Response.WriteAsync("Password or private key required for terminal access");
             return;
         }
 
-        var webSocket = await HttpContext.WebSockets.AcceptWebSocketAsync();
-        await ProxySshConnection(webSocket, ip, port, user, password);
+        _logger.LogInformation(
+            "Terminal WebSocket connection for VM {VmId}: {User}@{Host}:{Port} (auth: {AuthMethod})",
+            vmId, user, ip, port,
+            !string.IsNullOrEmpty(password) ? "password" : "key");
+
+        try
+        {
+            using var webSocket = await HttpContext.WebSockets.AcceptWebSocketAsync();
+            await ProxySshConnection(webSocket, ip, port, user, password, privateKey, vmId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Terminal connection failed for VM {VmId}", vmId);
+        }
     }
 
     /// <summary>
@@ -76,8 +118,8 @@ public class SshProxyController : ControllerBase
     /// </summary>
     [HttpPost("{vmId}/terminal/connect")]
     public async Task<ActionResult<TerminalConnectResponse>> InitiateTerminal(
-    string vmId,
-    [FromBody] TerminalConnectRequest request)
+        string vmId,
+        [FromBody] TerminalConnectRequest request)
     {
         _logger.LogInformation("Initiating terminal connection for VM {VmId}", vmId);
 
@@ -149,6 +191,9 @@ public class SshProxyController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Proxy data between WebSocket and SSH connection.
+    /// </summary>
     private async Task ProxySshConnection(
         WebSocket webSocket,
         string host,
@@ -187,10 +232,12 @@ public class SshProxyController : ControllerBase
             _logger.LogDebug("Using password authentication for {User}@{Host}", username, host);
         }
 
-        if (!authMethods.Any())
+        if (authMethods.Count == 0)
         {
-            throw new InvalidOperationException(
-                "No authentication method available. Provide password or privateKey.");
+            var errorMsg = Encoding.UTF8.GetBytes("\x1b[31mNo authentication method available. Provide password or privateKey.\x1b[0m\r\n");
+            await webSocket.SendAsync(errorMsg, WebSocketMessageType.Binary, true, CancellationToken.None);
+            await webSocket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "No auth method", CancellationToken.None);
+            return;
         }
 
         var connectionInfo = new Renci.SshNet.ConnectionInfo(host, port, username, authMethods.ToArray())
@@ -209,11 +256,21 @@ public class SshProxyController : ControllerBase
         {
             sshClient.Connect();
         }
+        catch (Renci.SshNet.Common.SshAuthenticationException ex)
+        {
+            _logger.LogWarning("SSH authentication failed for VM {VmId}: {Message}", vmId, ex.Message);
+            var errorMsg = Encoding.UTF8.GetBytes($"\x1b[31mAuthentication failed: {ex.Message}\x1b[0m\r\n");
+            await webSocket.SendAsync(errorMsg, WebSocketMessageType.Binary, true, CancellationToken.None);
+            await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Auth failed", CancellationToken.None);
+            return;
+        }
         catch (Exception ex)
         {
+            _logger.LogError(ex, "SSH connection failed for VM {VmId}", vmId);
             var errorMsg = Encoding.UTF8.GetBytes($"\x1b[31mFailed to connect: {ex.Message}\x1b[0m\r\n");
             await webSocket.SendAsync(errorMsg, WebSocketMessageType.Binary, true, CancellationToken.None);
-            throw;
+            await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Connection failed", CancellationToken.None);
+            return;
         }
 
         _logger.LogInformation("SSH connected to {User}@{Host}:{Port} for VM {VmId}", username, host, port, vmId);
@@ -240,14 +297,17 @@ public class SshProxyController : ControllerBase
             {
                 while (!cts.Token.IsCancellationRequested && webSocket.State == WebSocketState.Open)
                 {
-                    var bytesRead = await shellStream.ReadAsync(buffer, 0, buffer.Length, cts.Token);
-                    if (bytesRead > 0)
+                    if (shellStream.DataAvailable)
                     {
-                        await webSocket.SendAsync(
-                            new ArraySegment<byte>(buffer, 0, bytesRead),
-                            WebSocketMessageType.Binary,
-                            true,
-                            cts.Token);
+                        var bytesRead = await shellStream.ReadAsync(buffer, cts.Token);
+                        if (bytesRead > 0)
+                        {
+                            await webSocket.SendAsync(
+                                new ArraySegment<byte>(buffer, 0, bytesRead),
+                                WebSocketMessageType.Binary,
+                                true,
+                                cts.Token);
+                        }
                     }
                     else
                     {
@@ -258,7 +318,7 @@ public class SshProxyController : ControllerBase
             catch (OperationCanceledException) { }
             catch (Exception ex)
             {
-                _logger.LogDebug(ex, "SSH to WebSocket stream ended");
+                _logger.LogDebug(ex, "SSH to WebSocket stream ended for VM {VmId}", vmId);
             }
         }, cts.Token);
 
@@ -270,10 +330,11 @@ public class SshProxyController : ControllerBase
             {
                 while (!cts.Token.IsCancellationRequested && webSocket.State == WebSocketState.Open)
                 {
-                    var result = await webSocket.ReceiveAsync(buffer, cts.Token);
+                    var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
 
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
+                        _logger.LogDebug("WebSocket close received for VM {VmId}", vmId);
                         break;
                     }
 
@@ -292,8 +353,9 @@ public class SshProxyController : ControllerBase
                                     shellStream.ChangeWindowSize(
                                         (uint)resize.Cols,
                                         (uint)resize.Rows,
-                                        800,
-                                        600);
+                                        0,
+                                        0);
+                                    _logger.LogDebug("Terminal resized to {Cols}x{Rows}", resize.Cols, resize.Rows);
                                 }
                             }
                             catch { }
@@ -306,9 +368,13 @@ public class SshProxyController : ControllerBase
                 }
             }
             catch (OperationCanceledException) { }
+            catch (WebSocketException ex) when (ex.WebSocketErrorCode == WebSocketError.ConnectionClosedPrematurely)
+            {
+                _logger.LogDebug("WebSocket closed for VM {VmId}", vmId);
+            }
             catch (Exception ex)
             {
-                _logger.LogDebug(ex, "WebSocket to SSH stream ended");
+                _logger.LogDebug(ex, "WebSocket to SSH stream ended for VM {VmId}", vmId);
             }
         }, cts.Token);
 
@@ -318,13 +384,19 @@ public class SshProxyController : ControllerBase
         // Cancel the other task
         cts.Cancel();
 
+        _logger.LogInformation("Terminal session ended for VM {VmId}", vmId);
+
         // Clean close
         if (webSocket.State == WebSocketState.Open)
         {
-            await webSocket.CloseAsync(
-                WebSocketCloseStatus.NormalClosure,
-                "Session ended",
-                CancellationToken.None);
+            try
+            {
+                await webSocket.CloseAsync(
+                    WebSocketCloseStatus.NormalClosure,
+                    "Session ended",
+                    CancellationToken.None);
+            }
+            catch { }
         }
     }
 
