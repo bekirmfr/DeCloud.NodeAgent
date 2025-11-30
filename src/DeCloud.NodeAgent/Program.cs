@@ -31,11 +31,13 @@ builder.Services.AddSingleton<IImageManager, ImageManager>();
 
 // =====================================================
 // VM Repository with Encryption Support
+// FIXED: Single registration, proper encryption key generation
 // =====================================================
 builder.Services.AddSingleton<VmRepository>(sp =>
 {
     var options = sp.GetRequiredService<IOptions<LibvirtVmManagerOptions>>().Value;
     var logger = sp.GetRequiredService<ILogger<VmRepository>>();
+    var config = sp.GetRequiredService<IConfiguration>();
 
     // Check if running on Windows
     var isWindows = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
@@ -44,39 +46,42 @@ builder.Services.AddSingleton<VmRepository>(sp =>
     if (isWindows)
     {
         logger.LogWarning("Running on Windows - VmRepository will not be used");
-        // Return a dummy repository (won't be used on Windows)
         var tempPath = Path.Combine(Path.GetTempPath(), "decloud-dummy.db");
         return new VmRepository(tempPath, logger);
     }
 
     var dbPath = Path.Combine(options.VmStoragePath, "vms.db");
-
-    // Generate encryption key from node credentials
-    // Note: This will be null until node is registered, so repository starts unencrypted
-    // and can be upgraded to encrypted once credentials are available
     string? encryptionKey = null;
 
     try
     {
-        var walletAddress = builder.Configuration.GetValue<string>("Orchestrator:WalletAddress");
+        // Get wallet address from configuration
+        var walletAddress = config.GetValue<string>("Orchestrator:WalletAddress");
 
         if (!string.IsNullOrEmpty(walletAddress))
         {
-            // Use wallet address as basis for encryption key
-            // Note: Node ID not available yet, so we use wallet + machine ID
-            var machineId = Environment.MachineName;
+            // Generate deterministic encryption key using machine identifier + wallet
+            // This ensures the same key is generated across node agent restarts
+            var machineId = Environment.MachineName + "-" + Environment.UserDomainName;
             encryptionKey = VmRepository.GenerateEncryptionKey(machineId, walletAddress);
 
-            logger.LogInformation("VmRepository encryption enabled using wallet-based key");
+            logger.LogInformation(
+                "✓ VmRepository encryption ENABLED (machine: {Machine}, wallet: {Wallet})",
+                machineId,
+                walletAddress.Substring(0, Math.Min(10, walletAddress.Length)) + "...");
         }
         else
         {
-            logger.LogWarning("No wallet address configured - VmRepository encryption disabled");
+            logger.LogWarning(
+                "⚠️  VmRepository encryption DISABLED - no wallet address configured. " +
+                "VM data will be stored UNENCRYPTED in SQLite. " +
+                "Set 'Orchestrator:WalletAddress' in appsettings.json to enable encryption.");
         }
     }
     catch (Exception ex)
     {
-        logger.LogWarning(ex, "Failed to generate encryption key - using unencrypted repository");
+        logger.LogError(ex,
+            "❌ Failed to generate encryption key - VmRepository will run UNENCRYPTED");
     }
 
     return new VmRepository(dbPath, logger, encryptionKey);
@@ -85,27 +90,6 @@ builder.Services.AddSingleton<VmRepository>(sp =>
 // =====================================================
 // VM Manager with Repository Integration
 // =====================================================
-// Add VmRepository as singleton
-builder.Services.AddSingleton<VmRepository>(sp =>
-{
-    var logger = sp.GetRequiredService<ILogger<VmRepository>>();
-    var options = sp.GetRequiredService<IOptions<LibvirtVmManagerOptions>>();
-    var dbPath = Path.Combine(options.Value.VmStoragePath, "vms.db");
-
-    // Optional: Generate encryption key from node config
-    var config = sp.GetRequiredService<IConfiguration>();
-    var nodeId = config.GetValue<string>("Node:Id");
-    var walletAddress = config.GetValue<string>("Orchestrator:WalletAddress");
-    string? encryptionKey = null;
-
-    if (!string.IsNullOrEmpty(nodeId) && !string.IsNullOrEmpty(walletAddress))
-    {
-        encryptionKey = VmRepository.GenerateEncryptionKey(nodeId, walletAddress);
-    }
-
-    return new VmRepository(dbPath, logger, encryptionKey);
-});
-
 builder.Services.AddSingleton<LibvirtVmManager>();
 builder.Services.AddSingleton<IVmManager>(sp => sp.GetRequiredService<LibvirtVmManager>());
 
@@ -175,16 +159,22 @@ using (var scope = app.Services.CreateScope())
             tools.VirtCustomizeAvailable,
             tools.GuestMountAvailable,
             tools.QemuNbdAvailable);
-        var isWindows = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
-            System.Runtime.InteropServices.OSPlatform.Windows);
-
-        if (isWindows)
-        {
-            logger.LogWarning(
-                "⚠️  Running on Windows - VM management disabled. " +
-                "Deploy to Linux with KVM/libvirt for full functionality.");
-        }
     }
+
+    // Platform check
+    var isWindows = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
+        System.Runtime.InteropServices.OSPlatform.Windows);
+
+    if (isWindows)
+    {
+        logger.LogWarning(
+            "⚠️  Running on Windows - VM management disabled. " +
+            "Deploy to Linux with KVM/libvirt for full functionality.");
+    }
+
+    // Verify VmRepository encryption status
+    var repository = scope.ServiceProvider.GetRequiredService<VmRepository>();
+    // Note: VmRepository doesn't expose encryption status, but logs will show it
 }
 
 // =====================================================
