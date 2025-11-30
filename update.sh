@@ -342,6 +342,23 @@ fetch_updates() {
         git log --oneline HEAD..origin/$remote_branch | head -10
         echo ""
         
+        # ====================================================
+        # Check for local modifications
+        # ====================================================
+        if ! git diff-index --quiet HEAD --; then
+            log_warn "Local modifications detected"
+            
+            # Show what files are modified
+            local modified_files=$(git diff --name-only)
+            log_info "Modified files:"
+            echo "$modified_files" | sed 's/^/  - /'
+            echo ""
+            
+            log_info "Stashing local changes..."
+            git stash push -m "Auto-stash before update $(date +%Y%m%d_%H%M%S)" --quiet
+            log_success "Local changes stashed"
+        fi
+        
         # Backup database before pulling
         backup_database
         
@@ -353,11 +370,20 @@ fetch_updates() {
         
         if [ $pull_result -ne 0 ]; then
             log_error "Failed to pull updates"
+            log_error "Try manually: cd $REPO_DIR && git reset --hard && git pull"
             exit 1
         fi
         
         CHANGES_DETECTED=true
         log_success "Code updated to ${REMOTE:0:8}"
+        
+        # Check if we stashed anything
+        if git stash list | grep -q "Auto-stash before update"; then
+            log_info ""
+            log_warn "Local changes were stashed (may contain important config)"
+            log_info "To review stashed changes: cd $REPO_DIR && git stash show"
+            log_info "To restore stashed changes: cd $REPO_DIR && git stash pop"
+        fi
     fi
 }
 
@@ -481,6 +507,13 @@ show_status() {
         COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
         BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
         log_info "Version: $BRANCH @ $COMMIT"
+        
+        # Check for stashed changes
+        local stash_count=$(git stash list 2>/dev/null | wc -l)
+        if [ "$stash_count" -gt 0 ]; then
+            log_warn "Git stash: $stash_count stashed change(s)"
+            log_info "  View: cd $REPO_DIR && git stash list"
+        fi
     fi
     
     # Database info
