@@ -13,7 +13,7 @@
 
 set -e
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 
 # Colors
 RED='\033[0;31m'
@@ -35,6 +35,7 @@ REPO_DIR="$INSTALL_DIR/DeCloud.NodeAgent"
 REPO_URL="https://github.com/bekirmfr/DeCloud.NodeAgent.git"
 SERVICE_NAME="decloud-node-agent"
 CONFIG_DIR="/etc/decloud"
+DATA_DIR="/var/lib/decloud"
 
 # Flags
 FORCE_REBUILD=false
@@ -267,6 +268,36 @@ install_dependencies() {
 }
 
 # ============================================================
+# Database Backup
+# ============================================================
+backup_database() {
+    log_step "Backing up VM database..."
+    
+    local db_path="$DATA_DIR/vms/vms.db"
+    local backup_dir="$DATA_DIR/backups"
+    
+    if [ ! -f "$db_path" ]; then
+        log_info "No database found to backup (new installation)"
+        return 0
+    fi
+    
+    # Create backup directory
+    mkdir -p "$backup_dir"
+    
+    # Create timestamped backup
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_path="$backup_dir/vms_${timestamp}.db"
+    
+    cp "$db_path" "$backup_path"
+    
+    # Keep only last 5 backups
+    ls -t "$backup_dir"/vms_*.db 2>/dev/null | tail -n +6 | xargs rm -f 2>/dev/null || true
+    
+    local db_size=$(du -h "$db_path" | cut -f1)
+    log_success "Database backed up: $db_size to ${backup_path##*/}"
+}
+
+# ============================================================
 # Update Functions
 # ============================================================
 fetch_updates() {
@@ -280,9 +311,22 @@ fetch_updates() {
     # Fetch updates
     git fetch origin --quiet
     
+    # ====================================================
+    # FIX: Detect which branch exists and use it
+    # ====================================================
+    local remote_branch=""
+    if git show-ref --verify --quiet refs/remotes/origin/master; then
+        remote_branch="master"
+    elif git show-ref --verify --quiet refs/remotes/origin/main; then
+        remote_branch="main"
+    else
+        log_error "Could not find master or main branch"
+        exit 1
+    fi
+    
     # Check if there are updates
     LOCAL=$(git rev-parse HEAD)
-    REMOTE=$(git rev-parse origin/master 2>/dev/null || git rev-parse origin/main 2>/dev/null)
+    REMOTE=$(git rev-parse origin/$remote_branch)
     
     if [ "$LOCAL" = "$REMOTE" ]; then
         log_info "Already up to date (commit: ${LOCAL:0:8})"
@@ -295,11 +339,22 @@ fetch_updates() {
         # Show what changed
         echo ""
         log_info "Changes:"
-        git log --oneline HEAD..origin/master 2>/dev/null || git log --oneline HEAD..origin/main 2>/dev/null | head -10
+        git log --oneline HEAD..origin/$remote_branch | head -10
         echo ""
         
-        # Pull updates
-        git pull --quiet origin master 2>/dev/null || git pull --quiet origin main 2>/dev/null
+        # Backup database before pulling
+        backup_database
+        
+        # Pull updates (disable set -e temporarily)
+        set +e
+        git pull --quiet origin $remote_branch
+        local pull_result=$?
+        set -e
+        
+        if [ $pull_result -ne 0 ]; then
+            log_error "Failed to pull updates"
+            exit 1
+        fi
         
         CHANGES_DETECTED=true
         log_success "Code updated to ${REMOTE:0:8}"
@@ -387,6 +442,25 @@ verify_health() {
     log_info "Check status: systemctl status $SERVICE_NAME"
 }
 
+show_database_info() {
+    local db_path="$DATA_DIR/vms/vms.db"
+    
+    if [ ! -f "$db_path" ]; then
+        return
+    fi
+    
+    local db_size=$(du -h "$db_path" | cut -f1)
+    log_info "VM Database: $db_size"
+    
+    # Check if sqlite3 is available for stats
+    if command -v sqlite3 &> /dev/null; then
+        local vm_count=$(sqlite3 "$db_path" "SELECT COUNT(*) FROM VmRecords WHERE State != 'Deleted'" 2>/dev/null || echo "0")
+        if [ "$vm_count" != "0" ]; then
+            log_info "VMs in database: $vm_count"
+        fi
+    fi
+}
+
 show_status() {
     echo ""
     echo "╔═══════════════════════════════════════════════════════════════╗"
@@ -409,6 +483,9 @@ show_status() {
         log_info "Version: $BRANCH @ $COMMIT"
     fi
     
+    # Database info
+    show_database_info
+    
     # WireGuard status
     if command -v wg &> /dev/null && wg show wg-decloud &> /dev/null; then
         local peers=$(wg show wg-decloud peers 2>/dev/null | wc -l)
@@ -422,6 +499,14 @@ show_status() {
         local orchestrator=$(grep -oP '"BaseUrl":\s*"\K[^"]+' "$CONFIG_DIR/appsettings.Production.json" 2>/dev/null | head -1)
         if [ -n "$orchestrator" ]; then
             log_info "Orchestrator: $orchestrator"
+        fi
+        
+        # Check encryption status
+        local wallet=$(grep -oP '"WalletAddress":\s*"\K[^"]+' "$CONFIG_DIR/appsettings.Production.json" 2>/dev/null | head -1)
+        if [ -n "$wallet" ] && [ "$wallet" != "0x0000000000000000000000000000000000000000" ]; then
+            log_success "Database encryption: enabled"
+        else
+            log_warn "Database encryption: disabled (no wallet configured)"
         fi
     fi
     
