@@ -159,8 +159,7 @@ public class LibvirtVmManager : IVmManager
                         vm.State = actualState;
 
                         // Persist state change
-                        await _repository.UpdateVmStateAsync(vmId, actualState);
-                        await _repository.SaveVmAsync(_vms[vmId]);
+                        await _repository.SaveVmAsync(vm);
                     }
                 }
                 else
@@ -370,9 +369,9 @@ public class LibvirtVmManager : IVmManager
                 VncPort = _nextVncPort++.ToString()
             };
 
-            _vms[spec.VmId] = instance;
+            _vms.Add(spec.VmId, instance);
 
-            // Persist to database immediately
+            // Save complete VM to database IMMEDIATELY
             await _repository.SaveVmAsync(instance);
 
             _logger.LogInformation("Creating VM {VmId}: {VCpus} vCPUs, {MemMB}MB RAM, {DiskGB}GB disk",
@@ -407,7 +406,7 @@ public class LibvirtVmManager : IVmManager
                 instance.State = VmState.Running;
                 instance.StartedAt = DateTime.UtcNow;
 
-                // NEW: Update database
+                // Update database
                 await _repository.UpdateVmStateAsync(spec.VmId, VmState.Running);
 
                 _logger.LogInformation("VM {VmId} started successfully", spec.VmId);
@@ -416,12 +415,24 @@ public class LibvirtVmManager : IVmManager
                 _ = Task.Run(async () =>
                 {
                     await Task.Delay(TimeSpan.FromSeconds(10), ct);
-                    var ip = await GetVmIpAddressAsync(spec.VmId, ct);
-                    if (!string.IsNullOrEmpty(ip))
+
+                    await _lock.WaitAsync(ct); // ✅ ADD LOCK
+                    try
                     {
-                        instance.Spec.Network.IpAddress = ip;
-                        await _repository.UpdateVmIpAsync(spec.VmId, ip);
-                        _logger.LogInformation("VM {VmId} obtained IP: {Ip}", spec.VmId, ip);
+                        if (_vms.TryGetValue(spec.VmId, out var vm))
+                        {
+                            var ip = await GetVmIpAddressAsync(spec.VmId, ct);
+                            if (!string.IsNullOrEmpty(ip))
+                            {
+                                vm.Spec.Network.IpAddress = ip;
+                                await _repository.SaveVmAsync(vm);
+                                _logger.LogInformation("VM {VmId} obtained IP: {Ip}", spec.VmId, ip);
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        _lock.Release();
                     }
                 }, ct);
 
