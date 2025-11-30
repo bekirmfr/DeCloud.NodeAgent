@@ -1,4 +1,4 @@
-using DeCloud.NodeAgent.Core.Interfaces;
+﻿using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using Microsoft.Extensions.Logging;
@@ -37,12 +37,14 @@ public class LibvirtVmManager : IVmManager
         ICommandExecutor executor,
         IImageManager imageManager,
         IOptions<LibvirtVmManagerOptions> options,
+        VmRepository repository,
         ILogger<LibvirtVmManager> logger)
     {
         _executor = executor;
         _imageManager = imageManager;
         _logger = logger;
         _options = options.Value;
+        _repository = repository;
         _nextVncPort = _options.VncPortStart;
         _isWindows = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
             System.Runtime.InteropServices.OSPlatform.Windows);
@@ -52,14 +54,12 @@ public class LibvirtVmManager : IVmManager
             Directory.CreateDirectory(_options.VmStoragePath);
             Directory.CreateDirectory(_options.ImageCachePath);
 
-            var dbPath = Path.Combine(_options.VmStoragePath, "vms.db");
-            _repository = new VmRepository(dbPath, logger);
-
-            _logger.LogInformation("VM Manager initialized with persistent storage at {DbPath}", dbPath);
+            _logger.LogInformation("✓ LibvirtVmManager initialized with persistent storage");
         }
         else
         {
-            _logger.LogWarning("Running on Windows - VM management via libvirt/KVM is not available. " +
+            _logger.LogWarning(
+                "⚠️  Running on Windows - VM management via libvirt/KVM is not available. " +
                 "The API will run in simulation mode. Deploy to Linux for full VM functionality.");
         }
     }
@@ -85,7 +85,9 @@ public class LibvirtVmManager : IVmManager
                 _logger.LogDebug("Created QEMU guest agent channel directory");
             }
 
-            // Step 1 - Load VMs from SQLite database first
+            // =====================================================
+            // STEP 1: Load VMs from SQLite database
+            // =====================================================
             var savedVms = await _repository.LoadAllVmsAsync();
             foreach (var vm in savedVms)
             {
@@ -96,20 +98,24 @@ public class LibvirtVmManager : IVmManager
 
             if (savedVms.Any())
             {
-                _logger.LogInformation("Recovered {Count} VMs from local database", savedVms.Count);
+                _logger.LogInformation("✓ Recovered {Count} VMs from local database", savedVms.Count);
             }
 
-            // Step 2 - Reconcile with libvirt to get actual runtime state
+            // =====================================================
+            // STEP 2: Reconcile with libvirt to get actual state
+            // =====================================================
             if (_options.ReconcileOnStartup)
             {
                 await ReconcileWithLibvirtAsync(ct);
             }
 
-            // Step 3 - Update next VNC port
+            // =====================================================
+            // STEP 3: Update next VNC port
+            // =====================================================
             await UpdateNextVncPortAsync(ct);
 
             _initialized = true;
-            _logger.LogInformation("LibvirtVmManager initialized with {Count} VMs", _vms.Count);
+            _logger.LogInformation("✓ LibvirtVmManager initialized with {Count} VMs", _vms.Count);
         }
         finally
         {
