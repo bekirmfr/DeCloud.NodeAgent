@@ -210,13 +210,51 @@ public class OrchestratorClient : IOrchestratorClient
                 foreach (var cmd in commands.EnumerateArray())
                 {
                     var commandId = cmd.GetProperty("commandId").GetString() ?? "";
-                    var typeStr = cmd.GetProperty("type").GetString() ?? "";
+
+                    // Handle 'type' as either string OR number (enum integer)
+                    CommandType commandType;
+                    var typeProp = cmd.GetProperty("type");
+
+                    if (typeProp.ValueKind == JsonValueKind.Number)
+                    {
+                        commandType = (CommandType)typeProp.GetInt32();
+                    }
+                    else if (typeProp.ValueKind == JsonValueKind.String)
+                    {
+                        var typeStr = typeProp.GetString() ?? "";
+                        if (!Enum.TryParse<CommandType>(typeStr, true, out commandType))
+                        {
+                            _logger.LogWarning("Unknown command type: {Type}", typeStr);
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Unexpected type format: {Kind}", typeProp.ValueKind);
+                        continue;
+                    }
+
                     var payload = cmd.GetProperty("payload").GetString() ?? "";
 
                     _logger.LogInformation("Received command from orchestrator: {Type} (ID: {CommandId})",
-                        typeStr, commandId);
+                        commandType, commandId);
 
-                    // Commands are processed by CommandProcessorService
+                    // =====================================================
+                    // Without this, commands are never processed!
+                    // =====================================================
+                    _pendingCommands.Enqueue(new PendingCommand
+                    {
+                        CommandId = commandId,
+                        Type = commandType,
+                        Payload = payload,
+                        IssuedAt = DateTime.UtcNow
+                    });
+                }
+
+                if (commands.GetArrayLength() > 0)
+                {
+                    _logger.LogInformation("Enqueued {Count} command(s) for processing",
+                        commands.GetArrayLength());
                 }
             }
         }
