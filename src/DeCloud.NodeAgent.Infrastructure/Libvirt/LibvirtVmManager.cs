@@ -370,8 +370,6 @@ public class LibvirtVmManager : IVmManager
             };
 
             _vms.Add(spec.VmId, instance);
-
-            // Save complete VM to database IMMEDIATELY
             await _repository.SaveVmAsync(instance);
 
             _logger.LogInformation("Creating VM {VmId}: {VCpus} vCPUs, {MemMB}MB RAM, {DiskGB}GB disk",
@@ -390,23 +388,141 @@ public class LibvirtVmManager : IVmManager
             else
             {
                 _logger.LogWarning("VM {VmId} has no SSH key or password - will use fallback password 'decloud'", spec.VmId);
+                spec.Password = "decloud"; // Fallback password
             }
 
             var vmDir = Path.Combine(_options.VmStoragePath, spec.VmId);
             Directory.CreateDirectory(vmDir);
 
-            // After successful creation, update state
+            // =====================================================
+            // STEP 1: Prepare base image
+            // =====================================================
+            _logger.LogInformation("VM {VmId}: Downloading/preparing base image from {Url}",
+                spec.VmId, spec.BaseImageUrl);
+
+            string baseImagePath;
+            try
+            {
+                baseImagePath = await _imageManager.EnsureImageAvailableAsync(
+                    spec.BaseImageUrl,
+                    spec.BaseImageHash,
+                    ct);
+                _logger.LogInformation("VM {VmId}: Base image ready at {Path}", spec.VmId, baseImagePath);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "VM {VmId}: Failed to prepare base image", spec.VmId);
+                instance.State = VmState.Failed;
+                await _repository.UpdateVmStateAsync(spec.VmId, VmState.Failed);
+                return VmOperationResult.Fail(spec.VmId, $"Failed to prepare base image: {ex.Message}", "IMAGE_ERROR");
+            }
+
+            // =====================================================
+            // STEP 2: Create overlay disk
+            // =====================================================
+            _logger.LogInformation("VM {VmId}: Creating overlay disk ({DiskGB}GB)",
+                spec.VmId, spec.DiskBytes / 1024 / 1024 / 1024);
+
+            string diskPath;
+            try
+            {
+                diskPath = await _imageManager.CreateOverlayDiskAsync(
+                    baseImagePath,
+                    spec.VmId,
+                    spec.DiskBytes,
+                    ct);
+                instance.DiskPath = diskPath;
+                _logger.LogInformation("VM {VmId}: Overlay disk created at {Path}", spec.VmId, diskPath);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "VM {VmId}: Failed to create overlay disk", spec.VmId);
+                instance.State = VmState.Failed;
+                await _repository.UpdateVmStateAsync(spec.VmId, VmState.Failed);
+                return VmOperationResult.Fail(spec.VmId, $"Failed to create disk: {ex.Message}", "DISK_ERROR");
+            }
+
+            // =====================================================
+            // STEP 3: Create cloud-init ISO
+            // =====================================================
+            _logger.LogInformation("VM {VmId}: Creating cloud-init ISO", spec.VmId);
+
+            string cloudInitIso;
+            try
+            {
+                cloudInitIso = await CreateCloudInitIsoAsync(spec, vmDir, ct);
+                if (!string.IsNullOrEmpty(cloudInitIso))
+                {
+                    _logger.LogInformation("VM {VmId}: Cloud-init ISO created at {Path}", spec.VmId, cloudInitIso);
+                }
+                else
+                {
+                    _logger.LogWarning("VM {VmId}: Cloud-init ISO creation failed, VM may not configure properly", spec.VmId);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "VM {VmId}: Cloud-init ISO creation failed, continuing without it", spec.VmId);
+                cloudInitIso = string.Empty;
+            }
+
+            // =====================================================
+            // STEP 4: Generate libvirt XML
+            // =====================================================
+            var vncPort = int.Parse(instance.VncPort ?? "5900");
+            var domainXml = GenerateLibvirtXml(spec, diskPath, cloudInitIso, vncPort);
+
+            var xmlPath = Path.Combine(vmDir, "domain.xml");
+            await File.WriteAllTextAsync(xmlPath, domainXml, ct);
+            instance.ConfigPath = xmlPath;
+
+            _logger.LogInformation("VM {VmId}: Generated libvirt XML at {Path}", spec.VmId, xmlPath);
+            _logger.LogDebug("VM {VmId} XML content:\n{Xml}", spec.VmId, domainXml);
+
+            // =====================================================
+            // STEP 5: Save VM metadata
+            // =====================================================
+            await SaveVmMetadataAsync(vmDir, spec, ct);
+
+            // =====================================================
+            // STEP 6: Define VM in libvirt (THE CRITICAL MISSING STEP!)
+            // =====================================================
+            _logger.LogInformation("VM {VmId}: Defining VM in libvirt", spec.VmId);
+
+            var defineResult = await _executor.ExecuteAsync("virsh", $"define {xmlPath}", ct);
+            if (!defineResult.Success)
+            {
+                _logger.LogError("VM {VmId}: Failed to define VM in libvirt: {Error}",
+                    spec.VmId, defineResult.StandardError);
+
+                instance.State = VmState.Failed;
+                await _repository.UpdateVmStateAsync(spec.VmId, VmState.Failed);
+
+                // Cleanup
+                try { Directory.Delete(vmDir, recursive: true); } catch { }
+
+                return VmOperationResult.Fail(spec.VmId,
+                    $"Failed to define VM: {defineResult.StandardError}", "DEFINE_FAILED");
+            }
+
+            _logger.LogInformation("VM {VmId}: Successfully defined in libvirt", spec.VmId);
+
+            // Update database with all paths
+            await _repository.SaveVmAsync(instance);
+
+            // =====================================================
+            // STEP 7: Start the VM
+            // =====================================================
             instance.State = VmState.Starting;
             await _repository.UpdateVmStateAsync(spec.VmId, VmState.Starting);
 
-            // Start the VM
+            _logger.LogInformation("VM {VmId}: Starting VM", spec.VmId);
+
             var startResult = await _executor.ExecuteAsync("virsh", $"start {spec.VmId}", ct);
             if (startResult.Success)
             {
                 instance.State = VmState.Running;
                 instance.StartedAt = DateTime.UtcNow;
-
-                // Update database
                 await _repository.UpdateVmStateAsync(spec.VmId, VmState.Running);
 
                 _logger.LogInformation("VM {VmId} started successfully", spec.VmId);
@@ -414,9 +530,9 @@ public class LibvirtVmManager : IVmManager
                 // Background task to get IP address
                 _ = Task.Run(async () =>
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(10), ct);
+                    await Task.Delay(TimeSpan.FromSeconds(15), ct);
 
-                    await _lock.WaitAsync(ct); // ✅ ADD LOCK
+                    await _lock.WaitAsync(ct);
                     try
                     {
                         if (_vms.TryGetValue(spec.VmId, out var vm))
@@ -446,6 +562,18 @@ public class LibvirtVmManager : IVmManager
                 _logger.LogError("Failed to start VM {VmId}: {Error}", spec.VmId, startResult.StandardError);
                 return VmOperationResult.Fail(spec.VmId, startResult.StandardError, "START_FAILED");
             }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "VM {VmId}: Unexpected error during creation", spec.VmId);
+
+            if (_vms.TryGetValue(spec.VmId, out var instance))
+            {
+                instance.State = VmState.Failed;
+                await _repository.UpdateVmStateAsync(spec.VmId, VmState.Failed);
+            }
+
+            return VmOperationResult.Fail(spec.VmId, ex.Message, "UNEXPECTED_ERROR");
         }
         finally
         {

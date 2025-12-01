@@ -216,17 +216,8 @@ public class CommandProcessorService : BackgroundService
 
             if (result.Success)
             {
-                _logger.LogInformation("VM {VmId} created successfully, starting...", vmId);
-                var startResult = await _vmManager.StartVmAsync(vmId, ct);
-
-                if (startResult.Success)
-                {
-                    _logger.LogInformation("VM {VmId} started successfully", vmId);
-                    return true;
-                }
-
-                _logger.LogError("Failed to start VM {VmId}: {Error}", vmId, startResult.ErrorMessage);
-                return false;
+                _logger.LogInformation("VM {VmId} created and started successfully", vmId);
+                return true;
             }
 
             _logger.LogError("CreateVm failed: {Error}", result.ErrorMessage);
