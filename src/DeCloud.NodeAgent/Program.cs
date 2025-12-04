@@ -180,6 +180,10 @@ using (var scope = app.Services.CreateScope())
 // =====================================================
 // Middleware Pipeline
 // =====================================================
+app.UseWebSockets(new WebSocketOptions
+{
+    KeepAliveInterval = TimeSpan.FromSeconds(120)
+});
 app.UseSwagger();
 app.UseSwaggerUI();
 
