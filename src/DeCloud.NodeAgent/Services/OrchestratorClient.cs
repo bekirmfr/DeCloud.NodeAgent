@@ -144,7 +144,7 @@ public class OrchestratorClient : IOrchestratorClient
                 },
                 availableResources = new
                 {
-                    cpuCores = heartbeat.Resources.Cpu.LogicalCores - heartbeat.Resources.UsedVCpus,
+                    cpuCores = heartbeat.Resources.AvailableVCpus,
                     memoryMb = heartbeat.Resources.AvailableMemoryBytes / 1024 / 1024,
                     storageGb = heartbeat.Resources.AvailableStorageBytes / 1024 / 1024 / 1024,
                     bandwidthMbps = 1000

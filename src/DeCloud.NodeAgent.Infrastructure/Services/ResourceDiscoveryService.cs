@@ -98,7 +98,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             info.PhysicalCores = Environment.ProcessorCount;
         }
 
-        info.AvailableVCpus = Math.Max(1, info.LogicalCores) * 4;
+        info.AvailableVCpus = Math.Max(1, info.LogicalCores);
         return info;
     }
 
@@ -137,7 +137,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
         if (info.LogicalCores == 0) info.LogicalCores = Environment.ProcessorCount;
         if (info.PhysicalCores == 0) info.PhysicalCores = Environment.ProcessorCount;
-        info.AvailableVCpus = info.LogicalCores * 4;
+        info.AvailableVCpus = info.LogicalCores;
 
         return info;
     }
