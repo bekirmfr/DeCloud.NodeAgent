@@ -144,12 +144,11 @@ public class OrchestratorClient : IOrchestratorClient
                 },
                 availableResources = new
                 {
-                    cpuCores = heartbeat.Resources.AvailableVCpus,
+                    cpuCores = heartbeat.Resources.Cpu.LogicalCores - heartbeat.Resources.UsedVCpus,
                     memoryMb = heartbeat.Resources.AvailableMemoryBytes / 1024 / 1024,
                     storageGb = heartbeat.Resources.AvailableStorageBytes / 1024 / 1024 / 1024,
                     bandwidthMbps = 1000
                 },
-                // FIXED: Use data from VmSummary directly (populated by HeartbeatService)
                 activeVms = heartbeat.ActiveVmDetails.Select(v => new
                 {
                     vmId = v.VmId,
