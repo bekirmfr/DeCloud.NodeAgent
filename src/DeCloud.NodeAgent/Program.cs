@@ -31,7 +31,6 @@ builder.Services.AddSingleton<IImageManager, ImageManager>();
 
 // =====================================================
 // VM Repository with Encryption Support
-// FIXED: Single registration, proper encryption key generation
 // =====================================================
 builder.Services.AddSingleton<VmRepository>(sp =>
 {
