@@ -160,6 +160,7 @@ public class HeartbeatService : BackgroundService
                     if (vm.State == VmState.Running)
                     {
                         ipAddress = vm.Spec.Network.IpAddress ?? await _vmManager.GetVmIpAddressAsync(vm.VmId, ct);
+                        var vncPort = vm.VncPort;
                     }
 
                     vmSummaries.Add(new VmSummary
@@ -172,11 +173,9 @@ public class HeartbeatService : BackgroundService
                         VCpus = vm.Spec.VCpus,
                         MemoryBytes = vm.Spec.MemoryBytes,
                         DiskBytes = vm.Spec.DiskBytes,
-                        IpAddress = ipAddress,
                         CpuUsagePercent = usage?.CpuPercent ?? 0,
                         StartedAt = vm.StartedAt ?? vm.CreatedAt,
-
-                        // ADDED: Recovery fields from VmInstance
+                        IpAddress = ipAddress,
                         VncPort = vm.VncPort,
                         MacAddress = vm.Spec.Network.MacAddress,
                         EncryptedPassword = vm.Spec.EncryptedPassword
