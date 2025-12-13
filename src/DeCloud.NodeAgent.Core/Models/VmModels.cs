@@ -29,6 +29,7 @@ public class VmSpec
 
     // SECURITY: Password fields - only one should be set
     public string? Password { get; set; }              // Plaintext (transient, cleared after VM creation)
+    
     /// <summary>
     /// Wallet-encrypted password (stored permanently)
     /// Format: base64(iv):base64(ciphertext):base64(tag)

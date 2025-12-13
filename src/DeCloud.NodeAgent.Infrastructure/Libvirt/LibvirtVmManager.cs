@@ -485,7 +485,7 @@ public class LibvirtVmManager : IVmManager
             await SaveVmMetadataAsync(vmDir, spec, ct);
 
             // =====================================================
-            // STEP 6: Define VM in libvirt (THE CRITICAL MISSING STEP!)
+            // STEP 6: Define VM in libvirt
             // =====================================================
             _logger.LogInformation("VM {VmId}: Defining VM in libvirt", spec.VmId);
 
