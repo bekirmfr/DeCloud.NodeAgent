@@ -16,7 +16,7 @@
 
 set -e
 
-VERSION="1.3.0"
+VERSION="1.4.0"
 
 # Colors
 RED='\033[0;31m'
@@ -55,6 +55,10 @@ ENABLE_WIREGUARD_HUB=true
 # Libvirt
 SKIP_LIBVIRT=false
 
+# SSH CA configuration
+SSH_CA_KEY_PATH="/etc/ssh/decloud_ca"
+SSH_CA_PUB_PATH="/etc/ssh/decloud_ca.pub"
+
 # Minimum requirements
 MIN_CPU_CORES=2
 MIN_MEMORY_MB=2048
@@ -69,6 +73,77 @@ MEMORY_MB=""
 DISK_GB=""
 WG_PRIVATE_KEY=""
 WG_PUBLIC_KEY=""
+SSH_CA_PUBLIC_KEY=""
+
+# ============================================================
+# SSH Certificate Authority Setup
+# ============================================================
+setup_ssh_ca() {
+    log_step "Setting up SSH Certificate Authority..."
+    
+    # Check if CA already exists
+    if [ -f "$SSH_CA_KEY_PATH" ]; then
+        log_info "SSH CA already exists, skipping generation"
+        SSH_CA_PUBLIC_KEY=$(cat "$SSH_CA_PUB_PATH" 2>/dev/null || echo "")
+        log_success "SSH CA configured"
+        return
+    fi
+    
+    # Generate new SSH CA key pair
+    log_info "Generating SSH CA key pair..."
+    ssh-keygen -t ed25519 \
+        -f "$SSH_CA_KEY_PATH" \
+        -C "decloud-ca@$(hostname)" \
+        -N "" \
+        -q
+    
+    # Set proper permissions
+    chmod 600 "$SSH_CA_KEY_PATH"
+    chmod 644 "$SSH_CA_PUB_PATH"
+    
+    SSH_CA_PUBLIC_KEY=$(cat "$SSH_CA_PUB_PATH")
+    log_success "SSH CA key pair generated"
+    
+    # Configure sshd to trust this CA
+    log_info "Configuring sshd to trust CA certificates..."
+    
+    SSHD_CONFIG="/etc/ssh/sshd_config"
+    SSHD_CONFIG_BAK="/etc/ssh/sshd_config.backup-$(date +%Y%m%d-%H%M%S)"
+    
+    # Backup sshd_config
+    cp "$SSHD_CONFIG" "$SSHD_CONFIG_BAK"
+    log_info "sshd config backed up to: $SSHD_CONFIG_BAK"
+    
+    # Check if TrustedUserCAKeys already configured
+    if grep -q "^TrustedUserCAKeys" "$SSHD_CONFIG"; then
+        log_info "Updating existing TrustedUserCAKeys configuration..."
+        sed -i "s|^TrustedUserCAKeys.*|TrustedUserCAKeys $SSH_CA_PUB_PATH|" "$SSHD_CONFIG"
+    else
+        log_info "Adding TrustedUserCAKeys to sshd_config..."
+        echo "" >> "$SSHD_CONFIG"
+        echo "# DeCloud SSH Certificate Authority" >> "$SSHD_CONFIG"
+        echo "TrustedUserCAKeys $SSH_CA_PUB_PATH" >> "$SSHD_CONFIG"
+    fi
+    
+    # Test sshd configuration
+    log_info "Testing sshd configuration..."
+    if sshd -t 2>&1; then
+        log_success "sshd configuration valid"
+        
+        # Reload sshd
+        log_info "Reloading sshd..."
+        systemctl reload sshd || service sshd reload || true
+        log_success "sshd reloaded"
+    else
+        log_error "sshd configuration test failed!"
+        log_warn "Restoring backup..."
+        cp "$SSHD_CONFIG_BAK" "$SSHD_CONFIG"
+        systemctl reload sshd || service sshd reload || true
+        log_warn "SSH CA configured but sshd not reloaded"
+    fi
+    
+    log_success "SSH Certificate Authority setup complete"
+}
 
 # ============================================================
 # Argument Parsing
@@ -853,6 +928,20 @@ print_summary() {
     echo "  Orchestrator:    ${ORCHESTRATOR_URL}"
     echo ""
     
+    # SSH CA Information
+    if [ -n "$SSH_CA_PUBLIC_KEY" ]; then
+        echo "  ─────────────────────────────────────────────────────────────"
+        echo "  SSH Certificate Authority:"
+        echo "  ─────────────────────────────────────────────────────────────"
+        echo "  Status:          Configured"
+        echo "  CA Private Key:  $SSH_CA_KEY_PATH"
+        echo "  CA Public Key:   $SSH_CA_PUB_PATH"
+        echo ""
+        echo "  Wallet-based SSH authentication is enabled!"
+        echo "  Users can SSH using certificates signed by this CA."
+        echo ""
+    fi
+    
     if [ "$SKIP_WIREGUARD" = false ] && [ "$ENABLE_WIREGUARD_HUB" = true ]; then
         WG_PUBLIC_KEY=$(cat /etc/wireguard/node_public.key 2>/dev/null || echo "")
         if [ -n "$WG_PUBLIC_KEY" ]; then
@@ -878,6 +967,7 @@ print_summary() {
     if [ "$SKIP_WIREGUARD" = false ]; then
         echo "  WireGuard:       sudo decloud-wg status"
     fi
+    echo "  SSH CA Info:     cat $SSH_CA_PUB_PATH"
     echo ""
     echo "Configuration:     ${CONFIG_DIR}/appsettings.Production.json"
     echo "Data directory:    ${DATA_DIR}"
@@ -890,6 +980,7 @@ print_summary() {
     echo "Installed tools:"
     echo "  virt-customize:  $(which virt-customize 2>/dev/null && echo '✓' || echo '✗')"
     echo "  ssh-keygen:      $(which ssh-keygen 2>/dev/null && echo '✓' || echo '✗')"
+    echo "  SSH CA:          $([ -f $SSH_CA_KEY_PATH ] && echo '✓' || echo '✗')"
     echo ""
 }
 
@@ -931,6 +1022,9 @@ main() {
     install_libvirt
     install_wireguard
     configure_wireguard_hub
+    
+    # Setup SSH CA
+    setup_ssh_ca
     
     # Setup application
     create_directories
