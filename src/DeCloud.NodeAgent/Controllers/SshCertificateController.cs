@@ -2,7 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using System.Diagnostics;
 using System.Text;
 
-namespace NodeAgent.Controllers;
+namespace DeCloud.NodeAgent.Controllers;
 
 /// <summary>
 /// SSH Certificate Authority endpoints for the Node Agent
