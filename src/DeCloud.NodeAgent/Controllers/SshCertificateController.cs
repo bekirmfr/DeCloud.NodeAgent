@@ -106,10 +106,10 @@ public class SshCertificateController : ControllerBase
                 };
 
                 // Add extensions if any
-                if (extensions.Count > 0)
+                foreach (var ext in extensions)
                 {
                     args.Add("-O");
-                    args.Add(extensionsStr);
+                    args.Add(ext);  // ✅ Each extension gets its own -O flag
                 }
 
                 args.Add(pubKeyFile);               // Public key to sign
