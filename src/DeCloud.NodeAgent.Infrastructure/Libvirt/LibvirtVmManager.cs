@@ -957,6 +957,8 @@ public class LibvirtVmManager : IVmManager
             sb.AppendLine("  expire: false");
             sb.AppendLine();
             sb.AppendLine("ssh_pwauth: true");
+            _logger.LogInformation("Using password: {Password}",
+            spec.Password);
         }
 
         sb.AppendLine();
