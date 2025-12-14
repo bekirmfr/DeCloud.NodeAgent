@@ -10,6 +10,12 @@
 # - libguestfs-tools for cloud-init state cleaning
 # - openssh-client for ephemeral terminal key generation
 # 
+# Changelog v1.4.5:
+# - CRITICAL: Fixed password hash - use proper $6$ hash instead of '*'
+# - Password field now shows "P" (password set) instead of "L" (locked)
+# - Added verification that passwd -S shows correct status after setting password
+# - Ensures SSH certificate authentication works immediately after installation
+#
 # Changelog v1.4.4:
 # - CRITICAL: Added AllowUsers check and automatic decloud addition
 # - Improved unlock logic: passwd -u before usermod -p
@@ -30,7 +36,7 @@
 
 set -e
 
-VERSION="1.4.4"
+VERSION="1.4.5"
 
 # Colors
 RED='\033[0;31m'
@@ -175,8 +181,16 @@ setup_decloud_user() {
             log_info "Account is locked, unlocking..."
             # First unlock, then set impossible password
             passwd -u decloud &>/dev/null || true
-            usermod -p '*' decloud 2>/dev/null || true
-            log_success "Account unlocked (impossible password set)"
+            # Use a proper hash that shows as "P" (password set) not "L" (locked)
+            # This hash is impossible to match but doesn't trigger "locked" status
+            usermod -p '$6$rounds=656000$DeCloudImpossible$Qwt6vjdgZzE7pXWRoNmZbCFDZklM9X0v3mHs8K5jNfVhWaEoQb7Yx2Lz3PnMkJhG4RtYuIoP1aSdFgHjK2LmN.' decloud 2>/dev/null || true
+            # Verify it worked
+            PASSWD_STATUS=$(passwd -S decloud 2>/dev/null | awk '{print $2}')
+            if [ "$PASSWD_STATUS" = "P" ]; then
+                log_success "Account unlocked (impossible password set)"
+            else
+                log_warn "Account status: $PASSWD_STATUS (expected P)"
+            fi
         fi
         
         # Verify .ssh directory exists and has correct permissions
@@ -224,9 +238,19 @@ setup_decloud_user() {
         usermod -aG libvirt decloud 2>/dev/null || true
     fi
     
-    # Lock the password (certificate-only authentication)
+    # Disable password authentication (certificate-only)
     log_info "Disabling password authentication for decloud user..."
-    usermod -p '*' decloud 2>/dev/null || true
+    # Use a proper hash that shows as "P" (password set) not "L" (locked)
+    # This hash is impossible to match but doesn't trigger "locked" status in passwd -S
+    usermod -p '$6$rounds=656000$DeCloudImpossible$Qwt6vjdgZzE7pXWRoNmZbCFDZklM9X0v3mHs8K5jNfVhWaEoQb7Yx2Lz3PnMkJhG4RtYuIoP1aSdFgHjK2LmN.' decloud 2>/dev/null || true
+    
+    # Verify password field is set correctly
+    PASSWD_STATUS=$(passwd -S decloud 2>/dev/null | awk '{print $2}')
+    if [ "$PASSWD_STATUS" = "P" ]; then
+        log_success "Password authentication disabled (impossible password hash set)"
+    else
+        log_warn "Password status: $PASSWD_STATUS (expected P, got different status)"
+    fi
     
     # Create a README in the .ssh directory
     cat > /home/decloud/.ssh/README << 'README_EOF'
