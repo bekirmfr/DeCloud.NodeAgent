@@ -10,7 +10,8 @@
 # - libguestfs-tools for cloud-init state cleaning
 # - openssh-client for ephemeral terminal key generation
 # 
-# Changelog v1.4.2:
+# Changelog v1.4.3:
+# - CRITICAL: Added unlock check for existing decloud users
 # - Fixed SSH certificate authentication for decloud user
 # - Changed from passwd -l to usermod -p * (prevents account lock issues)
 # - Added sshd Match block to properly disable password auth
@@ -23,7 +24,7 @@
 
 set -e
 
-VERSION="1.4.2"
+VERSION="1.4.3"
 
 # Colors
 RED='\033[0;31m'
@@ -161,6 +162,14 @@ setup_decloud_user() {
     # Check if user already exists
     if id "decloud" &>/dev/null; then
         log_info "User 'decloud' already exists"
+        
+        # Ensure account is unlocked (not passwd -l)
+        PASSWD_STATUS=$(passwd -S decloud 2>/dev/null | awk '{print $2}')
+        if [ "$PASSWD_STATUS" = "L" ]; then
+            log_info "Account is locked, unlocking..."
+            usermod -p '*' decloud 2>/dev/null || true
+            log_success "Account unlocked (impossible password set)"
+        fi
         
         # Verify .ssh directory exists and has correct permissions
         if [ ! -d "/home/decloud/.ssh" ]; then
