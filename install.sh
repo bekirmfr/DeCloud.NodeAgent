@@ -10,6 +10,13 @@
 # - libguestfs-tools for cloud-init state cleaning
 # - openssh-client for ephemeral terminal key generation
 # 
+# Changelog v1.4.6:
+# - Added SSH client config for decloud user
+# - Automatically accepts new host keys for local VMs (192.168.122.*)
+# - Fixes "Host key verification failed" when connecting to VMs
+# - Seamless VM access through jump host without manual key acceptance
+#
+
 # Changelog v1.4.5:
 # - CRITICAL: Fixed password hash - use proper $6$ hash instead of '*'
 # - Password field now shows "P" (password set) instead of "L" (locked)
@@ -36,7 +43,7 @@
 
 set -e
 
-VERSION="1.4.5"
+VERSION="1.4.6"
 
 # Colors
 RED='\033[0;31m'
@@ -208,6 +215,26 @@ setup_decloud_user() {
             chown decloud:decloud /home/decloud/.ssh/authorized_keys
         fi
         
+        # Ensure SSH config exists for VM access
+        if [ ! -f "/home/decloud/.ssh/config" ]; then
+            log_info "Creating SSH client config for VM access..."
+            cat > /home/decloud/.ssh/config << 'SSH_CONFIG'
+# DeCloud Local VM Network
+# Automatically accept new host keys for local VMs on first connection
+Host 192.168.122.*
+    StrictHostKeyChecking accept-new
+    UserKnownHostsFile /home/decloud/.ssh/known_hosts
+    
+# External hosts require explicit verification
+Host *
+    StrictHostKeyChecking yes
+    UserKnownHostsFile /home/decloud/.ssh/known_hosts
+SSH_CONFIG
+            chmod 600 /home/decloud/.ssh/config
+            chown decloud:decloud /home/decloud/.ssh/config
+            log_success "SSH client config created"
+        fi
+        
         log_success "DeCloud user configured"
         return 0
     fi
@@ -231,6 +258,25 @@ setup_decloud_user() {
     touch /home/decloud/.ssh/authorized_keys
     chmod 600 /home/decloud/.ssh/authorized_keys
     chown decloud:decloud /home/decloud/.ssh/authorized_keys
+    
+    # Create SSH client config for VM access
+    log_info "Configuring SSH client for VM access..."
+    cat > /home/decloud/.ssh/config << 'SSH_CONFIG'
+# DeCloud Local VM Network
+# Automatically accept new host keys for local VMs on first connection
+Host 192.168.122.*
+    StrictHostKeyChecking accept-new
+    UserKnownHostsFile /home/decloud/.ssh/known_hosts
+    
+# External hosts require explicit verification  
+Host *
+    StrictHostKeyChecking yes
+    UserKnownHostsFile /home/decloud/.ssh/known_hosts
+SSH_CONFIG
+    
+    chmod 600 /home/decloud/.ssh/config
+    chown decloud:decloud /home/decloud/.ssh/config
+    log_success "SSH client configured for seamless VM access"
     
     # Add to libvirt group if it exists (optional, for VM access monitoring)
     if getent group libvirt > /dev/null 2>&1; then

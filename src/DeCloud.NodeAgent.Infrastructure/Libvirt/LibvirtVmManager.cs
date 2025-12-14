@@ -543,6 +543,9 @@ public class LibvirtVmManager : IVmManager
                                 vm.Spec.Network.IpAddress = ip;
                                 await _repository.SaveVmAsync(vm);
                                 _logger.LogInformation("VM {VmId} obtained IP: {Ip}", spec.VmId, ip);
+
+                                // Add VM host key to jump user's known_hosts for seamless SSH
+                                await AddVmHostKeyToJumpUserAsync(ip, spec.VmId, ct);
                             }
                         }
                     }
@@ -902,6 +905,86 @@ public class LibvirtVmManager : IVmManager
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Add VM's SSH host key to decloud user's known_hosts for seamless SSH access.
+    /// This prevents "Host key verification failed" errors when users connect through the jump host.
+    /// </summary>
+    private async Task AddVmHostKeyToJumpUserAsync(string vmIp, string vmId, CancellationToken ct)
+    {
+        try
+        {
+            _logger.LogInformation("VM {VmId}: Scanning SSH host key for {VmIp}", vmId, vmIp);
+
+            // Wait for SSH to be ready (up to 60 seconds)
+            var sshReady = false;
+            for (int i = 0; i < 12; i++)
+            {
+                var testResult = await _executor.ExecuteAsync("nc", $"-zv -w 2 {vmIp} 22", ct);
+                if (testResult.Success || testResult.StandardError.Contains("succeeded") ||
+                    testResult.StandardError.Contains("open"))
+                {
+                    sshReady = true;
+                    break;
+                }
+                await Task.Delay(5000, ct);
+            }
+
+            if (!sshReady)
+            {
+                _logger.LogWarning("VM {VmId}: SSH not ready after 60 seconds, skipping host key scan", vmId);
+                return;
+            }
+
+            _logger.LogInformation("VM {VmId}: SSH is ready, scanning host keys", vmId);
+
+            // Scan the host key using ssh-keyscan
+            var scanResult = await _executor.ExecuteAsync("ssh-keyscan",
+                $"-H -T 10 {vmIp}", ct);
+
+            if (!scanResult.Success || string.IsNullOrWhiteSpace(scanResult.StandardOutput))
+            {
+                _logger.LogWarning("VM {VmId}: Failed to scan host key: {Error}",
+                    vmId, scanResult.StandardError);
+                return;
+            }
+
+            var hostKey = scanResult.StandardOutput.Trim();
+            if (string.IsNullOrEmpty(hostKey) || hostKey.StartsWith("#"))
+            {
+                _logger.LogWarning("VM {VmId}: No valid host key returned from ssh-keyscan", vmId);
+                return;
+            }
+
+            // Append to decloud's known_hosts
+            var knownHostsPath = "/home/decloud/.ssh/known_hosts";
+
+            // Ensure the file exists
+            if (!File.Exists(knownHostsPath))
+            {
+                var dir = Path.GetDirectoryName(knownHostsPath);
+                if (!string.IsNullOrEmpty(dir))
+                {
+                    Directory.CreateDirectory(dir);
+                }
+                await File.WriteAllTextAsync(knownHostsPath, "", ct);
+
+                // Set proper ownership
+                await _executor.ExecuteAsync("chown", "decloud:decloud /home/decloud/.ssh/known_hosts", ct);
+                await _executor.ExecuteAsync("chmod", "600 /home/decloud/.ssh/known_hosts", ct);
+            }
+
+            // Append the host key (with newline)
+            await File.AppendAllTextAsync(knownHostsPath, hostKey + "\n", ct);
+
+            _logger.LogInformation("✓ VM {VmId}: Host key added to jump user's known_hosts", vmId);
+        }
+        catch (Exception ex)
+        {
+            // Don't fail VM creation if host key scanning fails
+            _logger.LogWarning(ex, "VM {VmId}: Failed to add host key to jump user, manual acceptance required", vmId);
+        }
     }
 
     /// <summary>
