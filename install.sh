@@ -10,6 +10,12 @@
 # - libguestfs-tools for cloud-init state cleaning
 # - openssh-client for ephemeral terminal key generation
 # 
+# Changelog v1.4.4:
+# - CRITICAL: Added AllowUsers check and automatic decloud addition
+# - Improved unlock logic: passwd -u before usermod -p
+# - Ensures AllowUsers directive doesn't block decloud user
+# - Made configure_decloud_sshd() more robust and idempotent
+#
 # Changelog v1.4.3:
 # - CRITICAL: Added unlock check for existing decloud users
 # - Fixed SSH certificate authentication for decloud user
@@ -24,7 +30,7 @@
 
 set -e
 
-VERSION="1.4.3"
+VERSION="1.4.4"
 
 # Colors
 RED='\033[0;31m'
@@ -167,6 +173,8 @@ setup_decloud_user() {
         PASSWD_STATUS=$(passwd -S decloud 2>/dev/null | awk '{print $2}')
         if [ "$PASSWD_STATUS" = "L" ]; then
             log_info "Account is locked, unlocking..."
+            # First unlock, then set impossible password
+            passwd -u decloud &>/dev/null || true
             usermod -p '*' decloud 2>/dev/null || true
             log_success "Account unlocked (impossible password set)"
         fi
@@ -265,21 +273,38 @@ configure_decloud_sshd() {
     log_step "Configuring SSH daemon for decloud user..."
     
     SSHD_CONFIG="/etc/ssh/sshd_config"
-    
-    # Check if decloud Match block already exists
-    if grep -q "^Match User decloud" "$SSHD_CONFIG"; then
-        log_info "DeCloud SSH configuration already exists"
-        return 0
-    fi
+    local config_changed=false
     
     # Backup sshd_config
     SSHD_CONFIG_BAK="/etc/ssh/sshd_config.backup-decloud-$(date +%Y%m%d-%H%M%S)"
     cp "$SSHD_CONFIG" "$SSHD_CONFIG_BAK"
     log_info "sshd config backed up to: $SSHD_CONFIG_BAK"
     
-    # Add Match block for decloud user at the end of file
-    log_info "Adding SSH configuration for decloud user..."
-    cat >> "$SSHD_CONFIG" << 'MATCH_EOF'
+    # ====================================================
+    # Check and update AllowUsers directive
+    # ====================================================
+    if grep -q "^AllowUsers" "$SSHD_CONFIG"; then
+        # AllowUsers exists - check if decloud is in it
+        if ! grep "^AllowUsers" "$SSHD_CONFIG" | grep -qw "decloud"; then
+            log_info "Adding decloud to AllowUsers directive..."
+            sed -i 's/^AllowUsers \(.*\)/AllowUsers \1 decloud/' "$SSHD_CONFIG"
+            config_changed=true
+            log_success "decloud added to AllowUsers"
+        else
+            log_info "decloud already in AllowUsers"
+        fi
+    else
+        log_info "No AllowUsers directive (all users allowed)"
+    fi
+    
+    # ====================================================
+    # Add Match block for decloud user
+    # ====================================================
+    if grep -q "^Match User decloud" "$SSHD_CONFIG"; then
+        log_info "Match block for decloud already exists"
+    else
+        log_info "Adding Match block for decloud user..."
+        cat >> "$SSHD_CONFIG" << 'MATCH_EOF'
 
 # DeCloud SSH Jump User Configuration
 # Certificate-only authentication, password auth disabled
@@ -288,26 +313,33 @@ Match User decloud
     PubkeyAuthentication yes
     AuthenticationMethods publickey
 MATCH_EOF
-    
-    # Test sshd configuration
-    log_info "Testing sshd configuration..."
-    if sshd -t 2>&1; then
-        log_success "sshd configuration valid"
-        
-        # Reload sshd
-        log_info "Reloading sshd..."
-        systemctl reload sshd || service sshd reload || true
-        log_success "sshd reloaded with decloud configuration"
-    else
-        log_error "sshd configuration test failed!"
-        log_warn "Restoring backup..."
-        cp "$SSHD_CONFIG_BAK" "$SSHD_CONFIG"
-        systemctl reload sshd || service sshd reload || true
-        log_error "Failed to configure sshd for decloud user"
-        return 1
+        config_changed=true
+        log_success "Match block added"
     fi
     
-    log_success "DeCloud SSH configuration complete"
+    # ====================================================
+    # Test and reload sshd if changes were made
+    # ====================================================
+    if [ "$config_changed" = true ]; then
+        log_info "Testing sshd configuration..."
+        if sshd -t 2>&1; then
+            log_success "sshd configuration valid"
+            
+            # Reload sshd
+            log_info "Reloading sshd..."
+            systemctl reload sshd || service sshd reload || true
+            log_success "sshd reloaded with decloud configuration"
+        else
+            log_error "sshd configuration test failed!"
+            log_warn "Restoring backup..."
+            cp "$SSHD_CONFIG_BAK" "$SSHD_CONFIG"
+            systemctl reload sshd || service sshd reload || true
+            log_error "Failed to configure sshd for decloud user"
+            return 1
+        fi
+    else
+        log_success "DeCloud SSH configuration already correct"
+    fi
 }
 
 # ============================================================
