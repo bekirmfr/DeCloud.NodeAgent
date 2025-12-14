@@ -9,6 +9,13 @@
 # - cloud-init tools for VM provisioning
 # - libguestfs-tools for cloud-init state cleaning
 # - openssh-client for ephemeral terminal key generation
+# 
+# Changelog v1.4.2:
+# - Fixed SSH certificate authentication for decloud user
+# - Changed from passwd -l to usermod -p * (prevents account lock issues)
+# - Added sshd Match block to properly disable password auth
+# - Ensures certificate-only authentication works correctly
+#
 #
 # Usage:
 #   curl -sSL https://raw.githubusercontent.com/bekirmfr/DeCloud.NodeAgent/master/install.sh | sudo bash -s -- --orchestrator http://IP:5050
@@ -16,7 +23,7 @@
 
 set -e
 
-VERSION="1.4.0"
+VERSION="1.4.2"
 
 # Colors
 RED='\033[0;31m'
@@ -202,7 +209,7 @@ setup_decloud_user() {
     
     # Lock the password (certificate-only authentication)
     log_info "Disabling password authentication for decloud user..."
-    passwd -l decloud &>/dev/null || true
+    usermod -p '*' decloud 2>/dev/null || true
     
     # Create a README in the .ssh directory
     cat > /home/decloud/.ssh/README << 'README_EOF'
@@ -240,6 +247,58 @@ README_EOF
     else
         echo "    Groups:          decloud"
     fi
+}
+
+# ============================================================
+# Configure SSHD for DeCloud User
+# ============================================================
+configure_decloud_sshd() {
+    log_step "Configuring SSH daemon for decloud user..."
+    
+    SSHD_CONFIG="/etc/ssh/sshd_config"
+    
+    # Check if decloud Match block already exists
+    if grep -q "^Match User decloud" "$SSHD_CONFIG"; then
+        log_info "DeCloud SSH configuration already exists"
+        return 0
+    fi
+    
+    # Backup sshd_config
+    SSHD_CONFIG_BAK="/etc/ssh/sshd_config.backup-decloud-$(date +%Y%m%d-%H%M%S)"
+    cp "$SSHD_CONFIG" "$SSHD_CONFIG_BAK"
+    log_info "sshd config backed up to: $SSHD_CONFIG_BAK"
+    
+    # Add Match block for decloud user at the end of file
+    log_info "Adding SSH configuration for decloud user..."
+    cat >> "$SSHD_CONFIG" << 'MATCH_EOF'
+
+# DeCloud SSH Jump User Configuration
+# Certificate-only authentication, password auth disabled
+Match User decloud
+    PasswordAuthentication no
+    PubkeyAuthentication yes
+    AuthenticationMethods publickey
+MATCH_EOF
+    
+    # Test sshd configuration
+    log_info "Testing sshd configuration..."
+    if sshd -t 2>&1; then
+        log_success "sshd configuration valid"
+        
+        # Reload sshd
+        log_info "Reloading sshd..."
+        systemctl reload sshd || service sshd reload || true
+        log_success "sshd reloaded with decloud configuration"
+    else
+        log_error "sshd configuration test failed!"
+        log_warn "Restoring backup..."
+        cp "$SSHD_CONFIG_BAK" "$SSHD_CONFIG"
+        systemctl reload sshd || service sshd reload || true
+        log_error "Failed to configure sshd for decloud user"
+        return 1
+    fi
+    
+    log_success "DeCloud SSH configuration complete"
 }
 
 # ============================================================
@@ -1138,6 +1197,7 @@ main() {
 
     # Setup decloud user for SSH jump host
     setup_decloud_user
+    configure_decloud_sshd
     
     # Setup application
     create_directories
