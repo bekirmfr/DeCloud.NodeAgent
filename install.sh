@@ -146,6 +146,103 @@ setup_ssh_ca() {
 }
 
 # ============================================================
+# DeCloud SSH User Setup
+# ============================================================
+setup_decloud_user() {
+    log_step "Setting up 'decloud' system user for SSH certificate authentication..."
+    
+    # Check if user already exists
+    if id "decloud" &>/dev/null; then
+        log_info "User 'decloud' already exists"
+        
+        # Verify .ssh directory exists and has correct permissions
+        if [ ! -d "/home/decloud/.ssh" ]; then
+            log_info "Creating .ssh directory for existing user..."
+            mkdir -p /home/decloud/.ssh
+            chmod 700 /home/decloud/.ssh
+            chown decloud:decloud /home/decloud/.ssh
+        fi
+        
+        # Ensure authorized_keys exists
+        if [ ! -f "/home/decloud/.ssh/authorized_keys" ]; then
+            touch /home/decloud/.ssh/authorized_keys
+            chmod 600 /home/decloud/.ssh/authorized_keys
+            chown decloud:decloud /home/decloud/.ssh/authorized_keys
+        fi
+        
+        log_success "DeCloud user configured"
+        return 0
+    fi
+    
+    # Create system user (no password, certificate-only authentication)
+    log_info "Creating 'decloud' system user..."
+    if ! useradd -m -s /bin/bash -c "DeCloud SSH Jump User" decloud 2>/dev/null; then
+        log_error "Failed to create decloud user"
+        return 1
+    fi
+    
+    log_success "User 'decloud' created"
+    
+    # Create .ssh directory with proper permissions
+    log_info "Setting up SSH directory..."
+    mkdir -p /home/decloud/.ssh
+    chmod 700 /home/decloud/.ssh
+    chown decloud:decloud /home/decloud/.ssh
+    
+    # Create authorized_keys file (even if empty, for future use)
+    touch /home/decloud/.ssh/authorized_keys
+    chmod 600 /home/decloud/.ssh/authorized_keys
+    chown decloud:decloud /home/decloud/.ssh/authorized_keys
+    
+    # Add to libvirt group if it exists (optional, for VM access monitoring)
+    if getent group libvirt > /dev/null 2>&1; then
+        log_info "Adding decloud user to libvirt group..."
+        usermod -aG libvirt decloud 2>/dev/null || true
+    fi
+    
+    # Lock the password (certificate-only authentication)
+    log_info "Disabling password authentication for decloud user..."
+    passwd -l decloud &>/dev/null || true
+    
+    # Create a README in the .ssh directory
+    cat > /home/decloud/.ssh/README << 'README_EOF'
+DeCloud SSH Jump Host
+=====================
+
+This account is configured for SSH certificate-based authentication only.
+
+Certificate authentication is handled by the DeCloud orchestrator.
+Users authenticate using their Ethereum wallet to receive short-lived
+SSH certificates signed by this node's Certificate Authority.
+
+The SSH CA public key is located at: /etc/ssh/decloud_ca.pub
+
+Connection flow:
+  User → Wallet signature → Orchestrator → SSH certificate → Jump host → VM
+
+For more information: https://github.com/bekirmfr/DeCloud
+README_EOF
+    
+    chown decloud:decloud /home/decloud/.ssh/README
+    chmod 644 /home/decloud/.ssh/README
+    
+    log_success "DeCloud user setup complete"
+    
+    # Display user info
+    log_info "User information:"
+    echo "    Username:        decloud"
+    echo "    Home directory:  /home/decloud"
+    echo "    Shell:           /bin/bash"
+    echo "    Authentication:  SSH certificate only (password disabled)"
+    echo "    SSH directory:   /home/decloud/.ssh (mode: 700)"
+    if getent group libvirt > /dev/null 2>&1; then
+        echo "    Groups:          decloud, libvirt"
+    else
+        echo "    Groups:          decloud"
+    fi
+}
+
+# ============================================================
 # Argument Parsing
 # ============================================================
 parse_args() {
@@ -941,6 +1038,19 @@ print_summary() {
         echo "  Users can SSH using certificates signed by this CA."
         echo ""
     fi
+
+    # DeCloud User Information
+    if id "decloud" &>/dev/null; then
+        echo "  ─────────────────────────────────────────────────────────────"
+        echo "  SSH Jump User:"
+        echo "  ─────────────────────────────────────────────────────────────"
+        echo "  Username:        decloud"
+        echo "  Authentication:  SSH Certificate only"
+        echo "  Home Directory:  /home/decloud"
+        echo ""
+        echo "  Users connect via: ssh -i key.pem -o CertificateFile=cert.pub decloud@${PUBLIC_IP}"
+        echo ""
+    fi
     
     if [ "$SKIP_WIREGUARD" = false ] && [ "$ENABLE_WIREGUARD_HUB" = true ]; then
         WG_PUBLIC_KEY=$(cat /etc/wireguard/node_public.key 2>/dev/null || echo "")
@@ -1025,6 +1135,9 @@ main() {
     
     # Setup SSH CA
     setup_ssh_ca
+
+    # Setup decloud user for SSH jump host
+    setup_decloud_user
     
     # Setup application
     create_directories

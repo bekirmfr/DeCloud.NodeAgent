@@ -5,6 +5,11 @@
 # Fetches latest code from GitHub, checks dependencies, rebuilds and restarts.
 # Safe to run multiple times - only installs/updates what's needed.
 #
+# Changelog v1.3.0:
+# - Added decloud user creation/verification
+# - Ensures SSH certificate authentication works on updates
+# - Idempotent: safe to run multiple times
+#
 # Usage:
 #   sudo ./update.sh              # Normal update
 #   sudo ./update.sh --force      # Force rebuild even if no changes
@@ -13,7 +18,7 @@
 
 set -e
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 
 # Colors
 RED='\033[0;31m'
@@ -104,6 +109,85 @@ check_installation() {
         log_error "  curl -sSL https://raw.githubusercontent.com/bekirmfr/DeCloud.NodeAgent/master/install.sh | sudo bash -s -- --orchestrator <URL>"
         exit 1
     fi
+}
+
+# ============================================================
+# DeCloud SSH User Setup (ensure exists on updates)
+# ============================================================
+setup_decloud_user() {
+    log_step "Checking 'decloud' system user..."
+    
+    # Check if user already exists
+    if id "decloud" &>/dev/null; then
+        log_success "User 'decloud' exists"
+        
+        # Verify .ssh directory exists and has correct permissions
+        if [ ! -d "/home/decloud/.ssh" ]; then
+            log_info "Creating .ssh directory..."
+            mkdir -p /home/decloud/.ssh
+            chmod 700 /home/decloud/.ssh
+            chown decloud:decloud /home/decloud/.ssh
+        fi
+        
+        # Ensure authorized_keys exists
+        if [ ! -f "/home/decloud/.ssh/authorized_keys" ]; then
+            touch /home/decloud/.ssh/authorized_keys
+            chmod 600 /home/decloud/.ssh/authorized_keys
+            chown decloud:decloud /home/decloud/.ssh/authorized_keys
+        fi
+        
+        return 0
+    fi
+    
+    # User doesn't exist, create it
+    log_info "Creating 'decloud' system user..."
+    if ! useradd -m -s /bin/bash -c "DeCloud SSH Jump User" decloud 2>/dev/null; then
+        log_error "Failed to create decloud user"
+        return 1
+    fi
+    
+    log_success "User 'decloud' created"
+    
+    # Create .ssh directory with proper permissions
+    mkdir -p /home/decloud/.ssh
+    chmod 700 /home/decloud/.ssh
+    chown decloud:decloud /home/decloud/.ssh
+    
+    # Create authorized_keys file
+    touch /home/decloud/.ssh/authorized_keys
+    chmod 600 /home/decloud/.ssh/authorized_keys
+    chown decloud:decloud /home/decloud/.ssh/authorized_keys
+    
+    # Add to libvirt group if it exists
+    if getent group libvirt > /dev/null 2>&1; then
+        log_info "Adding decloud user to libvirt group..."
+        usermod -aG libvirt decloud 2>/dev/null || true
+    fi
+    
+    # Lock the password (certificate-only authentication)
+    log_info "Disabling password authentication..."
+    passwd -l decloud &>/dev/null || true
+    
+    # Create README
+    cat > /home/decloud/.ssh/README << 'README_EOF'
+DeCloud SSH Jump Host
+=====================
+
+This account is configured for SSH certificate-based authentication only.
+
+Certificate authentication is handled by the DeCloud orchestrator.
+Users authenticate using their Ethereum wallet to receive short-lived
+SSH certificates signed by this node's Certificate Authority.
+
+The SSH CA public key is located at: /etc/ssh/decloud_ca.pub
+
+For more information: https://github.com/bekirmfr/DeCloud
+README_EOF
+    
+    chown decloud:decloud /home/decloud/.ssh/README
+    chmod 644 /home/decloud/.ssh/README
+    
+    log_success "DeCloud user configured"
 }
 
 # ============================================================
@@ -519,6 +603,21 @@ show_status() {
     # Database info
     show_database_info
     
+    # DeCloud user status
+    echo ""
+    log_info "SSH Certificate Auth:"
+    if id "decloud" &>/dev/null; then
+        log_success "  DeCloud user: configured"
+        if [ -f "/etc/ssh/decloud_ca.pub" ]; then
+            log_success "  SSH CA: configured"
+        else
+            log_warn "  SSH CA: not configured"
+        fi
+    else
+        log_warn "  DeCloud user: not found (SSH certificate auth won't work)"
+        log_info "  Run install.sh to set up SSH CA and decloud user"
+    fi
+    
     # WireGuard status
     if command -v wg &> /dev/null && wg show wg-decloud &> /dev/null; then
         local peers=$(wg show wg-decloud peers 2>/dev/null | wc -l)
@@ -574,6 +673,9 @@ main() {
     fi
     
     check_installation
+    
+    # Ensure decloud user exists (for SSH certificate auth)
+    setup_decloud_user
     
     # Fetch updates
     fetch_updates
