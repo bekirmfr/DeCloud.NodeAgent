@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json.Serialization;
 
 namespace DeCloud.NodeAgent.Controllers;
 
@@ -258,10 +259,16 @@ public class CertificateSignResponse
     public DateTime? ValidUntil { get; set; }
 }
 
+
 public class CaPublicKeyResponse
 {
+    [JsonPropertyName("success")]
     public bool Success { get; set; }
+
+    [JsonPropertyName("publicKey")]
     public string PublicKey { get; set; } = "";
+
+    [JsonPropertyName("error")]
     public string? Error { get; set; }
 }
 
