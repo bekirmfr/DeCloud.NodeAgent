@@ -125,6 +125,11 @@ public class NodeController : ControllerBase
         return Ok(new { status = "healthy", timestamp = DateTime.UtcNow });
     }
 
+    /// <summary>
+    /// Handles HTTP GET requests to retrieve the most recent heartbeat data.
+    /// </summary>
+    /// <returns>An <see cref="OkObjectResult"/> containing the latest heartbeat data if available; otherwise, a <see
+    /// cref="NotFoundObjectResult"/> indicating that no heartbeat data is present.</returns>
     [HttpGet("heartbeat")]
     public IActionResult Heartbeat()
     {
