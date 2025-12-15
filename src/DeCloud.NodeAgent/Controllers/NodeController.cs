@@ -11,18 +11,18 @@ public class NodeController : ControllerBase
 {
     private readonly IResourceDiscoveryService _resourceDiscovery;
     private readonly INetworkManager _networkManager;
-    private readonly HeartbeatService _heartBeatService;
+    private readonly IOrchestratorClient _orchestratorClient;
     private readonly ILogger<NodeController> _logger;
 
     public NodeController(
         IResourceDiscoveryService resourceDiscovery,
         INetworkManager networkManager,
-        HeartbeatService _heartBeatService,
+        IOrchestratorClient orchestratorClient,
         ILogger<NodeController> logger)
     {
         _resourceDiscovery = resourceDiscovery;
         _networkManager = networkManager;
-        this._heartBeatService = _heartBeatService;
+        _orchestratorClient = orchestratorClient;
         _logger = logger;
     }
 
@@ -133,14 +133,11 @@ public class NodeController : ControllerBase
     [HttpGet("heartbeat")]
     public IActionResult Heartbeat()
     {
-        var lastHeartbeat = _heartBeatService.GetLastHeartbeat();
-        if (lastHeartbeat != null)
-        {
-            return Ok(lastHeartbeat);
-        }
-        else
+        var lastHeartbeat = _orchestratorClient.GetLastHeartbeat();
+        if (lastHeartbeat == null)
         {
             return NotFound("No heartbeat data available.");
         }
+        return Ok(lastHeartbeat);
     }
 }

@@ -227,11 +227,6 @@ public class HeartbeatService : BackgroundService
         }
     }
 
-    public Heartbeat? GetLastHeartbeat()
-    {
-        return _lastHeartbeat;
-    }
-
     private async Task<string> GetPublicIpAsync(CancellationToken ct)
     {
         try

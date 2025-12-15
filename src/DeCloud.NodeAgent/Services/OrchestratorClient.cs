@@ -24,6 +24,7 @@ public class OrchestratorClient : IOrchestratorClient
 
     private string? _nodeId;
     private string? _authToken;
+    private Heartbeat? _lastHeartbeat = null;
 
     // Queue for pending commands received from heartbeat responses
     private readonly ConcurrentQueue<PendingCommand> _pendingCommands = new();
@@ -174,6 +175,8 @@ public class OrchestratorClient : IOrchestratorClient
 
             if (response.IsSuccessStatusCode)
             {
+                _lastHeartbeat = heartbeat;
+
                 var content = await response.Content.ReadAsStringAsync(ct);
                 await ProcessHeartbeatResponseAsync(content, ct);
 
@@ -194,6 +197,11 @@ public class OrchestratorClient : IOrchestratorClient
             _logger.LogError(ex, "Failed to send heartbeat");
             return false;
         }
+    }
+
+    public Heartbeat? GetLastHeartbeat()
+    {
+        return _lastHeartbeat;
     }
 
     private Task ProcessHeartbeatResponseAsync(string content, CancellationToken ct)
