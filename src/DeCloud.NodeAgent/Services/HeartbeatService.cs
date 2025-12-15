@@ -159,7 +159,8 @@ public class HeartbeatService : BackgroundService
                     string? ipAddress = null;
                     if (vm.State == VmState.Running)
                     {
-                        ipAddress = vm.Spec.Network.IpAddress ?? await _vmManager.GetVmIpAddressAsync(vm.VmId, ct);
+                        // CORRECT: Always get fresh libvirt IP first, fall back to stored IP
+                        ipAddress = await _vmManager.GetVmIpAddressAsync(vm.VmId, ct) ?? vm.Spec.Network.IpAddress;
                         var vncPort = vm.VncPort;
                     }
 
