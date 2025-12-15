@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
@@ -129,14 +129,37 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             foreach (var line in lscpuResult.StandardOutput.Split('\n'))
             {
                 if (line.StartsWith("CPU(s):"))
-                    int.TryParse(line.Split(':').LastOrDefault()?.Trim(), out var cores);
+                {
+                    if (int.TryParse(line.Split(':').LastOrDefault()?.Trim(), out var cores))
+                    {
+                        info.LogicalCores = cores;
+                    }
+                }
                 else if (line.StartsWith("Core(s) per socket:"))
-                    int.TryParse(line.Split(':').LastOrDefault()?.Trim(), out var cps);
+                {
+                    if (int.TryParse(line.Split(':').LastOrDefault()?.Trim(), out var coresPerSocket))
+                    {
+                        info.PhysicalCores = coresPerSocket;
+                    }
+                }
+                else if (line.StartsWith("Socket(s):"))
+                {
+                    // Also parse socket count for accurate physical core calculation
+                    if (int.TryParse(line.Split(':').LastOrDefault()?.Trim(), out var sockets))
+                    {
+                        // Physical cores = cores per socket × socket count
+                        if (info.PhysicalCores > 0)
+                        {
+                            info.PhysicalCores *= sockets;
+                        }
+                    }
+                }
             }
         }
 
+        // Fallback only if lscpu completely failed
         if (info.LogicalCores == 0) info.LogicalCores = Environment.ProcessorCount;
-        if (info.PhysicalCores == 0) info.PhysicalCores = Environment.ProcessorCount;
+        if (info.PhysicalCores == 0) info.PhysicalCores = info.LogicalCores;
         info.AvailableVCpus = info.LogicalCores;
 
         return info;

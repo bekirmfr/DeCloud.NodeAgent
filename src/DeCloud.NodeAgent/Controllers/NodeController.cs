@@ -1,5 +1,6 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Services;
 using Microsoft.AspNetCore.Mvc;
 
 namespace DeCloud.NodeAgent.Controllers;
@@ -10,15 +11,18 @@ public class NodeController : ControllerBase
 {
     private readonly IResourceDiscoveryService _resourceDiscovery;
     private readonly INetworkManager _networkManager;
+    private readonly HeartbeatService _heartBeatService;
     private readonly ILogger<NodeController> _logger;
 
     public NodeController(
         IResourceDiscoveryService resourceDiscovery,
         INetworkManager networkManager,
+        HeartbeatService _heartBeatService,
         ILogger<NodeController> logger)
     {
         _resourceDiscovery = resourceDiscovery;
         _networkManager = networkManager;
+        this._heartBeatService = _heartBeatService;
         _logger = logger;
     }
 
@@ -119,5 +123,19 @@ public class NodeController : ControllerBase
     public IActionResult Health()
     {
         return Ok(new { status = "healthy", timestamp = DateTime.UtcNow });
+    }
+
+    [HttpGet("heartbeat")]
+    public IActionResult Heartbeat()
+    {
+        var lastHeartbeat = _heartBeatService.GetLastHeartbeat();
+        if (lastHeartbeat != null)
+        {
+            return Ok(lastHeartbeat);
+        }
+        else
+        {
+            return NotFound("No heartbeat data available.");
+        }
     }
 }

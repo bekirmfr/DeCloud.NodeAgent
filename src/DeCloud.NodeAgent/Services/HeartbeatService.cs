@@ -14,6 +14,7 @@ public class HeartbeatService : BackgroundService
     private readonly IOrchestratorClient _orchestratorClient;
     private readonly HeartbeatOptions _options;
     private readonly ILogger<HeartbeatService> _logger;
+    private Heartbeat? _lastHeartbeat = null;
     private NodeStatus _currentStatus = NodeStatus.Offline;
 
     public HeartbeatService(
@@ -207,6 +208,7 @@ public class HeartbeatService : BackgroundService
 
             if (success)
             {
+                _lastHeartbeat = heartbeat;
                 _logger.LogDebug("Heartbeat sent: {VmCount} VMs, CPU {Cpu}%, MEM {Mem}%",
                     activeVms.Count,
                     snapshot.CpuUsagePercent,
@@ -223,6 +225,11 @@ public class HeartbeatService : BackgroundService
         {
             _logger.LogError(ex, "Error sending heartbeat");
         }
+    }
+
+    public Heartbeat? GetLastHeartbeat()
+    {
+        return _lastHeartbeat;
     }
 
     private async Task<string> GetPublicIpAsync(CancellationToken ct)
