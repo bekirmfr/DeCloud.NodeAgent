@@ -1073,23 +1073,27 @@ public class LibvirtVmManager : IVmManager
             sb.AppendLine("      # ERROR: CA public key not available");
         }
 
-        // Runtime commands
+        // Runtime commands - Using heredoc to avoid quote issues
         sb.AppendLine();
         sb.AppendLine("runcmd:");
         sb.AppendLine("  - systemctl enable qemu-guest-agent");
         sb.AppendLine("  - systemctl start qemu-guest-agent");
 
-        // =====================================================
-        // SECURITY: Configure SSH Certificate Authority
-        // NO inline comments in runcmd - they break YAML parsing!
-        // =====================================================
-        sb.AppendLine("  - echo '' >> /etc/ssh/sshd_config");
-        sb.AppendLine("  - echo '# DeCloud SSH Certificate Authority' >> /etc/ssh/sshd_config");
-        sb.AppendLine("  - echo 'TrustedUserCAKeys /etc/ssh/decloud_ca.pub' >> /etc/ssh/sshd_config");
-        sb.AppendLine("  - echo 'AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u' >> /etc/ssh/sshd_config");
+        // Use heredoc to write SSH config - avoids ALL quote escaping issues
+        sb.AppendLine("  - |");
+        sb.AppendLine("    cat >> /etc/ssh/sshd_config << 'DECLOUD_EOF'");
+        sb.AppendLine("");
+        sb.AppendLine("    # DeCloud: SSH Certificate Authority");
+        sb.AppendLine("    TrustedUserCAKeys /etc/ssh/decloud_ca.pub");
+        sb.AppendLine("    AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u");
+        sb.AppendLine("    DECLOUD_EOF");
+
+        // Create principals directory and file
         sb.AppendLine("  - mkdir -p /etc/ssh/auth_principals");
-        sb.AppendLine($"  - echo 'vm-{spec.VmId}' > /etc/ssh/auth_principals/ubuntu");
+        sb.AppendLine($"  - echo vm-{spec.VmId} > /etc/ssh/auth_principals/ubuntu");
         sb.AppendLine("  - chmod 644 /etc/ssh/auth_principals/ubuntu");
+
+        // Restart SSH to apply configuration
         sb.AppendLine("  - systemctl restart sshd || systemctl restart ssh");
 
         // Ensure SSH allows password auth if password is set
