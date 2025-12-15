@@ -1059,7 +1059,6 @@ public class LibvirtVmManager : IVmManager
         if (File.Exists(caPublicKeyPath))
         {
             var caPublicKey = await File.ReadAllTextAsync(caPublicKeyPath, ct);
-            // Indent each line with 6 spaces for YAML
             foreach (var line in caPublicKey.Split('\n', StringSplitOptions.RemoveEmptyEntries))
             {
                 sb.AppendLine($"      {line.Trim()}");
@@ -1071,7 +1070,7 @@ public class LibvirtVmManager : IVmManager
             _logger.LogWarning(
                 "VM {VmId}: SSH CA public key not found at {Path} - certificate auth will not work!",
                 spec.VmId, caPublicKeyPath);
-            sb.AppendLine("      # ERROR: CA public key not available on node");
+            sb.AppendLine("      # ERROR: CA public key not available");
         }
 
         // Runtime commands
@@ -1079,27 +1078,18 @@ public class LibvirtVmManager : IVmManager
         sb.AppendLine("runcmd:");
         sb.AppendLine("  - systemctl enable qemu-guest-agent");
         sb.AppendLine("  - systemctl start qemu-guest-agent");
-        sb.AppendLine();
 
         // =====================================================
         // SECURITY: Configure SSH Certificate Authority
+        // NO inline comments in runcmd - they break YAML parsing!
         // =====================================================
-        sb.AppendLine("  # Configure SSH Certificate Authority trust");
         sb.AppendLine("  - echo '' >> /etc/ssh/sshd_config");
-        sb.AppendLine("  - echo '# DeCloud: SSH Certificate Authority' >> /etc/ssh/sshd_config");
+        sb.AppendLine("  - echo '# DeCloud SSH Certificate Authority' >> /etc/ssh/sshd_config");
         sb.AppendLine("  - echo 'TrustedUserCAKeys /etc/ssh/decloud_ca.pub' >> /etc/ssh/sshd_config");
         sb.AppendLine("  - echo 'AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u' >> /etc/ssh/sshd_config");
-        sb.AppendLine();
-
-        // Create principals for ubuntu user (only allow access with this VM's ID)
-        sb.AppendLine("  # Configure allowed certificate principals");
         sb.AppendLine("  - mkdir -p /etc/ssh/auth_principals");
         sb.AppendLine($"  - echo 'vm-{spec.VmId}' > /etc/ssh/auth_principals/ubuntu");
         sb.AppendLine("  - chmod 644 /etc/ssh/auth_principals/ubuntu");
-        sb.AppendLine();
-
-        // Restart sshd
-        sb.AppendLine("  # Apply SSH configuration");
         sb.AppendLine("  - systemctl restart sshd || systemctl restart ssh");
 
         // Ensure SSH allows password auth if password is set
