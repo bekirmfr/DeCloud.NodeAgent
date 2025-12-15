@@ -1073,7 +1073,9 @@ public class LibvirtVmManager : IVmManager
             sb.AppendLine("      # ERROR: CA public key not available");
         }
 
+        // =====================================================
         // Runtime commands - Using heredoc to avoid quote issues
+        // =====================================================
         sb.AppendLine();
         sb.AppendLine("runcmd:");
         sb.AppendLine("  - systemctl enable qemu-guest-agent");
