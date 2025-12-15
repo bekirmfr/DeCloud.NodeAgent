@@ -1003,7 +1003,6 @@ public class LibvirtVmManager : IVmManager
         sb.AppendLine();
 
         // CRITICAL: Regenerate machine-id BEFORE networking starts
-        // This prevents DHCP collisions when VMs are cloned from the same base image
         sb.AppendLine("bootcmd:");
         sb.AppendLine("  - rm -f /etc/machine-id /var/lib/dbus/machine-id");
         sb.AppendLine("  - systemd-machine-id-setup");
@@ -1016,7 +1015,7 @@ public class LibvirtVmManager : IVmManager
         sb.AppendLine("    shell: /bin/bash");
         sb.AppendLine(hasPassword ? "    lock_passwd: false" : "    lock_passwd: true");
 
-        // SSH key(s) - support multiple keys (newline separated)
+        // SSH key(s)
         if (hasSshKey)
         {
             sb.AppendLine("    ssh_authorized_keys:");
@@ -1040,8 +1039,7 @@ public class LibvirtVmManager : IVmManager
             sb.AppendLine("  expire: false");
             sb.AppendLine();
             sb.AppendLine("ssh_pwauth: true");
-            _logger.LogInformation("Using password: {Password}",
-            spec.Password);
+            _logger.LogInformation("Using password: {Password}", spec.Password);
         }
 
         sb.AppendLine();
@@ -1049,12 +1047,62 @@ public class LibvirtVmManager : IVmManager
         sb.AppendLine("  - qemu-guest-agent");
         sb.AppendLine();
 
+        // =====================================================
+        // SECURITY: Write SSH CA public key
+        // =====================================================
+        sb.AppendLine("write_files:");
+        sb.AppendLine("  - path: /etc/ssh/decloud_ca.pub");
+        sb.AppendLine("    permissions: '0644'");
+        sb.AppendLine("    content: |");
+
+        var caPublicKeyPath = "/etc/ssh/decloud_ca.pub";
+        if (File.Exists(caPublicKeyPath))
+        {
+            var caPublicKey = await File.ReadAllTextAsync(caPublicKeyPath, ct);
+            // Indent each line with 6 spaces for YAML
+            foreach (var line in caPublicKey.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                sb.AppendLine($"      {line.Trim()}");
+            }
+            _logger.LogInformation("VM {VmId}: Including SSH CA public key in cloud-init", spec.VmId);
+        }
+        else
+        {
+            _logger.LogWarning(
+                "VM {VmId}: SSH CA public key not found at {Path} - certificate auth will not work!",
+                spec.VmId, caPublicKeyPath);
+            sb.AppendLine("      # ERROR: CA public key not available on node");
+        }
+
         // Runtime commands
+        sb.AppendLine();
         sb.AppendLine("runcmd:");
         sb.AppendLine("  - systemctl enable qemu-guest-agent");
         sb.AppendLine("  - systemctl start qemu-guest-agent");
+        sb.AppendLine();
 
-        // Ensure SSH allows password auth (some images disable it)
+        // =====================================================
+        // SECURITY: Configure SSH Certificate Authority
+        // =====================================================
+        sb.AppendLine("  # Configure SSH Certificate Authority trust");
+        sb.AppendLine("  - echo '' >> /etc/ssh/sshd_config");
+        sb.AppendLine("  - echo '# DeCloud: SSH Certificate Authority' >> /etc/ssh/sshd_config");
+        sb.AppendLine("  - echo 'TrustedUserCAKeys /etc/ssh/decloud_ca.pub' >> /etc/ssh/sshd_config");
+        sb.AppendLine("  - echo 'AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u' >> /etc/ssh/sshd_config");
+        sb.AppendLine();
+
+        // Create principals for ubuntu user (only allow access with this VM's ID)
+        sb.AppendLine("  # Configure allowed certificate principals");
+        sb.AppendLine("  - mkdir -p /etc/ssh/auth_principals");
+        sb.AppendLine($"  - echo 'vm-{spec.VmId}' > /etc/ssh/auth_principals/ubuntu");
+        sb.AppendLine("  - chmod 644 /etc/ssh/auth_principals/ubuntu");
+        sb.AppendLine();
+
+        // Restart sshd
+        sb.AppendLine("  # Apply SSH configuration");
+        sb.AppendLine("  - systemctl restart sshd || systemctl restart ssh");
+
+        // Ensure SSH allows password auth if password is set
         if (hasPassword)
         {
             sb.AppendLine("  - sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config");
@@ -1095,8 +1143,9 @@ public class LibvirtVmManager : IVmManager
             return string.Empty;
         }
 
-        _logger.LogInformation("Created cloud-init ISO at {Path} (password auth: {HasPassword}, ssh key: {HasSshKey})",
-            isoPath, hasPassword, hasSshKey);
+        _logger.LogInformation(
+            "Created cloud-init ISO at {Path} (password: {HasPassword}, ssh key: {HasSshKey}, CA trust: {HasCA})",
+            isoPath, hasPassword, hasSshKey, File.Exists(caPublicKeyPath));
 
         return isoPath;
     }
