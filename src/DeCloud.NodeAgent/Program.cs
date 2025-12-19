@@ -108,6 +108,11 @@ builder.Services.AddSingleton<IOrchestratorClient>(sp =>
     sp.GetRequiredService<OrchestratorClient>());
 
 // =====================================================
+// Ingress Gateway & Security Services  <-- ADD THIS
+// =====================================================
+builder.Services.AddIngressAndSecurityServices(builder.Configuration);
+
+// =====================================================
 // Background Services
 // =====================================================
 builder.Services.AddHostedService<HeartbeatService>();
