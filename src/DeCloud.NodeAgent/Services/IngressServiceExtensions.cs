@@ -78,6 +78,12 @@ public static class IngressServiceExtensions
         // Security audit logging
         services.AddSingleton<IAuditService, AuditService>();
 
+        // HttpClient for VM proxy (used by InternalProxyController)
+        services.AddHttpClient("VmProxy", client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(30);
+        });
+
         return services;
     }
 

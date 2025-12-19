@@ -1,4 +1,5 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Infrastructure;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using DeCloud.NodeAgent.Infrastructure.Network;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
@@ -108,7 +109,7 @@ builder.Services.AddSingleton<IOrchestratorClient>(sp =>
     sp.GetRequiredService<OrchestratorClient>());
 
 // =====================================================
-// Ingress Gateway & Security Services  <-- ADD THIS
+// Ingress Gateway & Security Services
 // =====================================================
 builder.Services.AddIngressAndSecurityServices(builder.Configuration);
 
