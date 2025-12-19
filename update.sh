@@ -1,48 +1,25 @@
 #!/bin/bash
 #
 # DeCloud Node Agent Update Script
-# 
-# Fetches latest code from GitHub, checks dependencies, rebuilds and restarts.
-# Safe to run multiple times - only installs/updates what's needed.
 #
-# Changelog v1.3.5:
-# - Added SSH client config for decloud user
-# - Automatically accepts new host keys for local VMs (192.168.122.*)
-# - Fixes "Host key verification failed" when connecting to VMs
-# - Seamless VM access through jump host without manual key acceptance
+# Updates the Node Agent, Caddy, and fail2ban while preserving configuration.
+# Safe to run multiple times.
 #
-
-# Changelog v1.3.4:
-# - CRITICAL: Fixed password hash - use proper $6$ hash instead of '*'
-# - Password field now shows "P" (password set) instead of "L" (locked)
-# - Added verification that passwd -S shows correct status after setting password
-# - Ensures existing nodes with locked accounts get properly fixed
-#
-# Changelog v1.3.3:
-# - CRITICAL: Added AllowUsers check and automatic decloud addition
-# - Added unlock check for existing users (was missing!)
-# - Improved unlock logic: passwd -u before usermod -p
-# - Ensures AllowUsers directive doesn't block decloud user
-# - Made configure_decloud_sshd() more robust and idempotent
+# Version: 1.5.0
+# Changelog:
+# - Added Caddy ingress gateway update support
+# - Added fail2ban update and health verification
+# - Added security status reporting
 #
 # Usage:
 #   sudo ./update.sh              # Normal update
 #   sudo ./update.sh --force      # Force rebuild even if no changes
 #   sudo ./update.sh --deps-only  # Only check/install dependencies
 #
-# - Added automatic creation of 'decloud' system user
-# - Configured decloud user for certificate-based SSH authentication only
-# - Added user to libvirt group for VM access monitoring
-# - Password authentication disabled (certificate-only)
-#
-#
-# Usage:
-#   curl -sSL https://raw.githubusercontent.com/bekirmfr/DeCloud.NodeAgent/master/install.sh | sudo bash -s -- --orchestrator http://IP:5050
-#
 
 set -e
 
-VERSION="1.3.5"
+VERSION="1.5.0"
 
 # Colors
 RED='\033[0;31m'
@@ -58,358 +35,22 @@ log_warn() { echo -e "${YELLOW}[!]${NC} $1"; }
 log_error() { echo -e "${RED}[✗]${NC} $1"; }
 log_step() { echo -e "${CYAN}[STEP]${NC} $1"; }
 
-# Default configuration
-ORCHESTRATOR_URL=""
+# ============================================================
+# Configuration
+# ============================================================
+
 INSTALL_DIR="/opt/decloud"
-DATA_DIR="/var/lib/decloud"
+REPO_DIR="$INSTALL_DIR/DeCloud.NodeAgent"
 CONFIG_DIR="/etc/decloud"
-WALLET_ADDRESS="0x0000000000000000000000000000000000000000"
-AGENT_PORT=5100
-NODE_NAME=$(hostname)
-REGION="default"
-ZONE="default"
+DECLOUD_LOG_DIR="/var/log/decloud"
+SERVICE_NAME="decloud-node-agent"
 
-# WireGuard configuration
-WIREGUARD_PORT=51820
-WIREGUARD_INTERFACE="wg-decloud"
-WIREGUARD_HUB_IP="10.10.0.1"
-WIREGUARD_NETWORK="10.10.0.0/24"
-VM_NETWORK="192.168.122.0/24"
-SKIP_WIREGUARD=false
-ENABLE_WIREGUARD_HUB=true
-
-# Libvirt
-SKIP_LIBVIRT=false
-
-# SSH CA configuration
-SSH_CA_KEY_PATH="/etc/ssh/decloud_ca"
-SSH_CA_PUB_PATH="/etc/ssh/decloud_ca.pub"
-
-# Minimum requirements
-MIN_CPU_CORES=2
-MIN_MEMORY_MB=2048
-MIN_DISK_GB=20
-
-# Detected values
-PUBLIC_IP=""
-OS=""
-VERSION_ID=""
-CPU_CORES=""
-MEMORY_MB=""
-DISK_GB=""
-WG_PRIVATE_KEY=""
-WG_PUBLIC_KEY=""
-SSH_CA_PUBLIC_KEY=""
-
-# ============================================================
-# SSH Certificate Authority Setup
-# ============================================================
-setup_ssh_ca() {
-    log_step "Setting up SSH Certificate Authority..."
-    
-    # Check if CA already exists
-    if [ -f "$SSH_CA_KEY_PATH" ]; then
-        log_info "SSH CA already exists, skipping generation"
-        SSH_CA_PUBLIC_KEY=$(cat "$SSH_CA_PUB_PATH" 2>/dev/null || echo "")
-        log_success "SSH CA configured"
-        return
-    fi
-    
-    # Generate new SSH CA key pair
-    log_info "Generating SSH CA key pair..."
-    ssh-keygen -t ed25519 \
-        -f "$SSH_CA_KEY_PATH" \
-        -C "decloud-ca@$(hostname)" \
-        -N "" \
-        -q
-    
-    # Set proper permissions
-    chmod 600 "$SSH_CA_KEY_PATH"
-    chmod 644 "$SSH_CA_PUB_PATH"
-    
-    SSH_CA_PUBLIC_KEY=$(cat "$SSH_CA_PUB_PATH")
-    log_success "SSH CA key pair generated"
-    
-    # Configure sshd to trust this CA
-    log_info "Configuring sshd to trust CA certificates..."
-    
-    SSHD_CONFIG="/etc/ssh/sshd_config"
-    SSHD_CONFIG_BAK="/etc/ssh/sshd_config.backup-$(date +%Y%m%d-%H%M%S)"
-    
-    # Backup sshd_config
-    cp "$SSHD_CONFIG" "$SSHD_CONFIG_BAK"
-    log_info "sshd config backed up to: $SSHD_CONFIG_BAK"
-    
-    # Check if TrustedUserCAKeys already configured
-    if grep -q "^TrustedUserCAKeys" "$SSHD_CONFIG"; then
-        log_info "Updating existing TrustedUserCAKeys configuration..."
-        sed -i "s|^TrustedUserCAKeys.*|TrustedUserCAKeys $SSH_CA_PUB_PATH|" "$SSHD_CONFIG"
-    else
-        log_info "Adding TrustedUserCAKeys to sshd_config..."
-        echo "" >> "$SSHD_CONFIG"
-        echo "# DeCloud SSH Certificate Authority" >> "$SSHD_CONFIG"
-        echo "TrustedUserCAKeys $SSH_CA_PUB_PATH" >> "$SSHD_CONFIG"
-    fi
-    
-    # Test sshd configuration
-    log_info "Testing sshd configuration..."
-    if sshd -t 2>&1; then
-        log_success "sshd configuration valid"
-        
-        # Reload sshd
-        log_info "Reloading sshd..."
-        systemctl reload sshd || service sshd reload || true
-        log_success "sshd reloaded"
-    else
-        log_error "sshd configuration test failed!"
-        log_warn "Restoring backup..."
-        cp "$SSHD_CONFIG_BAK" "$SSHD_CONFIG"
-        systemctl reload sshd || service sshd reload || true
-        log_warn "SSH CA configured but sshd not reloaded"
-    fi
-    
-    log_success "SSH Certificate Authority setup complete"
-}
-
-# ============================================================
-# DeCloud SSH User Setup
-# ============================================================
-setup_decloud_user() {
-    log_step "Setting up 'decloud' system user for SSH certificate authentication..."
-    
-    # Check if user already exists
-    if id "decloud" &>/dev/null; then
-        log_info "User 'decloud' already exists"
-        
-        # Ensure account is unlocked (fix passwd -l issue)
-        PASSWD_STATUS=$(passwd -S decloud 2>/dev/null | awk '{print $2}')
-        if [ "$PASSWD_STATUS" = "L" ]; then
-            log_info "Account is locked, unlocking..."
-            # First unlock, then set impossible password
-            passwd -u decloud &>/dev/null || true
-            # Use a proper hash that shows as "P" (password set) not "L" (locked)
-            # This hash is impossible to match but doesn't trigger "locked" status
-            usermod -p '$6$rounds=656000$DeCloudImpossible$Qwt6vjdgZzE7pXWRoNmZbCFDZklM9X0v3mHs8K5jNfVhWaEoQb7Yx2Lz3PnMkJhG4RtYuIoP1aSdFgHjK2LmN.' decloud 2>/dev/null || true
-            # Verify it worked
-            PASSWD_STATUS=$(passwd -S decloud 2>/dev/null | awk '{print $2}')
-            if [ "$PASSWD_STATUS" = "P" ]; then
-                log_success "Account unlocked (impossible password set)"
-            else
-                log_warn "Account status: $PASSWD_STATUS (expected P)"
-            fi
-        fi
-        
-        # Verify .ssh directory exists and has correct permissions
-        if [ ! -d "/home/decloud/.ssh" ]; then
-            log_info "Creating .ssh directory for existing user..."
-            mkdir -p /home/decloud/.ssh
-            chmod 700 /home/decloud/.ssh
-            chown decloud:decloud /home/decloud/.ssh
-        fi
-        
-        # Ensure authorized_keys exists
-        if [ ! -f "/home/decloud/.ssh/authorized_keys" ]; then
-            touch /home/decloud/.ssh/authorized_keys
-            chmod 600 /home/decloud/.ssh/authorized_keys
-            chown decloud:decloud /home/decloud/.ssh/authorized_keys
-        fi
-        
-        # Ensure SSH config exists for VM access
-        if [ ! -f "/home/decloud/.ssh/config" ]; then
-            log_info "Creating SSH client config for VM access..."
-            cat > /home/decloud/.ssh/config << 'SSH_CONFIG'
-# DeCloud Local VM Network
-# Automatically accept new host keys for local VMs on first connection
-Host 192.168.122.*
-    StrictHostKeyChecking accept-new
-    UserKnownHostsFile /home/decloud/.ssh/known_hosts
-    
-# External hosts require explicit verification
-Host *
-    StrictHostKeyChecking yes
-    UserKnownHostsFile /home/decloud/.ssh/known_hosts
-SSH_CONFIG
-            chmod 600 /home/decloud/.ssh/config
-            chown decloud:decloud /home/decloud/.ssh/config
-            log_success "SSH client config created"
-        fi
-        
-        log_success "DeCloud user configured"
-        return 0
-    fi
-    
-    # Create system user (no password, certificate-only authentication)
-    log_info "Creating 'decloud' system user..."
-    if ! useradd -m -s /bin/bash -c "DeCloud SSH Jump User" decloud 2>/dev/null; then
-        log_error "Failed to create decloud user"
-        return 1
-    fi
-    
-    log_success "User 'decloud' created"
-    
-    # Create .ssh directory with proper permissions
-    log_info "Setting up SSH directory..."
-    mkdir -p /home/decloud/.ssh
-    chmod 700 /home/decloud/.ssh
-    chown decloud:decloud /home/decloud/.ssh
-    
-    # Create authorized_keys file (even if empty, for future use)
-    touch /home/decloud/.ssh/authorized_keys
-    chmod 600 /home/decloud/.ssh/authorized_keys
-    chown decloud:decloud /home/decloud/.ssh/authorized_keys
-    
-    # Create SSH client config for VM access
-    log_info "Configuring SSH client for VM access..."
-    cat > /home/decloud/.ssh/config << 'SSH_CONFIG'
-# DeCloud Local VM Network
-# Automatically accept new host keys for local VMs on first connection
-Host 192.168.122.*
-    StrictHostKeyChecking accept-new
-    UserKnownHostsFile /home/decloud/.ssh/known_hosts
-    
-# External hosts require explicit verification
-Host *
-    StrictHostKeyChecking yes
-    UserKnownHostsFile /home/decloud/.ssh/known_hosts
-SSH_CONFIG
-    
-    chmod 600 /home/decloud/.ssh/config
-    chown decloud:decloud /home/decloud/.ssh/config
-    log_success "SSH client configured for seamless VM access"
-    
-    # Add to libvirt group if it exists (optional, for VM access monitoring)
-    if getent group libvirt > /dev/null 2>&1; then
-        log_info "Adding decloud user to libvirt group..."
-        usermod -aG libvirt decloud 2>/dev/null || true
-    fi
-    
-    # Disable password authentication (certificate-only)
-    log_info "Disabling password authentication for decloud user..."
-    # Use a proper hash that shows as "P" (password set) not "L" (locked)
-    # This hash is impossible to match but doesn't trigger "locked" status in passwd -S
-    usermod -p '$6$rounds=656000$DeCloudImpossible$Qwt6vjdgZzE7pXWRoNmZbCFDZklM9X0v3mHs8K5jNfVhWaEoQb7Yx2Lz3PnMkJhG4RtYuIoP1aSdFgHjK2LmN.' decloud 2>/dev/null || true
-    
-    # Verify password field is set correctly
-    PASSWD_STATUS=$(passwd -S decloud 2>/dev/null | awk '{print $2}')
-    if [ "$PASSWD_STATUS" = "P" ]; then
-        log_success "Password authentication disabled (impossible password hash set)"
-    else
-        log_warn "Password status: $PASSWD_STATUS (expected P, got different status)"
-    fi
-    
-    # Create a README in the .ssh directory
-    cat > /home/decloud/.ssh/README << 'README_EOF'
-DeCloud SSH Jump Host
-=====================
-
-This account is configured for SSH certificate-based authentication only.
-
-Certificate authentication is handled by the DeCloud orchestrator.
-Users authenticate using their Ethereum wallet to receive short-lived
-SSH certificates signed by this node's Certificate Authority.
-
-The SSH CA public key is located at: /etc/ssh/decloud_ca.pub
-
-Connection flow:
-  User → Wallet signature → Orchestrator → SSH certificate → Jump host → VM
-
-For more information: https://github.com/bekirmfr/DeCloud
-README_EOF
-    
-    chown decloud:decloud /home/decloud/.ssh/README
-    chmod 644 /home/decloud/.ssh/README
-    
-    log_success "DeCloud user setup complete"
-    
-    # Display user info
-    log_info "User information:"
-    echo "    Username:        decloud"
-    echo "    Home directory:  /home/decloud"
-    echo "    Shell:           /bin/bash"
-    echo "    Authentication:  SSH certificate only (password disabled)"
-    echo "    SSH directory:   /home/decloud/.ssh (mode: 700)"
-    if getent group libvirt > /dev/null 2>&1; then
-        echo "    Groups:          decloud, libvirt"
-    else
-        echo "    Groups:          decloud"
-    fi
-}
-
-# ============================================================
-# Configure SSHD for DeCloud User
-# ============================================================
-configure_decloud_sshd() {
-    log_step "Configuring SSH daemon for decloud user..."
-    
-    SSHD_CONFIG="/etc/ssh/sshd_config"
-    local config_changed=false
-    
-    # Backup sshd_config
-    SSHD_CONFIG_BAK="/etc/ssh/sshd_config.backup-decloud-$(date +%Y%m%d-%H%M%S)"
-    cp "$SSHD_CONFIG" "$SSHD_CONFIG_BAK"
-    log_info "sshd config backed up to: $SSHD_CONFIG_BAK"
-    
-    # ====================================================
-    # Check and update AllowUsers directive
-    # ====================================================
-    if grep -q "^AllowUsers" "$SSHD_CONFIG"; then
-        # AllowUsers exists - check if decloud is in it
-        if ! grep "^AllowUsers" "$SSHD_CONFIG" | grep -qw "decloud"; then
-            log_info "Adding decloud to AllowUsers directive..."
-            sed -i 's/^AllowUsers \(.*\)/AllowUsers \1 decloud/' "$SSHD_CONFIG"
-            config_changed=true
-            log_success "decloud added to AllowUsers"
-        else
-            log_info "decloud already in AllowUsers"
-        fi
-    else
-        log_info "No AllowUsers directive (all users allowed)"
-    fi
-    
-    # ====================================================
-    # Add Match block for decloud user
-    # ====================================================
-    if grep -q "^Match User decloud" "$SSHD_CONFIG"; then
-        log_info "Match block for decloud already exists"
-    else
-        log_info "Adding Match block for decloud user..."
-        cat >> "$SSHD_CONFIG" << 'MATCH_EOF'
-
-# DeCloud SSH Jump User Configuration
-# Certificate-only authentication, password auth disabled
-Match User decloud
-    PasswordAuthentication no
-    PubkeyAuthentication yes
-    AuthenticationMethods publickey
-MATCH_EOF
-        config_changed=true
-        log_success "Match block added"
-    fi
-    
-    # ====================================================
-    # Test and reload sshd if changes were made
-    # ====================================================
-    if [ "$config_changed" = true ]; then
-        log_info "Testing sshd configuration..."
-        if sshd -t 2>&1; then
-            log_success "sshd configuration valid"
-            
-            # Reload sshd
-            log_info "Reloading sshd..."
-            systemctl reload sshd || service sshd reload || true
-            log_success "sshd reloaded with decloud configuration"
-        else
-            log_error "sshd configuration test failed!"
-            log_warn "Restoring backup..."
-            cp "$SSHD_CONFIG_BAK" "$SSHD_CONFIG"
-            systemctl reload sshd || service sshd reload || true
-            log_error "Failed to configure sshd for decloud user"
-            return 1
-        fi
-    else
-        log_success "DeCloud SSH configuration already correct"
-    fi
-}
+# Flags
+FORCE_REBUILD=false
+DEPS_ONLY=false
+CHANGES_DETECTED=false
+SKIP_CADDY_UPDATE=false
+SKIP_FAIL2BAN_UPDATE=false
 
 # ============================================================
 # Argument Parsing
@@ -417,48 +58,25 @@ MATCH_EOF
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case $1 in
-            --orchestrator)
-                ORCHESTRATOR_URL="$2"
-                shift 2
-                ;;
-            --wallet)
-                WALLET_ADDRESS="$2"
-                shift 2
-                ;;
-            --name)
-                NODE_NAME="$2"
-                shift 2
-                ;;
-            --region)
-                REGION="$2"
-                shift 2
-                ;;
-            --zone)
-                ZONE="$2"
-                shift 2
-                ;;
-            --port)
-                AGENT_PORT="$2"
-                shift 2
-                ;;
-            --wg-port)
-                WIREGUARD_PORT="$2"
-                shift 2
-                ;;
-            --wg-ip)
-                WIREGUARD_HUB_IP="$2"
-                shift 2
-                ;;
-            --skip-wireguard)
-                SKIP_WIREGUARD=true
+            --force|-f)
+                FORCE_REBUILD=true
                 shift
                 ;;
-            --no-wireguard-hub)
-                ENABLE_WIREGUARD_HUB=false
+            --deps-only|-d)
+                DEPS_ONLY=true
                 shift
                 ;;
-            --skip-libvirt)
-                SKIP_LIBVIRT=true
+            --skip-caddy-update)
+                SKIP_CADDY_UPDATE=true
+                shift
+                ;;
+            --skip-fail2ban-update)
+                SKIP_FAIL2BAN_UPDATE=true
+                shift
+                ;;
+            --skip-security-update)
+                SKIP_CADDY_UPDATE=true
+                SKIP_FAIL2BAN_UPDATE=true
                 shift
                 ;;
             --help|-h)
@@ -476,44 +94,28 @@ parse_args() {
 
 show_help() {
     cat << EOF
-DeCloud Node Agent Installer v${VERSION}
+DeCloud Node Agent Update Script v${VERSION}
 
-Usage: $0 --orchestrator <url> [options]
+Usage: $0 [options]
 
-Required:
-  --orchestrator <url>   Orchestrator URL (e.g., http://142.234.200.108:5050)
-
-Optional:
-  --wallet <address>     Node operator wallet address (default: zero address)
-  --name <name>          Node name (default: hostname)
-  --region <region>      Region identifier (default: default)
-  --zone <zone>          Zone identifier (default: default)
-  --port <port>          Agent API port (default: 5100)
-
-WireGuard Options:
-  --wg-port <port>       WireGuard listen port (default: 51820)
-  --wg-ip <ip>           WireGuard hub IP (default: 10.10.0.1)
-  --skip-wireguard       Skip WireGuard installation entirely
-  --no-wireguard-hub     Install WireGuard but don't configure hub
-
-Other:
-  --skip-libvirt         Skip libvirt installation (testing only)
-  --help                 Show this help message
+Options:
+  --force, -f              Force rebuild even if no code changes detected
+  --deps-only, -d          Only check and install dependencies
+  --skip-caddy-update      Skip Caddy update
+  --skip-fail2ban-update   Skip fail2ban update
+  --skip-security-update   Skip both Caddy and fail2ban updates
+  --help, -h               Show this help message
 
 Examples:
-  # Basic installation
-  $0 --orchestrator http://142.234.200.108:5050
-
-  # With custom wallet and region
-  $0 --orchestrator http://142.234.200.108:5050 --wallet 0xYourWallet --region us-east
-
-  # Without WireGuard
-  $0 --orchestrator http://142.234.200.108:5050 --skip-wireguard
+  $0                       # Normal update
+  $0 --force               # Force rebuild
+  $0 --deps-only           # Only check dependencies
+  $0 --skip-security-update # Skip Caddy and fail2ban
 EOF
 }
 
 # ============================================================
-# Requirement Checks
+# Checks
 # ============================================================
 check_root() {
     if [ "$EUID" -ne 0 ]; then
@@ -522,744 +124,408 @@ check_root() {
     fi
 }
 
-check_os() {
-    log_step "Checking operating system..."
-    
-    if [ ! -f /etc/os-release ]; then
-        log_error "Cannot detect OS. Only Ubuntu/Debian are supported."
+check_installation() {
+    if [ ! -d "$REPO_DIR" ]; then
+        log_error "Node Agent not installed at $REPO_DIR"
+        log_error "Run install.sh first"
         exit 1
     fi
     
-    . /etc/os-release
-    OS=$ID
-    VERSION_ID=$VERSION_ID
-    
-    case $OS in
-        ubuntu)
-            if [[ "${VERSION_ID%%.*}" -lt 20 ]]; then
-                log_error "Ubuntu 20.04 or later required. Found: $VERSION_ID"
-                exit 1
-            fi
-            log_success "Ubuntu $VERSION_ID detected"
-            ;;
-        debian)
-            if [[ "${VERSION_ID%%.*}" -lt 11 ]]; then
-                log_error "Debian 11 or later required. Found: $VERSION_ID"
-                exit 1
-            fi
-            log_success "Debian $VERSION_ID detected"
-            ;;
-        *)
-            log_warn "Untested OS: $OS $VERSION_ID. Continuing anyway..."
-            ;;
-    esac
-}
-
-check_architecture() {
-    log_step "Checking architecture..."
-    
-    ARCH=$(uname -m)
-    if [ "$ARCH" != "x86_64" ]; then
-        log_error "Only x86_64 architecture is supported. Found: $ARCH"
-        exit 1
-    fi
-    log_success "Architecture: x86_64"
-}
-
-check_virtualization() {
-    log_step "Checking virtualization support..."
-    
-    if [ "$SKIP_LIBVIRT" = true ]; then
-        log_warn "Skipping virtualization check (--skip-libvirt)"
-        return
-    fi
-    
-    # Check CPU virtualization
-    if grep -E 'vmx|svm' /proc/cpuinfo > /dev/null 2>&1; then
-        log_success "Hardware virtualization supported"
-    else
-        log_error "Hardware virtualization (VT-x/AMD-V) not detected"
-        log_error "Enable it in BIOS or check if running in a nested VM"
+    if [ ! -f "$CONFIG_DIR/appsettings.Production.json" ]; then
+        log_error "Configuration not found at $CONFIG_DIR/appsettings.Production.json"
         exit 1
     fi
     
-    # Check KVM availability
-    if [ -c /dev/kvm ]; then
-        log_success "KVM available"
+    log_success "Existing installation found"
+}
+
+check_service_status() {
+    log_step "Checking service status..."
+    
+    if systemctl is-active --quiet $SERVICE_NAME; then
+        log_success "Node Agent service is running"
     else
-        log_warn "KVM not available. Will try to enable after installing packages."
+        log_warn "Node Agent service is not running"
     fi
 }
 
-check_resources() {
-    log_step "Checking system resources..."
-    
-    # CPU
-    CPU_CORES=$(nproc)
-    if [ "$CPU_CORES" -lt "$MIN_CPU_CORES" ]; then
-        log_warn "Found $CPU_CORES CPU cores. Recommended: $MIN_CPU_CORES+"
-    else
-        log_success "CPU cores: $CPU_CORES"
+# ============================================================
+# Caddy Functions
+# ============================================================
+check_caddy() {
+    if ! command -v caddy &> /dev/null; then
+        log_info "Caddy not installed (ingress gateway disabled)"
+        return 0
     fi
-    
-    # Memory
-    MEMORY_MB=$(free -m | awk '/^Mem:/{print $2}')
-    if [ "$MEMORY_MB" -lt "$MIN_MEMORY_MB" ]; then
-        log_warn "Found ${MEMORY_MB}MB RAM. Recommended: ${MIN_MEMORY_MB}MB+"
-    else
-        log_success "Memory: ${MEMORY_MB}MB"
-    fi
-    
-    # Disk
-    DISK_GB=$(df -BG / | awk 'NR==2{print $4}' | tr -d 'G')
-    if [ "$DISK_GB" -lt "$MIN_DISK_GB" ]; then
-        log_warn "Found ${DISK_GB}GB free disk. Recommended: ${MIN_DISK_GB}GB+"
-    else
-        log_success "Free disk: ${DISK_GB}GB"
-    fi
-}
 
-check_network() {
-    log_step "Checking network..."
-    
-    # Detect public IP
-    PUBLIC_IP=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || \
-                curl -s --max-time 5 https://ifconfig.me 2>/dev/null || \
-                hostname -I | awk '{print $1}')
-    
-    if [ -z "$PUBLIC_IP" ]; then
-        log_warn "Could not detect public IP. Using hostname IP."
-        PUBLIC_IP=$(hostname -I | awk '{print $1}')
-    fi
-    
-    log_success "Public IP: $PUBLIC_IP"
-    
-    # Test orchestrator connectivity
-    if [ -n "$ORCHESTRATOR_URL" ]; then
-        if curl -s --max-time 5 "$ORCHESTRATOR_URL/health" > /dev/null 2>&1; then
-            log_success "Orchestrator reachable: $ORCHESTRATOR_URL"
+    log_step "Checking Caddy status..."
+
+    if systemctl is-active --quiet caddy; then
+        local version=$(caddy version 2>/dev/null | head -1 | awk '{print $1}')
+        log_success "Caddy running: $version"
+        
+        local admin_status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:2019/config/ 2>/dev/null || echo "000")
+        if [ "$admin_status" = "200" ]; then
+            log_success "Caddy Admin API accessible"
         else
-            log_warn "Cannot reach orchestrator at $ORCHESTRATOR_URL"
-            log_warn "Make sure the orchestrator is running and accessible"
+            log_warn "Caddy Admin API not responding"
         fi
-    fi
-}
-
-# ============================================================
-# Installation Functions
-# ============================================================
-install_base_dependencies() {
-    log_step "Installing base dependencies..."
-    
-    apt-get update -qq
-    apt-get install -y -qq \
-        curl \
-        wget \
-        git \
-        jq \
-        apt-transport-https \
-        ca-certificates \
-        gnupg \
-        lsb-release \
-        > /dev/null 2>&1
-    
-    log_success "Base dependencies installed"
-}
-
-install_dotnet() {
-    log_step "Installing .NET 8 SDK..."
-    
-    # Check if already installed
-    if command -v dotnet &> /dev/null; then
-        DOTNET_VERSION=$(dotnet --version 2>/dev/null || echo "0")
-        if [[ "$DOTNET_VERSION" == 8.* ]]; then
-            log_success ".NET 8 already installed: $DOTNET_VERSION"
-            return
-        fi
-    fi
-    
-    # Add Microsoft repository
-    wget -q https://packages.microsoft.com/config/$OS/$VERSION_ID/packages-microsoft-prod.deb -O /tmp/packages-microsoft-prod.deb
-    dpkg -i /tmp/packages-microsoft-prod.deb > /dev/null 2>&1
-    rm /tmp/packages-microsoft-prod.deb
-    
-    apt-get update -qq
-    apt-get install -y -qq dotnet-sdk-8.0 > /dev/null 2>&1
-    
-    log_success ".NET 8 SDK installed"
-}
-
-install_libvirt() {
-    log_step "Installing libvirt/KVM and virtualization tools..."
-    
-    if [ "$SKIP_LIBVIRT" = true ]; then
-        log_warn "Skipping libvirt installation (--skip-libvirt)"
-        return
-    fi
-    
-    # Check if running in a VM (nested virtualization)
-    if [ -f /sys/module/kvm_intel/parameters/nested ]; then
-        NESTED=$(cat /sys/module/kvm_intel/parameters/nested)
-        if [ "$NESTED" != "Y" ] && [ "$NESTED" != "1" ]; then
-            log_warn "Nested virtualization may not be enabled"
-            log_warn "Performance may be reduced if running inside a VM"
-        fi
-    fi
-    
-    # Core virtualization packages
-    PACKAGES="qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virtinst"
-    
-    # Cloud-init and disk tools
-    PACKAGES="$PACKAGES cloud-image-utils genisoimage qemu-utils"
-    
-    # libguestfs for cleaning cloud-init state from base images
-    PACKAGES="$PACKAGES libguestfs-tools"
-    
-    # openssh-client for ssh-keygen (ephemeral terminal key generation)
-    PACKAGES="$PACKAGES openssh-client"
-    
-    apt-get install -y -qq $PACKAGES > /dev/null 2>&1
-    
-    # Load nbd module for qemu-nbd fallback method (cloud-init cleaning)
-    modprobe nbd max_part=8 2>/dev/null || true
-    if [ ! -f /etc/modules-load.d/decloud.conf ] || ! grep -q "nbd" /etc/modules-load.d/decloud.conf 2>/dev/null; then
-        echo "nbd" >> /etc/modules-load.d/decloud.conf
-    fi
-    
-    # Enable and start libvirtd
-    systemctl enable libvirtd --quiet 2>/dev/null || true
-    systemctl start libvirtd 2>/dev/null || true
-    
-    # Setup default network
-    if ! virsh net-list --all | grep -q "default"; then
-        log_info "Creating default network..."
-        virsh net-define /usr/share/libvirt/networks/default.xml > /dev/null 2>&1 || true
-    fi
-    
-    virsh net-autostart default > /dev/null 2>&1 || true
-    virsh net-start default > /dev/null 2>&1 || true
-    
-    # Create QEMU guest agent channel directory (for ephemeral key injection)
-    mkdir -p /var/lib/libvirt/qemu/channel/target
-    
-    log_success "Libvirt/KVM installed and configured"
-}
-
-install_wireguard() {
-    log_step "Installing WireGuard..."
-    
-    if [ "$SKIP_WIREGUARD" = true ]; then
-        log_warn "Skipping WireGuard installation (--skip-wireguard)"
-        return
-    fi
-    
-    apt-get install -y -qq wireguard wireguard-tools > /dev/null 2>&1
-    
-    log_success "WireGuard installed"
-}
-
-configure_wireguard_hub() {
-    if [ "$SKIP_WIREGUARD" = true ] || [ "$ENABLE_WIREGUARD_HUB" = false ]; then
-        return
-    fi
-    
-    log_step "Configuring WireGuard hub..."
-    
-    # Generate keys
-    WG_PRIVATE_KEY=$(wg genkey)
-    WG_PUBLIC_KEY=$(echo "$WG_PRIVATE_KEY" | wg pubkey)
-    
-    mkdir -p /etc/wireguard
-    
-    # Save keys
-    echo "$WG_PRIVATE_KEY" > /etc/wireguard/node_private.key
-    echo "$WG_PUBLIC_KEY" > /etc/wireguard/node_public.key
-    chmod 600 /etc/wireguard/node_private.key
-    
-    # Create WireGuard config
-    cat > /etc/wireguard/${WIREGUARD_INTERFACE}.conf << EOF
-[Interface]
-Address = ${WIREGUARD_HUB_IP}/24
-ListenPort = ${WIREGUARD_PORT}
-PrivateKey = ${WG_PRIVATE_KEY}
-
-# Enable IP forwarding for VM access
-PostUp = sysctl -w net.ipv4.ip_forward=1
-PostUp = iptables -A FORWARD -i %i -j ACCEPT
-PostUp = iptables -A FORWARD -o %i -j ACCEPT
-PostUp = iptables -t nat -A POSTROUTING -s ${WIREGUARD_NETWORK} -o eth0 -j MASQUERADE
-PostUp = iptables -t nat -A POSTROUTING -s ${WIREGUARD_NETWORK} -o ens3 -j MASQUERADE
-PostUp = iptables -A FORWARD -i %i -o virbr0 -j ACCEPT
-PostUp = iptables -A FORWARD -i virbr0 -o %i -j ACCEPT
-
-PostDown = iptables -D FORWARD -i %i -j ACCEPT
-PostDown = iptables -D FORWARD -o %i -j ACCEPT
-PostDown = iptables -t nat -D POSTROUTING -s ${WIREGUARD_NETWORK} -o eth0 -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -t nat -D POSTROUTING -s ${WIREGUARD_NETWORK} -o ens3 -j MASQUERADE 2>/dev/null || true
-PostDown = iptables -D FORWARD -i %i -o virbr0 -j ACCEPT 2>/dev/null || true
-PostDown = iptables -D FORWARD -i virbr0 -o %i -j ACCEPT 2>/dev/null || true
-
-# Peers will be added dynamically
-EOF
-
-    chmod 600 /etc/wireguard/${WIREGUARD_INTERFACE}.conf
-    
-    # Enable IP forwarding permanently
-    if ! grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf; then
-        echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-    fi
-    sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
-    
-    # Start WireGuard
-    systemctl enable wg-quick@${WIREGUARD_INTERFACE} --quiet 2>/dev/null || true
-    systemctl start wg-quick@${WIREGUARD_INTERFACE} 2>/dev/null || true
-    
-    # Configure firewall for WireGuard
-    if command -v ufw &> /dev/null; then
-        ufw allow ${WIREGUARD_PORT}/udp > /dev/null 2>&1 || true
-    fi
-    iptables -I INPUT -p udp --dport ${WIREGUARD_PORT} -j ACCEPT 2>/dev/null || true
-    
-    log_success "WireGuard hub configured (${WIREGUARD_HUB_IP})"
-}
-
-# ============================================================
-# Application Setup
-# ============================================================
-create_directories() {
-    log_step "Creating directories..."
-    
-    mkdir -p $INSTALL_DIR
-    mkdir -p $DATA_DIR/vms
-    mkdir -p $DATA_DIR/images
-    mkdir -p $CONFIG_DIR
-    mkdir -p /var/log/decloud
-    
-    log_success "Directories created"
-}
-
-download_node_agent() {
-    log_step "Downloading Node Agent..."
-    
-    cd $INSTALL_DIR
-    
-    if [ -d "DeCloud.NodeAgent" ]; then
-        log_info "Updating existing installation..."
-        cd DeCloud.NodeAgent
-        git pull --quiet
     else
-        git clone --quiet https://github.com/bekirmfr/DeCloud.NodeAgent.git
-        cd DeCloud.NodeAgent
+        log_warn "Caddy service not running"
     fi
+}
+
+update_caddy() {
+    if [ "$SKIP_CADDY_UPDATE" = true ]; then
+        log_info "Skipping Caddy update (--skip-caddy-update)"
+        return 0
+    fi
+
+    if ! command -v caddy &> /dev/null; then
+        log_info "Caddy not installed, skipping update"
+        return 0
+    fi
+
+    log_step "Checking for Caddy updates..."
+
+    apt-get update -qq > /dev/null 2>&1
+
+    local current_version=$(caddy version 2>/dev/null | head -1 | awk '{print $1}')
+    local available_version=$(apt-cache policy caddy 2>/dev/null | grep Candidate | awk '{print $2}')
+
+    if [ "$current_version" = "$available_version" ] || [ -z "$available_version" ]; then
+        log_success "Caddy is up to date: $current_version"
+        return 0
+    fi
+
+    log_info "Updating Caddy: $current_version → $available_version"
+
+    systemctl stop caddy 2>/dev/null || true
+    apt-get install -y -qq caddy > /dev/null 2>&1
+    systemctl start caddy 2>/dev/null || true
+
+    sleep 2
+    if systemctl is-active --quiet caddy; then
+        local new_version=$(caddy version 2>/dev/null | head -1 | awk '{print $1}')
+        log_success "Caddy updated: $new_version"
+    else
+        log_error "Caddy failed to restart after update"
+        return 1
+    fi
+}
+
+verify_caddy_health() {
+    if ! command -v caddy &> /dev/null; then
+        return 0
+    fi
+
+    log_step "Verifying Caddy health..."
+
+    local max_attempts=10
+    local attempt=1
+
+    while [ $attempt -le $max_attempts ]; do
+        local health=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health 2>/dev/null || echo "000")
+        local admin=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:2019/config/ 2>/dev/null || echo "000")
+
+        if [ "$health" = "200" ] && [ "$admin" = "200" ]; then
+            log_success "Caddy healthy"
+            return 0
+        fi
+
+        sleep 1
+        ((attempt++))
+    done
+
+    log_warn "Caddy health check incomplete"
+}
+
+# ============================================================
+# fail2ban Functions
+# ============================================================
+check_fail2ban() {
+    if ! command -v fail2ban-client &> /dev/null; then
+        log_info "fail2ban not installed"
+        return 0
+    fi
+
+    log_step "Checking fail2ban status..."
+
+    if systemctl is-active --quiet fail2ban; then
+        local jails=$(fail2ban-client status 2>/dev/null | grep "Jail list" | cut -d: -f2 | tr -d '[:space:]')
+        log_success "fail2ban running"
+        log_info "Active jails: $jails"
+        
+        # Count total bans
+        local total_banned=0
+        for jail in $(echo "$jails" | tr ',' ' '); do
+            local banned=$(fail2ban-client status "$jail" 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
+            total_banned=$((total_banned + banned))
+        done
+        
+        if [ "$total_banned" -gt 0 ]; then
+            log_info "Currently banned IPs: $total_banned"
+        fi
+    else
+        log_warn "fail2ban service not running"
+    fi
+}
+
+update_fail2ban() {
+    if [ "$SKIP_FAIL2BAN_UPDATE" = true ]; then
+        log_info "Skipping fail2ban update (--skip-fail2ban-update)"
+        return 0
+    fi
+
+    if ! command -v fail2ban-client &> /dev/null; then
+        log_info "fail2ban not installed, skipping update"
+        return 0
+    fi
+
+    log_step "Checking for fail2ban updates..."
+
+    local current_version=$(fail2ban-client --version 2>/dev/null | head -1 | awk '{print $NF}')
+    local available_version=$(apt-cache policy fail2ban 2>/dev/null | grep Candidate | awk '{print $2}')
+
+    if [ "$current_version" = "$available_version" ] || [ -z "$available_version" ]; then
+        log_success "fail2ban is up to date: $current_version"
+        return 0
+    fi
+
+    log_info "Updating fail2ban: $current_version → $available_version"
+
+    apt-get install -y -qq fail2ban > /dev/null 2>&1
+    systemctl restart fail2ban 2>/dev/null || true
+
+    sleep 2
+    if systemctl is-active --quiet fail2ban; then
+        log_success "fail2ban updated and running"
+    else
+        log_error "fail2ban failed to restart after update"
+        return 1
+    fi
+}
+
+verify_fail2ban_health() {
+    if ! command -v fail2ban-client &> /dev/null; then
+        return 0
+    fi
+
+    log_step "Verifying fail2ban health..."
+
+    if fail2ban-client ping > /dev/null 2>&1; then
+        log_success "fail2ban responsive"
+    else
+        log_error "fail2ban not responding"
+        return 1
+    fi
+}
+
+# ============================================================
+# Security Log Check
+# ============================================================
+check_security_logs() {
+    log_step "Checking security logs..."
+
+    if [ -f "$DECLOUD_LOG_DIR/audit.log" ]; then
+        local log_size=$(du -sh "$DECLOUD_LOG_DIR/audit.log" 2>/dev/null | awk '{print $1}')
+        local log_entries=$(wc -l < "$DECLOUD_LOG_DIR/audit.log" 2>/dev/null || echo "0")
+        log_success "Audit log: $log_size ($log_entries entries)"
+        
+        # Check for recent security events
+        local recent_violations=$(grep -c "SecurityViolation\|BlockedPortAttempt" "$DECLOUD_LOG_DIR/audit.log" 2>/dev/null || echo "0")
+        if [ "$recent_violations" -gt 0 ]; then
+            log_warn "Security events detected: $recent_violations violations in audit log"
+        fi
+    else
+        log_info "Audit log not found (may not be enabled)"
+    fi
+}
+
+# ============================================================
+# Node Agent Update Functions
+# ============================================================
+fetch_updates() {
+    log_step "Fetching latest code..."
     
-    log_success "Node Agent downloaded"
+    cd "$REPO_DIR"
+    
+    # Store current commit
+    OLD_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+    
+    # Fetch changes
+    git fetch origin --quiet 2>/dev/null || {
+        log_error "Failed to fetch updates from repository"
+        exit 1
+    }
+    
+    # Check for changes
+    LOCAL=$(git rev-parse HEAD 2>/dev/null)
+    REMOTE=$(git rev-parse origin/master 2>/dev/null || git rev-parse origin/main 2>/dev/null)
+    
+    if [ "$LOCAL" = "$REMOTE" ]; then
+        log_success "Already up to date (commit: ${LOCAL:0:7})"
+        CHANGES_DETECTED=false
+    else
+        log_info "Updates available: ${LOCAL:0:7} → ${REMOTE:0:7}"
+        
+        # Pull changes
+        git reset --hard origin/master 2>/dev/null || git reset --hard origin/main 2>/dev/null
+        
+        NEW_COMMIT=$(git rev-parse HEAD)
+        log_success "Updated to commit: ${NEW_COMMIT:0:7}"
+        CHANGES_DETECTED=true
+        
+        # Show recent commits
+        echo ""
+        log_info "Recent changes:"
+        git log --oneline -5 2>/dev/null | while read line; do
+            echo "    $line"
+        done
+        echo ""
+    fi
 }
 
 build_node_agent() {
     log_step "Building Node Agent..."
     
-    cd $INSTALL_DIR/DeCloud.NodeAgent
+    cd "$REPO_DIR"
     
-    dotnet restore --verbosity quiet
-    dotnet build -c Release --verbosity quiet
+    # Clean previous build
+    dotnet clean --verbosity quiet > /dev/null 2>&1 || true
     
-    log_success "Node Agent built"
+    # Build
+    dotnet build --configuration Release --verbosity quiet > /dev/null 2>&1
+    
+    # Publish
+    dotnet publish src/DeCloud.NodeAgent/DeCloud.NodeAgent.csproj \
+        --configuration Release \
+        --output "$INSTALL_DIR/publish" \
+        --verbosity quiet > /dev/null 2>&1
+    
+    log_success "Build complete"
 }
 
-create_configuration() {
-    log_step "Creating configuration..."
+restart_service() {
+    log_step "Restarting Node Agent service..."
     
-    cat > $CONFIG_DIR/appsettings.Production.json << EOF
-{
-  "Logging": {
-    "LogLevel": {
-      "Default": "Information",
-      "Microsoft.AspNetCore": "Warning",
-      "DeCloud": "Information"
+    systemctl restart $SERVICE_NAME 2>/dev/null || {
+        log_error "Failed to restart service"
+        return 1
     }
-  },
-  "Serilog": {
-    "MinimumLevel": {
-      "Default": "Information",
-      "Override": {
-        "Microsoft": "Warning",
-        "System": "Warning"
-      }
-    },
-    "WriteTo": [
-      { "Name": "Console" },
-      {
-        "Name": "File",
-        "Args": {
-          "path": "/var/log/decloud/node-agent-.log",
-          "rollingInterval": "Day",
-          "retainedFileCountLimit": 7
-        }
-      }
-    ]
-  },
-  "AllowedHosts": "*",
-  "Kestrel": {
-    "Endpoints": {
-      "Http": {
-        "Url": "http://0.0.0.0:${AGENT_PORT}"
-      }
-    }
-  },
-  "Node": {
-    "Name": "${NODE_NAME}",
-    "Region": "${REGION}",
-    "Zone": "${ZONE}",
-    "PublicIp": "${PUBLIC_IP}"
-  },
-  "Libvirt": {
-    "VmStoragePath": "${DATA_DIR}/vms",
-    "ImageCachePath": "${DATA_DIR}/images",
-    "LibvirtUri": "qemu:///system",
-    "VncPortStart": 5900,
-    "ReconcileOnStartup": true
-  },
-  "Images": {
-    "CachePath": "${DATA_DIR}/images",
-    "VmStoragePath": "${DATA_DIR}/vms",
-    "DownloadTimeout": "00:30:00"
-  },
-  "WireGuard": {
-    "InterfaceName": "${WIREGUARD_INTERFACE}",
-    "ConfigPath": "/etc/wireguard",
-    "ListenPort": ${WIREGUARD_PORT},
-    "Address": "${WIREGUARD_HUB_IP}/24"
-  },
-  "Heartbeat": {
-    "Interval": "00:00:15",
-    "OrchestratorUrl": "${ORCHESTRATOR_URL}"
-  },
-  "CommandProcessor": {
-    "PollInterval": "00:00:05"
-  },
-  "Orchestrator": {
-    "BaseUrl": "${ORCHESTRATOR_URL}",
-    "ApiKey": "",
-    "Timeout": "00:00:30",
-    "WalletAddress": "${WALLET_ADDRESS}"
-  }
-}
-EOF
-
-    # Symlink to project
-    ln -sf $CONFIG_DIR/appsettings.Production.json \
-        $INSTALL_DIR/DeCloud.NodeAgent/src/DeCloud.NodeAgent/appsettings.Production.json
     
-    log_success "Configuration created"
-}
-
-create_systemd_service() {
-    log_step "Creating systemd service..."
+    sleep 3
     
-    cat > /etc/systemd/system/decloud-node-agent.service << EOF
-[Unit]
-Description=DeCloud Node Agent
-Documentation=https://github.com/bekirmfr/DeCloud.NodeAgent
-After=network.target libvirtd.service wg-quick@${WIREGUARD_INTERFACE}.service
-Wants=libvirtd.service
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=${INSTALL_DIR}/DeCloud.NodeAgent
-ExecStart=/usr/bin/dotnet run --project src/DeCloud.NodeAgent -c Release --no-build --environment Production
-Restart=always
-RestartSec=10
-Environment=DOTNET_ENVIRONMENT=Production
-Environment=ASPNETCORE_ENVIRONMENT=Production
-Environment=DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
-Environment=DOTNET_NOLOGO=1
-Environment=DOTNET_CLI_HOME=/tmp/dotnet-cli
-
-# Security
-PrivateTmp=true
-
-# Logging
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=decloud-node-agent
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    systemctl daemon-reload
-    systemctl enable decloud-node-agent --quiet
-    
-    log_success "Systemd service created"
-}
-
-configure_firewall() {
-    log_step "Configuring firewall..."
-    
-    # Agent API port
-    if command -v ufw &> /dev/null; then
-        ufw allow $AGENT_PORT/tcp > /dev/null 2>&1 || true
-    fi
-    iptables -I INPUT -p tcp --dport $AGENT_PORT -j ACCEPT 2>/dev/null || true
-    
-    log_success "Firewall configured"
-}
-
-start_service() {
-    log_step "Starting Node Agent..."
-    
-    systemctl start decloud-node-agent
-    
-    # Wait and check
-    sleep 5
-    
-    if systemctl is-active --quiet decloud-node-agent; then
-        log_success "Node Agent is running"
+    if systemctl is-active --quiet $SERVICE_NAME; then
+        log_success "Service restarted successfully"
     else
-        log_error "Node Agent failed to start"
-        log_error "Check logs: journalctl -u decloud-node-agent -n 50"
-        exit 1
+        log_error "Service failed to start"
+        log_info "Check logs: journalctl -u $SERVICE_NAME -n 50"
+        return 1
     fi
 }
 
-create_client_helper_script() {
-    log_step "Creating WireGuard client helper script..."
+verify_health() {
+    log_step "Verifying Node Agent health..."
     
-    cat > /usr/local/bin/decloud-wg << 'SCRIPT_EOF'
-#!/bin/bash
-#
-# DeCloud WireGuard Client Management
-#
-
-WG_INTERFACE="wg-decloud"
-WG_DIR="/etc/wireguard"
-
-# Read config to get actual values
-get_config_value() {
-    local key="$1"
-    local default="$2"
-    local config_file="$WG_DIR/$WG_INTERFACE.conf"
+    local max_attempts=10
+    local attempt=1
+    local port=$(grep -oP '"Urls":\s*"http://0.0.0.0:\K[0-9]+' "$CONFIG_DIR/appsettings.Production.json" 2>/dev/null || echo "5100")
     
-    if [ -f "$config_file" ]; then
-        local value=$(grep "^${key}" "$config_file" 2>/dev/null | awk '{print $3}' | head -1)
-        if [ -n "$value" ]; then
-            echo "$value"
-            return
+    while [ $attempt -le $max_attempts ]; do
+        local status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:$port/health 2>/dev/null || echo "000")
+        
+        if [ "$status" = "200" ]; then
+            log_success "Node Agent healthy (port $port)"
+            return 0
         fi
-    fi
-    echo "$default"
-}
-
-# Get hub IP from config (strip /24)
-get_hub_ip() {
-    local addr=$(get_config_value "Address" "10.10.0.1/24")
-    echo "${addr%/*}"
-}
-
-# Get network from hub IP
-get_network() {
-    local hub_ip=$(get_hub_ip)
-    local prefix="${hub_ip%.*}"
-    echo "${prefix}.0/24"
-}
-
-# Suggest next client IP
-suggest_client_ip() {
-    local hub_ip=$(get_hub_ip)
-    local prefix="${hub_ip%.*}"
-    local last_octet=2
-    
-    # Find highest used IP
-    for conf in $WG_DIR/clients/*.conf 2>/dev/null; do
-        if [ -f "$conf" ]; then
-            local ip=$(grep "Address" "$conf" | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1)
-            if [ -n "$ip" ]; then
-                local octet="${ip##*.}"
-                if [ "$octet" -ge "$last_octet" ]; then
-                    last_octet=$((octet + 1))
-                fi
-            fi
-        fi
+        
+        sleep 1
+        ((attempt++))
     done
     
-    echo "${prefix}.${last_octet}"
+    log_warn "Health check incomplete (service may still be starting)"
 }
 
-case "${1:-help}" in
-    status)
-        echo "=== WireGuard Status ==="
-        wg show $WG_INTERFACE 2>/dev/null || echo "Interface not running"
-        echo ""
-        echo "=== Clients ==="
-        ls -1 $WG_DIR/clients/ 2>/dev/null | sed 's/.conf$//' || echo "No clients configured"
-        ;;
+# ============================================================
+# Status Display
+# ============================================================
+show_status() {
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "                    DeCloud Node Agent Status"
+    echo "═══════════════════════════════════════════════════════════════"
+    echo ""
     
-    add)
-        if [ -z "$2" ] || [ -z "$3" ]; then
-            echo "Usage: $0 add <client_pubkey> <client_ip>"
-            echo "Example: $0 add ABC123...= 10.10.0.2"
-            exit 1
-        fi
-        
-        CLIENT_PUBKEY="$2"
-        CLIENT_IP="$3"
-        VM_NET="192.168.122.0/24"
-        
-        wg set $WG_INTERFACE peer "$CLIENT_PUBKEY" allowed-ips "${CLIENT_IP}/32,${VM_NET}"
-        wg-quick save $WG_INTERFACE 2>/dev/null || true
-        
-        echo "Added peer: $CLIENT_IP"
-        ;;
+    # Node Agent
+    echo "  Node Agent Service:"
+    if systemctl is-active --quiet $SERVICE_NAME; then
+        local port=$(grep -oP '"Urls":\s*"http://0.0.0.0:\K[0-9]+' "$CONFIG_DIR/appsettings.Production.json" 2>/dev/null || echo "5100")
+        echo -e "    Status:     ${GREEN}Running${NC}"
+        echo "    Port:       $port"
+        echo "    Config:     $CONFIG_DIR/appsettings.Production.json"
+    else
+        echo -e "    Status:     ${RED}Stopped${NC}"
+    fi
     
-    remove)
-        if [ -z "$2" ]; then
-            echo "Usage: $0 remove <client_pubkey>"
-            exit 1
-        fi
-        
-        wg set $WG_INTERFACE peer "$2" remove
-        wg-quick save $WG_INTERFACE 2>/dev/null || true
-        
-        echo "Removed peer"
-        ;;
-    
-    client-config)
-        CLIENT_IP="${2:-$(suggest_client_ip)}"
-        HUB_IP=$(get_hub_ip)
-        HUB_ENDPOINT="${3:-$(curl -s https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')}"
-        HUB_PORT=$(get_config_value "ListenPort" "51820")
-        HUB_PUBKEY=$(cat $WG_DIR/node_public.key 2>/dev/null || echo "HUB_PUBLIC_KEY_HERE")
-        
-        # Generate client keys
-        CLIENT_PRIVKEY=$(wg genkey)
-        CLIENT_PUBKEY=$(echo "$CLIENT_PRIVKEY" | wg pubkey)
-        
-        # Save client config
-        mkdir -p $WG_DIR/clients
-        cat > $WG_DIR/clients/${CLIENT_IP}.conf << EOF
-[Interface]
-PrivateKey = ${CLIENT_PRIVKEY}
-Address = ${CLIENT_IP}/24
-
-[Peer]
-PublicKey = ${HUB_PUBKEY}
-Endpoint = ${HUB_ENDPOINT}:${HUB_PORT}
-AllowedIPs = ${HUB_IP}/32, 192.168.122.0/24
-PersistentKeepalive = 25
-EOF
-        
-        echo "=== Client Config for ${CLIENT_IP} ==="
-        echo ""
-        cat $WG_DIR/clients/${CLIENT_IP}.conf
-        echo ""
-        echo "=== Next Steps ==="
-        echo "1. Copy the config above to your client"
-        echo "2. Add client to hub: $0 add ${CLIENT_PUBKEY} ${CLIENT_IP}"
-        echo ""
-        echo "Client Public Key: ${CLIENT_PUBKEY}"
-        ;;
-    
-    help|*)
-        echo "DeCloud WireGuard Client Management"
-        echo ""
-        echo "Usage: $0 <command> [args]"
-        echo ""
-        echo "Commands:"
-        echo "  status                  Show WireGuard status and clients"
-        echo "  add <pubkey> <ip>       Add a client peer"
-        echo "  remove <pubkey>         Remove a client peer"
-        echo "  client-config [ip]      Generate client config"
-        echo ""
-        ;;
-esac
-SCRIPT_EOF
-
-    chmod +x /usr/local/bin/decloud-wg
-    
-    log_success "WireGuard helper script created: decloud-wg"
+    # Code version
+    if [ -d "$REPO_DIR/.git" ]; then
+        local commit=$(cd "$REPO_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+        local branch=$(cd "$REPO_DIR" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+        echo "    Version:    $branch @ $commit"
+    fi
 }
 
-print_summary() {
+show_security_status() {
     echo ""
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║              Installation Complete!                          ║"
-    echo "╚══════════════════════════════════════════════════════════════╝"
-    echo ""
-    log_success "Node Agent v${VERSION} installed successfully!"
-    echo ""
-    echo "  Node Name:       ${NODE_NAME}"
-    echo "  Public IP:       ${PUBLIC_IP}"
-    echo "  Agent API:       http://${PUBLIC_IP}:${AGENT_PORT}"
-    echo "  Orchestrator:    ${ORCHESTRATOR_URL}"
-    echo ""
+    echo "  Security Services:"
     
-    # SSH CA Information
-    if [ -n "$SSH_CA_PUBLIC_KEY" ]; then
-        echo "  ─────────────────────────────────────────────────────────────"
-        echo "  SSH Certificate Authority:"
-        echo "  ─────────────────────────────────────────────────────────────"
-        echo "  Status:          Configured"
-        echo "  CA Private Key:  $SSH_CA_KEY_PATH"
-        echo "  CA Public Key:   $SSH_CA_PUB_PATH"
-        echo ""
-        echo "  Wallet-based SSH authentication is enabled!"
-        echo "  Users can SSH using certificates signed by this CA."
-        echo ""
-    fi
-
-    # DeCloud User Information
-    if id "decloud" &>/dev/null; then
-        echo "  ─────────────────────────────────────────────────────────────"
-        echo "  SSH Jump User:"
-        echo "  ─────────────────────────────────────────────────────────────"
-        echo "  Username:        decloud"
-        echo "  Authentication:  SSH Certificate only"
-        echo "  Home Directory:  /home/decloud"
-        echo ""
-        echo "  Users connect via: ssh -i key.pem -o CertificateFile=cert.pub decloud@${PUBLIC_IP}"
-        echo ""
-    fi
-    
-    if [ "$SKIP_WIREGUARD" = false ] && [ "$ENABLE_WIREGUARD_HUB" = true ]; then
-        WG_PUBLIC_KEY=$(cat /etc/wireguard/node_public.key 2>/dev/null || echo "")
-        if [ -n "$WG_PUBLIC_KEY" ]; then
-            echo "  ─────────────────────────────────────────────────────────────"
-            echo "  WireGuard Hub (for external VM access):"
-            echo "  ─────────────────────────────────────────────────────────────"
-            echo "  Hub Overlay IP:  ${WIREGUARD_HUB_IP}"
-            echo "  Hub Endpoint:    ${PUBLIC_IP}:${WIREGUARD_PORT}"
-            echo "  Hub Public Key:  ${WG_PUBLIC_KEY}"
-            echo ""
-            echo "  To connect from your machine:"
-            echo "    1. Generate client config:  decloud-wg client-config 10.10.0.2"
-            echo "    2. Add client to hub:       decloud-wg add <YOUR_PUBKEY> 10.10.0.2"
-            echo "    3. Connect and access VMs:  ssh ubuntu@192.168.122.x"
-            echo ""
+    # Caddy
+    if command -v caddy &> /dev/null; then
+        if systemctl is-active --quiet caddy; then
+            local version=$(caddy version 2>/dev/null | head -1 | awk '{print $1}')
+            echo -e "    Caddy:      ${GREEN}Running${NC} ($version)"
+            
+            # Count routes
+            local route_count=$(curl -s http://localhost:2019/config/apps/http/servers/ingress/routes 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+            echo "                $route_count active routes"
+        else
+            echo -e "    Caddy:      ${RED}Stopped${NC}"
         fi
+    else
+        echo "    Caddy:      Not installed"
     fi
     
-    echo "Useful commands:"
-    echo "  Status:          sudo systemctl status decloud-node-agent"
-    echo "  Logs:            sudo journalctl -u decloud-node-agent -f"
-    echo "  Restart:         sudo systemctl restart decloud-node-agent"
-    if [ "$SKIP_WIREGUARD" = false ]; then
-        echo "  WireGuard:       sudo decloud-wg status"
+    # fail2ban
+    if command -v fail2ban-client &> /dev/null; then
+        if systemctl is-active --quiet fail2ban; then
+            local jails=$(fail2ban-client status 2>/dev/null | grep "Jail list" | cut -d: -f2 | tr ',' ' ' | wc -w)
+            
+            local total_banned=0
+            for jail in $(fail2ban-client status 2>/dev/null | grep "Jail list" | cut -d: -f2 | tr ',' ' '); do
+                local banned=$(fail2ban-client status "$jail" 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
+                total_banned=$((total_banned + banned))
+            done
+            
+            echo -e "    fail2ban:   ${GREEN}Running${NC} ($jails jails, $total_banned banned)"
+        else
+            echo -e "    fail2ban:   ${RED}Stopped${NC}"
+        fi
+    else
+        echo "    fail2ban:   Not installed"
     fi
-    echo "  SSH CA Info:     cat $SSH_CA_PUB_PATH"
+    
+    # Logs
     echo ""
-    echo "Configuration:     ${CONFIG_DIR}/appsettings.Production.json"
-    echo "Data directory:    ${DATA_DIR}"
-    echo ""
-    echo "System resources:"
-    echo "  CPU Cores:       ${CPU_CORES}"
-    echo "  Memory:          ${MEMORY_MB}MB"
-    echo "  Free Disk:       ${DISK_GB}GB"
-    echo ""
-    echo "Installed tools:"
-    echo "  virt-customize:  $(which virt-customize 2>/dev/null && echo '✓' || echo '✗')"
-    echo "  ssh-keygen:      $(which ssh-keygen 2>/dev/null && echo '✓' || echo '✗')"
-    echo "  SSH CA:          $([ -f $SSH_CA_KEY_PATH ] && echo '✓' || echo '✗')"
+    echo "  Logs:"
+    echo "    Agent:      journalctl -u $SERVICE_NAME -f"
+    if [ -f "$DECLOUD_LOG_DIR/audit.log" ]; then
+        echo "    Audit:      tail -f $DECLOUD_LOG_DIR/audit.log"
+    fi
+    if [ -f "/var/log/caddy/caddy.log" ]; then
+        echo "    Caddy:      tail -f /var/log/caddy/caddy.log"
+    fi
+    echo "    fail2ban:   tail -f /var/log/fail2ban.log"
     echo ""
 }
 
@@ -1269,58 +535,57 @@ print_summary() {
 main() {
     echo ""
     echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║       DeCloud Node Agent Installer v${VERSION}                    ║"
+    echo "║       DeCloud Node Agent Update Script v${VERSION}                ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo ""
     
     parse_args "$@"
     
-    # Validate required arguments
-    if [ -z "$ORCHESTRATOR_URL" ]; then
-        log_error "Orchestrator URL is required"
-        echo ""
-        show_help
-        exit 1
+    # Checks
+    check_root
+    check_installation
+    check_service_status
+    
+    # Security checks
+    check_caddy
+    check_fail2ban
+    check_security_logs
+    
+    if [ "$DEPS_ONLY" = true ]; then
+        log_success "Dependency check complete"
+        show_status
+        show_security_status
+        exit 0
     fi
     
-    # Run checks
-    check_root
-    check_os
-    check_architecture
-    check_virtualization
-    check_resources
-    check_network
+    # Fetch updates
+    fetch_updates
     
-    echo ""
-    log_info "All requirements met. Starting installation..."
-    echo ""
+    # Build and restart if changes detected or forced
+    if [ "$CHANGES_DETECTED" = true ] || [ "$FORCE_REBUILD" = true ]; then
+        if [ "$FORCE_REBUILD" = true ] && [ "$CHANGES_DETECTED" = false ]; then
+            log_info "Forcing rebuild (--force)"
+        fi
+        
+        build_node_agent
+        restart_service
+        verify_health
+        
+        # Update security components
+        update_caddy
+        verify_caddy_health
+        update_fail2ban
+        verify_fail2ban_health
+    else
+        log_info "No changes detected, skipping rebuild"
+        log_info "Use --force to rebuild anyway"
+    fi
     
-    # Install dependencies
-    install_base_dependencies
-    install_dotnet
-    install_libvirt
-    install_wireguard
-    configure_wireguard_hub
+    # Show final status
+    show_status
+    show_security_status
     
-    # Setup SSH CA
-    setup_ssh_ca
-
-    # Setup decloud user for SSH jump host
-    setup_decloud_user
-    configure_decloud_sshd
-    
-    # Setup application
-    create_directories
-    download_node_agent
-    build_node_agent
-    create_configuration
-    create_systemd_service
-    configure_firewall
-    create_client_helper_script
-    start_service
-    
-    # Done
-    print_summary
+    log_success "Update complete!"
 }
 
 main "$@"
