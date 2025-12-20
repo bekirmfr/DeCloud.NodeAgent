@@ -20,7 +20,7 @@
 #
 # Usage:
 #   curl -sSL https://raw.githubusercontent.com/.../install.sh | sudo bash -s -- \
-#       --orchestrator http://IP:5050
+#       --orchestrator https://decloud.stackfi.tech
 #
 
 set -e
@@ -147,7 +147,7 @@ DeCloud Node Agent Installer v${VERSION}
 Usage: $0 --orchestrator <url> [options]
 
 Required:
-  --orchestrator <url>   Orchestrator URL (e.g., http://142.234.200.108:5050)
+  --orchestrator <url>   Orchestrator URL (e.g., https://decloud.stackfi.tech)
 
 Node Identity:
   --wallet <address>     Node operator wallet address
@@ -176,13 +176,13 @@ PORT REQUIREMENTS:
 
 Examples:
   # Basic installation
-  $0 --orchestrator http://142.234.200.108:5050
+  $0 --orchestrator https://decloud.stackfi.tech
 
   # Custom ports (if defaults conflict)
-  $0 --orchestrator http://142.234.200.108:5050 --port 5200 --wg-port 51821
+  $0 --orchestrator https://decloud.stackfi.tech --port 5200 --wg-port 51821
 
   # With wallet and region
-  $0 --orchestrator http://142.234.200.108:5050 --wallet 0xYourWallet --region us-east
+  $0 --orchestrator https://decloud.stackfi.tech --wallet 0xYourWallet --region us-east
 EOF
 }
 
