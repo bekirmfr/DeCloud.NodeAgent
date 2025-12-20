@@ -22,6 +22,10 @@ builder.Services.Configure<CommandProcessorOptions>(
     builder.Configuration.GetSection("CommandProcessor"));
 builder.Services.Configure<OrchestratorClientOptions>(
     builder.Configuration.GetSection("Orchestrator"));
+builder.Services.Configure<PortSecurityOptions>(
+    builder.Configuration.GetSection("PortSecurity"));
+builder.Services.Configure<AuditLogOptions>(
+    builder.Configuration.GetSection("AuditLog"));
 
 // =====================================================
 // Core Services
@@ -109,11 +113,6 @@ builder.Services.AddSingleton<IOrchestratorClient>(sp =>
     sp.GetRequiredService<OrchestratorClient>());
 
 // =====================================================
-// Ingress Gateway & Security Services
-// =====================================================
-builder.Services.AddIngressAndSecurityServices(builder.Configuration);
-
-// =====================================================
 // Background Services
 // =====================================================
 builder.Services.AddHostedService<HeartbeatService>();
@@ -122,6 +121,22 @@ builder.Services.AddHostedService<DatabaseMaintenanceService>();
 
 // Initialize VM Manager on startup to load VMs from database
 builder.Services.AddHostedService<VmManagerInitializationService>();
+
+// =====================================================
+// Security services for port validation and auditing
+// =====================================================
+
+// Port security (validates ingress target ports)
+builder.Services.AddSingleton<IPortSecurityService, PortSecurityService>();
+
+// Security audit logging
+builder.Services.AddSingleton<IAuditService, AuditService>();
+
+// HttpClient for VM proxy (used by InternalProxyController)
+builder.Services.AddHttpClient("VmProxy", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(30);
+});
 
 // =====================================================
 // API

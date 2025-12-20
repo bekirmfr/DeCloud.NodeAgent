@@ -2,29 +2,30 @@
 #
 # DeCloud Node Agent Installation Script
 # 
-# Installs and configures the Node Agent with all dependencies:
+# Installs and configures the Node Agent with minimal dependencies:
 # - .NET 8 Runtime
 # - KVM/QEMU/libvirt for virtualization
 # - WireGuard for overlay networking
-# - Caddy for HTTP/HTTPS ingress with automatic TLS
-# - fail2ban for DDoS protection
 # - SSH CA for certificate authentication
 #
-# Version: 1.5.0
-# Changelog:
-# - Added Caddy ingress gateway with automatic Let's Encrypt TLS
-# - Added fail2ban DDoS/abuse protection
-# - Added security audit logging
-# - Simplified architecture (HTTP-only ingress, no direct port forwarding)
+# PORTS REQUIRED:
+# - Agent API (default 5100) - configurable
+# - WireGuard (default 51820) - configurable
+#
+# PORTS NOT REQUIRED:
+# - 80/443 - These stay with your existing apps!
+#
+# Version: 2.0.0
+# Architecture: Central ingress via Orchestrator, not on nodes
 #
 # Usage:
 #   curl -sSL https://raw.githubusercontent.com/.../install.sh | sudo bash -s -- \
-#       --orchestrator http://IP:5050 --caddy-email admin@example.com
+#       --orchestrator http://IP:5050
 #
 
 set -e
 
-VERSION="1.5.0"
+VERSION="2.0.0"
 
 # Colors
 RED='\033[0;31m'
@@ -57,9 +58,10 @@ NODE_ZONE="default"
 INSTALL_DIR="/opt/decloud"
 CONFIG_DIR="/etc/decloud"
 DATA_DIR="/var/lib/decloud/vms"
+LOG_DIR="/var/log/decloud"
 REPO_URL="https://github.com/bekirmfr/DeCloud.NodeAgent.git"
 
-# Ports
+# Ports (configurable - work with your existing infrastructure)
 AGENT_PORT=5100
 WIREGUARD_PORT=51820
 
@@ -67,19 +69,6 @@ WIREGUARD_PORT=51820
 WIREGUARD_HUB_IP="10.10.0.1"
 SKIP_WIREGUARD=false
 ENABLE_WIREGUARD_HUB=true
-
-# Caddy Ingress
-INSTALL_CADDY=${INSTALL_CADDY:-true}
-CADDY_ACME_EMAIL=""
-CADDY_ACME_STAGING=false
-CADDY_DATA_DIR="/var/lib/caddy"
-CADDY_LOG_DIR="/var/log/caddy"
-CADDY_CONFIG_DIR="/etc/caddy"
-
-# Security / fail2ban
-INSTALL_FAIL2BAN=${INSTALL_FAIL2BAN:-true}
-DECLOUD_LOG_DIR="/var/log/decloud"
-DECLOUD_AUDIT_LOG="${DECLOUD_LOG_DIR}/audit.log"
 
 # SSH CA
 SSH_CA_KEY_PATH="/etc/decloud/ssh_ca"
@@ -138,22 +127,6 @@ parse_args() {
                 SKIP_LIBVIRT=true
                 shift
                 ;;
-            --skip-caddy)
-                INSTALL_CADDY=false
-                shift
-                ;;
-            --caddy-email)
-                CADDY_ACME_EMAIL="$2"
-                shift 2
-                ;;
-            --caddy-staging)
-                CADDY_ACME_STAGING=true
-                shift
-                ;;
-            --skip-fail2ban)
-                INSTALL_FAIL2BAN=false
-                shift
-                ;;
             --help|-h)
                 show_help
                 exit 0
@@ -181,35 +154,35 @@ Node Identity:
   --name <name>          Node name (default: hostname)
   --region <region>      Region identifier (default: default)
   --zone <zone>          Zone identifier (default: default)
-  --port <port>          Agent API port (default: 5100)
 
-WireGuard:
+Network (all ports are configurable!):
+  --port <port>          Agent API port (default: 5100)
   --wg-port <port>       WireGuard listen port (default: 51820)
   --wg-ip <ip>           WireGuard hub IP (default: 10.10.0.1)
   --skip-wireguard       Skip WireGuard installation
   --no-wireguard-hub     Install WireGuard but don't configure hub
 
-Ingress Gateway:
-  --skip-caddy           Skip Caddy ingress gateway installation
-  --caddy-email <email>  Email for Let's Encrypt TLS certificates (recommended)
-  --caddy-staging        Use Let's Encrypt staging (for testing)
-
-Security:
-  --skip-fail2ban        Skip fail2ban DDoS protection
-
 Other:
   --skip-libvirt         Skip libvirt installation (testing only)
   --help                 Show this help message
 
+PORT REQUIREMENTS:
+  This installer only needs TWO ports:
+  - Agent API port (default 5100) - for orchestrator communication
+  - WireGuard port (default 51820) - for overlay network
+
+  Ports 80/443 are NOT required! Your existing web servers stay untouched.
+  HTTP ingress is handled centrally by the Orchestrator.
+
 Examples:
-  # Full installation with ingress
-  $0 --orchestrator http://142.234.200.108:5050 --caddy-email admin@example.com
+  # Basic installation
+  $0 --orchestrator http://142.234.200.108:5050
 
-  # Without ingress gateway
-  $0 --orchestrator http://142.234.200.108:5050 --skip-caddy --skip-fail2ban
+  # Custom ports (if defaults conflict)
+  $0 --orchestrator http://142.234.200.108:5050 --port 5200 --wg-port 51821
 
-  # Test environment with staging certificates
-  $0 --orchestrator http://142.234.200.108:5050 --caddy-email test@example.com --caddy-staging
+  # With wallet and region
+  $0 --orchestrator http://142.234.200.108:5050 --wallet 0xYourWallet --region us-east
 EOF
 }
 
@@ -317,6 +290,33 @@ check_resources() {
     fi
 }
 
+check_ports() {
+    log_step "Checking required ports..."
+    
+    # Check Agent API port
+    if ss -tlnp | grep -q ":${AGENT_PORT} "; then
+        log_error "Port $AGENT_PORT is already in use"
+        log_info "Use --port <number> to specify a different port"
+        ss -tlnp | grep ":${AGENT_PORT} "
+        exit 1
+    fi
+    log_success "Port $AGENT_PORT is available (Agent API)"
+    
+    # Check WireGuard port
+    if [ "$SKIP_WIREGUARD" = false ]; then
+        if ss -ulnp | grep -q ":${WIREGUARD_PORT} "; then
+            log_error "Port $WIREGUARD_PORT is already in use"
+            log_info "Use --wg-port <number> to specify a different port"
+            ss -ulnp | grep ":${WIREGUARD_PORT} "
+            exit 1
+        fi
+        log_success "Port $WIREGUARD_PORT is available (WireGuard)"
+    fi
+    
+    # Inform about 80/443
+    log_info "Ports 80/443 NOT required - ingress handled by Orchestrator"
+}
+
 check_network() {
     log_step "Checking network connectivity..."
     
@@ -336,7 +336,7 @@ check_network() {
 }
 
 # ============================================================
-# Base Installation
+# Installation Functions
 # ============================================================
 install_base_dependencies() {
     log_step "Installing base dependencies..."
@@ -452,359 +452,6 @@ EOF
 }
 
 # ============================================================
-# Caddy Ingress Gateway
-# ============================================================
-install_caddy() {
-    if [ "$INSTALL_CADDY" = false ]; then
-        log_warn "Skipping Caddy installation (--skip-caddy)"
-        return 0
-    fi
-
-    log_step "Installing Caddy web server..."
-
-    if command -v caddy &> /dev/null; then
-        local version=$(caddy version 2>/dev/null | head -1 | awk '{print $1}')
-        log_success "Caddy already installed: $version"
-        return 0
-    fi
-
-    apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl > /dev/null 2>&1
-
-    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | \
-        gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null
-
-    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | \
-        tee /etc/apt/sources.list.d/caddy-stable.list > /dev/null
-
-    apt-get update -qq
-    apt-get install -y -qq caddy > /dev/null 2>&1
-
-    if ! command -v caddy &> /dev/null; then
-        log_error "Caddy installation failed"
-        return 1
-    fi
-
-    local version=$(caddy version 2>/dev/null | head -1 | awk '{print $1}')
-    log_success "Caddy installed: $version"
-}
-
-configure_caddy() {
-    if [ "$INSTALL_CADDY" = false ]; then
-        return 0
-    fi
-
-    if ! command -v caddy &> /dev/null; then
-        log_warn "Caddy not installed, skipping configuration"
-        return 0
-    fi
-
-    log_step "Configuring Caddy..."
-
-    mkdir -p "$CADDY_DATA_DIR" "$CADDY_LOG_DIR" "$CADDY_CONFIG_DIR"
-    chown caddy:caddy "$CADDY_DATA_DIR" "$CADDY_LOG_DIR"
-
-    local acme_email_line=""
-    local acme_ca_line=""
-
-    if [ -n "$CADDY_ACME_EMAIL" ]; then
-        acme_email_line="    email $CADDY_ACME_EMAIL"
-    fi
-
-    if [ "$CADDY_ACME_STAGING" = true ]; then
-        acme_ca_line="    acme_ca https://acme-staging-v02.api.letsencrypt.org/directory"
-    fi
-
-    cat > "$CADDY_CONFIG_DIR/Caddyfile" << EOF
-# DeCloud Ingress Gateway Configuration
-# Routes managed dynamically via Admin API (localhost:2019)
-
-{
-    admin localhost:2019
-
-    log {
-        output file $CADDY_LOG_DIR/caddy.log {
-            roll_size 100mb
-            roll_keep 5
-            roll_keep_for 720h
-        }
-        format json
-    }
-
-$acme_email_line
-$acme_ca_line
-}
-
-:8080 {
-    respond /health "OK" 200
-    respond /ready "OK" 200
-}
-EOF
-
-    mkdir -p /etc/systemd/system/caddy.service.d
-    cat > /etc/systemd/system/caddy.service.d/decloud.conf << 'EOF'
-[Service]
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-LimitNOFILE=1048576
-Restart=always
-RestartSec=5
-Environment="XDG_DATA_HOME=/var/lib/caddy"
-Environment="XDG_CONFIG_HOME=/etc/caddy"
-ProtectSystem=full
-ProtectHome=true
-PrivateTmp=true
-NoNewPrivileges=true
-EOF
-
-    systemctl daemon-reload
-    log_success "Caddy configured"
-}
-
-configure_caddy_firewall() {
-    if [ "$INSTALL_CADDY" = false ]; then
-        return 0
-    fi
-
-    if ! command -v caddy &> /dev/null; then
-        return 0
-    fi
-
-    log_step "Configuring firewall for ingress (ports 80, 443)..."
-
-    if command -v ufw &> /dev/null && ufw status | grep -q "Status: active"; then
-        ufw allow 80/tcp comment "DeCloud Ingress HTTP" > /dev/null 2>&1 || true
-        ufw allow 443/tcp comment "DeCloud Ingress HTTPS" > /dev/null 2>&1 || true
-        log_success "UFW rules added for ports 80/443"
-    fi
-
-    if command -v firewall-cmd &> /dev/null && systemctl is-active --quiet firewalld; then
-        firewall-cmd --permanent --add-service=http > /dev/null 2>&1 || true
-        firewall-cmd --permanent --add-service=https > /dev/null 2>&1 || true
-        firewall-cmd --reload > /dev/null 2>&1 || true
-        log_success "Firewalld rules added for HTTP/HTTPS"
-    fi
-
-    if command -v iptables &> /dev/null; then
-        iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || \
-            iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
-        iptables -C INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || \
-            iptables -I INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
-    fi
-
-    log_success "Firewall configured for ingress"
-}
-
-start_caddy() {
-    if [ "$INSTALL_CADDY" = false ]; then
-        return 0
-    fi
-
-    if ! command -v caddy &> /dev/null; then
-        return 0
-    fi
-
-    log_step "Starting Caddy service..."
-
-    systemctl enable caddy --quiet 2>/dev/null || true
-    systemctl start caddy 2>/dev/null || true
-
-    sleep 2
-
-    if systemctl is-active --quiet caddy; then
-        log_success "Caddy service started"
-
-        local admin_check=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:2019/config/ 2>/dev/null || echo "000")
-        if [ "$admin_check" = "200" ]; then
-            log_success "Caddy Admin API accessible (localhost:2019)"
-        fi
-    else
-        log_error "Failed to start Caddy service"
-        return 1
-    fi
-}
-
-# ============================================================
-# fail2ban DDoS Protection
-# ============================================================
-install_fail2ban() {
-    if [ "$INSTALL_FAIL2BAN" = false ]; then
-        log_warn "Skipping fail2ban installation (--skip-fail2ban)"
-        return 0
-    fi
-
-    log_step "Installing fail2ban..."
-
-    apt-get install -y -qq fail2ban > /dev/null 2>&1
-
-    if ! command -v fail2ban-client &> /dev/null; then
-        log_error "fail2ban installation failed"
-        return 1
-    fi
-
-    log_success "fail2ban installed"
-}
-
-configure_fail2ban() {
-    if [ "$INSTALL_FAIL2BAN" = false ]; then
-        return 0
-    fi
-
-    if ! command -v fail2ban-client &> /dev/null; then
-        return 0
-    fi
-
-    log_step "Configuring fail2ban filters and jails..."
-
-    mkdir -p "$DECLOUD_LOG_DIR"
-    touch "$DECLOUD_AUDIT_LOG"
-    chmod 640 "$DECLOUD_AUDIT_LOG"
-
-    # Caddy rate limiting filter
-    cat > /etc/fail2ban/filter.d/caddy-ratelimit.conf << 'EOF'
-[Definition]
-failregex = ^.*"client_ip":"<HOST>".*"status":(429|503).*$
-            ^.*"remote_ip":"<HOST>".*"status":(429|503).*$
-ignoreregex =
-datepattern = "ts":{EPOCH}
-              %%Y-%%m-%%dT%%H:%%M:%%S
-EOF
-
-    # Caddy abuse filter
-    cat > /etc/fail2ban/filter.d/caddy-abuse.conf << 'EOF'
-[Definition]
-failregex = ^.*"client_ip":"<HOST>".*"status":(400|401|403|404|405).*$
-            ^.*"remote_ip":"<HOST>".*"status":(400|401|403|404|405).*$
-ignoreregex = 
-datepattern = "ts":{EPOCH}
-              %%Y-%%m-%%dT%%H:%%M:%%S
-EOF
-
-    # DeCloud API filter
-    cat > /etc/fail2ban/filter.d/decloud-api.conf << 'EOF'
-[Definition]
-failregex = ^.*"RemoteIpAddress":"<HOST>".*"StatusCode":(401|403).*$
-            ^.*Unauthorized access attempt from <HOST>.*$
-ignoreregex =
-datepattern = %%Y-%%m-%%d %%H:%%M:%%S
-EOF
-
-    # Jail configuration
-    cat > /etc/fail2ban/jail.d/decloud.conf << EOF
-[DEFAULT]
-bantime = 3600
-findtime = 600
-maxretry = 10
-banaction = iptables-multiport
-action = %(action_)s
-
-[sshd]
-enabled = true
-port = ssh,22,2222
-filter = sshd
-logpath = /var/log/auth.log
-maxretry = 5
-bantime = 86400
-
-[caddy-ratelimit]
-enabled = true
-port = http,https
-filter = caddy-ratelimit
-logpath = ${CADDY_LOG_DIR}/access.log
-maxretry = 50
-findtime = 60
-bantime = 1800
-
-[caddy-abuse]
-enabled = true
-port = http,https
-filter = caddy-abuse
-logpath = ${CADDY_LOG_DIR}/access.log
-maxretry = 30
-findtime = 300
-bantime = 3600
-
-[decloud-api]
-enabled = true
-port = ${AGENT_PORT}
-filter = decloud-api
-logpath = ${DECLOUD_LOG_DIR}/nodeagent.log
-maxretry = 10
-findtime = 300
-bantime = 3600
-
-[recidive]
-enabled = true
-filter = recidive
-logpath = /var/log/fail2ban.log
-banaction = iptables-allports
-bantime = 604800
-findtime = 86400
-maxretry = 3
-EOF
-
-    log_success "fail2ban configured"
-}
-
-start_fail2ban() {
-    if [ "$INSTALL_FAIL2BAN" = false ]; then
-        return 0
-    fi
-
-    if ! command -v fail2ban-client &> /dev/null; then
-        return 0
-    fi
-
-    log_step "Starting fail2ban service..."
-
-    if ! fail2ban-client -t > /dev/null 2>&1; then
-        log_warn "fail2ban configuration has warnings"
-    fi
-
-    systemctl enable fail2ban --quiet 2>/dev/null || true
-    systemctl restart fail2ban 2>/dev/null || true
-
-    sleep 2
-
-    if systemctl is-active --quiet fail2ban; then
-        log_success "fail2ban service started"
-        local jails=$(fail2ban-client status 2>/dev/null | grep "Jail list" | cut -d: -f2 | tr -d '[:space:]')
-        log_info "Active jails: $jails"
-    else
-        log_warn "fail2ban may not be running correctly"
-    fi
-}
-
-# ============================================================
-# Security Logging
-# ============================================================
-setup_security_logging() {
-    log_step "Setting up security logging..."
-
-    mkdir -p "$DECLOUD_LOG_DIR"
-    mkdir -p "$CADDY_LOG_DIR"
-
-    touch "$DECLOUD_AUDIT_LOG"
-    chmod 640 "$DECLOUD_AUDIT_LOG"
-
-    cat > /etc/logrotate.d/decloud << EOF
-${DECLOUD_LOG_DIR}/*.log {
-    daily
-    missingok
-    rotate 14
-    compress
-    delaycompress
-    notifempty
-    create 640 root root
-    sharedscripts
-    postrotate
-        systemctl reload decloud-node-agent > /dev/null 2>&1 || true
-    endscript
-}
-EOF
-
-    log_success "Security logging configured"
-}
-
-# ============================================================
 # SSH CA Setup
 # ============================================================
 setup_ssh_ca() {
@@ -889,7 +536,7 @@ create_directories() {
     mkdir -p "$INSTALL_DIR"
     mkdir -p "$CONFIG_DIR"
     mkdir -p "$DATA_DIR"
-    mkdir -p "$DECLOUD_LOG_DIR"
+    mkdir -p "$LOG_DIR"
     mkdir -p /var/lib/decloud
     
     log_success "Directories created"
@@ -928,9 +575,6 @@ build_node_agent() {
 create_configuration() {
     log_step "Creating configuration..."
 
-    local caddy_staging="false"
-    [ "$CADDY_ACME_STAGING" = true ] && caddy_staging="true"
-
     cat > "${CONFIG_DIR}/appsettings.Production.json" << EOF
 {
   "Logging": {
@@ -954,7 +598,8 @@ create_configuration() {
   },
   "WireGuard": {
     "Interface": "wg0",
-    "ConfigPath": "/etc/wireguard/wg0.conf"
+    "ConfigPath": "/etc/wireguard/wg0.conf",
+    "ListenPort": ${WIREGUARD_PORT}
   },
   "Libvirt": {
     "Uri": "qemu:///system",
@@ -966,28 +611,6 @@ create_configuration() {
   "SshCa": {
     "PrivateKeyPath": "${SSH_CA_KEY_PATH}",
     "PublicKeyPath": "${SSH_CA_PUB_PATH}"
-  },
-  "Caddy": {
-    "AdminApiUrl": "http://localhost:2019",
-    "ConfigPath": "/etc/caddy/Caddyfile",
-    "AcmeEmail": "${CADDY_ACME_EMAIL:-}",
-    "UseAcmeStaging": ${caddy_staging},
-    "DataDir": "/var/lib/caddy",
-    "EnableAccessLog": true,
-    "AccessLogPath": "/var/log/caddy/access.log",
-    "AutoHttpsRedirect": true
-  },
-  "PortSecurity": {
-    "MinAllowedPort": 1,
-    "MaxAllowedPort": 65535,
-    "BlockedPorts": [22, 2222, 3306, 5432, 27017, 6379, 9200, 5100, 51820, 2019, 16509]
-  },
-  "AuditLog": {
-    "Enabled": true,
-    "LogPath": "/var/log/decloud/audit.log",
-    "MaxFileSizeMb": 100,
-    "MaxFiles": 10,
-    "RetentionDays": 90
   }
 }
 EOF
@@ -1013,8 +636,8 @@ Restart=always
 RestartSec=10
 Environment=ASPNETCORE_ENVIRONMENT=Production
 Environment=DOTNET_ENVIRONMENT=Production
-StandardOutput=append:${DECLOUD_LOG_DIR}/nodeagent.log
-StandardError=append:${DECLOUD_LOG_DIR}/nodeagent.log
+StandardOutput=append:${LOG_DIR}/nodeagent.log
+StandardError=append:${LOG_DIR}/nodeagent.log
 
 [Install]
 WantedBy=multi-user.target
@@ -1034,8 +657,28 @@ configure_firewall() {
             ufw allow ${WIREGUARD_PORT}/udp comment "DeCloud WireGuard" > /dev/null 2>&1 || true
         fi
         
-        log_success "UFW rules added"
+        log_success "UFW rules added (ports $AGENT_PORT/tcp, $WIREGUARD_PORT/udp)"
+    else
+        log_info "UFW not active, skipping firewall configuration"
     fi
+}
+
+create_helper_scripts() {
+    log_step "Creating helper scripts..."
+    
+    # WireGuard helper
+    cat > /usr/local/bin/decloud-wg << 'EOFWG'
+#!/bin/bash
+case "$1" in
+    status) wg show ;;
+    add) wg set wg0 peer "$2" allowed-ips "$3/32" ;;
+    remove) wg set wg0 peer "$2" remove ;;
+    *) echo "Usage: decloud-wg {status|add <pubkey> <ip>|remove <pubkey>}" ;;
+esac
+EOFWG
+    chmod +x /usr/local/bin/decloud-wg
+    
+    log_success "Helper scripts created"
 }
 
 start_service() {
@@ -1055,59 +698,8 @@ start_service() {
 }
 
 # ============================================================
-# Status Display
+# Summary
 # ============================================================
-print_caddy_status() {
-    if [ "$INSTALL_CADDY" = false ]; then
-        return 0
-    fi
-
-    echo ""
-    echo "  ─────────────────────────────────────────────────────────────"
-    echo "  Caddy Ingress Gateway:"
-    echo "  ─────────────────────────────────────────────────────────────"
-
-    if command -v caddy &> /dev/null && systemctl is-active --quiet caddy; then
-        echo -e "  Status:          ${GREEN}Running${NC}"
-        echo "  Admin API:       http://localhost:2019"
-        echo "  Health Check:    http://localhost:8080/health"
-        echo "  Ports:           80 (HTTP), 443 (HTTPS)"
-        
-        if [ -n "$CADDY_ACME_EMAIL" ]; then
-            echo "  ACME Email:      $CADDY_ACME_EMAIL"
-        else
-            echo -e "  ACME Email:      ${YELLOW}Not configured${NC}"
-        fi
-        
-        if [ "$CADDY_ACME_STAGING" = true ]; then
-            echo -e "  ACME Mode:       ${YELLOW}STAGING${NC}"
-        else
-            echo "  ACME Mode:       Production"
-        fi
-    else
-        echo -e "  Status:          ${RED}Not Running${NC}"
-    fi
-}
-
-print_fail2ban_status() {
-    if [ "$INSTALL_FAIL2BAN" = false ]; then
-        return 0
-    fi
-
-    echo ""
-    echo "  ─────────────────────────────────────────────────────────────"
-    echo "  fail2ban DDoS Protection:"
-    echo "  ─────────────────────────────────────────────────────────────"
-
-    if command -v fail2ban-client &> /dev/null && systemctl is-active --quiet fail2ban; then
-        echo -e "  Status:          ${GREEN}Running${NC}"
-        local jails=$(fail2ban-client status 2>/dev/null | grep "Jail list" | cut -d: -f2 | tr -d '[:space:]')
-        echo "  Active Jails:    $jails"
-    else
-        echo -e "  Status:          ${RED}Not Running${NC}"
-    fi
-}
-
 print_summary() {
     echo ""
     echo "╔══════════════════════════════════════════════════════════════╗"
@@ -1116,26 +708,41 @@ print_summary() {
     echo ""
     echo "  Node Agent:      http://localhost:${AGENT_PORT}"
     echo "  Orchestrator:    ${ORCHESTRATOR_URL}"
-    echo "  Configuration:   ${CONFIG_DIR}/appsettings.Production.json"
-    echo "  Data directory:  ${DATA_DIR}"
     echo ""
+    echo "  ─────────────────────────────────────────────────────────────"
+    echo "  Ports Used:"
+    echo "  ─────────────────────────────────────────────────────────────"
+    echo "    Agent API:     ${AGENT_PORT}/tcp"
+    if [ "$SKIP_WIREGUARD" = false ]; then
+        echo "    WireGuard:     ${WIREGUARD_PORT}/udp"
+    fi
+    echo ""
+    echo -e "    ${GREEN}Ports 80/443: NOT USED${NC} - Your existing apps are safe!"
+    echo "    HTTP ingress is handled centrally by the Orchestrator."
+    echo ""
+    echo "  ─────────────────────────────────────────────────────────────"
     echo "  Commands:"
+    echo "  ─────────────────────────────────────────────────────────────"
     echo "    Status:        sudo systemctl status decloud-node-agent"
     echo "    Logs:          sudo journalctl -u decloud-node-agent -f"
     echo "    Restart:       sudo systemctl restart decloud-node-agent"
-    
     if [ "$SKIP_WIREGUARD" = false ]; then
-        echo "    WireGuard:     sudo wg show"
+        echo "    WireGuard:     sudo decloud-wg status"
     fi
-    
-    print_caddy_status
-    print_fail2ban_status
-    
     echo ""
-    echo "  System resources:"
+    echo "  ─────────────────────────────────────────────────────────────"
+    echo "  Files:"
+    echo "  ─────────────────────────────────────────────────────────────"
+    echo "    Configuration: ${CONFIG_DIR}/appsettings.Production.json"
+    echo "    Data:          ${DATA_DIR}"
+    echo "    Logs:          ${LOG_DIR}/nodeagent.log"
+    echo ""
+    echo "  ─────────────────────────────────────────────────────────────"
+    echo "  Resources:"
+    echo "  ─────────────────────────────────────────────────────────────"
     echo "    CPU Cores:     ${CPU_CORES}"
     echo "    Memory:        ${MEMORY_MB}MB"
-    echo "    Free Disk:     ${DISK_GB}GB"
+    echo "    Disk:          ${DISK_GB}GB"
     echo ""
 }
 
@@ -1164,26 +771,19 @@ main() {
     check_architecture
     check_virtualization
     check_resources
+    check_ports
     check_network
     
     echo ""
     log_info "All requirements met. Starting installation..."
     echo ""
     
-    # Base installation
+    # Install dependencies
     install_base_dependencies
     install_dotnet
     install_libvirt
     install_wireguard
     configure_wireguard_hub
-    
-    # Ingress & Security
-    install_caddy
-    configure_caddy
-    configure_caddy_firewall
-    install_fail2ban
-    configure_fail2ban
-    setup_security_logging
     
     # SSH CA
     setup_ssh_ca
@@ -1197,11 +797,8 @@ main() {
     create_configuration
     create_systemd_service
     configure_firewall
+    create_helper_scripts
     start_service
-    
-    # Start security services
-    start_caddy
-    start_fail2ban
     
     # Done
     print_summary
