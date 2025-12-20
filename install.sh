@@ -77,6 +77,9 @@ SSH_CA_PUB_PATH="/etc/decloud/ssh_ca.pub"
 # Other
 SKIP_LIBVIRT=false
 
+# Update mode (detected if node agent already running)
+UPDATE_MODE=false
+
 # ============================================================
 # Argument Parsing
 # ============================================================
@@ -294,23 +297,39 @@ check_ports() {
     log_step "Checking required ports..."
     
     # Check Agent API port
-    if ss -tlnp | grep -q ":${AGENT_PORT} "; then
-        log_error "Port $AGENT_PORT is already in use"
-        log_info "Use --port <number> to specify a different port"
-        ss -tlnp | grep ":${AGENT_PORT} "
-        exit 1
+    local agent_port_process=""
+    agent_port_process=$(ss -tlnp 2>/dev/null | grep ":${AGENT_PORT} " | sed -n 's/.*users:(("\([^"]*\)".*/\1/p' | head -1)
+    
+    if [ -n "$agent_port_process" ]; then
+        if [ "$agent_port_process" = "decloud-node" ] || [ "$agent_port_process" = "dotnet" ]; then
+            log_warn "Node Agent already running on port $AGENT_PORT - will update in place"
+            UPDATE_MODE=true
+        else
+            log_error "Port $AGENT_PORT is already in use by '$agent_port_process'"
+            log_info "Use --port <number> to specify a different port"
+            exit 1
+        fi
+    else
+        log_success "Port $AGENT_PORT is available (Agent API)"
     fi
-    log_success "Port $AGENT_PORT is available (Agent API)"
     
     # Check WireGuard port
     if [ "$SKIP_WIREGUARD" = false ]; then
-        if ss -ulnp | grep -q ":${WIREGUARD_PORT} "; then
-            log_error "Port $WIREGUARD_PORT is already in use"
-            log_info "Use --wg-port <number> to specify a different port"
-            ss -ulnp | grep ":${WIREGUARD_PORT} "
-            exit 1
+        local wg_port_process=""
+        wg_port_process=$(ss -ulnp 2>/dev/null | grep ":${WIREGUARD_PORT} " | sed -n 's/.*users:(("\([^"]*\)".*/\1/p' | head -1)
+        
+        if [ -n "$wg_port_process" ]; then
+            # WireGuard already running is fine for updates
+            if [ "$wg_port_process" = "wireguard" ] || [[ "$wg_port_process" == *"wg"* ]]; then
+                log_success "WireGuard already running on port $WIREGUARD_PORT"
+            else
+                log_error "Port $WIREGUARD_PORT is already in use by '$wg_port_process'"
+                log_info "Use --wg-port <number> to specify a different port"
+                exit 1
+            fi
+        else
+            log_success "Port $WIREGUARD_PORT is available (WireGuard)"
         fi
-        log_success "Port $WIREGUARD_PORT is available (WireGuard)"
     fi
     
     # Inform about 80/443
@@ -544,6 +563,13 @@ create_directories() {
 
 download_node_agent() {
     log_step "Downloading Node Agent..."
+    
+    # Stop service if running (update mode)
+    if [ "$UPDATE_MODE" = true ]; then
+        log_info "Stopping existing node agent service..."
+        systemctl stop decloud-node-agent 2>/dev/null || true
+        sleep 2
+    fi
     
     if [ -d "$INSTALL_DIR/DeCloud.NodeAgent" ]; then
         rm -rf "$INSTALL_DIR/DeCloud.NodeAgent"
