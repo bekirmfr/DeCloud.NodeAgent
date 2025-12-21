@@ -1090,6 +1090,18 @@ public class LibvirtVmManager : IVmManager
         sb.AppendLine("    AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u");
         sb.AppendLine("    DECLOUD_EOF");
 
+        // ============================================================
+        // Cloud-Init Snippet for DeCloud Welcome Page
+        // Zero dependencies - uses Python stdlib http.server
+        // Self-documenting - includes removal instructions on the page
+        // ============================================================
+        sb.AppendLine("  # DeCloud Welcome Page (port 80)");
+        sb.AppendLine("  - mkdir -p /var/www");
+        sb.AppendLine($"  - echo '<!DOCTYPE html><html><head><title>{spec.Name}</title><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:system-ui,sans-serif;min-height:100vh;display:flex;justify-content:center;align-items:center;background:linear-gradient(135deg,#0f0f23,#1a1a3e);color:#fff}}.card{{background:rgba(255,255,255,.05);padding:3rem;border-radius:16px;text-align:center;border:1px solid rgba(255,255,255,.1);max-width:500px}}h1{{font-size:2rem;margin-bottom:.5rem}}.name{{color:#4ade80;font-family:monospace}}p{{color:#94a3b8}}.status{{display:inline-block;padding:.4rem 1rem;background:rgba(34,197,94,.2);border:1px solid rgba(34,197,94,.3);border-radius:9999px;margin-top:1rem;font-size:.875rem}}.dot{{display:inline-block;width:8px;height:8px;background:#22c55e;border-radius:50%;margin-right:.5rem;animation:pulse 2s infinite}}@keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.5}}}}.note{{margin-top:2rem;padding:1rem;background:rgba(0,0,0,.3);border-radius:8px;font-size:.8rem;color:#64748b}}code{{background:rgba(0,0,0,.4);padding:.2rem .4rem;border-radius:4px;font-size:.75rem;color:#f59e0b}}</style></head><body><div class=\"card\"><h1>🚀 <span class=\"name\">{spec.Name}</span></h1><p>Decentralized compute, running on your terms.</p><div class=\"status\"><span class=\"dot\"></span>Online</div><div class=\"note\">To remove this page and free port 80:<br><code>sudo systemctl disable --now welcome</code></div></div></body></html>' > /var/www/index.html");
+        sb.AppendLine("  - printf '[Unit]\\nDescription=DeCloud Welcome Page\\nAfter=network.target\\n[Service]\\nExecStart=/usr/bin/python3 -m http.server 80 --directory /var/www\\nRestart=always\\n[Install]\\nWantedBy=multi-user.target' > /etc/systemd/system/welcome.service");
+        sb.AppendLine("  - systemctl daemon-reload");
+        sb.AppendLine("  - systemctl enable --now welcome");
+
         // Create principals directory and file
         sb.AppendLine("  - mkdir -p /etc/ssh/auth_principals");
         sb.AppendLine($"  - echo vm-{spec.VmId} > /etc/ssh/auth_principals/ubuntu");
