@@ -62,19 +62,34 @@ public class InternalProxyController : ControllerBase
                 return;
             }
 
-            // Get VM's private IP
-            var vmIp = vm.Spec.Network?.IpAddress;
+            // =========================================================================
+            // Always get fresh IP from libvirt first, fall back to stored IP
+            // This resolves the issue where stored IP may not be populated yet
+            // =========================================================================
+            var vmIp = await _vmManager.GetVmIpAddressAsync(vmId, HttpContext.RequestAborted);
+
+            // Fall back to stored IP if fresh lookup fails
             if (string.IsNullOrEmpty(vmIp))
             {
-                _logger.LogWarning("VM {VmId} has no IP address", vmId);
+                vmIp = vm.Spec.Network?.IpAddress;
+            }
+
+            if (string.IsNullOrEmpty(vmIp))
+            {
+                _logger.LogWarning("VM {VmId} has no IP address (state: {State}, created: {Created})",
+                    vmId, vm.State, vm.CreatedAt);
                 HttpContext.Response.StatusCode = 503;
                 await HttpContext.Response.WriteAsJsonAsync(new
                 {
                     error = "VM not ready",
-                    message = "VM does not have an IP address yet"
+                    message = "VM does not have an IP address yet",
+                    vmState = vm.State.ToString(),
+                    suggestion = "The VM may still be booting. Please wait 30-60 seconds and try again."
                 });
                 return;
             }
+
+            _logger.LogDebug("Proxying request to VM {VmId} at {VmIp}", vmId, vmIp);
 
             // Get target port from header or default to 80
             var targetPort = 80;
@@ -224,7 +239,16 @@ public class InternalProxyController : ControllerBase
             return;
         }
 
-        var vmIp = vm.Spec.Network?.IpAddress;
+        // =========================================================================
+        // Get fresh IP first
+        // =========================================================================
+        var vmIp = await _vmManager.GetVmIpAddressAsync(vmId, HttpContext.RequestAborted);
+
+        if (string.IsNullOrEmpty(vmIp))
+        {
+            vmIp = vm.Spec.Network?.IpAddress;
+        }
+
         if (string.IsNullOrEmpty(vmIp))
         {
             HttpContext.Response.StatusCode = 503;
@@ -249,60 +273,90 @@ public class InternalProxyController : ControllerBase
             using var vmWsClient = new System.Net.WebSockets.ClientWebSocket();
 
             var wsPath = string.IsNullOrEmpty(path) ? "/" : $"/{path}";
-            var wsUri = new Uri($"ws://{vmIp}:{targetPort}{wsPath}");
+            var queryString = HttpContext.Request.QueryString.Value ?? "";
+            var vmWsUrl = $"ws://{vmIp}:{targetPort}{wsPath}{queryString}";
 
-            await vmWsClient.ConnectAsync(wsUri, HttpContext.RequestAborted);
+            await vmWsClient.ConnectAsync(new Uri(vmWsUrl), HttpContext.RequestAborted);
 
-            // Bidirectional proxy
-            var clientToVm = ProxyWebSocketOneWay(clientWs, vmWsClient, "client→vm", HttpContext.RequestAborted);
-            var vmToClient = ProxyWebSocketOneWay(vmWsClient, clientWs, "vm→client", HttpContext.RequestAborted);
+            // Bidirectional relay
+            var buffer = new byte[4096];
 
-            await Task.WhenAny(clientToVm, vmToClient);
+            var clientToVm = Task.Run(async () =>
+            {
+                try
+                {
+                    while (clientWs.State == System.Net.WebSockets.WebSocketState.Open)
+                    {
+                        var result = await clientWs.ReceiveAsync(new ArraySegment<byte>(buffer), HttpContext.RequestAborted);
+
+                        if (result.MessageType == System.Net.WebSockets.WebSocketMessageType.Close)
+                        {
+                            await vmWsClient.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "Client closed", HttpContext.RequestAborted);
+                            break;
+                        }
+
+                        await vmWsClient.SendAsync(
+                            new ArraySegment<byte>(buffer, 0, result.Count),
+                            result.MessageType,
+                            result.EndOfMessage,
+                            HttpContext.RequestAborted);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Client to VM WebSocket relay ended");
+                }
+            });
+
+            var vmToClient = Task.Run(async () =>
+            {
+                try
+                {
+                    while (vmWsClient.State == System.Net.WebSockets.WebSocketState.Open)
+                    {
+                        var result = await vmWsClient.ReceiveAsync(new ArraySegment<byte>(buffer), HttpContext.RequestAborted);
+
+                        if (result.MessageType == System.Net.WebSockets.WebSocketMessageType.Close)
+                        {
+                            await clientWs.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "VM closed", HttpContext.RequestAborted);
+                            break;
+                        }
+
+                        await clientWs.SendAsync(
+                            new ArraySegment<byte>(buffer, 0, result.Count),
+                            result.MessageType,
+                            result.EndOfMessage,
+                            HttpContext.RequestAborted);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "VM to client WebSocket relay ended");
+                }
+            });
+
+            await Task.WhenAll(clientToVm, vmToClient);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "WebSocket proxy error for VM {VmId}", vmId);
+            _logger.LogError(ex, "WebSocket proxy error for VM {VmId}", vmId);
         }
     }
 
-    private async Task ProxyWebSocketOneWay(
-        System.Net.WebSockets.WebSocket source,
-        System.Net.WebSockets.WebSocket dest,
-        string direction,
-        CancellationToken ct)
+    private static bool IsHopByHopHeader(string headerName)
     {
-        var buffer = new byte[4096];
-
-        while (source.State == System.Net.WebSockets.WebSocketState.Open && !ct.IsCancellationRequested)
+        var hopByHopHeaders = new[]
         {
-            var result = await source.ReceiveAsync(buffer, ct);
+            "Connection",
+            "Keep-Alive",
+            "Proxy-Authenticate",
+            "Proxy-Authorization",
+            "TE",
+            "Trailers",
+            "Transfer-Encoding",
+            "Upgrade"
+        };
 
-            if (result.MessageType == System.Net.WebSockets.WebSocketMessageType.Close)
-            {
-                await dest.CloseAsync(
-                    System.Net.WebSockets.WebSocketCloseStatus.NormalClosure,
-                    "Closed",
-                    ct);
-                break;
-            }
-
-            await dest.SendAsync(
-                new ArraySegment<byte>(buffer, 0, result.Count),
-                result.MessageType,
-                result.EndOfMessage,
-                ct);
-        }
-    }
-
-    private static bool IsHopByHopHeader(string header)
-    {
-        return header.Equals("Connection", StringComparison.OrdinalIgnoreCase) ||
-               header.Equals("Keep-Alive", StringComparison.OrdinalIgnoreCase) ||
-               header.Equals("Proxy-Authenticate", StringComparison.OrdinalIgnoreCase) ||
-               header.Equals("Proxy-Authorization", StringComparison.OrdinalIgnoreCase) ||
-               header.Equals("TE", StringComparison.OrdinalIgnoreCase) ||
-               header.Equals("Trailer", StringComparison.OrdinalIgnoreCase) ||
-               header.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase) ||
-               header.Equals("Upgrade", StringComparison.OrdinalIgnoreCase);
+        return hopByHopHeaders.Contains(headerName, StringComparer.OrdinalIgnoreCase);
     }
 }
