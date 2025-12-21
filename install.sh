@@ -655,9 +655,9 @@ After=network.target libvirtd.service
 Wants=libvirtd.service
 
 [Service]
-Type=notify
+Type=simple
 WorkingDirectory=${INSTALL_DIR}/publish
-ExecStart=${INSTALL_DIR}/publish/DeCloud.NodeAgent
+ExecStart=/usr/bin/dotnet ${INSTALL_DIR}/publish/DeCloud.NodeAgent.dll
 Restart=always
 RestartSec=10
 Environment=ASPNETCORE_ENVIRONMENT=Production
