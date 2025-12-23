@@ -1,9 +1,12 @@
-// Updated HeartbeatService.cs for Node Agent
+﻿// Updated HeartbeatService.cs for Node Agent
 // Sends detailed VM information with each heartbeat
 
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.Shared;
 using Microsoft.Extensions.Options;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace DeCloud.NodeAgent.Services;
 
@@ -65,6 +68,9 @@ public class HeartbeatService : BackgroundService
         _logger.LogInformation("Heartbeat service stopping");
     }
 
+    // Updated HeartbeatService.RegisterWithOrchestratorAsync
+    // Generates deterministic node ID before registration
+
     private async Task RegisterWithOrchestratorAsync(CancellationToken ct)
     {
         var maxRetries = 5;
@@ -74,39 +80,98 @@ public class HeartbeatService : BackgroundService
         {
             try
             {
-                _logger.LogInformation("Attempting to register with orchestrator (attempt {Attempt}/{Max})",
-                    i + 1, maxRetries);
+                _logger.LogInformation("Registration attempt {Attempt}/{Max}", i + 1, maxRetries);
 
+                // =====================================================
+                // STEP 1: Get Machine ID
+                // =====================================================
+                string machineId;
+                try
+                {
+                    machineId = NodeIdGenerator.GetMachineId();
+                    _logger.LogInformation("Machine ID: {MachineId}", machineId);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to get machine ID");
+                    throw;
+                }
+
+                // =====================================================
+                // STEP 2: Get Wallet Address
+                // =====================================================
+                var walletAddress = _orchestratorClient.WalletAddress;
+
+                // Validate wallet address
+                if (string.IsNullOrWhiteSpace(walletAddress) ||
+                    walletAddress == "0x0000000000000000000000000000000000000000")
+                {
+                    _logger.LogError(
+                        "❌ CRITICAL: No valid wallet address configured! " +
+                        "Set 'Orchestrator:WalletAddress' in appsettings.json or NODE_WALLET_ADDRESS environment variable.");
+
+                    throw new InvalidOperationException("No valid wallet address configured");
+                }
+
+                _logger.LogInformation("Wallet address: {Wallet}", walletAddress);
+
+                // =====================================================
+                // STEP 3: Generate Deterministic Node ID
+                // =====================================================
+                string nodeId;
+                try
+                {
+                    nodeId = NodeIdGenerator.GenerateNodeId(machineId, walletAddress);
+                    _logger.LogInformation("✓ Generated deterministic node ID: {NodeId}", nodeId);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to generate node ID");
+                    throw;
+                }
+
+                // =====================================================
+                // STEP 4: Build Registration Request
+                // =====================================================
                 var resources = await _resourceDiscovery.DiscoverAllAsync(ct);
                 var publicIp = await GetPublicIpAsync(ct);
 
-                // Build registration using correct NodeRegistration properties
                 var registration = new NodeRegistration
                 {
+                    NodeId = nodeId,           // ← Deterministic node ID
+                    MachineId = machineId,     // ← For validation
                     Name = Environment.MachineName,
-                    NodeId = Environment.MachineName,
-                    PublicIp = publicIp,                          // FIXED: Direct property
-                    AgentPort = _options.AgentPort,               // FIXED: Direct property
+                    WalletAddress = walletAddress,
+                    PublicIp = publicIp ?? "127.0.0.1",
+                    AgentPort = 5100,
                     Resources = resources,
-                    AgentVersion = "1.0.0",                       // FIXED: Direct property
-                    SupportedImages = new List<string>            // FIXED: Direct property
-                    {
-                        "ubuntu-24.04",
-                        "ubuntu-22.04",
-                        "debian-12"
-                    },
-                    SupportsGpu = resources.Gpus.Any(),           // FIXED: Direct property
-                    GpuInfo = resources.Gpus.FirstOrDefault(),    // FIXED: Direct property
-                    WalletAddress = _options.WalletAddress ?? "0x0000000000000000000000000000000000000000",
-                    Region = "default",                           // FIXED: Direct property
-                    Zone = "default"                              // FIXED: Direct property
+                    AgentVersion = "2.0.0",
+                    SupportedImages = new List<string>
+                {
+                    "ubuntu-24.04", "ubuntu-22.04", "ubuntu-20.04",
+                    "debian-12", "debian-11",
+                    "fedora-40", "fedora-39",
+                    "alpine-3.19", "alpine-3.18"
+                },
+                    SupportsGpu = resources.Gpus.Any(),
+                    GpuInfo = resources.Gpus.FirstOrDefault(),
+                    Region = "default",
+                    Zone = "default"
                 };
 
+                // =====================================================
+                // STEP 5: Register with Orchestrator
+                // =====================================================
                 var success = await _orchestratorClient.RegisterNodeAsync(registration, ct);
 
                 if (success)
                 {
-                    _logger.LogInformation("Successfully registered with orchestrator");
+                    _logger.LogInformation(
+                        "✓ Successfully registered with orchestrator\n" +
+                        "  Node ID: {NodeId}\n" +
+                        "  Machine: {MachineId}\n" +
+                        "  Wallet:  {Wallet}",
+                        nodeId, machineId, walletAddress);
                     return;
                 }
 

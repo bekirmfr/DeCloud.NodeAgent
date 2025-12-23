@@ -83,8 +83,21 @@ public class VmSummary
 /// </summary>
 public class NodeRegistration
 {
+    /// <summary>
+    /// Deterministic node ID (calculated from MachineId + WalletAddress)
+    /// </summary>
+    public required string NodeId { get; set; }
+
+    /// <summary>
+    /// Machine fingerprint for validation
+    /// </summary>
+    public required string MachineId { get; set; }
+
+    /// <summary>
+    /// Wallet address for ownership/billing
+    /// </summary>
+    public required string WalletAddress { get; set; }
     public string Name { get; set; } = string.Empty;
-    public string NodeId { get; set; } = string.Empty;
     public string PublicIp { get; set; } = string.Empty;
     public int AgentPort { get; set; }
 
@@ -100,7 +113,6 @@ public class NodeRegistration
     public NodePricing? Pricing { get; set; }
     
     // Staking info
-    public string WalletAddress { get; set; } = string.Empty;
     public string StakingTxHash { get; set; } = string.Empty;
 
     public string Region { get; set; } = "default";

@@ -54,6 +54,8 @@ public class OrchestratorClient : IOrchestratorClient
 
             var request = new
             {
+                nodeId = registration.NodeId,
+                machineId = registration.MachineId,
                 name = registration.Name,
                 walletAddress = registration.WalletAddress,
                 publicIp = registration.PublicIp,

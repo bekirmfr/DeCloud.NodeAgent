@@ -93,6 +93,8 @@ public interface IOrchestratorClient
     string? NodeId { get; }
     bool IsRegistered { get; }
 
+    string? WalletAddress { get; set; }
+
     Task<bool> RegisterNodeAsync(NodeRegistration registration, CancellationToken ct = default);
     Task<bool> SendHeartbeatAsync(Heartbeat heartbeat, CancellationToken ct = default);
 
