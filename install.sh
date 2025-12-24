@@ -56,7 +56,7 @@ NODE_ZONE="default"
 
 # Paths
 INSTALL_DIR="/opt/decloud"
-CONFIG_DIR="/opt/decloud/publish/"
+CONFIG_DIR="/opt/decloud/publish"
 DATA_DIR="/var/lib/decloud/vms"
 LOG_DIR="/var/log/decloud"
 REPO_URL="https://github.com/bekirmfr/DeCloud.NodeAgent.git"
