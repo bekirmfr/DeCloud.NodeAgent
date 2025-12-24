@@ -13,7 +13,7 @@ public class LibvirtVmManagerOptions
 {
     public string VmStoragePath { get; set; } = "/var/lib/decloud/vms";
     public string ImageCachePath { get; set; } = "/var/lib/decloud/images";
-    public string LibvirtUri { get; set; } = "qemu:///system";
+    public string Uri { get; set; } = "qemu:///system";
     public int VncPortStart { get; set; } = 5900;
     public bool ReconcileOnStartup { get; set; } = true;
 }

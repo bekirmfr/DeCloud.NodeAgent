@@ -21,7 +21,7 @@ builder.Services.Configure<HeartbeatOptions>(
 builder.Services.Configure<CommandProcessorOptions>(
     builder.Configuration.GetSection("CommandProcessor"));
 builder.Services.Configure<OrchestratorClientOptions>(
-    builder.Configuration.GetSection("Orchestrator"));
+    builder.Configuration.GetSection("OrchestratorClient"));
 builder.Services.Configure<PortSecurityOptions>(
     builder.Configuration.GetSection("PortSecurity"));
 builder.Services.Configure<AuditLogOptions>(

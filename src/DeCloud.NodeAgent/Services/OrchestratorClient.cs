@@ -11,7 +11,6 @@ namespace DeCloud.NodeAgent.Services;
 public class OrchestratorClientOptions
 {
     public string BaseUrl { get; set; } = "http://localhost:5000";
-    public string? ApiKey { get; set; }
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(30);
     public string? WalletAddress { get; set; }
 }
@@ -24,6 +23,7 @@ public class OrchestratorClient : IOrchestratorClient
 
     private string? _nodeId;
     private string? _authToken;
+    private string? _walletAddress;
     private Heartbeat? _lastHeartbeat = null;
 
     // Queue for pending commands received from heartbeat responses
@@ -31,7 +31,7 @@ public class OrchestratorClient : IOrchestratorClient
 
     public string? NodeId => _nodeId;
     public bool IsRegistered => !string.IsNullOrEmpty(_nodeId) && !string.IsNullOrEmpty(_authToken);
-    public string? WalletAddress { get; set; }
+    public string? WalletAddress => _walletAddress;
 
     public OrchestratorClient(
         HttpClient httpClient,
@@ -41,6 +41,7 @@ public class OrchestratorClient : IOrchestratorClient
         _httpClient = httpClient;
         _logger = logger;
         _options = options.Value;
+        _walletAddress = _options.WalletAddress;
 
         _httpClient.BaseAddress = new Uri(_options.BaseUrl.TrimEnd('/'));
         _httpClient.Timeout = _options.Timeout;
@@ -92,6 +93,7 @@ public class OrchestratorClient : IOrchestratorClient
                 {
                     _nodeId = data.GetProperty("nodeId").GetString();
                     _authToken = data.GetProperty("authToken").GetString();
+                    _walletAddress = data.GetProperty("walletAddress").GetString();
 
                     _logger.LogInformation("Node registered successfully. NodeId: {NodeId}", _nodeId);
                     return true;

@@ -680,11 +680,11 @@ create_configuration() {
     }
   },
   "Urls": "http://0.0.0.0:${AGENT_PORT}",
-  "Orchestrator": {
+  "OrchestratorClient": {
     "BaseUrl": "${ORCHESTRATOR_URL}",
     "WalletAddress": "${NODE_WALLET}",
-    "HeartbeatIntervalSeconds": 30,
-    "CommandPollIntervalSeconds": 5
+    "Timeout": "00:00:30",
+    "CommandPollInterval": "00:00:05"
   },
   "Node": {
     "Name": "${NODE_NAME}",
