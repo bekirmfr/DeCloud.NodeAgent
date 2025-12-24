@@ -48,7 +48,7 @@ public class SshProxyController : ControllerBase
     public async Task Terminal(
         string vmId,
         [FromQuery] string ip,
-        [FromQuery] string user = "ubuntu",
+        [FromQuery] string user = "root",
         [FromQuery] int port = 22,
         [FromQuery] string? password = null,
         [FromQuery] string? privateKey = null,
@@ -131,7 +131,7 @@ public class SshProxyController : ControllerBase
             var injectResult = await _ephemeralKeyService.InjectKeyAsync(
                 vmId,
                 keypair.PublicKey,
-                request.Username ?? "ubuntu",
+                request.Username ?? "root",
                 TimeSpan.FromSeconds(request.TtlSeconds > 0 ? request.TtlSeconds : 300));
 
             if (injectResult.Success)
@@ -141,7 +141,7 @@ public class SshProxyController : ControllerBase
                 _ephemeralKeyCache[cacheKey] = (keypair.PrivateKey, DateTime.UtcNow.AddMinutes(5));
 
                 var privateKeyBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(keypair.PrivateKey));
-                var wsUrl = $"/api/vms/{vmId}/terminal?ip={request.VmIp}&user={request.Username ?? "ubuntu"}&port={request.Port}&keyRef={Uri.EscapeDataString(cacheKey)}";
+                var wsUrl = $"/api/vms/{vmId}/terminal?ip={request.VmIp}&user={request.Username ?? "root"}&port={request.Port}&keyRef={Uri.EscapeDataString(cacheKey)}";
 
                 return Ok(new TerminalConnectResponse
                 {
@@ -162,7 +162,7 @@ public class SshProxyController : ControllerBase
             if (!string.IsNullOrEmpty(request.Password))
             {
                 _logger.LogInformation("Using password fallback for VM {VmId}", vmId);
-                var wsUrl = $"/api/vms/{vmId}/terminal?ip={request.VmIp}&user={request.Username ?? "ubuntu"}&port={request.Port}";
+                var wsUrl = $"/api/vms/{vmId}/terminal?ip={request.VmIp}&user={request.Username ?? "root"}&port={request.Port}";
 
                 return Ok(new TerminalConnectResponse
                 {

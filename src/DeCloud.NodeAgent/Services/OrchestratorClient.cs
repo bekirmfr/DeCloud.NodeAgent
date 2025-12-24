@@ -93,7 +93,6 @@ public class OrchestratorClient : IOrchestratorClient
                 {
                     _nodeId = data.GetProperty("nodeId").GetString();
                     _authToken = data.GetProperty("authToken").GetString();
-                    _walletAddress = data.GetProperty("walletAddress").GetString();
 
                     _logger.LogInformation("Node registered successfully. NodeId: {NodeId}", _nodeId);
                     return true;

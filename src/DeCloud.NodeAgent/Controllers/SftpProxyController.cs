@@ -51,7 +51,7 @@ public class SftpProxyController : ControllerBase
     public async Task SftpProxy(
         string vmId,
         [FromQuery] string ip,
-        [FromQuery] string user = "ubuntu",
+        [FromQuery] string user = "root",
         [FromQuery] int port = 22,
         [FromQuery] string? password = null,
         [FromQuery] string? privateKey = null,
@@ -714,7 +714,7 @@ public class SftpProxyController : ControllerBase
 
     private static string SanitizePath(string? path)
     {
-        if (string.IsNullOrEmpty(path)) return "/home";
+        if (string.IsNullOrEmpty(path)) return "/root";
 
         // Normalize path separators
         path = path.Replace("\\", "/");
