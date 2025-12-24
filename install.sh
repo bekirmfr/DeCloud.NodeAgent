@@ -1,14 +1,26 @@
 #!/bin/bash
 #
-# DeCloud Node Agent Installation Script v2.1.0
+# DeCloud Node Agent Installation Script
 # 
-# BREAKING CHANGE: Wallet address is now MANDATORY
-# No fallback or auto-generation - operators must provide a valid wallet
+# Installs and configures the Node Agent with minimal dependencies:
+# - .NET 8 Runtime
+# - KVM/QEMU/libvirt for virtualization
+# - WireGuard for overlay networking
+# - SSH CA for certificate authentication
+#
+# PORTS REQUIRED:
+# - Agent API (default 5100) - configurable
+# - WireGuard (default 51820) - configurable
+#
+# PORTS NOT REQUIRED:
+# - 80/443 - These stay with your existing apps!
+#
+# Version: 2.0.0
+# Architecture: Central ingress via Orchestrator, not on nodes
 #
 # Usage:
 #   curl -sSL https://raw.githubusercontent.com/.../install.sh | sudo bash -s -- \
-#       --orchestrator https://decloud.stackfi.tech \
-#       --wallet 0xYourWalletAddress
+#       --orchestrator https://decloud.stackfi.tech
 #
 
 set -e
@@ -33,11 +45,11 @@ log_step() { echo -e "${CYAN}[STEP]${NC} $1"; }
 # Configuration Defaults
 # ============================================================
 
-# Required - NO DEFAULTS!
+# Required
 ORCHESTRATOR_URL=""
-NODE_WALLET=""  # ← MUST be provided by operator
 
 # Node Identity
+NODE_WALLET=""  # MANDATORY - must be provided
 NODE_NAME=$(hostname)
 NODE_REGION="default"
 NODE_ZONE="default"
@@ -49,7 +61,7 @@ DATA_DIR="/var/lib/decloud/vms"
 LOG_DIR="/var/log/decloud"
 REPO_URL="https://github.com/bekirmfr/DeCloud.NodeAgent.git"
 
-# Ports
+# Ports (configurable - work with your existing infrastructure)
 AGENT_PORT=5100
 WIREGUARD_PORT=51820
 
@@ -64,32 +76,9 @@ SSH_CA_PUB_PATH="/etc/decloud/ssh_ca.pub"
 
 # Other
 SKIP_LIBVIRT=false
+
+# Update mode (detected if node agent already running)
 UPDATE_MODE=false
-
-# ============================================================
-# Wallet Validation
-# ============================================================
-
-validate_wallet_address() {
-    local wallet="$1"
-    
-    # Check if empty
-    if [ -z "$wallet" ]; then
-        return 1
-    fi
-    
-    # Check format: must start with 0x and be 42 characters total
-    if [[ ! "$wallet" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
-        return 1
-    fi
-    
-    # Check if null address
-    if [ "$wallet" == "0x0000000000000000000000000000000000000000" ]; then
-        return 1
-    fi
-    
-    return 0
-}
 
 # ============================================================
 # Argument Parsing
@@ -158,21 +147,20 @@ show_help() {
     cat << EOF
 DeCloud Node Agent Installer v${VERSION}
 
-Usage: $0 --orchestrator <url> --wallet <address> [options]
+Usage: $0 --orchestrator <url> [options]
 
-${RED}REQUIRED:${NC}
+Required (MANDATORY):
   --orchestrator <url>   Orchestrator URL (e.g., https://decloud.stackfi.tech)
-  --wallet <address>     ${RED}MANDATORY${NC} Ethereum wallet address (0x...)
-                         - Must be valid 42-character Ethereum address
-                         - Cannot be null address (0x000...000)
-                         - Used for node identity and billing
+  --wallet <address>     **MANDATORY** Ethereum wallet address (0x...)
+                         Must be valid 42-char address, not null (0x000...000)
 
 Node Identity:
+  --wallet <address>     Node operator wallet address
   --name <name>          Node name (default: hostname)
   --region <region>      Region identifier (default: default)
   --zone <zone>          Zone identifier (default: default)
 
-Network (all ports are configurable):
+Network (all ports are configurable!):
   --port <port>          Agent API port (default: 5100)
   --wg-port <port>       WireGuard listen port (default: 51820)
   --wg-ip <ip>           WireGuard hub IP (default: 10.10.0.1)
@@ -183,14 +171,7 @@ Other:
   --skip-libvirt         Skip libvirt installation (testing only)
   --help                 Show this help message
 
-${YELLOW}WALLET ADDRESS REQUIREMENT:${NC}
-  Starting from v2.1.0, wallet address is MANDATORY for node identity.
-  - Node ID is deterministically generated from hardware + wallet
-  - Same hardware + same wallet = always same node ID
-  - Ensures stable node identity across restarts
-  - No fallback or auto-generation available
-
-${YELLOW}PORT REQUIREMENTS:${NC}
+PORT REQUIREMENTS:
   This installer only needs TWO ports:
   - Agent API port (default 5100) - for orchestrator communication
   - WireGuard port (default 51820) - for overlay network
@@ -198,38 +179,50 @@ ${YELLOW}PORT REQUIREMENTS:${NC}
   Ports 80/443 are NOT required! Your existing web servers stay untouched.
   HTTP ingress is handled centrally by the Orchestrator.
 
-${GREEN}Examples:${NC}
+Examples:
   # Basic installation
-  $0 --orchestrator https://decloud.stackfi.tech \\
-     --wallet 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb
+  $0 --orchestrator https://decloud.stackfi.tech
 
-  # Custom ports and region
-  $0 --orchestrator https://decloud.stackfi.tech \\
-     --wallet 0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb \\
-     --port 5200 --region us-east --name my-node-1
+  # Custom ports (if defaults conflict)
+  $0 --orchestrator https://decloud.stackfi.tech --port 5200 --wg-port 51821
 
-${CYAN}Get a wallet address:${NC}
-  - MetaMask: https://metamask.io
-  - Generate with OpenSSL: openssl rand -hex 20 | awk '{print "0x" \$1}'
-  - Use your existing Ethereum wallet address
+  # With wallet and region
+  $0 --orchestrator https://decloud.stackfi.tech --wallet 0xYourWallet --region us-east
 EOF
 }
 
 # ============================================================
 # Requirement Checks
+
 # ============================================================
+# Wallet Validation
+# ============================================================
+
+validate_wallet_address() {
+    local wallet="$1"
+    
+    # Check if empty
+    if [ -z "$wallet" ]; then
+        return 1
+    fi
+    
+    # Check format: must start with 0x and be 42 characters total
+    if [[ ! "$wallet" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+        return 1
+    fi
+    
+    # Check if null address
+    if [ "$wallet" == "0x0000000000000000000000000000000000000000" ]; then
+        return 1
+    fi
+    
+    return 0
+}
 
 check_required_params() {
     log_step "Validating required parameters..."
     
     # Check orchestrator URL
-    if [ -z "$ORCHESTRATOR_URL" ]; then
-        log_error "Orchestrator URL is required!"
-        log_error "Use: --orchestrator https://your-orchestrator.com"
-        echo ""
-        show_help
-        exit 1
-    fi
     
     # Check wallet address
     if [ -z "$NODE_WALLET" ]; then
@@ -267,6 +260,7 @@ check_required_params() {
     log_success "Node Name:    $NODE_NAME"
 }
 
+# ============================================================
 check_root() {
     if [ "$EUID" -ne 0 ]; then
         log_error "This script must be run as root (use sudo)"
@@ -274,12 +268,404 @@ check_root() {
     fi
 }
 
-# [Rest of the functions remain the same - check_os, check_architecture, etc.]
-# ... (keeping the file manageable, use the original install.sh for these)
+check_os() {
+    log_step "Checking operating system..."
+    
+    if [ ! -f /etc/os-release ]; then
+        log_error "Cannot detect OS. Only Ubuntu/Debian are supported."
+        exit 1
+    fi
+    
+    . /etc/os-release
+    OS=$ID
+    OS_VERSION=$VERSION_ID
+    
+    case $OS in
+        ubuntu)
+            if [[ "${VERSION_ID%%.*}" -lt 20 ]]; then
+                log_error "Ubuntu 20.04 or later required. Found: $VERSION_ID"
+                exit 1
+            fi
+            log_success "Ubuntu $VERSION_ID detected"
+            ;;
+        debian)
+            if [[ "${VERSION_ID%%.*}" -lt 11 ]]; then
+                log_error "Debian 11 or later required. Found: $VERSION_ID"
+                exit 1
+            fi
+            log_success "Debian $VERSION_ID detected"
+            ;;
+        *)
+            log_error "Unsupported OS: $OS. Only Ubuntu/Debian are supported."
+            exit 1
+            ;;
+    esac
+}
+
+check_architecture() {
+    log_step "Checking architecture..."
+    
+    ARCH=$(uname -m)
+    case $ARCH in
+        x86_64|amd64)
+            log_success "x86_64 architecture detected"
+            ;;
+        aarch64|arm64)
+            log_success "ARM64 architecture detected"
+            ;;
+        *)
+            log_error "Unsupported architecture: $ARCH"
+            exit 1
+            ;;
+    esac
+}
+
+check_virtualization() {
+    log_step "Checking virtualization support..."
+    
+    if [ "$SKIP_LIBVIRT" = true ]; then
+        log_warn "Skipping virtualization check (--skip-libvirt)"
+        return
+    fi
+    
+    if grep -E 'vmx|svm' /proc/cpuinfo > /dev/null 2>&1; then
+        log_success "Hardware virtualization supported"
+    else
+        log_warn "Hardware virtualization may not be available"
+        log_warn "VMs may run with reduced performance"
+    fi
+}
+
+check_resources() {
+    log_step "Checking system resources..."
+    
+    CPU_CORES=$(nproc)
+    MEMORY_MB=$(free -m | awk '/^Mem:/{print $2}')
+    DISK_GB=$(df -BG "$INSTALL_DIR" 2>/dev/null | awk 'NR==2{print $4}' | tr -d 'G' || echo "50")
+    
+    if [ "$CPU_CORES" -lt 2 ]; then
+        log_warn "Only $CPU_CORES CPU cores available (2+ recommended)"
+    else
+        log_success "$CPU_CORES CPU cores available"
+    fi
+    
+    if [ "$MEMORY_MB" -lt 2048 ]; then
+        log_warn "Only ${MEMORY_MB}MB RAM available (4096MB+ recommended)"
+    else
+        log_success "${MEMORY_MB}MB RAM available"
+    fi
+    
+    if [ "$DISK_GB" -lt 20 ]; then
+        log_warn "Only ${DISK_GB}GB disk space available (50GB+ recommended)"
+    else
+        log_success "${DISK_GB}GB disk space available"
+    fi
+}
+
+check_ports() {
+    log_step "Checking required ports..."
+    
+    # Check Agent API port
+    local agent_port_process=""
+    agent_port_process=$(ss -tlnp 2>/dev/null | grep ":${AGENT_PORT} " | sed -n 's/.*users:(("\([^"]*\)".*/\1/p' | head -1)
+    
+    if [ -n "$agent_port_process" ]; then
+        if [ "$agent_port_process" = "decloud-node" ] || [ "$agent_port_process" = "dotnet" ]; then
+            log_warn "Node Agent already running on port $AGENT_PORT - will update in place"
+            UPDATE_MODE=true
+        else
+            log_error "Port $AGENT_PORT is already in use by '$agent_port_process'"
+            log_info "Use --port <number> to specify a different port"
+            exit 1
+        fi
+    else
+        log_success "Port $AGENT_PORT is available (Agent API)"
+    fi
+    
+    # Check WireGuard port
+    if [ "$SKIP_WIREGUARD" = false ]; then
+        local wg_port_process=""
+        wg_port_process=$(ss -ulnp 2>/dev/null | grep ":${WIREGUARD_PORT} " | sed -n 's/.*users:(("\([^"]*\)".*/\1/p' | head -1)
+        
+        if [ -n "$wg_port_process" ]; then
+            # WireGuard already running is fine for updates
+            if [ "$wg_port_process" = "wireguard" ] || [[ "$wg_port_process" == *"wg"* ]]; then
+                log_success "WireGuard already running on port $WIREGUARD_PORT"
+            else
+                log_error "Port $WIREGUARD_PORT is already in use by '$wg_port_process'"
+                log_info "Use --wg-port <number> to specify a different port"
+                exit 1
+            fi
+        else
+            log_success "Port $WIREGUARD_PORT is available (WireGuard)"
+        fi
+    fi
+    
+    # Inform about 80/443
+    log_info "Ports 80/443 NOT required - ingress handled by Orchestrator"
+}
+
+check_network() {
+    log_step "Checking network connectivity..."
+    
+    if curl -s --max-time 5 https://github.com > /dev/null 2>&1; then
+        log_success "Internet connectivity OK"
+    else
+        log_error "Cannot reach github.com. Check internet connection."
+        exit 1
+    fi
+    
+    if curl -s --max-time 5 "$ORCHESTRATOR_URL/health" > /dev/null 2>&1; then
+        log_success "Orchestrator reachable at $ORCHESTRATOR_URL"
+    else
+        log_warn "Cannot reach orchestrator at $ORCHESTRATOR_URL"
+        log_warn "Make sure orchestrator is running before starting the agent"
+    fi
+}
 
 # ============================================================
-# Application Setup - Updated Configuration
+# Installation Functions
 # ============================================================
+install_base_dependencies() {
+    log_step "Installing base dependencies..."
+    
+    apt-get update -qq
+    apt-get install -y -qq \
+        curl wget git jq apt-transport-https ca-certificates \
+        gnupg lsb-release software-properties-common > /dev/null 2>&1
+    
+    log_success "Base dependencies installed"
+}
+
+install_dotnet() {
+    log_step "Installing .NET 8 SDK..."
+    
+    if command -v dotnet &> /dev/null; then
+        DOTNET_VERSION=$(dotnet --version 2>/dev/null | head -1)
+        if [[ "$DOTNET_VERSION" == 8.* ]]; then
+            log_success ".NET 8 already installed: $DOTNET_VERSION"
+            return
+        fi
+    fi
+    
+    # Add Microsoft repository
+    wget -q https://packages.microsoft.com/config/$OS/$OS_VERSION/packages-microsoft-prod.deb -O /tmp/packages-microsoft-prod.deb
+    dpkg -i /tmp/packages-microsoft-prod.deb > /dev/null 2>&1
+    rm /tmp/packages-microsoft-prod.deb
+    
+    apt-get update -qq
+    apt-get install -y -qq dotnet-sdk-8.0 > /dev/null 2>&1
+    
+    log_success ".NET 8 SDK installed"
+}
+
+install_libvirt() {
+    log_step "Installing libvirt/KVM and virtualization tools..."
+    
+    if [ "$SKIP_LIBVIRT" = true ]; then
+        log_warn "Skipping libvirt installation (--skip-libvirt)"
+        return
+    fi
+    
+    PACKAGES="qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virtinst"
+    PACKAGES="$PACKAGES cloud-image-utils genisoimage qemu-utils"
+    PACKAGES="$PACKAGES libguestfs-tools openssh-client"
+    
+    apt-get install -y -qq $PACKAGES > /dev/null 2>&1
+    
+    # Load nbd module
+    modprobe nbd max_part=8 2>/dev/null || true
+    echo "nbd" >> /etc/modules-load.d/decloud.conf 2>/dev/null || true
+    
+    # Enable libvirtd
+    systemctl enable libvirtd --quiet 2>/dev/null || true
+    systemctl start libvirtd 2>/dev/null || true
+    
+    # Setup default network
+    if ! virsh net-info default &>/dev/null; then
+        virsh net-define /usr/share/libvirt/networks/default.xml 2>/dev/null || true
+    fi
+    virsh net-autostart default 2>/dev/null || true
+    virsh net-start default 2>/dev/null || true
+    
+    log_success "libvirt installed and configured"
+}
+
+install_wireguard() {
+    if [ "$SKIP_WIREGUARD" = true ]; then
+        log_warn "Skipping WireGuard installation (--skip-wireguard)"
+        return
+    fi
+    
+    log_step "Installing WireGuard..."
+    
+    apt-get install -y -qq wireguard wireguard-tools > /dev/null 2>&1
+    
+    log_success "WireGuard installed"
+}
+
+configure_wireguard_hub() {
+    if [ "$SKIP_WIREGUARD" = true ] || [ "$ENABLE_WIREGUARD_HUB" = false ]; then
+        return
+    fi
+    
+    log_step "Configuring WireGuard hub..."
+    
+    mkdir -p /etc/wireguard
+    
+    if [ ! -f /etc/wireguard/privatekey ]; then
+        wg genkey | tee /etc/wireguard/privatekey | wg pubkey > /etc/wireguard/publickey
+        chmod 600 /etc/wireguard/privatekey
+    fi
+    
+    PRIVATE_KEY=$(cat /etc/wireguard/privatekey)
+    PUBLIC_KEY=$(cat /etc/wireguard/publickey)
+    
+    cat > /etc/wireguard/wg0.conf << EOF
+[Interface]
+PrivateKey = $PRIVATE_KEY
+Address = $WIREGUARD_HUB_IP/24
+ListenPort = $WIREGUARD_PORT
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT
+EOF
+    
+    chmod 600 /etc/wireguard/wg0.conf
+    
+    systemctl enable wg-quick@wg0 --quiet 2>/dev/null || true
+    systemctl start wg-quick@wg0 2>/dev/null || true
+    
+    log_success "WireGuard hub configured"
+    log_info "Public key: $PUBLIC_KEY"
+}
+
+# ============================================================
+# SSH CA Setup
+# ============================================================
+setup_ssh_ca() {
+    log_step "Setting up SSH Certificate Authority..."
+    
+    if [ -f "$SSH_CA_KEY_PATH" ] && [ -f "$SSH_CA_PUB_PATH" ]; then
+        log_success "SSH CA already exists"
+        return
+    fi
+    
+    mkdir -p "$(dirname $SSH_CA_KEY_PATH)"
+    
+    ssh-keygen -t ed25519 -f "$SSH_CA_KEY_PATH" -N "" -C "DeCloud SSH CA" > /dev/null 2>&1
+    chmod 600 "$SSH_CA_KEY_PATH"
+    chmod 644 "$SSH_CA_PUB_PATH"
+    
+    log_success "SSH CA created"
+}
+
+setup_decloud_user() {
+    log_step "Setting up decloud user for SSH jump host..."
+    
+    if id "decloud" &>/dev/null; then
+        log_info "User 'decloud' already exists"
+    else
+        useradd -r -m -s /bin/bash -d /home/decloud decloud
+        log_success "User 'decloud' created"
+    fi
+    
+    mkdir -p /home/decloud/.ssh
+    chmod 700 /home/decloud/.ssh
+    chown -R decloud:decloud /home/decloud/.ssh
+    
+    # Set proper password hash to enable account
+    usermod -p '*' decloud 2>/dev/null || true
+}
+
+configure_decloud_sshd() {
+    log_step "Configuring SSH for certificate authentication..."
+    
+    local sshd_config="/etc/ssh/sshd_config"
+    
+    # Add TrustedUserCAKeys if not present
+    if ! grep -q "TrustedUserCAKeys.*$SSH_CA_PUB_PATH" "$sshd_config" 2>/dev/null; then
+        echo "" >> "$sshd_config"
+        echo "# DeCloud SSH CA" >> "$sshd_config"
+        echo "TrustedUserCAKeys $SSH_CA_PUB_PATH" >> "$sshd_config"
+    fi
+    
+    # Add Match block for decloud user
+    if ! grep -q "Match User decloud" "$sshd_config" 2>/dev/null; then
+        cat >> "$sshd_config" << 'EOF'
+
+# DeCloud user configuration
+Match User decloud
+    PasswordAuthentication no
+    PubkeyAuthentication yes
+    AuthorizedKeysFile none
+EOF
+    fi
+    
+    # Check AllowUsers directive
+    if grep -q "^AllowUsers" "$sshd_config" 2>/dev/null; then
+        if ! grep -q "AllowUsers.*decloud" "$sshd_config" 2>/dev/null; then
+            sed -i 's/^AllowUsers.*/& decloud/' "$sshd_config"
+            log_info "Added decloud to AllowUsers"
+        fi
+    fi
+    
+    # Reload SSH
+    systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
+    
+    log_success "SSH configured for certificate authentication"
+}
+
+# ============================================================
+# Application Setup
+# ============================================================
+create_directories() {
+    log_step "Creating directories..."
+    
+    mkdir -p "$INSTALL_DIR"
+    mkdir -p "$CONFIG_DIR"
+    mkdir -p "$DATA_DIR"
+    mkdir -p "$LOG_DIR"
+    mkdir -p /var/lib/decloud
+    
+    log_success "Directories created"
+}
+
+download_node_agent() {
+    log_step "Downloading Node Agent..."
+    
+    # Stop service if running (update mode)
+    if [ "$UPDATE_MODE" = true ]; then
+        log_info "Stopping existing node agent service..."
+        systemctl stop decloud-node-agent 2>/dev/null || true
+        sleep 2
+    fi
+    
+    if [ -d "$INSTALL_DIR/DeCloud.NodeAgent" ]; then
+        rm -rf "$INSTALL_DIR/DeCloud.NodeAgent"
+    fi
+    
+    cd "$INSTALL_DIR"
+    git clone --depth 1 "$REPO_URL" DeCloud.NodeAgent > /dev/null 2>&1
+    
+    cd DeCloud.NodeAgent
+    COMMIT=$(git rev-parse --short HEAD)
+    
+    log_success "Code downloaded (commit: $COMMIT)"
+}
+
+build_node_agent() {
+    log_step "Building Node Agent..."
+    
+    cd "$INSTALL_DIR/DeCloud.NodeAgent"
+    
+    dotnet build --configuration Release --verbosity quiet > /dev/null 2>&1
+    dotnet publish src/DeCloud.NodeAgent/DeCloud.NodeAgent.csproj \
+        --configuration Release \
+        --output "$INSTALL_DIR/publish" \
+        --verbosity quiet > /dev/null 2>&1
+    
+    log_success "Node Agent built"
+}
 
 create_configuration() {
     log_step "Creating configuration..."
@@ -325,7 +711,6 @@ create_configuration() {
 EOF
 
     chmod 640 "${CONFIG_DIR}/appsettings.Production.json"
-    log_success "Configuration created"
     
     # Display machine ID for reference
     if [ -f "/etc/machine-id" ]; then
@@ -333,10 +718,89 @@ EOF
         log_info "Machine ID: ${MACHINE_ID}"
         log_info "Node identity = SHA256(machine-id + wallet)"
     fi
+    log_success "Configuration created"
+}
+
+create_systemd_service() {
+    log_step "Creating systemd service..."
+    
+    cat > /etc/systemd/system/decloud-node-agent.service << EOF
+[Unit]
+Description=DeCloud Node Agent
+After=network.target libvirtd.service
+Wants=libvirtd.service
+
+[Service]
+Type=simple
+WorkingDirectory=${INSTALL_DIR}/publish
+ExecStart=/usr/bin/dotnet ${INSTALL_DIR}/publish/DeCloud.NodeAgent.dll
+Restart=always
+RestartSec=10
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=DOTNET_ENVIRONMENT=Production
+StandardOutput=append:${LOG_DIR}/nodeagent.log
+StandardError=append:${LOG_DIR}/nodeagent.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    log_success "Systemd service created"
+}
+
+configure_firewall() {
+    log_step "Configuring firewall..."
+    
+    if command -v ufw &> /dev/null && ufw status | grep -q "Status: active"; then
+        ufw allow ${AGENT_PORT}/tcp comment "DeCloud Agent API" > /dev/null 2>&1 || true
+        
+        if [ "$SKIP_WIREGUARD" = false ]; then
+            ufw allow ${WIREGUARD_PORT}/udp comment "DeCloud WireGuard" > /dev/null 2>&1 || true
+        fi
+        
+        log_success "UFW rules added (ports $AGENT_PORT/tcp, $WIREGUARD_PORT/udp)"
+    else
+        log_info "UFW not active, skipping firewall configuration"
+    fi
+}
+
+create_helper_scripts() {
+    log_step "Creating helper scripts..."
+    
+    # WireGuard helper
+    cat > /usr/local/bin/decloud-wg << 'EOFWG'
+#!/bin/bash
+case "$1" in
+    status) wg show ;;
+    add) wg set wg0 peer "$2" allowed-ips "$3/32" ;;
+    remove) wg set wg0 peer "$2" remove ;;
+    *) echo "Usage: decloud-wg {status|add <pubkey> <ip>|remove <pubkey>}" ;;
+esac
+EOFWG
+    chmod +x /usr/local/bin/decloud-wg
+    
+    log_success "Helper scripts created"
+}
+
+start_service() {
+    log_step "Starting Node Agent service..."
+    
+    systemctl enable decloud-node-agent --quiet 2>/dev/null || true
+    systemctl start decloud-node-agent 2>/dev/null || true
+    
+    sleep 3
+    
+    if systemctl is-active --quiet decloud-node-agent; then
+        log_success "Node Agent service started"
+    else
+        log_error "Failed to start Node Agent"
+        log_info "Check logs: journalctl -u decloud-node-agent -n 50"
+    fi
 }
 
 # ============================================================
-# Summary - Updated
+# Summary
 # ============================================================
 print_summary() {
     echo ""
@@ -351,11 +815,10 @@ print_summary() {
     echo "  Node Identity (Deterministic):"
     echo "  ─────────────────────────────────────────────────────────────"
     echo "    Wallet:        ${NODE_WALLET}"
-    echo "    Machine ID:    $(cat /etc/machine-id 2>/dev/null || echo 'unknown')"
+    echo "    Machine ID:    $(cat /etc/machine-id 2>/dev/null || echo unknown)"
     echo "    Node Name:     ${NODE_NAME}"
     echo ""
-    echo -e "    ${GREEN}Node ID is deterministically generated from:${NC}"
-    echo "    SHA256(machine-id + wallet)"
+    echo -e "    ${GREEN}Node ID = SHA256(machine-id + wallet)${NC}"
     echo "    → Same hardware + same wallet = always same node ID"
     echo ""
     echo "  ─────────────────────────────────────────────────────────────"
@@ -367,6 +830,7 @@ print_summary() {
     fi
     echo ""
     echo -e "    ${GREEN}Ports 80/443: NOT USED${NC} - Your existing apps are safe!"
+    echo "    HTTP ingress is handled centrally by the Orchestrator."
     echo ""
     echo "  ─────────────────────────────────────────────────────────────"
     echo "  Commands:"
@@ -374,7 +838,9 @@ print_summary() {
     echo "    Status:        sudo systemctl status decloud-node-agent"
     echo "    Logs:          sudo journalctl -u decloud-node-agent -f"
     echo "    Restart:       sudo systemctl restart decloud-node-agent"
-    echo "    View Config:   sudo cat ${CONFIG_DIR}/appsettings.Production.json"
+    if [ "$SKIP_WIREGUARD" = false ]; then
+        echo "    WireGuard:     sudo decloud-wg status"
+    fi
     echo ""
     echo "  ─────────────────────────────────────────────────────────────"
     echo "  Files:"
@@ -398,13 +864,12 @@ print_summary() {
 }
 
 # ============================================================
-# Main - Updated
+# Main
 # ============================================================
 main() {
     echo ""
     echo "╔══════════════════════════════════════════════════════════════╗"
     echo "║       DeCloud Node Agent Installer v${VERSION}                    ║"
-    echo "║       ${RED}Wallet Address Now REQUIRED${NC}                           ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo ""
     
@@ -413,7 +878,8 @@ main() {
     # CRITICAL: Validate required parameters FIRST
     check_required_params
     
-    # Other checks
+    
+    # Checks
     check_root
     check_os
     check_architecture
