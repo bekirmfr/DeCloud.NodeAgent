@@ -68,9 +68,9 @@ public class HeartbeatService : BackgroundService
         _logger.LogInformation("Heartbeat service stopping");
     }
 
-    // Updated HeartbeatService.RegisterWithOrchestratorAsync
-    // Generates deterministic node ID before registration
-
+    /// <summary>
+    /// Register with orchestrator, reporting proper physical/logical core counts
+    /// </summary>
     private async Task RegisterWithOrchestratorAsync(CancellationToken ct)
     {
         var maxRetries = 5;
@@ -82,86 +82,48 @@ public class HeartbeatService : BackgroundService
             {
                 _logger.LogInformation("Registration attempt {Attempt}/{Max}", i + 1, maxRetries);
 
-                // =====================================================
-                // STEP 1: Get Machine ID
-                // =====================================================
-                string machineId;
-                try
-                {
-                    machineId = NodeIdGenerator.GetMachineId();
-                    _logger.LogInformation("Machine ID: {MachineId}", machineId);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to get machine ID");
-                    throw;
-                }
-
-                // =====================================================
-                // STEP 2: Get Wallet Address
-                // =====================================================
-                var walletAddress = _orchestratorClient.WalletAddress;
-
-                // Validate wallet address
-                if (string.IsNullOrWhiteSpace(walletAddress) ||
-                    walletAddress == "0x0000000000000000000000000000000000000000")
-                {
-                    _logger.LogError(
-                        "❌ CRITICAL: No valid wallet address configured! " +
-                        "Set 'Orchestrator:WalletAddress' in appsettings.json or NODE_WALLET_ADDRESS environment variable.");
-
-                    throw new InvalidOperationException("No valid wallet address configured");
-                }
-
-                _logger.LogInformation("Wallet address: {Wallet}", walletAddress);
-
-                // =====================================================
-                // STEP 3: Generate Deterministic Node ID
-                // =====================================================
-                string nodeId;
-                try
-                {
-                    nodeId = NodeIdGenerator.GenerateNodeId(machineId, walletAddress);
-                    _logger.LogInformation("✓ Generated deterministic node ID: {NodeId}", nodeId);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to generate node ID");
-                    throw;
-                }
-
-                // =====================================================
-                // STEP 4: Build Registration Request
-                // =====================================================
+                // Discover all resources
                 var resources = await _resourceDiscovery.DiscoverAllAsync(ct);
-                var publicIp = await GetPublicIpAsync(ct);
+
+                // Generate deterministic node ID
+                var machineId = await GetMachineIdAsync(ct);
+                var walletAddress = (_orchestratorClient as OrchestratorClient)?.WalletAddress
+                    ?? "0x0000000000000000000000000000000000000000";
+                var nodeId = GenerateDeterministicNodeId(machineId, walletAddress);
+
+                _logger.LogInformation(
+                    "Discovered resources: " +
+                    "CPU: {PhysicalCores} physical / {LogicalCores} logical, " +
+                    "Memory: {MemoryGB}GB, " +
+                    "Storage: {StorageGB}GB",
+                    resources.Cpu.PhysicalCores,
+                    resources.Cpu.LogicalCores,
+                    resources.Memory.TotalBytes / 1024 / 1024 / 1024,
+                    resources.Storage.Sum(s => s.TotalBytes) / 1024 / 1024 / 1024);
 
                 var registration = new NodeRegistration
                 {
-                    NodeId = nodeId,           // ← Deterministic node ID
-                    MachineId = machineId,     // ← For validation
+                    NodeId = nodeId,
+                    MachineId = machineId,
                     Name = Environment.MachineName,
                     WalletAddress = walletAddress,
-                    PublicIp = publicIp ?? "127.0.0.1",
+                    PublicIp = await GetPublicIpAsync(ct) ?? "127.0.0.1",
                     AgentPort = 5100,
                     Resources = resources,
                     AgentVersion = "2.0.0",
                     SupportedImages = new List<string>
-                {
-                    "ubuntu-24.04", "ubuntu-22.04", "ubuntu-20.04",
-                    "debian-12", "debian-11",
-                    "fedora-40", "fedora-39",
-                    "alpine-3.19", "alpine-3.18"
-                },
+                    {
+                        "ubuntu-24.04", "ubuntu-22.04", "ubuntu-20.04",
+                        "debian-12", "debian-11",
+                        "fedora-40", "fedora-39",
+                        "alpine-3.19", "alpine-3.18"
+                    },
                     SupportsGpu = resources.Gpus.Any(),
                     GpuInfo = resources.Gpus.FirstOrDefault(),
                     Region = "default",
                     Zone = "default"
                 };
 
-                // =====================================================
-                // STEP 5: Register with Orchestrator
-                // =====================================================
                 var success = await _orchestratorClient.RegisterNodeAsync(registration, ct);
 
                 if (success)
@@ -170,8 +132,11 @@ public class HeartbeatService : BackgroundService
                         "✓ Successfully registered with orchestrator\n" +
                         "  Node ID: {NodeId}\n" +
                         "  Machine: {MachineId}\n" +
-                        "  Wallet:  {Wallet}",
-                        nodeId, machineId, walletAddress);
+                        "  Wallet:  {Wallet}\n" +
+                        "  CPU:     {PhysCores} physical / {LogicalCores} logical cores",
+                        nodeId, machineId, walletAddress,
+                        resources.Cpu.PhysicalCores,
+                        resources.Cpu.LogicalCores);
                     return;
                 }
 
@@ -191,118 +156,154 @@ public class HeartbeatService : BackgroundService
         _logger.LogError("Failed to register with orchestrator after {Retries} attempts", maxRetries);
     }
 
-    // HeartbeatService.cs - Updated snippet showing proper VmSummary population
-
+    /// <summary>
+    /// Send heartbeat with current resource snapshot
+    /// </summary>
     private async Task SendHeartbeatAsync(CancellationToken ct)
     {
-        try
+        // Get current resource snapshot
+        var snapshot = await _resourceDiscovery.GetCurrentSnapshotAsync(ct);
+
+        // Get all active VMs with detailed information
+        var allVms = await _vmManager.GetAllVmsAsync(ct);
+        var activeVms = allVms
+            .Where(vm => vm.State != VmState.Deleted && vm.State != VmState.Failed)
+            .ToList();
+
+        // Build detailed VM summaries
+        var vmSummaries = new List<VmSummary>();
+        foreach (var vm in activeVms)
         {
-            // Get current resource snapshot
-            var snapshot = await _resourceDiscovery.GetCurrentSnapshotAsync(ct);
-
-            // Get all active VMs with detailed information
-            var allVms = await _vmManager.GetAllVmsAsync(ct);
-            var activeVms = allVms
-                .Where(vm => vm.State != VmState.Deleted && vm.State != VmState.Failed)
-                .ToList();
-
-            // =====================================================
-            // Build detailed VM summaries for heartbeat
-            // UPDATED: Include VncPort, MacAddress, EncryptedPassword
-            // =====================================================
-            var vmSummaries = new List<VmSummary>();
-
-            foreach (var vm in activeVms)
+            try
             {
-                try
+                vmSummaries.Add(new VmSummary
                 {
-                    // Get current usage metrics if VM is running
-                    var usage = vm.State == VmState.Running
-                        ? await _vmManager.GetVmUsageAsync(vm.VmId, ct)
-                        : null;
-
-                    // Get IP address for running VMs
-                    string? ipAddress = null;
-                    if (vm.State == VmState.Running)
-                    {
-                        // CORRECT: Always get fresh libvirt IP first, fall back to stored IP
-                        ipAddress = await _vmManager.GetVmIpAddressAsync(vm.VmId, ct) ?? vm.Spec.Network.IpAddress;
-                        var vncPort = vm.VncPort;
-                    }
-
-                    vmSummaries.Add(new VmSummary
-                    {
-                        VmId = vm.VmId,
-                        Name = vm.Name,
-                        TenantId = vm.Spec.TenantId,
-                        LeaseId = vm.Spec.LeaseId,
-                        State = vm.State,
-                        VCpus = vm.Spec.VCpus,
-                        MemoryBytes = vm.Spec.MemoryBytes,
-                        DiskBytes = vm.Spec.DiskBytes,
-                        CpuUsagePercent = usage?.CpuPercent ?? 0,
-                        StartedAt = vm.StartedAt ?? vm.CreatedAt,
-                        IpAddress = ipAddress,
-                        VncPort = vm.VncPort,
-                        MacAddress = vm.Spec.Network.MacAddress,
-                        EncryptedPassword = vm.Spec.EncryptedPassword
-                    });
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to get details for VM {VmId}", vm.VmId);
-                }
+                    VmId = vm.VmId,
+                    State = vm.State.ToString(),
+                    CpuCores = vm.Spec.VCpus,
+                    MemoryMb = vm.Spec.MemoryBytes / 1024 / 1024,
+                    DiskGb = vm.Spec.DiskBytes / 1024 / 1024 / 1024,
+                    IpAddress = vm.Spec.Network?.IpAddress,
+                    VncPort = int.TryParse(vm.VncPort, out var port) ? port : null,
+                    MacAddress = vm.Spec.Network?.MacAddress,
+                    EncryptedPassword = vm.Spec.EncryptedPassword
+                });
             }
-
-            // Update resource usage based on running VMs
-            snapshot.UsedVCpus = activeVms.Where(v => v.State == VmState.Running).Sum(v => v.Spec.VCpus);
-            snapshot.UsedMemoryBytes = activeVms.Where(v => v.State == VmState.Running).Sum(v => v.Spec.MemoryBytes);
-
-            // Create heartbeat using the standard Heartbeat model
-            var heartbeat = new Heartbeat
+            catch (Exception ex)
             {
-                NodeId = (_orchestratorClient as OrchestratorClient)?.NodeId ?? Environment.MachineName,
-                Timestamp = DateTime.UtcNow,
-                Status = _currentStatus,
-                Resources = snapshot,
-                ActiveVmDetails = vmSummaries  // Now includes VncPort, MacAddress, EncryptedPassword
-            };
-
-            // Send heartbeat - OrchestratorClient will transform to API format
-            var success = await _orchestratorClient.SendHeartbeatAsync(heartbeat, ct);
-
-            if (success)
-            {
-                _lastHeartbeat = heartbeat;
-                _logger.LogDebug("Heartbeat sent: {VmCount} VMs, CPU {Cpu}%, MEM {Mem}%",
-                    activeVms.Count,
-                    snapshot.CpuUsagePercent,
-                    snapshot.TotalMemoryBytes > 0
-                        ? (double)snapshot.UsedMemoryBytes / snapshot.TotalMemoryBytes * 100
-                        : 0);
-            }
-            else
-            {
-                _logger.LogWarning("Heartbeat failed - orchestrator may be unreachable");
+                _logger.LogWarning(ex, "Failed to build summary for VM {VmId}", vm.VmId);
             }
         }
-        catch (Exception ex)
+
+        // Build heartbeat with proper physical/logical core separation
+        var heartbeat = new Heartbeat
         {
-            _logger.LogError(ex, "Error sending heartbeat");
+            Resources = new ResourceSnapshot
+            {
+                // CRITICAL: Report both physical and logical cores
+                PhysicalCpuCores = snapshot.PhysicalCpuCores,
+                LogicalCpuCores = snapshot.LogicalCpuCores,
+                CpuUsagePercent = snapshot.CpuUsagePercent,
+                LoadAverage = await GetLoadAverageAsync(ct),
+
+                TotalMemoryBytes = snapshot.TotalMemoryBytes,
+                UsedMemoryBytes = snapshot.UsedMemoryBytes,
+
+                TotalStorageBytes = snapshot.TotalStorageBytes,
+                UsedStorageBytes = snapshot.UsedStorageBytes,
+
+                NetworkInMbps = 0, // TODO: Implement network monitoring
+                NetworkOutMbps = 0
+            },
+            ActiveVmIds = activeVms.Select(vm => vm.VmId).ToList(),
+            VmSummaries = vmSummaries
+        };
+
+        var success = await _orchestratorClient.SendHeartbeatAsync(heartbeat, ct);
+
+        if (success)
+        {
+            _lastHeartbeat = heartbeat;
+
+            // Log resource summary periodically
+            if (DateTime.UtcNow.Second < 15) // Log once per minute-ish
+            {
+                var allocatedCores = vmSummaries.Sum(vm => vm.CpuCores);
+                var allocatedMemMb = vmSummaries.Sum(vm => vm.MemoryMb);
+
+                _logger.LogDebug(
+                    "Heartbeat sent: {VmCount} VMs, " +
+                    "Allocated: {AllocCores}c/{AllocMem}MB, " +
+                    "Physical capacity: {PhysCores}c",
+                    activeVms.Count,
+                    allocatedCores,
+                    allocatedMemMb,
+                    snapshot.PhysicalCpuCores);
+            }
+        }
+        else
+        {
+            _logger.LogWarning("Heartbeat failed");
         }
     }
 
-    private async Task<string> GetPublicIpAsync(CancellationToken ct)
+    private async Task<string> GetMachineIdAsync(CancellationToken ct)
+    {
+        try
+        {
+            // Try /etc/machine-id first (Linux)
+            if (File.Exists("/etc/machine-id"))
+            {
+                return (await File.ReadAllTextAsync("/etc/machine-id", ct)).Trim();
+            }
+
+            // Fallback to hostname + some hardware info
+            return $"{Environment.MachineName}-{Environment.ProcessorCount}";
+        }
+        catch
+        {
+            return Environment.MachineName;
+        }
+    }
+
+    private string GenerateDeterministicNodeId(string machineId, string walletAddress)
+    {
+        var input = $"{machineId.ToLowerInvariant()}:{walletAddress.ToLowerInvariant()}";
+        using var sha256 = SHA256.Create();
+        var hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(input));
+        return $"node-{Convert.ToHexString(hash[..8]).ToLowerInvariant()}";
+    }
+
+    private async Task<string?> GetPublicIpAsync(CancellationToken ct)
     {
         try
         {
             using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-            return (await client.GetStringAsync("https://api.ipify.org", ct)).Trim();
+            return await client.GetStringAsync("https://api.ipify.org", ct);
         }
         catch
         {
-            return "127.0.0.1";
+            return null;
         }
+    }
+
+    private async Task<double> GetLoadAverageAsync(CancellationToken ct)
+    {
+        try
+        {
+            if (File.Exists("/proc/loadavg"))
+            {
+                var content = await File.ReadAllTextAsync("/proc/loadavg", ct);
+                var parts = content.Split(' ');
+                if (parts.Length > 0 && double.TryParse(parts[0], out var load))
+                {
+                    return load;
+                }
+            }
+        }
+        catch { }
+
+        return 0;
     }
 }
 
@@ -313,7 +314,4 @@ public class HeartbeatService : BackgroundService
 public class HeartbeatOptions
 {
     public TimeSpan Interval { get; set; } = TimeSpan.FromSeconds(15);
-    public string OrchestratorUrl { get; set; } = "http://localhost:5000";
-    public string? WalletAddress { get; set; }
-    public int AgentPort { get; set; } = 5100;
 }

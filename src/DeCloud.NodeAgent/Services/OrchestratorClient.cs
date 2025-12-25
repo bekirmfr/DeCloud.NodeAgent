@@ -1,4 +1,4 @@
-// Sends enhanced heartbeat with detailed VM information
+﻿// Sends enhanced heartbeat with detailed VM information
 
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
@@ -47,12 +47,28 @@ public class OrchestratorClient : IOrchestratorClient
         _httpClient.Timeout = _options.Timeout;
     }
 
+    /// <summary>
+    /// Register node with orchestrator.
+    /// 
+    /// CPU REPORTING:
+    /// - cpuCores = PhysicalCores (used for overcommit calculations)
+    /// - cpuThreads = LogicalCores (informational, shows HT/SMT capability)
+    /// 
+    /// This allows the orchestrator to properly calculate overcommit ratios
+    /// based on actual physical capacity rather than thread count.
+    /// </summary>
     public async Task<bool> RegisterNodeAsync(NodeRegistration registration, CancellationToken ct = default)
     {
         try
         {
-            _logger.LogInformation("Registering node with orchestrator at {Url}", _options.BaseUrl);
+            _logger.LogInformation(
+                "Registering node with orchestrator at {Url}. " +
+                "CPU: {PhysicalCores} physical cores, {LogicalCores} logical threads",
+                _options.BaseUrl,
+                registration.Resources.Cpu.PhysicalCores,
+                registration.Resources.Cpu.LogicalCores);
 
+            // Build registration request with explicit physical/logical separation
             var request = new
             {
                 nodeId = registration.NodeId,
@@ -63,7 +79,12 @@ public class OrchestratorClient : IOrchestratorClient
                 agentPort = registration.AgentPort,
                 resources = new
                 {
-                    cpuCores = registration.Resources.Cpu.LogicalCores,
+                    // CRITICAL: Report PHYSICAL cores as the base capacity
+                    cpuCores = registration.Resources.Cpu.PhysicalCores,
+
+                    // Also report logical threads for reference
+                    cpuThreads = registration.Resources.Cpu.LogicalCores,
+
                     memoryMb = registration.Resources.Memory.TotalBytes / 1024 / 1024,
                     storageGb = registration.Resources.Storage.Sum(s => s.TotalBytes) / 1024 / 1024 / 1024,
                     bandwidthMbps = 1000
@@ -94,7 +115,12 @@ public class OrchestratorClient : IOrchestratorClient
                     _nodeId = data.GetProperty("nodeId").GetString();
                     _authToken = data.GetProperty("authToken").GetString();
 
-                    _logger.LogInformation("Node registered successfully. NodeId: {NodeId}", _nodeId);
+                    _logger.LogInformation(
+                        "✓ Node registered successfully. NodeId: {NodeId}, " +
+                        "Reported capacity: {PhysCores} physical cores / {LogicalCores} threads",
+                        _nodeId,
+                        registration.Resources.Cpu.PhysicalCores,
+                        registration.Resources.Cpu.LogicalCores);
                     return true;
                 }
             }
@@ -110,6 +136,10 @@ public class OrchestratorClient : IOrchestratorClient
         }
     }
 
+    /// <summary>
+    /// Send heartbeat with current resource availability.
+    /// Reports available resources based on actual VM allocations.
+    /// </summary>
     public async Task<bool> SendHeartbeatAsync(Heartbeat heartbeat, CancellationToken ct = default)
     {
         if (!IsRegistered)
@@ -132,67 +162,71 @@ public class OrchestratorClient : IOrchestratorClient
                 ? (double)heartbeat.Resources.UsedStorageBytes / heartbeat.Resources.TotalStorageBytes * 100
                 : 0;
 
-            var payload = new
+            // Calculate available resources (total - allocated to VMs)
+            var allocatedCpuCores = heartbeat.VmSummaries?.Sum(vm => vm.CpuCores) ?? 0;
+            var allocatedMemoryMb = heartbeat.VmSummaries?.Sum(vm => vm.MemoryMb) ?? 0;
+            var allocatedStorageGb = heartbeat.VmSummaries?.Sum(vm => vm.DiskGb) ?? 0;
+
+            var totalPhysicalCores = heartbeat.Resources.PhysicalCpuCores;
+            var totalLogicalCores = heartbeat.Resources.LogicalCpuCores;
+            var totalMemoryMb = heartbeat.Resources.TotalMemoryBytes / 1024 / 1024;
+            var totalStorageGb = heartbeat.Resources.TotalStorageBytes / 1024 / 1024 / 1024;
+
+            var heartbeatPayload = new
             {
-                nodeId = heartbeat.NodeId,
+                nodeId = _nodeId,
                 metrics = new
                 {
-                    timestamp = heartbeat.Timestamp.ToString("O"),
+                    timestamp = DateTime.UtcNow.ToString("o"),
                     cpuUsagePercent = cpuUsage,
                     memoryUsagePercent = memUsage,
                     storageUsagePercent = storageUsage,
-                    networkInMbps = 0,
-                    networkOutMbps = 0,
-                    activeVmCount = heartbeat.ActiveVmDetails.Count,
-                    loadAverage = 0.0
+                    networkInMbps = heartbeat.Resources.NetworkInMbps,
+                    networkOutMbps = heartbeat.Resources.NetworkOutMbps,
+                    activeVmCount = heartbeat.ActiveVmIds?.Count ?? 0,
+                    loadAverage = heartbeat.Resources.LoadAverage
                 },
                 availableResources = new
                 {
-                    cpuCores = heartbeat.Resources.AvailableVCpus,
-                    memoryMb = heartbeat.Resources.AvailableMemoryBytes / 1024 / 1024,
-                    storageGb = heartbeat.Resources.AvailableStorageBytes / 1024 / 1024 / 1024,
+                    // Report PHYSICAL cores (consistent with registration)
+                    cpuCores = Math.Max(0, totalPhysicalCores - allocatedCpuCores),
+                    cpuThreads = Math.Max(0, totalLogicalCores - allocatedCpuCores),
+                    memoryMb = Math.Max(0, totalMemoryMb - allocatedMemoryMb),
+                    storageGb = Math.Max(0, totalStorageGb - allocatedStorageGb),
                     bandwidthMbps = 1000
                 },
-                activeVms = heartbeat.ActiveVmDetails.Select(v => new
+                activeVmIds = heartbeat.ActiveVmIds ?? new List<string>(),
+                vmSummaries = heartbeat.VmSummaries?.Select(vm => new
                 {
-                    vmId = v.VmId,
-                    name = v.Name,
-                    tenantId = v.TenantId,
-                    state = v.State.ToString(),  // Convert enum to string
-                    ipAddress = v.IpAddress,
-                    cpuUsagePercent = v.CpuUsagePercent,
-                    startedAt = v.StartedAt.ToString("O"),
-                    vCpus = v.VCpus,
-                    memoryBytes = v.MemoryBytes,
-                    diskBytes = v.DiskBytes,
-                    // These fields are populated by HeartbeatService from VmInstance
-                    vncPort = v.VncPort,
-                    macAddress = v.MacAddress,
-                    encryptedPassword = v.EncryptedPassword
+                    vmId = vm.VmId,
+                    state = vm.State,
+                    cpuCores = vm.CpuCores,
+                    memoryMb = vm.MemoryMb,
+                    diskGb = vm.DiskGb,
+                    ipAddress = vm.IpAddress,
+                    vncPort = vm.VncPort,
+                    macAddress = vm.MacAddress,
+                    encryptedPassword = vm.EncryptedPassword
                 }).ToList()
             };
 
-            request.Content = JsonContent.Create(payload);
+            request.Content = JsonContent.Create(heartbeatPayload);
 
             var response = await _httpClient.SendAsync(request, ct);
 
             if (response.IsSuccessStatusCode)
             {
-                _lastHeartbeat = heartbeat;
-
                 var content = await response.Content.ReadAsStringAsync(ct);
                 await ProcessHeartbeatResponseAsync(content, ct);
 
-                if (heartbeat.ActiveVmDetails.Count > 0)
-                {
-                    _logger.LogDebug("Heartbeat sent successfully: {VmCount} VMs",
-                        heartbeat.ActiveVmDetails.Count);
-                }
-
+                _lastHeartbeat = heartbeat;
                 return true;
             }
 
-            _logger.LogWarning("Heartbeat failed with status: {Status}", response.StatusCode);
+            _logger.LogWarning(
+                "Heartbeat failed: {Status} - {Content}",
+                response.StatusCode,
+                await response.Content.ReadAsStringAsync(ct));
             return false;
         }
         catch (Exception ex)
@@ -207,73 +241,40 @@ public class OrchestratorClient : IOrchestratorClient
         return _lastHeartbeat;
     }
 
-    private Task ProcessHeartbeatResponseAsync(string content, CancellationToken ct)
+    private async Task ProcessHeartbeatResponseAsync(string content, CancellationToken ct)
     {
         try
         {
             var json = JsonDocument.Parse(content);
 
-            if (json.RootElement.TryGetProperty("data", out var data) &&
-                data.TryGetProperty("pendingCommands", out var commands) &&
-                commands.ValueKind == JsonValueKind.Array)
+            if (json.RootElement.TryGetProperty("data", out var data))
             {
-                foreach (var cmd in commands.EnumerateArray())
+                if (data.TryGetProperty("pendingCommands", out var commands) &&
+                    commands.ValueKind == JsonValueKind.Array)
                 {
-                    var commandId = cmd.GetProperty("commandId").GetString() ?? "";
-
-                    // Handle 'type' as either string OR number (enum integer)
-                    CommandType commandType;
-                    var typeProp = cmd.GetProperty("type");
-
-                    if (typeProp.ValueKind == JsonValueKind.Number)
+                    foreach (var cmd in commands.EnumerateArray())
                     {
-                        commandType = (CommandType)typeProp.GetInt32();
-                    }
-                    else if (typeProp.ValueKind == JsonValueKind.String)
-                    {
-                        var typeStr = typeProp.GetString() ?? "";
-                        if (!Enum.TryParse<CommandType>(typeStr, true, out commandType))
+                        var pendingCommand = new PendingCommand
                         {
-                            _logger.LogWarning("Unknown command type: {Type}", typeStr);
-                            continue;
-                        }
+                            CommandId = cmd.GetProperty("commandId").GetString() ?? "",
+                            Type = cmd.GetProperty("type").GetString() ?? "",
+                            VmId = cmd.TryGetProperty("vmId", out var vmId) ? vmId.GetString() : null,
+                            Payload = cmd.TryGetProperty("payload", out var payload) ? payload.ToString() : null
+                        };
+
+                        _pendingCommands.Enqueue(pendingCommand);
+                        _logger.LogInformation(
+                            "Received command: {Type} for VM {VmId}",
+                            pendingCommand.Type,
+                            pendingCommand.VmId);
                     }
-                    else
-                    {
-                        _logger.LogWarning("Unexpected type format: {Kind}", typeProp.ValueKind);
-                        continue;
-                    }
-
-                    var payload = cmd.GetProperty("payload").GetString() ?? "";
-
-                    _logger.LogInformation("Received command from orchestrator: {Type} (ID: {CommandId})",
-                        commandType, commandId);
-
-                    // =====================================================
-                    // Without this, commands are never processed!
-                    // =====================================================
-                    _pendingCommands.Enqueue(new PendingCommand
-                    {
-                        CommandId = commandId,
-                        Type = commandType,
-                        Payload = payload,
-                        IssuedAt = DateTime.UtcNow
-                    });
-                }
-
-                if (commands.GetArrayLength() > 0)
-                {
-                    _logger.LogInformation("Enqueued {Count} command(s) for processing",
-                        commands.GetArrayLength());
                 }
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to process heartbeat response");
+            _logger.LogWarning(ex, "Failed to parse heartbeat response");
         }
-
-        return Task.CompletedTask;
     }
 
     public Task<List<PendingCommand>> GetPendingCommandsAsync(CancellationToken ct = default)
@@ -356,5 +357,10 @@ public class OrchestratorClient : IOrchestratorClient
             _logger.LogError(ex, "Error acknowledging command {CommandId}", commandId);
             return false;
         }
+    }
+
+    public bool TryGetPendingCommand(out PendingCommand? command)
+    {
+        return _pendingCommands.TryDequeue(out command);
     }
 }
