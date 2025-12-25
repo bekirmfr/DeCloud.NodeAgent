@@ -18,7 +18,7 @@ public interface IEphemeralSshKeyService
     Task<SshKeyInjectionResult> InjectKeyAsync(
         string vmId,
         string publicKey,
-        string username = "ubuntu",
+        string username = "root",
         TimeSpan? ttl = null,
         CancellationToken ct = default);
 
@@ -28,7 +28,7 @@ public interface IEphemeralSshKeyService
     Task<bool> RemoveKeyAsync(
         string vmId,
         string publicKeyFingerprint,
-        string username = "ubuntu",
+        string username = "root",
         CancellationToken ct = default);
 
     /// <summary>
@@ -151,7 +151,7 @@ public class EphemeralSshKeyService : IEphemeralSshKeyService
     public async Task<SshKeyInjectionResult> InjectKeyAsync(
         string vmId,
         string publicKey,
-        string username = "ubuntu",
+        string username = "root",
         TimeSpan? ttl = null,
         CancellationToken ct = default)
     {
@@ -210,7 +210,7 @@ public class EphemeralSshKeyService : IEphemeralSshKeyService
     public async Task<bool> RemoveKeyAsync(
         string vmId,
         string publicKeyFingerprint,
-        string username = "ubuntu",
+        string username = "root",
         CancellationToken ct = default)
     {
         _logger.LogInformation("Removing SSH key {Fingerprint} from VM {VmId}", publicKeyFingerprint, vmId);
