@@ -1115,6 +1115,7 @@ public class LibvirtVmManager : IVmManager
         // Ensure SSH allows password auth if password is set
         if (hasPassword)
         {
+            sb.AppendLine("  - sed -i 's/^#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config");
             sb.AppendLine("  - sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config");
             sb.AppendLine("  - sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config");
             sb.AppendLine("  - sed -i 's/^#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config");
