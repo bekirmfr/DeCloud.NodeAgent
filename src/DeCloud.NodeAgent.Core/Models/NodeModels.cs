@@ -1,14 +1,15 @@
 namespace DeCloud.NodeAgent.Core.Models;
 
-
 /// <summary>
-/// Heartbeat payload sent to orchestrator
+/// Periodic heartbeat sent to orchestrator
 /// </summary>
 public class Heartbeat
 {
+    public string NodeId { get; set; } = string.Empty;
+    public DateTime Timestamp { get; set; }
+    public NodeStatus Status { get; set; }
     public ResourceSnapshot Resources { get; set; } = new();
-    public List<string>? ActiveVmIds { get; set; }
-    public List<VmSummary>? VmSummaries { get; set; }
+    public List<VmSummary> ActiveVmDetails { get; set; } = new();
 }
 
 public enum NodeStatus
@@ -35,63 +36,46 @@ public class HealthCheck
     public DateTime CheckedAt { get; set; } = DateTime.UtcNow;
 }
 
-/// <summary>
-/// Current resource snapshot for heartbeat.
-/// 
-/// CPU FIELDS:
-/// - PhysicalCpuCores: Actual CPU cores (used for capacity calculations)
-/// - LogicalCpuCores: Threads/hyperthreads (informational)
-/// - CpuUsagePercent: Current utilization across all cores
-/// </summary>
 public class ResourceSnapshot
 {
-    // CPU - Physical cores (TRUE capacity)
-    public int PhysicalCpuCores { get; set; }
-
-    // CPU - Logical cores/threads (informational)
-    public int LogicalCpuCores { get; set; }
-
-    // CPU - Current usage percentage (0-100)
+    // CPU
+    public int TotalVCpus { get; set; }
+    public int UsedVCpus { get; set; }
+    public int AvailableVCpus => TotalVCpus - UsedVCpus;
     public double CpuUsagePercent { get; set; }
-
-    // CPU - Load average (1 minute)
-    public double LoadAverage { get; set; }
-
+    
     // Memory
     public long TotalMemoryBytes { get; set; }
     public long UsedMemoryBytes { get; set; }
-    public long AvailableMemoryBytes => TotalMemoryBytes - UsedMemoryBytes;
+    public long AvailableMemoryBytes => Math.Max(0, TotalMemoryBytes - UsedMemoryBytes);
 
     // Storage
     public long TotalStorageBytes { get; set; }
     public long UsedStorageBytes { get; set; }
-    public long AvailableStorageBytes => TotalStorageBytes - UsedStorageBytes;
+    public long AvailableStorageBytes => Math.Max(0, TotalStorageBytes - UsedStorageBytes);
 
-    // Network
-    public double NetworkInMbps { get; set; }
-    public double NetworkOutMbps { get; set; }
+    // GPU (if any)
+    public int TotalGpus { get; set; }
+    public int UsedGpus { get; set; }
+    public int AvailableGpus => TotalGpus - UsedGpus;
 }
 
-/// <summary>
-/// Summary of a running VM for heartbeat reporting
-/// </summary>
 public class VmSummary
 {
     public string VmId { get; set; } = string.Empty;
-    public string State { get; set; } = string.Empty;
-
-    // Allocated resources (what the VM was provisioned with)
-    public int CpuCores { get; set; }
-    public long MemoryMb { get; set; }
-    public long DiskGb { get; set; }
-
-    // Network info
+    public string? Name { get; set; }
+    public string TenantId { get; set; } = string.Empty;
+    public string LeaseId { get; set; } = string.Empty;
+    public VmState State { get; set; }
+    public int VCpus { get; set; }
+    public long MemoryBytes { get; set; }
+    public long? DiskBytes { get; set; }
+    public double CpuUsagePercent { get; set; }
     public string? IpAddress { get; set; }
-    public int? VncPort { get; set; }
+    public string? VncPort { get; set; }
     public string? MacAddress { get; set; }
-
-    // Security (wallet-encrypted password)
     public string? EncryptedPassword { get; set; }
+    public DateTime StartedAt { get; set; }
 }
 
 /// <summary>

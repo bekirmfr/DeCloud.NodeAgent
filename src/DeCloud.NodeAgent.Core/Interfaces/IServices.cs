@@ -106,9 +106,9 @@ public interface IOrchestratorClient
 public class PendingCommand
 {
     public string CommandId { get; set; } = string.Empty;
-    public string Type { get; set; } = string.Empty;
-    public string? VmId { get; set; }
-    public string? Payload { get; set; }
+    public CommandType Type { get; set; }
+    public string Payload { get; set; } = string.Empty;  // JSON payload
+    public DateTime IssuedAt { get; set; }
 }
 
 public enum CommandType
