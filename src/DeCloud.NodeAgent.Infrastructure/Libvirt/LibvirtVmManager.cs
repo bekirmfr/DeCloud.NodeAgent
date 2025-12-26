@@ -1163,67 +1163,142 @@ public class LibvirtVmManager : IVmManager
 
     private string GenerateLibvirtXml(VmSpec spec, string diskPath, string? cloudInitIso, int vncPort)
     {
-        var cloudInitDisk = string.IsNullOrEmpty(cloudInitIso) ? "" : $@"
-            <disk type='file' device='cdrom'>
-              <driver name='qemu' type='raw'/>
-              <source file='{cloudInitIso}'/>
-              <target dev='sda' bus='sata'/>
-              <readonly/>
-            </disk>";
+        // ========================================
+        // CPU SHARES CALCULATION
+        // ========================================
+        // Each compute point = 1000 shares (libvirt default unit)
+        // This ensures VMs get CPU time proportional to their tier pricing
+        var cpuShares = spec.ComputePointCost * 1000;
 
+        // ========================================
+        // TIER-SPECIFIC CPU CONFIGURATION
+        // ========================================
+        var cpuTune = "";
+
+        switch (spec.QualityTier)
+        {
+            case 0: // Guaranteed - Dedicated cores with high shares
+                    // For Guaranteed tier, we use high CPU shares
+                    // TODO: Implement CPU pinning when core allocation tracking is added
+                cpuTune = $@"
+                <cputune>
+                  <shares>{cpuShares}</shares>
+                </cputune>";
+                break;
+
+            case 1: // Standard - Balanced shares
+                cpuTune = $@"
+                <cputune>
+                  <shares>{cpuShares}</shares>
+                </cputune>";
+                break;
+
+            case 2: // Balanced - Medium shares
+                cpuTune = $@"
+                <cputune>
+                  <shares>{cpuShares}</shares>
+                </cputune>";
+                break;
+
+            case 3: // Burstable - Low shares + Hard quota cap
+                    // Burstable tier: Low shares (1000 per vCPU) + Hard CPU quota
+                    // Quota limits burst capacity even when node is idle
+
+                // Calculate quota: Allow ComputePointCost as % of total CPU time
+                // Example: 4 points on 16-point node = 25% quota
+                // With 4 vCPUs, that's 6.25% per vCPU
+
+                // Quota is in microseconds per period (100ms = 100,000 microseconds)
+                // quota = (ComputePointCost / TotalPoints) × period × 1000
+                // For safety, cap at points × 12,500 microseconds (12.5% per point)
+                var quotaMicroseconds = spec.ComputePointCost * 12500; // 12.5ms per point per 100ms
+                var periodMicroseconds = 100000; // 100ms period (standard)
+
+                cpuTune = $@"
+                <cputune>
+                  <shares>{cpuShares}</shares>
+                  <quota>{quotaMicroseconds}</quota>
+                  <period>{periodMicroseconds}</period>
+                </cputune>";
+                break;
+
+            default:
+                // Fallback to shares only
+                cpuTune = $@"
+                <cputune>
+                  <shares>{cpuShares}</shares>
+                </cputune>";
+                break;
+        }
+
+        // ========================================
+        // CLOUD-INIT ISO (if provided)
+        // ========================================
+        var cloudInitDisk = string.IsNullOrEmpty(cloudInitIso) ? "" : $@"
+        <disk type='file' device='cdrom'>
+          <driver name='qemu' type='raw'/>
+          <source file='{cloudInitIso}'/>
+          <target dev='sda' bus='sata'/>
+          <readonly/>
+        </disk>";
+
+        // ========================================
+        // COMPLETE LIBVIRT XML
+        // ========================================
         return $@"<domain type='kvm'>
-              <name>{spec.VmId}</name>
-              <uuid>{spec.VmId}</uuid>
-              <memory unit='bytes'>{spec.MemoryBytes}</memory>
-              <vcpu placement='static'>{spec.VCpus}</vcpu>
-              <os>
-                <type arch='x86_64' machine='q35'>hvm</type>
-                <boot dev='hd'/>
-              </os>
-              <features>
-                <acpi/>
-                <apic/>
-              </features>
-              <cpu mode='host-passthrough' check='none'/>
-              <clock offset='utc'>
-                <timer name='rtc' tickpolicy='catchup'/>
-                <timer name='pit' tickpolicy='delay'/>
-                <timer name='hpet' present='no'/>
-              </clock>
-              <on_poweroff>destroy</on_poweroff>
-              <on_reboot>restart</on_reboot>
-              <on_crash>destroy</on_crash>
-              <devices>
-                <emulator>/usr/bin/qemu-system-x86_64</emulator>
-                <disk type='file' device='disk'>
-                  <driver name='qemu' type='qcow2'/>
-                  <source file='{diskPath}'/>
-                  <target dev='vda' bus='virtio'/>
-                </disk>{cloudInitDisk}
-                <interface type='network'>
-                  <source network='default'/>
-                  <model type='virtio'/>
-                </interface>
-                <serial type='pty'>
-                  <target port='0'/>
-                </serial>
-                <console type='pty'>
-                  <target type='serial' port='0'/>
-                </console>
-                <graphics type='vnc' port='{vncPort}' autoport='no' listen='0.0.0.0'>
-                  <listen type='address' address='0.0.0.0'/>
-                </graphics>
-                <video>
-                  <model type='qxl' ram='65536' vram='65536' vgamem='16384' heads='1'/>
-                </video>
-                <rng model='virtio'>
-                  <backend model='random'>/dev/urandom</backend>
-                </rng>
-                <channel type='unix'>
-                  <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.VmId}.org.qemu.guest_agent.0'/>
-                  <target type='virtio' name='org.qemu.guest_agent.0'/>
-                </channel>
-              </devices>
-            </domain>";
+      <name>{spec.VmId}</name>
+      <uuid>{spec.VmId}</uuid>
+      <memory unit='bytes'>{spec.MemoryBytes}</memory>
+      <vcpu placement='static'>{spec.VCpus}</vcpu>
+      {cpuTune}
+      <os>
+        <type arch='x86_64' machine='q35'>hvm</type>
+        <boot dev='hd'/>
+      </os>
+      <features>
+        <acpi/>
+        <apic/>
+      </features>
+      <cpu mode='host-passthrough' check='none'/>
+      <clock offset='utc'>
+        <timer name='rtc' tickpolicy='catchup'/>
+        <timer name='pit' tickpolicy='delay'/>
+        <timer name='hpet' present='no'/>
+      </clock>
+      <on_poweroff>destroy</on_poweroff>
+      <on_reboot>restart</on_reboot>
+      <on_crash>destroy</on_crash>
+      <devices>
+        <emulator>/usr/bin/qemu-system-x86_64</emulator>
+        <disk type='file' device='disk'>
+          <driver name='qemu' type='qcow2'/>
+          <source file='{diskPath}'/>
+          <target dev='vda' bus='virtio'/>
+        </disk>{cloudInitDisk}
+        <interface type='network'>
+          <source network='default'/>
+          <model type='virtio'/>
+        </interface>
+        <serial type='pty'>
+          <target port='0'/>
+        </serial>
+        <console type='pty'>
+          <target type='serial' port='0'/>
+        </console>
+        <graphics type='vnc' port='{vncPort}' autoport='no' listen='0.0.0.0'>
+          <listen type='address' address='0.0.0.0'/>
+        </graphics>
+        <video>
+          <model type='qxl' ram='65536' vram='65536' vgamem='16384' heads='1'/>
+        </video>
+        <rng model='virtio'>
+          <backend model='random'>/dev/urandom</backend>
+        </rng>
+        <channel type='unix'>
+          <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.VmId}.org.qemu.guest_agent.0'/>
+          <target type='virtio' name='org.qemu.guest_agent.0'/>
+        </channel>
+      </devices>
+    </domain>";
     }
 }

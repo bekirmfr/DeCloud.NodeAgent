@@ -13,6 +13,10 @@ public class VmSpec
     public long MemoryBytes { get; set; } = 1024 * 1024 * 1024; // 1GB default
     public long DiskBytes { get; set; } = 10L * 1024 * 1024 * 1024; // 10GB default
 
+    // Quality tier and point cost
+    public int QualityTier { get; set; } = 1;  // 0=Guaranteed, 1=Standard, 3=Balanced, 3=Burstable
+    public int ComputePointCost { get; set; } // Total points (vCPUs × pointsPerVCpu)
+
     // Image source
     public string BaseImageUrl { get; set; } = string.Empty;  // URL to download base image
     public string BaseImageHash { get; set; } = string.Empty; // SHA256 for verification
