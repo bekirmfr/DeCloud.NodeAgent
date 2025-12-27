@@ -137,40 +137,18 @@ public class CommandProcessorService : BackgroundService
             var name = GetStringProperty(root, "Name", "name") ?? vmId;
 
             // Try new flat format first, then fall back to nested Spec format
-            int cpuCores;
-            int qualityTier;
-            long memoryBytes;
-            long diskBytes;
-            string? imageUrl;
-            string? imageId = null;
-            string? sshPublicKey;
-            string? password;
-            string? tenantId;
-            string? leaseId;
-
-            if (root.TryGetProperty("Spec", out var spec))
-            {
-                cpuCores = GetIntProperty(spec, "cpuCores", "CpuCores") ?? 1;
-                qualityTier = GetIntProperty(spec, "qualityTier", "QualityTier") ?? 1;
-                var memoryMb = GetLongProperty(spec, "memoryMb", "MemoryMb") ?? 1024;
-                var diskGb = GetLongProperty(spec, "diskGb", "DiskGb") ?? 10;
-                memoryBytes = memoryMb * 1024 * 1024;
-                diskBytes = diskGb * 1024 * 1024 * 1024;
-                imageId = GetStringProperty(spec, "imageId", "ImageId");
-                imageUrl = GetStringProperty(spec, "imageUrl", "ImageUrl");
-                sshPublicKey = GetStringProperty(spec, "sshPublicKey", "SshPublicKey");
-                password = GetStringProperty(root, "Password", "password");
-                tenantId = "orchestrator";
-                leaseId = vmId;
-
-                _logger.LogInformation("Parsed nested Spec format: {VCpus} vCPUs, {MemoryMB}MB, imageId={ImageId}",
-                    cpuCores, memoryMb, imageId ?? "null");
-            }
-            else
-            {
-                _logger.LogError("Unknown payload format - neither flat nor nested Spec found");
-                return false;
-            }
+            int cpuCores = GetIntProperty(root, "cpuCores", "CpuCores") ?? 1;;
+            int qualityTier = GetIntProperty(root, "qualityTier", "QualityTier") ?? 1;
+            var memoryMb = GetLongProperty(root, "memoryMb", "MemoryMb") ?? 1024;
+            long memoryBytes = memoryMb * 1024 * 1024;
+            var diskGb = GetLongProperty(root, "diskGb", "DiskGb") ?? 10;
+            long diskBytes = diskGb * 1024 * 1024 * 1024;
+            string? imageUrl = GetStringProperty(root, "imageUrl", "ImageUrl");
+            string? imageId = GetStringProperty(root, "imageId", "ImageId");
+            string? sshPublicKey = GetStringProperty(root, "sshPublicKey", "SshPublicKey");
+            string? password = GetStringProperty(root, "Password", "password");
+            string? tenantId = "orchestrator";
+            string? leaseId = vmId;
 
             // Resolve image URL if not provided directly
             if (string.IsNullOrEmpty(imageUrl))
