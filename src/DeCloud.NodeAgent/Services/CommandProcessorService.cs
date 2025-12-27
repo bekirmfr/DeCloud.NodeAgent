@@ -138,6 +138,7 @@ public class CommandProcessorService : BackgroundService
 
             // Try new flat format first, then fall back to nested Spec format
             int cpuCores;
+            int qualityTier = 1;
             long memoryBytes;
             long diskBytes;
             string? imageUrl;
@@ -166,6 +167,7 @@ public class CommandProcessorService : BackgroundService
             {
                 // Old nested format
                 cpuCores = GetIntProperty(spec, "cpuCores", "CpuCores") ?? 1;
+                qualityTier = GetIntProperty(spec, "qualityTier", "QualityTier") ?? 1;
                 var memoryMb = GetLongProperty(spec, "memoryMb", "MemoryMb") ?? 1024;
                 var diskGb = GetLongProperty(spec, "diskGb", "DiskGb") ?? 10;
                 memoryBytes = memoryMb * 1024 * 1024;
@@ -198,6 +200,7 @@ public class CommandProcessorService : BackgroundService
                 VmId = vmId,
                 Name = name,
                 VCpus = cpuCores,
+                QualityTier = qualityTier
                 MemoryBytes = memoryBytes,
                 DiskBytes = diskBytes,
                 BaseImageUrl = imageUrl,
