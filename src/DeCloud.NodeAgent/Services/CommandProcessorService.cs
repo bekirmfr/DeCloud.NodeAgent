@@ -138,7 +138,7 @@ public class CommandProcessorService : BackgroundService
 
             // Try new flat format first, then fall back to nested Spec format
             int cpuCores;
-            int qualityTier = 1;
+            int qualityTier;
             long memoryBytes;
             long diskBytes;
             string? imageUrl;
@@ -148,22 +148,7 @@ public class CommandProcessorService : BackgroundService
             string? tenantId;
             string? leaseId;
 
-            if (root.TryGetProperty("VCpus", out _) || root.TryGetProperty("MemoryBytes", out _))
-            {
-                // New flat format from updated Orchestrator
-                cpuCores = GetIntProperty(root, "VCpus", "vCpus") ?? 1;
-                memoryBytes = GetLongProperty(root, "MemoryBytes", "memoryBytes") ?? 1024L * 1024L * 1024L;
-                diskBytes = GetLongProperty(root, "DiskBytes", "diskBytes") ?? 10L * 1024L * 1024L * 1024L;
-                imageUrl = GetStringProperty(root, "BaseImageUrl", "baseImageUrl");
-                sshPublicKey = GetStringProperty(root, "SshPublicKey", "sshPublicKey");
-                password = GetStringProperty(root, "Password", "password");
-                tenantId = GetStringProperty(root, "TenantId", "tenantId") ?? "orchestrator";
-                leaseId = GetStringProperty(root, "LeaseId", "leaseId") ?? vmId;
-
-                _logger.LogInformation("Parsed flat format: {VCpus} vCPUs, {MemoryMB}MB, imageUrl={ImageUrl}",
-                    cpuCores, memoryBytes / 1024 / 1024, imageUrl ?? "null");
-            }
-            else if (root.TryGetProperty("Spec", out var spec))
+            if (root.TryGetProperty("Spec", out var spec))
             {
                 // Old nested format
                 cpuCores = GetIntProperty(spec, "cpuCores", "CpuCores") ?? 1;
