@@ -208,7 +208,6 @@ public class HeartbeatService : BackgroundService
 
             // =====================================================
             // Build detailed VM summaries for heartbeat
-            // UPDATED: Include VncPort, MacAddress, EncryptedPassword
             // =====================================================
             var vmSummaries = new List<VmSummary>();
 
