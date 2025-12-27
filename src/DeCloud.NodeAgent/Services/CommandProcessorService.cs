@@ -200,7 +200,7 @@ public class CommandProcessorService : BackgroundService
                 VmId = vmId,
                 Name = name,
                 VCpus = cpuCores,
-                QualityTier = qualityTier
+                QualityTier = qualityTier,
                 MemoryBytes = memoryBytes,
                 DiskBytes = diskBytes,
                 BaseImageUrl = imageUrl,
