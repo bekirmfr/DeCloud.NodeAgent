@@ -1224,7 +1224,7 @@ public class LibvirtVmManager : IVmManager
                 // Quota is in microseconds per period (100ms = 100,000 microseconds)
                 // quota = (ComputePointCost / TotalPoints) × period × 1000
                 // For safety, cap at points × 12,500 microseconds (12.5% per point)
-                var quotaMicroseconds = spec.ComputePointCost * 12500; // 12.5ms per point per 100ms
+                var quotaMicroseconds = spec.VCpus * 50000; // 12.5ms per point per 100ms
                 var periodMicroseconds = 100000; // 100ms period (standard)
 
                 cpuTune = $@"
