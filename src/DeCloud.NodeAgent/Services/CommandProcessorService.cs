@@ -150,7 +150,6 @@ public class CommandProcessorService : BackgroundService
 
             if (root.TryGetProperty("Spec", out var spec))
             {
-                // Old nested format
                 cpuCores = GetIntProperty(spec, "cpuCores", "CpuCores") ?? 1;
                 qualityTier = GetIntProperty(spec, "qualityTier", "QualityTier") ?? 1;
                 var memoryMb = GetLongProperty(spec, "memoryMb", "MemoryMb") ?? 1024;
@@ -196,9 +195,9 @@ public class CommandProcessorService : BackgroundService
                 LeaseId = leaseId
             };
 
-            _logger.LogInformation("Creating VM {VmId}: {VCpus} vCPUs, {MemoryMB}MB RAM, {DiskGB}GB disk, image: {ImageUrl}, SSH key: {HasKey}",
+            _logger.LogInformation("Creating VM {VmId}: {VCpus} vCPUs, {MemoryMB}MB RAM, {DiskGB}GB disk, image: {ImageUrl}, SSH key: {HasKey}, quality tier: {QualityTier}",
                 vmId, cpuCores, memoryBytes / 1024 / 1024, diskBytes / 1024 / 1024 / 1024, imageUrl,
-                !string.IsNullOrEmpty(sshPublicKey) ? "yes" : "no");
+                !string.IsNullOrEmpty(sshPublicKey) ? "yes" : "no", qualityTier);
 
             var result = await _vmManager.CreateVmAsync(vmSpec, ct);
 
