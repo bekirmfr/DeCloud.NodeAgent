@@ -1168,7 +1168,20 @@ public class LibvirtVmManager : IVmManager
         // ========================================
         // Each compute point = 1000 shares (libvirt default unit)
         // This ensures VMs get CPU time proportional to their tier pricing
+        var pointsPerVCpu = spec.QualityTier switch
+        {
+            0 => 8,  // Guaranteed
+            1 => 4,  // Standard
+            2 => 2,  // Balanced
+            3 => 1,  // Burstable
+            _ => 4   // Default to Standard
+        };
+
+        spec.ComputePointCost = spec.VCpus * pointsPerVCpu;
         var cpuShares = spec.ComputePointCost * 1000;
+
+        // Ensure shares is at least 1 burstable tier equivalent
+        cpuShares = Math.Max(1000, cpuShares);
 
         // ========================================
         // TIER-SPECIFIC CPU CONFIGURATION
