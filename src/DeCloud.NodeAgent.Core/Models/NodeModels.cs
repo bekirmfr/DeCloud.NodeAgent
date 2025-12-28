@@ -69,6 +69,7 @@ public class VmSummary
     public string LeaseId { get; set; } = string.Empty;
     public VmState State { get; set; }
     public int VCpus { get; set; }
+    public int QualityTier { get; set; }
     public long MemoryBytes { get; set; }
     public long? DiskBytes { get; set; }
     public double CpuUsagePercent { get; set; }

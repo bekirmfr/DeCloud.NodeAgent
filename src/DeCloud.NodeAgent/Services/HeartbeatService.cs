@@ -252,6 +252,7 @@ public class HeartbeatService : BackgroundService
                         LeaseId = vm.Spec.LeaseId,
                         State = vm.State,
                         VCpus = vm.Spec.VCpus,
+                        QualityTier = vm.Spec.QualityTier,
                         MemoryBytes = vm.Spec.MemoryBytes,
                         DiskBytes = vm.Spec.DiskBytes,
                         CpuUsagePercent = usage?.CpuPercent ?? 0,
