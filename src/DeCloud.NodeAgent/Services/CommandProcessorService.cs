@@ -132,17 +132,17 @@ public class CommandProcessorService : BackgroundService
             using var doc = JsonDocument.Parse(payload);
             var root = doc.RootElement;
 
-            if (GetStringProperty(root, "TenantId", "tenantId") == null || GetStringProperty(root, "TenantWalletAddress", "tenantWalletAddress") == null)
+            if (GetStringProperty(root, "OwnerId", "ownerId") == null || GetStringProperty(root, "TenantWalletAddress", "tenantWalletAddress") == null)
             {
-                _logger.LogWarning("CreateVm command is missing TenantId or TenantWalletAddress");
+                _logger.LogWarning("CreateVm command is missing OwnerId or OwnerWallet");
                 return false;
             }
 
             // Parse the new flat format from Orchestrator
             var vmId = GetStringProperty(root, "VmId", "vmId") ?? Guid.NewGuid().ToString();
             var name = GetStringProperty(root, "Name", "name") ?? vmId;
-            var tenantId = GetStringProperty(root, "TenantId", "tenantId");
-            var tenantWalletAddress = GetStringProperty(root, "TenantWalletAddress", "tenantWalletAddress");
+            var ownerId = GetStringProperty(root, "OwnerId", "ownerId");
+            var ownerWallet = GetStringProperty(root, "OwnerWallet", "ownerWallet");
 
             // Try new flat format first, then fall back to nested Spec format
             int cpuCores = GetIntProperty(root, "cpuCores", "CpuCores") ?? 1;;
@@ -176,8 +176,8 @@ public class CommandProcessorService : BackgroundService
                 BaseImageHash = "",
                 SshPublicKey = sshPublicKey,
                 Password = password,
-                TenantId = tenantId,
-                TenantWalletAddress = tenantWalletAddress,
+                OwnerId = ownerId,
+                OwnerWallet = ownerWallet,
                 LeaseId = leaseId
             };
 

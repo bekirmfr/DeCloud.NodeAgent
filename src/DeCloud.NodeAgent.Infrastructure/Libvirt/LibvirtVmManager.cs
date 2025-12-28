@@ -261,7 +261,7 @@ public class LibvirtVmManager : IVmManager
                     VCpus = vcpus,
                     MemoryBytes = memoryBytes,
                     DiskBytes = await GetDiskSizeAsync(diskPath, ct),
-                    TenantId = tenantId ?? "unknown",
+                    OwnerId = tenantId ?? "unknown",
                     LeaseId = leaseId ?? "unknown"
                 },
                 State = state,
@@ -590,7 +590,7 @@ public class LibvirtVmManager : IVmManager
         {
             vmId = spec.VmId,
             name = spec.Name,
-            tenantId = spec.TenantId,
+            tenantId = spec.OwnerId,
             leaseId = spec.LeaseId,
             createdAt = DateTime.UtcNow,
             vcpus = spec.VCpus,

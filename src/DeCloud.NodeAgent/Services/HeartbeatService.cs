@@ -243,13 +243,13 @@ public class HeartbeatService : BackgroundService
 
                     vmSummaries.Add(new VmSummary
                     {
-                        VmId = vm.VmId,
+                        Id = vm.VmId,
                         Name = vm.Name,
-                        TenantId = vm.Spec.TenantId,
-                        TenantWalletAddress = vm.Spec.TenantWalletAddress,
+                        OwnerId = vm.Spec.OwnerId,
+                        OwnerWallet = vm.Spec.OwnerWallet,
                         LeaseId = vm.Spec.LeaseId,
                         State = vm.State,
-                        VCpus = vm.Spec.VCpus,
+                        CpuCores = vm.Spec.VCpus,
                         QualityTier = vm.Spec.QualityTier,
                         MemoryBytes = vm.Spec.MemoryBytes,
                         DiskBytes = vm.Spec.DiskBytes,

@@ -75,8 +75,8 @@ public class VmRepository : IDisposable
             CREATE TABLE IF NOT EXISTS VmRecords (
                 VmId TEXT PRIMARY KEY,
                 Name TEXT NOT NULL,
-                TenantId TEXT NOT NULL,
-                TenantWalletAddress TEXT,
+                OwnerId TEXT NOT NULL,
+                OwnerWallet TEXT,
                 LeaseId TEXT,
                 VCpus INTEGER NOT NULL,
                 MemoryBytes INTEGER NOT NULL,
@@ -98,7 +98,7 @@ public class VmRepository : IDisposable
                 EncryptedPassword TEXT
             );
             
-            CREATE INDEX IF NOT EXISTS idx_tenant ON VmRecords(TenantId);
+            CREATE INDEX IF NOT EXISTS idx_tenant ON VmRecords(OwnerId);
             CREATE INDEX IF NOT EXISTS idx_state ON VmRecords(State);
             CREATE INDEX IF NOT EXISTS idx_updated ON VmRecords(LastUpdated);
         ";
@@ -121,12 +121,12 @@ public class VmRepository : IDisposable
         {
             var sql = @"
                 INSERT OR REPLACE INTO VmRecords 
-                (VmId, Name, TenantId, TenantWalletAddress,LeaseId, VCpus, MemoryBytes, DiskBytes, 
+                (VmId, Name, OwnerId, OwnerWallet,LeaseId, VCpus, MemoryBytes, DiskBytes, 
                  State, IpAddress, MacAddress, VncPort, Pid,
                  CreatedAt, StartedAt, StoppedAt, LastUpdated, DiskPath, ConfigPath,
                  BaseImageUrl, BaseImageHash, SshPublicKey, EncryptedPassword)
                 VALUES 
-                (@VmId, @Name, @TenantId, @TenantWalletAddress, @LeaseId, @VCpus, @MemoryBytes, @DiskBytes,
+                (@VmId, @Name, @OwnerId, @OwnerWallet, @LeaseId, @VCpus, @MemoryBytes, @DiskBytes,
                  @State, @IpAddress, @MacAddress, @VncPort, @Pid,
                  @CreatedAt, @StartedAt, @StoppedAt, @LastUpdated, @DiskPath, @ConfigPath,
                  @BaseImageUrl, @BaseImageHash, @SshPublicKey, @EncryptedPassword)
@@ -137,9 +137,8 @@ public class VmRepository : IDisposable
 
             cmd.Parameters.AddWithValue("@VmId", vm.VmId);
             cmd.Parameters.AddWithValue("@Name", vm.Name);
-            cmd.Parameters.AddWithValue("@TenantId", vm.Spec.TenantId);
-            cmd.Parameters.AddWithValue("@TenantId", vm.Spec.TenantId ?? (object)DBNull.Value);
-            cmd.Parameters.AddWithValue("@TenantWalletAddress", vm.Spec.TenantWalletAddress ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@OwnerId", vm.Spec.OwnerId);
+            cmd.Parameters.AddWithValue("@OwnerWallet", vm.Spec.OwnerWallet ?? (object)DBNull.Value);
             cmd.Parameters.AddWithValue("@LeaseId", vm.Spec.LeaseId ?? (object)DBNull.Value);
             cmd.Parameters.AddWithValue("@VCpus", vm.Spec.VCpus);
             cmd.Parameters.AddWithValue("@MemoryBytes", vm.Spec.MemoryBytes);
@@ -418,8 +417,8 @@ public class VmRepository : IDisposable
                 {
                     VmId = reader.GetString(0),
                     Name = reader.GetString(1),
-                    TenantId = reader.GetString(2),
-                    TenantWalletAddress = reader.GetString(3),
+                    OwnerId = reader.GetString(2),
+                    OwnerWallet = reader.GetString(3),
                     LeaseId = reader.IsDBNull(4) ? null : reader.GetString(4),
                     VCpus = reader.GetInt32(5),
                     MemoryBytes = reader.GetInt64(6),

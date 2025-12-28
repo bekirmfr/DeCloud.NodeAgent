@@ -42,8 +42,8 @@ public class VmSpec
     public string? EncryptedPassword { get; set; }     // Wallet-encrypted (persistent)
 
     // Billing and ownership
-    public string TenantId { get; set; } = string.Empty;      // Tenant/user ID
-    public string TenantWalletAddress { get; set; } = string.Empty; // Tenant's wallet address
+    public string OwnerId { get; set; } = string.Empty;      // Tenant/user ID
+    public string OwnerWallet { get; set; } = string.Empty; // Tenant's wallet address
     public string LeaseId { get; set; } = string.Empty;       // On-chain lease reference
 }
 

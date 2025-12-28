@@ -155,14 +155,14 @@ public class OrchestratorClient : IOrchestratorClient
                 },
                 activeVms = heartbeat.ActiveVmDetails.Select(v => new
                 {
-                    vmId = v.VmId,
+                    vmId = v.Id,
                     name = v.Name,
-                    tenantId = v.TenantId,
+                    tenantId = v.OwnerId,
                     state = v.State.ToString(),  // Convert enum to string
                     ipAddress = v.IpAddress,
                     cpuUsagePercent = v.CpuUsagePercent,
                     startedAt = v.StartedAt.ToString("O"),
-                    vCpus = v.VCpus,
+                    vCpus = v.CpuCores,
                     memoryBytes = v.MemoryBytes,
                     diskBytes = v.DiskBytes,
                     // These fields are populated by HeartbeatService from VmInstance

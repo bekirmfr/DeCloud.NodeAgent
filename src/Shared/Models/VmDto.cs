@@ -9,8 +9,8 @@ public class VmDto
     // Identity (aligned naming)
     public required string VmId { get; set; }
     public required string Name { get; set; }
-    public required string TenantId { get; set; }
-    public required string TenantWallet { get; set; }
+    public required string OwnerId { get; set; }
+    public required string OwnerWallet { get; set; }
     
     // Resources (use smallest unit - bytes)
     public required int VCpus { get; set; }
