@@ -43,7 +43,7 @@ public class VmSpec
 
     // Billing and ownership
     public string TenantId { get; set; } = string.Empty;      // Tenant/user ID
-    public string? OwnerId { get; set; }                      // Owner user ID (may be same as TenantId)
+    public string TenantWalletAddress { get; set; } = string.Empty; // Tenant's wallet address
     public string LeaseId { get; set; } = string.Empty;       // On-chain lease reference
 }
 

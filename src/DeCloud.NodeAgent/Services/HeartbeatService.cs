@@ -233,10 +233,13 @@ public class HeartbeatService : BackgroundService
 
                     // Get IP address for running VMs
                     string? ipAddress = null;
+                    bool isIpAssigned = false;
                     if (vm.State == VmState.Running)
                     {
-                        // CORRECT: Always get fresh libvirt IP first, fall back to stored IP
-                        ipAddress = await _vmManager.GetVmIpAddressAsync(vm.VmId, ct) ?? vm.Spec.Network.IpAddress;
+                        // Always get fresh libvirt IP first, fall back to stored IP
+                        var vmIpAddress = await _vmManager.GetVmIpAddressAsync(vm.VmId, ct);
+                        isIpAssigned = !string.IsNullOrEmpty(vmIpAddress);
+                        ipAddress = vmIpAddress ?? vm.Spec.Network.IpAddress;
                         var vncPort = vm.VncPort;
                     }
 
@@ -245,6 +248,7 @@ public class HeartbeatService : BackgroundService
                         VmId = vm.VmId,
                         Name = vm.Name,
                         TenantId = vm.Spec.TenantId,
+                        TenantWalletAddress = vm.Spec.TenantWalletAddress,
                         LeaseId = vm.Spec.LeaseId,
                         State = vm.State,
                         VCpus = vm.Spec.VCpus,
@@ -252,6 +256,7 @@ public class HeartbeatService : BackgroundService
                         DiskBytes = vm.Spec.DiskBytes,
                         CpuUsagePercent = usage?.CpuPercent ?? 0,
                         StartedAt = vm.StartedAt ?? vm.CreatedAt,
+                        IsIpAssigned = isIpAssigned,
                         IpAddress = ipAddress,
                         VncPort = vm.VncPort,
                         MacAddress = vm.Spec.Network.MacAddress,

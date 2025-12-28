@@ -132,9 +132,17 @@ public class CommandProcessorService : BackgroundService
             using var doc = JsonDocument.Parse(payload);
             var root = doc.RootElement;
 
+            if (GetStringProperty(root, "TenantId", "tenantId") == null || GetStringProperty(root, "TenantWalletAddress", "tenantWalletAddress") == null)
+            {
+                _logger.LogWarning("CreateVm command is missing TenantId or TenantWalletAddress");
+                return false;
+            }
+
             // Parse the new flat format from Orchestrator
             var vmId = GetStringProperty(root, "VmId", "vmId") ?? Guid.NewGuid().ToString();
             var name = GetStringProperty(root, "Name", "name") ?? vmId;
+            var tenantId = GetStringProperty(root, "TenantId", "tenantId");
+            var tenantWalletAddress = GetStringProperty(root, "TenantWalletAddress", "tenantWalletAddress");
 
             // Try new flat format first, then fall back to nested Spec format
             int cpuCores = GetIntProperty(root, "cpuCores", "CpuCores") ?? 1;;
@@ -147,7 +155,6 @@ public class CommandProcessorService : BackgroundService
             string? imageId = GetStringProperty(root, "imageId", "ImageId");
             string? sshPublicKey = GetStringProperty(root, "sshPublicKey", "SshPublicKey");
             string? password = GetStringProperty(root, "Password", "password");
-            string? tenantId = "orchestrator";
             string? leaseId = vmId;
 
             // Resolve image URL if not provided directly
@@ -170,6 +177,7 @@ public class CommandProcessorService : BackgroundService
                 SshPublicKey = sshPublicKey,
                 Password = password,
                 TenantId = tenantId,
+                TenantWalletAddress = tenantWalletAddress,
                 LeaseId = leaseId
             };
 

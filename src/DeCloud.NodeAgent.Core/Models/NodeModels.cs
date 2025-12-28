@@ -65,12 +65,14 @@ public class VmSummary
     public string VmId { get; set; } = string.Empty;
     public string? Name { get; set; }
     public string TenantId { get; set; } = string.Empty;
+    public string TenantWalletAddress { get; set; } = string.Empty;
     public string LeaseId { get; set; } = string.Empty;
     public VmState State { get; set; }
     public int VCpus { get; set; }
     public long MemoryBytes { get; set; }
     public long? DiskBytes { get; set; }
     public double CpuUsagePercent { get; set; }
+    public bool IsIpAssigned { get; set; }
     public string? IpAddress { get; set; }
     public string? VncPort { get; set; }
     public string? MacAddress { get; set; }

@@ -878,6 +878,15 @@ public class LibvirtVmManager : IVmManager
         return result.Success;
     }
 
+    /// <summary>
+    /// Asynchronously retrieves the IPv4 address assigned to the specified virtual machine.
+    /// </summary>
+    /// <remarks>This method queries the DHCP leases of the default network and matches them to the MAC
+    /// address of the specified virtual machine. Returns null if the IP address cannot be determined, such as when the
+    /// VM is not running or not connected to the default network.</remarks>
+    /// <param name="vmId">The unique identifier of the virtual machine for which to obtain the IP address. Cannot be null or empty.</param>
+    /// <param name="ct">A cancellation token that can be used to cancel the operation.</param>
+    /// <returns>A string containing the IPv4 address of the virtual machine if found; otherwise, null.</returns>
     public async Task<string?> GetVmIpAddressAsync(string vmId, CancellationToken ct = default)
     {
         var result = await _executor.ExecuteAsync("virsh", "net-dhcp-leases default", ct);
