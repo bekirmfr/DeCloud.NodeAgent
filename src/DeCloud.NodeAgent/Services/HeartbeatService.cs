@@ -207,6 +207,17 @@ public class HeartbeatService : BackgroundService
                 .ToList();
 
             // =====================================================
+            // Apply quota to Burstable VMs after boot
+            // =====================================================
+            foreach (var vm in activeVms)
+            {
+                if (ShouldApplyQuota(vm))
+                {
+                    await ApplyBurstableQuotaAsync(vm, ct);
+                }
+            }
+
+            // =====================================================
             // Build detailed VM summaries for heartbeat
             // =====================================================
             var vmSummaries = new List<VmSummary>();
@@ -288,6 +299,78 @@ public class HeartbeatService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error sending heartbeat");
+        }
+    }
+    /// <summary>
+    /// Check if a Burstable VM needs quota applied
+    /// </summary>
+    private bool ShouldApplyQuota(VmInstance vm)
+    {
+        // Only apply to Burstable tier (QualityTier = 3)
+        if (vm.Spec.QualityTier != 3)
+            return false;
+
+        // Only apply to running VMs
+        if (vm.State != VmState.Running)
+            return false;
+
+        // Already applied?
+        if (vm.QuotaAppliedAt.HasValue)
+            return false;
+
+        // VM must have an IP (indicates guest agent is working)
+        if (string.IsNullOrEmpty(vm.Spec.Network.IpAddress))
+            return false;
+
+        // VM must be running for at least 60 seconds
+        if (!vm.StartedAt.HasValue)
+            return false;
+
+        var uptime = DateTime.UtcNow - vm.StartedAt.Value;
+        if (uptime < TimeSpan.FromSeconds(60))
+            return false;
+
+        return true;
+    }
+
+    /// <summary>
+    /// Apply quota cap to a Burstable VM
+    /// </summary>
+    private async Task ApplyBurstableQuotaAsync(VmInstance vm, CancellationToken ct)
+    {
+        try
+        {
+            _logger.LogInformation(
+                "VM {VmId} ({Name}) is ready - applying Burstable tier quota cap (uptime: {Uptime}s)",
+                vm.VmId, vm.Name,
+                vm.StartedAt.HasValue ? (DateTime.UtcNow - vm.StartedAt.Value).TotalSeconds : 0);
+
+            // Calculate quota: 50% per vCPU
+            var quotaPerVCpu = 50000; // 50ms per 100ms period = 50%
+            var totalQuota = vm.Spec.VCpus * quotaPerVCpu;
+
+            var success = await _vmManager.ApplyQuotaCapAsync(
+                vm.VmId,
+                totalQuota,
+                periodMicroseconds: 100000,
+                ct);
+
+            if (success)
+            {
+                _logger.LogInformation(
+                    "✓ Applied {Percent}% CPU quota to Burstable VM {VmId} ({VCpus} vCPUs)",
+                    50, vm.VmId, vm.Spec.VCpus);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Failed to apply quota to VM {VmId} - will retry on next heartbeat",
+                    vm.VmId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error applying quota to VM {VmId}", vm.VmId);
         }
     }
 

@@ -1224,14 +1224,13 @@ public class LibvirtVmManager : IVmManager
                 // Quota is in microseconds per period (100ms = 100,000 microseconds)
                 // quota = (ComputePointCost / TotalPoints) × period × 1000
                 // For safety, cap at points × 12,500 microseconds (12.5% per point)
-                var quotaMicroseconds = spec.VCpus * 50000; // 12.5ms per point per 100ms
-                var periodMicroseconds = 100000; // 100ms period (standard)
+                // var quotaMicroseconds = spec.VCpus * 50000; // 12.5ms per point per 100ms
+                // var periodMicroseconds = 100000; // 100ms period (standard)
 
                 cpuTune = $@"
                 <cputune>
                   <shares>{cpuShares}</shares>
-                  <quota>{quotaMicroseconds}</quota>
-                  <period>{periodMicroseconds}</period>
+                  <!-- Quota applied after 90s via monitoring service -->
                 </cputune>";
                 break;
 
@@ -1248,70 +1247,119 @@ public class LibvirtVmManager : IVmManager
         // CLOUD-INIT ISO (if provided)
         // ========================================
         var cloudInitDisk = string.IsNullOrEmpty(cloudInitIso) ? "" : $@"
-        <disk type='file' device='cdrom'>
-          <driver name='qemu' type='raw'/>
-          <source file='{cloudInitIso}'/>
-          <target dev='sda' bus='sata'/>
-          <readonly/>
-        </disk>";
+            <disk type='file' device='cdrom'>
+              <driver name='qemu' type='raw'/>
+              <source file='{cloudInitIso}'/>
+              <target dev='sda' bus='sata'/>
+              <readonly/>
+            </disk>";
 
         // ========================================
         // COMPLETE LIBVIRT XML
         // ========================================
-        return $@"<domain type='kvm'>
-      <name>{spec.VmId}</name>
-      <uuid>{spec.VmId}</uuid>
-      <memory unit='bytes'>{spec.MemoryBytes}</memory>
-      <vcpu placement='static'>{spec.VCpus}</vcpu>
-      {cpuTune}
-      <os>
-        <type arch='x86_64' machine='q35'>hvm</type>
-        <boot dev='hd'/>
-      </os>
-      <features>
-        <acpi/>
-        <apic/>
-      </features>
-      <cpu mode='host-passthrough' check='none'/>
-      <clock offset='utc'>
-        <timer name='rtc' tickpolicy='catchup'/>
-        <timer name='pit' tickpolicy='delay'/>
-        <timer name='hpet' present='no'/>
-      </clock>
-      <on_poweroff>destroy</on_poweroff>
-      <on_reboot>restart</on_reboot>
-      <on_crash>destroy</on_crash>
-      <devices>
-        <emulator>/usr/bin/qemu-system-x86_64</emulator>
-        <disk type='file' device='disk'>
-          <driver name='qemu' type='qcow2'/>
-          <source file='{diskPath}'/>
-          <target dev='vda' bus='virtio'/>
-        </disk>{cloudInitDisk}
-        <interface type='network'>
-          <source network='default'/>
-          <model type='virtio'/>
-        </interface>
-        <serial type='pty'>
-          <target port='0'/>
-        </serial>
-        <console type='pty'>
-          <target type='serial' port='0'/>
-        </console>
-        <graphics type='vnc' port='{vncPort}' autoport='no' listen='0.0.0.0'>
-          <listen type='address' address='0.0.0.0'/>
-        </graphics>
-        <video>
-          <model type='qxl' ram='65536' vram='65536' vgamem='16384' heads='1'/>
-        </video>
-        <rng model='virtio'>
-          <backend model='random'>/dev/urandom</backend>
-        </rng>
-        <channel type='unix'>
-          <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.VmId}.org.qemu.guest_agent.0'/>
-          <target type='virtio' name='org.qemu.guest_agent.0'/>
-        </channel>
-      </devices>
-    </domain>";
+        return $@"
+            <domain type='kvm'>
+              <name>{spec.VmId}</name>
+              <uuid>{spec.VmId}</uuid>
+              <memory unit='bytes'>{spec.MemoryBytes}</memory>
+              <vcpu placement='static'>{spec.VCpus}</vcpu>
+              {cpuTune}
+              <os>
+                <type arch='x86_64' machine='q35'>hvm</type>
+                <boot dev='hd'/>
+              </os>
+              <features>
+                <acpi/>
+                <apic/>
+              </features>
+              <cpu mode='host-passthrough' check='none'/>
+              <clock offset='utc'>
+                <timer name='rtc' tickpolicy='catchup'/>
+                <timer name='pit' tickpolicy='delay'/>
+                <timer name='hpet' present='no'/>
+              </clock>
+              <on_poweroff>destroy</on_poweroff>
+              <on_reboot>restart</on_reboot>
+              <on_crash>destroy</on_crash>
+              <devices>
+                <emulator>/usr/bin/qemu-system-x86_64</emulator>
+                <disk type='file' device='disk'>
+                  <driver name='qemu' type='qcow2'/>
+                  <source file='{diskPath}'/>
+                  <target dev='vda' bus='virtio'/>
+                </disk>{cloudInitDisk}
+                <interface type='network'>
+                  <source network='default'/>
+                  <model type='virtio'/>
+                </interface>
+                <serial type='pty'>
+                  <target port='0'/>
+                </serial>
+                <console type='pty'>
+                  <target type='serial' port='0'/>
+                </console>
+                <graphics type='vnc' port='{vncPort}' autoport='no' listen='0.0.0.0'>
+                  <listen type='address' address='0.0.0.0'/>
+                </graphics>
+                <video>
+                  <model type='qxl' ram='65536' vram='65536' vgamem='16384' heads='1'/>
+                </video>
+                <rng model='virtio'>
+                  <backend model='random'>/dev/urandom</backend>
+                </rng>
+                <channel type='unix'>
+                  <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.VmId}.org.qemu.guest_agent.0'/>
+                  <target type='virtio' name='org.qemu.guest_agent.0'/>
+                </channel>
+              </devices>
+            </domain>";
+    }
+
+    /// <summary>
+    /// Apply CPU quota cap to a running VM (for Burstable tier after boot)
+    /// </summary>
+    public async Task<bool> ApplyQuotaCapAsync(
+        string vmId,
+        int quotaMicroseconds,
+        int periodMicroseconds = 100000,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            _logger.LogInformation(
+                "Applying quota cap to VM {VmId}: {Quota}µs per {Period}µs ({Percent}%)",
+                vmId, quotaMicroseconds, periodMicroseconds,
+                (quotaMicroseconds * 100.0 / periodMicroseconds));
+
+            // Use virsh schedinfo to dynamically update CPU quota
+            var result = await _executor.ExecuteAsync(
+                "virsh",
+                $"schedinfo {vmId} --set vcpu_quota={quotaMicroseconds} --set vcpu_period={periodMicroseconds}",
+                ct);
+
+            if (!result.Success)
+            {
+                _logger.LogError(
+                    "Failed to apply quota to VM {VmId}: {Error}",
+                    vmId, result.StandardError);
+                return false;
+            }
+
+            _logger.LogInformation("Successfully applied quota cap to VM {VmId}", vmId);
+
+            // Mark quota as applied in VM metadata
+            if (_vms.TryGetValue(vmId, out var instance))
+            {
+                instance.QuotaAppliedAt = DateTime.UtcNow;
+                await _repository.SaveVmAsync(instance);
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception applying quota to VM {VmId}", vmId);
+            return false;
+        }
     }
 }

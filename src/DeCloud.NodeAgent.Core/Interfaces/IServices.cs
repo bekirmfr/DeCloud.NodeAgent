@@ -34,6 +34,14 @@ public interface IVmManager
     
     Task<bool> VmExistsAsync(string vmId, CancellationToken ct = default);
     Task<string?> GetVmIpAddressAsync(string vmId, CancellationToken ct = default);
+    /// <summary>
+    /// Apply CPU quota cap to a running VM
+    /// </summary>
+    Task<bool> ApplyQuotaCapAsync(
+        string vmId,
+        int quotaMicroseconds,
+        int periodMicroseconds = 100000,
+        CancellationToken ct = default);
 }
 
 /// <summary>

@@ -67,6 +67,11 @@ public class VmInstance
     public VmSpec Spec { get; set; } = new();
     public string? NetworkInterface { get; set; }  // e.g., "vnet0"
 
+    /// <summary>
+    /// Timestamp when CPU quota was applied (for Burstable tier)
+    /// </summary>
+    public DateTime? QuotaAppliedAt { get; set; }
+
     // Runtime info
     public int? Pid { get; set; }  // QEMU process ID
     public string? VncPort { get; set; }
