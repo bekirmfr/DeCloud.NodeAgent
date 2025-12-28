@@ -140,7 +140,7 @@ public class VmRepository : IDisposable
             cmd.Parameters.AddWithValue("@OwnerId", vm.Spec.OwnerId);
             cmd.Parameters.AddWithValue("@OwnerWallet", vm.Spec.OwnerWallet ?? (object)DBNull.Value);
             cmd.Parameters.AddWithValue("@LeaseId", vm.Spec.LeaseId ?? (object)DBNull.Value);
-            cmd.Parameters.AddWithValue("@VCpus", vm.Spec.VCpus);
+            cmd.Parameters.AddWithValue("@VCpus", vm.Spec.CpuCores);
             cmd.Parameters.AddWithValue("@MemoryBytes", vm.Spec.MemoryBytes);
             cmd.Parameters.AddWithValue("@DiskBytes", vm.Spec.DiskBytes);
             cmd.Parameters.AddWithValue("@State", vm.State.ToString());
@@ -415,12 +415,12 @@ public class VmRepository : IDisposable
                 Name = reader.GetString(1),
                 Spec = new VmSpec
                 {
-                    VmId = reader.GetString(0),
+                    Id = reader.GetString(0),
                     Name = reader.GetString(1),
                     OwnerId = reader.GetString(2),
                     OwnerWallet = reader.GetString(3),
                     LeaseId = reader.IsDBNull(4) ? null : reader.GetString(4),
-                    VCpus = reader.GetInt32(5),
+                    CpuCores = reader.GetInt32(5),
                     MemoryBytes = reader.GetInt64(6),
                     DiskBytes = reader.GetInt64(7),
                     Network = new VmNetworkConfig
@@ -434,7 +434,7 @@ public class VmRepository : IDisposable
                     EncryptedPassword = reader.IsDBNull(22) ? null : reader.GetString(22)
                 },
                 State = Enum.Parse<VmState>(reader.GetString(8)),
-                VncPort = reader.IsDBNull(11) ? null : reader.GetString(11),
+                VncPort = reader.IsDBNull(11) ? null : reader.GetInt32(11),
                 Pid = reader.IsDBNull(12) ? null : reader.GetInt32(12),
                 CreatedAt = DateTime.Parse(reader.GetString(13)),
                 StartedAt = reader.IsDBNull(14) ? null : DateTime.Parse(reader.GetString(14)),

@@ -227,7 +227,7 @@ public class LibvirtVmManager : IVmManager
 
             var graphics = domain.Descendants("graphics")
                 .FirstOrDefault(g => g.Attribute("type")?.Value == "vnc");
-            var vncPort = graphics?.Attribute("port")?.Value;
+            int? vncPort = graphics?.Attribute("port")?.Value != null ? int.Parse(graphics?.Attribute("port")?.Value) : null;
 
             var state = await GetVmStateFromLibvirtAsync(vmId, ct);
 
@@ -256,9 +256,9 @@ public class LibvirtVmManager : IVmManager
                 Name = vmName ?? domain.Element("name")?.Value ?? vmId,
                 Spec = new VmSpec
                 {
-                    VmId = vmId,
+                    Id = vmId,
                     Name = vmName ?? domain.Element("name")?.Value ?? vmId,
-                    VCpus = vcpus,
+                    CpuCores = vcpus,
                     MemoryBytes = memoryBytes,
                     DiskBytes = await GetDiskSizeAsync(diskPath, ct),
                     OwnerId = tenantId ?? "unknown",
@@ -310,9 +310,10 @@ public class LibvirtVmManager : IVmManager
         var maxPort = _options.VncPortStart;
         foreach (var vm in _vms.Values)
         {
-            if (int.TryParse(vm.VncPort, out var port) && port >= maxPort)
+            int? port = vm.VncPort;
+            if (port != null && port >= maxPort)
             {
-                maxPort = port + 1;
+                maxPort = (int)(port + 1);
             }
         }
         _nextVncPort = maxPort;
@@ -340,7 +341,7 @@ public class LibvirtVmManager : IVmManager
         if (_isWindows)
         {
             _logger.LogWarning("VM creation not supported on Windows - requires Linux with KVM/libvirt");
-            return VmOperationResult.Fail(spec.VmId,
+            return VmOperationResult.Fail(spec.Id,
                 "VM creation requires Linux with KVM/libvirt. Windows detected.", "PLATFORM_UNSUPPORTED");
         }
 
@@ -352,53 +353,53 @@ public class LibvirtVmManager : IVmManager
         await _lock.WaitAsync(ct);
         try
         {
-            if (_vms.ContainsKey(spec.VmId))
+            if (_vms.ContainsKey(spec.Id))
             {
-                return VmOperationResult.Fail(spec.VmId, "VM already exists", "DUPLICATE");
+                return VmOperationResult.Fail(spec.Id, "VM already exists", "DUPLICATE");
             }
 
             // Create VM instance tracking object
             var instance = new VmInstance
             {
-                VmId = spec.VmId,
+                VmId = spec.Id,
                 Name = spec.Name,
                 Spec = spec,
                 State = VmState.Creating,
                 CreatedAt = DateTime.UtcNow,
                 LastHeartbeat = DateTime.UtcNow,
-                VncPort = _nextVncPort++.ToString()
+                VncPort = _nextVncPort++
             };
 
-            _vms.Add(spec.VmId, instance);
+            _vms.Add(spec.Id, instance);
             await _repository.SaveVmAsync(instance);
 
             _logger.LogInformation("Creating VM {VmId}: {VCpus} vCPUs, {MemMB}MB RAM, {DiskGB}GB disk",
-                spec.VmId, spec.VCpus, spec.MemoryBytes / 1024 / 1024, spec.DiskBytes / 1024 / 1024 / 1024);
+                spec.Id, spec.CpuCores, spec.MemoryBytes / 1024 / 1024, spec.DiskBytes / 1024 / 1024 / 1024);
 
             // Log authentication method
             if (!string.IsNullOrEmpty(spec.SshPublicKey))
             {
                 _logger.LogInformation("VM {VmId} will use SSH key authentication ({KeyLength} chars)",
-                    spec.VmId, spec.SshPublicKey.Length);
+                    spec.Id, spec.SshPublicKey.Length);
             }
             else if (!string.IsNullOrEmpty(spec.Password))
             {
-                _logger.LogInformation("VM {VmId} will use password authentication", spec.VmId);
+                _logger.LogInformation("VM {VmId} will use password authentication", spec.Id);
             }
             else
             {
-                _logger.LogWarning("VM {VmId} has no SSH key or password - will use fallback password 'decloud'", spec.VmId);
+                _logger.LogWarning("VM {VmId} has no SSH key or password - will use fallback password 'decloud'", spec.Id);
                 spec.Password = "decloud"; // Fallback password
             }
 
-            var vmDir = Path.Combine(_options.VmStoragePath, spec.VmId);
+            var vmDir = Path.Combine(_options.VmStoragePath, spec.Id);
             Directory.CreateDirectory(vmDir);
 
             // =====================================================
             // STEP 1: Prepare base image
             // =====================================================
             _logger.LogInformation("VM {VmId}: Downloading/preparing base image from {Url}",
-                spec.VmId, spec.BaseImageUrl);
+                spec.Id, spec.BaseImageUrl);
 
             string baseImagePath;
             try
@@ -407,45 +408,45 @@ public class LibvirtVmManager : IVmManager
                     spec.BaseImageUrl,
                     spec.BaseImageHash,
                     ct);
-                _logger.LogInformation("VM {VmId}: Base image ready at {Path}", spec.VmId, baseImagePath);
+                _logger.LogInformation("VM {VmId}: Base image ready at {Path}", spec.Id, baseImagePath);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "VM {VmId}: Failed to prepare base image", spec.VmId);
+                _logger.LogError(ex, "VM {VmId}: Failed to prepare base image", spec.Id);
                 instance.State = VmState.Failed;
-                await _repository.UpdateVmStateAsync(spec.VmId, VmState.Failed);
-                return VmOperationResult.Fail(spec.VmId, $"Failed to prepare base image: {ex.Message}", "IMAGE_ERROR");
+                await _repository.UpdateVmStateAsync(spec.Id, VmState.Failed);
+                return VmOperationResult.Fail(spec.Id, $"Failed to prepare base image: {ex.Message}", "IMAGE_ERROR");
             }
 
             // =====================================================
             // STEP 2: Create overlay disk
             // =====================================================
             _logger.LogInformation("VM {VmId}: Creating overlay disk ({DiskGB}GB)",
-                spec.VmId, spec.DiskBytes / 1024 / 1024 / 1024);
+                spec.Id, spec.DiskBytes / 1024 / 1024 / 1024);
 
             string diskPath;
             try
             {
                 diskPath = await _imageManager.CreateOverlayDiskAsync(
                     baseImagePath,
-                    spec.VmId,
+                    spec.Id,
                     spec.DiskBytes,
                     ct);
                 instance.DiskPath = diskPath;
-                _logger.LogInformation("VM {VmId}: Overlay disk created at {Path}", spec.VmId, diskPath);
+                _logger.LogInformation("VM {VmId}: Overlay disk created at {Path}", spec.Id, diskPath);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "VM {VmId}: Failed to create overlay disk", spec.VmId);
+                _logger.LogError(ex, "VM {VmId}: Failed to create overlay disk", spec.Id);
                 instance.State = VmState.Failed;
-                await _repository.UpdateVmStateAsync(spec.VmId, VmState.Failed);
-                return VmOperationResult.Fail(spec.VmId, $"Failed to create disk: {ex.Message}", "DISK_ERROR");
+                await _repository.UpdateVmStateAsync(spec.Id, VmState.Failed);
+                return VmOperationResult.Fail(spec.Id, $"Failed to create disk: {ex.Message}", "DISK_ERROR");
             }
 
             // =====================================================
             // STEP 3: Create cloud-init ISO
             // =====================================================
-            _logger.LogInformation("VM {VmId}: Creating cloud-init ISO", spec.VmId);
+            _logger.LogInformation("VM {VmId}: Creating cloud-init ISO", spec.Id);
 
             string cloudInitIso;
             try
@@ -453,31 +454,31 @@ public class LibvirtVmManager : IVmManager
                 cloudInitIso = await CreateCloudInitIsoAsync(spec, vmDir, ct);
                 if (!string.IsNullOrEmpty(cloudInitIso))
                 {
-                    _logger.LogInformation("VM {VmId}: Cloud-init ISO created at {Path}", spec.VmId, cloudInitIso);
+                    _logger.LogInformation("VM {VmId}: Cloud-init ISO created at {Path}", spec.Id, cloudInitIso);
                 }
                 else
                 {
-                    _logger.LogWarning("VM {VmId}: Cloud-init ISO creation failed, VM may not configure properly", spec.VmId);
+                    _logger.LogWarning("VM {VmId}: Cloud-init ISO creation failed, VM may not configure properly", spec.Id);
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "VM {VmId}: Cloud-init ISO creation failed, continuing without it", spec.VmId);
+                _logger.LogWarning(ex, "VM {VmId}: Cloud-init ISO creation failed, continuing without it", spec.Id);
                 cloudInitIso = string.Empty;
             }
 
             // =====================================================
             // STEP 4: Generate libvirt XML
             // =====================================================
-            var vncPort = int.Parse(instance.VncPort ?? "5900");
+            var vncPort = instance.VncPort ?? 5900;
             var domainXml = GenerateLibvirtXml(spec, diskPath, cloudInitIso, vncPort);
 
             var xmlPath = Path.Combine(vmDir, "domain.xml");
             await File.WriteAllTextAsync(xmlPath, domainXml, ct);
             instance.ConfigPath = xmlPath;
 
-            _logger.LogInformation("VM {VmId}: Generated libvirt XML at {Path}", spec.VmId, xmlPath);
-            _logger.LogDebug("VM {VmId} XML content:\n{Xml}", spec.VmId, domainXml);
+            _logger.LogInformation("VM {VmId}: Generated libvirt XML at {Path}", spec.Id, xmlPath);
+            _logger.LogDebug("VM {VmId} XML content:\n{Xml}", spec.Id, domainXml);
 
             // =====================================================
             // STEP 5: Save VM metadata
@@ -487,25 +488,25 @@ public class LibvirtVmManager : IVmManager
             // =====================================================
             // STEP 6: Define VM in libvirt
             // =====================================================
-            _logger.LogInformation("VM {VmId}: Defining VM in libvirt", spec.VmId);
+            _logger.LogInformation("VM {VmId}: Defining VM in libvirt", spec.Id);
 
             var defineResult = await _executor.ExecuteAsync("virsh", $"define {xmlPath}", ct);
             if (!defineResult.Success)
             {
                 _logger.LogError("VM {VmId}: Failed to define VM in libvirt: {Error}",
-                    spec.VmId, defineResult.StandardError);
+                    spec.Id, defineResult.StandardError);
 
                 instance.State = VmState.Failed;
-                await _repository.UpdateVmStateAsync(spec.VmId, VmState.Failed);
+                await _repository.UpdateVmStateAsync(spec.Id, VmState.Failed);
 
                 // Cleanup
                 try { Directory.Delete(vmDir, recursive: true); } catch { }
 
-                return VmOperationResult.Fail(spec.VmId,
+                return VmOperationResult.Fail(spec.Id,
                     $"Failed to define VM: {defineResult.StandardError}", "DEFINE_FAILED");
             }
 
-            _logger.LogInformation("VM {VmId}: Successfully defined in libvirt", spec.VmId);
+            _logger.LogInformation("VM {VmId}: Successfully defined in libvirt", spec.Id);
 
             // Update database with all paths
             await _repository.SaveVmAsync(instance);
@@ -514,18 +515,18 @@ public class LibvirtVmManager : IVmManager
             // STEP 7: Start the VM
             // =====================================================
             instance.State = VmState.Starting;
-            await _repository.UpdateVmStateAsync(spec.VmId, VmState.Starting);
+            await _repository.UpdateVmStateAsync(spec.Id, VmState.Starting);
 
-            _logger.LogInformation("VM {VmId}: Starting VM", spec.VmId);
+            _logger.LogInformation("VM {VmId}: Starting VM", spec.Id);
 
-            var startResult = await _executor.ExecuteAsync("virsh", $"start {spec.VmId}", ct);
+            var startResult = await _executor.ExecuteAsync("virsh", $"start {spec.Id}", ct);
             if (startResult.Success)
             {
                 instance.State = VmState.Running;
                 instance.StartedAt = DateTime.UtcNow;
-                await _repository.UpdateVmStateAsync(spec.VmId, VmState.Running);
+                await _repository.UpdateVmStateAsync(spec.Id, VmState.Running);
 
-                _logger.LogInformation("VM {VmId} started successfully", spec.VmId);
+                _logger.LogInformation("VM {VmId} started successfully", spec.Id);
 
                 // Background task to get IP address
                 _ = Task.Run(async () =>
@@ -535,17 +536,17 @@ public class LibvirtVmManager : IVmManager
                     await _lock.WaitAsync(ct);
                     try
                     {
-                        if (_vms.TryGetValue(spec.VmId, out var vm))
+                        if (_vms.TryGetValue(spec.Id, out var vm))
                         {
-                            var ip = await GetVmIpAddressAsync(spec.VmId, ct);
+                            var ip = await GetVmIpAddressAsync(spec.Id, ct);
                             if (!string.IsNullOrEmpty(ip))
                             {
                                 vm.Spec.Network.IpAddress = ip;
                                 await _repository.SaveVmAsync(vm);
-                                _logger.LogInformation("VM {VmId} obtained IP: {Ip}", spec.VmId, ip);
+                                _logger.LogInformation("VM {VmId} obtained IP: {Ip}", spec.Id, ip);
 
                                 // Add VM host key to jump user's known_hosts for seamless SSH
-                                await AddVmHostKeyToJumpUserAsync(ip, spec.VmId, ct);
+                                await AddVmHostKeyToJumpUserAsync(ip, spec.Id, ct);
                             }
                         }
                     }
@@ -555,28 +556,28 @@ public class LibvirtVmManager : IVmManager
                     }
                 }, ct);
 
-                return VmOperationResult.Ok(spec.VmId, VmState.Running);
+                return VmOperationResult.Ok(spec.Id, VmState.Running);
             }
             else
             {
                 instance.State = VmState.Failed;
-                await _repository.UpdateVmStateAsync(spec.VmId, VmState.Failed);
+                await _repository.UpdateVmStateAsync(spec.Id, VmState.Failed);
 
-                _logger.LogError("Failed to start VM {VmId}: {Error}", spec.VmId, startResult.StandardError);
-                return VmOperationResult.Fail(spec.VmId, startResult.StandardError, "START_FAILED");
+                _logger.LogError("Failed to start VM {VmId}: {Error}", spec.Id, startResult.StandardError);
+                return VmOperationResult.Fail(spec.Id, startResult.StandardError, "START_FAILED");
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "VM {VmId}: Unexpected error during creation", spec.VmId);
+            _logger.LogError(ex, "VM {VmId}: Unexpected error during creation", spec.Id);
 
-            if (_vms.TryGetValue(spec.VmId, out var instance))
+            if (_vms.TryGetValue(spec.Id, out var instance))
             {
                 instance.State = VmState.Failed;
-                await _repository.UpdateVmStateAsync(spec.VmId, VmState.Failed);
+                await _repository.UpdateVmStateAsync(spec.Id, VmState.Failed);
             }
 
-            return VmOperationResult.Fail(spec.VmId, ex.Message, "UNEXPECTED_ERROR");
+            return VmOperationResult.Fail(spec.Id, ex.Message, "UNEXPECTED_ERROR");
         }
         finally
         {
@@ -588,12 +589,12 @@ public class LibvirtVmManager : IVmManager
     {
         var metadata = new
         {
-            vmId = spec.VmId,
+            vmId = spec.Id,
             name = spec.Name,
             tenantId = spec.OwnerId,
             leaseId = spec.LeaseId,
             createdAt = DateTime.UtcNow,
-            vcpus = spec.VCpus,
+            vcpus = spec.CpuCores,
             memoryBytes = spec.MemoryBytes,
             diskBytes = spec.DiskBytes
         };
@@ -1074,13 +1075,13 @@ public class LibvirtVmManager : IVmManager
             {
                 sb.AppendLine($"      {line.Trim()}");
             }
-            _logger.LogInformation("VM {VmId}: Including SSH CA public key in cloud-init", spec.VmId);
+            _logger.LogInformation("VM {VmId}: Including SSH CA public key in cloud-init", spec.Id);
         }
         else
         {
             _logger.LogWarning(
                 "VM {VmId}: SSH CA public key not found at {Path} - certificate auth will not work!",
-                spec.VmId, caPublicKeyPath);
+                spec.Id, caPublicKeyPath);
             sb.AppendLine("      # ERROR: CA public key not available");
         }
 
@@ -1115,7 +1116,7 @@ public class LibvirtVmManager : IVmManager
 
         // Create principals directory and file
         sb.AppendLine("  - mkdir -p /etc/ssh/auth_principals");
-        sb.AppendLine($"  - echo vm-{spec.VmId} > /etc/ssh/auth_principals/root");
+        sb.AppendLine($"  - echo vm-{spec.Id} > /etc/ssh/auth_principals/root");
         sb.AppendLine("  - chmod 644 /etc/ssh/auth_principals/root");
 
         // Restart SSH to apply configuration
@@ -1133,14 +1134,14 @@ public class LibvirtVmManager : IVmManager
 
         var userData = sb.ToString();
 
-        _logger.LogDebug("Cloud-init user-data for VM {VmId}:\n{UserData}", spec.VmId, userData);
+        _logger.LogDebug("Cloud-init user-data for VM {VmId}:\n{UserData}", spec.Id, userData);
 
         var userDataPath = Path.Combine(vmDir, "user-data");
         var metaDataPath = Path.Combine(vmDir, "meta-data");
 
         await File.WriteAllTextAsync(userDataPath, userData, ct);
 
-        var metaData = $"instance-id: {spec.VmId}\nlocal-hostname: {spec.Name}\n";
+        var metaData = $"instance-id: {spec.Id}\nlocal-hostname: {spec.Name}\n";
         await File.WriteAllTextAsync(metaDataPath, metaData, ct);
 
         var isoPath = Path.Combine(vmDir, "cloud-init.iso");
@@ -1186,7 +1187,7 @@ public class LibvirtVmManager : IVmManager
             _ => 4   // Default to Standard
         };
 
-        spec.ComputePointCost = spec.VCpus * pointsPerVCpu;
+        spec.ComputePointCost = spec.CpuCores * pointsPerVCpu;
         var cpuShares = spec.ComputePointCost * 1000;
 
         // Ensure shares is at least 1 burstable tier equivalent
@@ -1268,10 +1269,10 @@ public class LibvirtVmManager : IVmManager
         // ========================================
         return $@"
             <domain type='kvm'>
-              <name>{spec.VmId}</name>
-              <uuid>{spec.VmId}</uuid>
+              <name>{spec.Id}</name>
+              <uuid>{spec.Id}</uuid>
               <memory unit='bytes'>{spec.MemoryBytes}</memory>
-              <vcpu placement='static'>{spec.VCpus}</vcpu>
+              <vcpu placement='static'>{spec.CpuCores}</vcpu>
               {cpuTune}
               <os>
                 <type arch='x86_64' machine='q35'>hvm</type>
@@ -1317,7 +1318,7 @@ public class LibvirtVmManager : IVmManager
                   <backend model='random'>/dev/urandom</backend>
                 </rng>
                 <channel type='unix'>
-                  <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.VmId}.org.qemu.guest_agent.0'/>
+                  <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.Id}.org.qemu.guest_agent.0'/>
                   <target type='virtio' name='org.qemu.guest_agent.0'/>
                 </channel>
               </devices>

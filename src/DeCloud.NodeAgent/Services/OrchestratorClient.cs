@@ -157,12 +157,14 @@ public class OrchestratorClient : IOrchestratorClient
                 {
                     vmId = v.Id,
                     name = v.Name,
-                    tenantId = v.OwnerId,
+                    qualityTier = v.QualityTier,
+                    computePointCost = v.ComputePointCost,
+                    ownerId = v.OwnerId,
                     state = v.State.ToString(),  // Convert enum to string
                     ipAddress = v.IpAddress,
                     cpuUsagePercent = v.CpuUsagePercent,
                     startedAt = v.StartedAt.ToString("O"),
-                    vCpus = v.CpuCores,
+                    cpuCores = v.CpuCores,
                     memoryBytes = v.MemoryBytes,
                     diskBytes = v.DiskBytes,
                     // These fields are populated by HeartbeatService from VmInstance

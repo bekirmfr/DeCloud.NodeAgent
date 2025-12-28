@@ -70,12 +70,13 @@ public class VmSummary
     public string LeaseId { get; set; } = string.Empty;
     public int CpuCores { get; set; }
     public int QualityTier { get; set; }
+    public int ComputePointCost { get; set; }
     public long MemoryBytes { get; set; }
     public long? DiskBytes { get; set; }
     public double CpuUsagePercent { get; set; }
     public bool IsIpAssigned { get; set; }
     public string? IpAddress { get; set; }
-    public string? VncPort { get; set; }
+    public int? VncPort { get; set; }
     public string? MacAddress { get; set; }
     public string? EncryptedPassword { get; set; }
     public DateTime StartedAt { get; set; }

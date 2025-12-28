@@ -147,6 +147,7 @@ public class CommandProcessorService : BackgroundService
             // Try new flat format first, then fall back to nested Spec format
             int cpuCores = GetIntProperty(root, "cpuCores", "CpuCores") ?? 1;;
             int qualityTier = GetIntProperty(root, "qualityTier", "QualityTier") ?? 1;
+            var computePointCost = GetIntProperty(root, "computePointCost", "ComputePointCost") ?? 0;
             var memoryMb = GetLongProperty(root, "memoryMb", "MemoryMb") ?? 1024;
             long memoryBytes = memoryMb * 1024 * 1024;
             var diskGb = GetLongProperty(root, "diskGb", "DiskGb") ?? 10;
@@ -166,10 +167,11 @@ public class CommandProcessorService : BackgroundService
 
             var vmSpec = new VmSpec
             {
-                VmId = vmId,
+                Id = vmId,
                 Name = name,
-                VCpus = cpuCores,
+                CpuCores = cpuCores,
                 QualityTier = qualityTier,
+                ComputePointCost = computePointCost,
                 MemoryBytes = memoryBytes,
                 DiskBytes = diskBytes,
                 BaseImageUrl = imageUrl,

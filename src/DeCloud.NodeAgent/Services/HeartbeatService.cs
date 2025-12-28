@@ -249,8 +249,9 @@ public class HeartbeatService : BackgroundService
                         OwnerWallet = vm.Spec.OwnerWallet,
                         LeaseId = vm.Spec.LeaseId,
                         State = vm.State,
-                        CpuCores = vm.Spec.VCpus,
+                        CpuCores = vm.Spec.CpuCores,
                         QualityTier = vm.Spec.QualityTier,
+                        ComputePointCost = vm.Spec.ComputePointCost,
                         MemoryBytes = vm.Spec.MemoryBytes,
                         DiskBytes = vm.Spec.DiskBytes,
                         CpuUsagePercent = usage?.CpuPercent ?? 0,
@@ -269,7 +270,7 @@ public class HeartbeatService : BackgroundService
             }
 
             // Update resource usage based on running VMs
-            snapshot.UsedVCpus = activeVms.Where(v => v.State == VmState.Running).Sum(v => v.Spec.VCpus);
+            snapshot.UsedVCpus = activeVms.Where(v => v.State == VmState.Running).Sum(v => v.Spec.CpuCores);
             snapshot.UsedMemoryBytes = activeVms.Where(v => v.State == VmState.Running).Sum(v => v.Spec.MemoryBytes);
 
             // Create heartbeat using the standard Heartbeat model
@@ -351,7 +352,7 @@ public class HeartbeatService : BackgroundService
 
             // Calculate quota: 50% per vCPU
             var quotaPerVCpu = 50000; // 50ms per 100ms period = 50%
-            var totalQuota = vm.Spec.VCpus * quotaPerVCpu;
+            var totalQuota = vm.Spec.CpuCores * quotaPerVCpu;
 
             var success = await _vmManager.ApplyQuotaCapAsync(
                 vm.VmId,
@@ -363,7 +364,7 @@ public class HeartbeatService : BackgroundService
             {
                 _logger.LogInformation(
                     "✓ Applied {Percent}% CPU quota to Burstable VM {VmId} ({VCpus} vCPUs)",
-                    50, vm.VmId, vm.Spec.VCpus);
+                    50, vm.VmId, vm.Spec.CpuCores);
             }
             else
             {

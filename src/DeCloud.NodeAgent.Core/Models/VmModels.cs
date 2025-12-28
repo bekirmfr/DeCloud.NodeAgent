@@ -5,17 +5,17 @@ namespace DeCloud.NodeAgent.Core.Models;
 /// </summary>
 public class VmSpec
 {
-    public string VmId { get; set; } = Guid.NewGuid().ToString();
+    public string Id { get; set; } = Guid.NewGuid().ToString();
     public string Name { get; set; } = string.Empty;
 
     // Resource allocation
-    public int VCpus { get; set; } = 1;
+    public int CpuCores { get; set; } = 1;
     public long MemoryBytes { get; set; } = 1024 * 1024 * 1024; // 1GB default
     public long DiskBytes { get; set; } = 10L * 1024 * 1024 * 1024; // 10GB default
 
     // Quality tier and point cost
     public int QualityTier { get; set; } = 1;  // 0=Guaranteed, 1=Standard, 3=Balanced, 3=Burstable
-    public int ComputePointCost { get; set; } // Total points (vCPUs × pointsPerVCpu)
+    public int ComputePointCost { get; set; } = 0; // Total points (vCPUs × pointsPerVCpu)
 
     // Image source
     public string BaseImageUrl { get; set; } = string.Empty;  // URL to download base image
@@ -74,7 +74,7 @@ public class VmInstance
 
     // Runtime info
     public int? Pid { get; set; }  // QEMU process ID
-    public string? VncPort { get; set; }
+    public int? VncPort { get; set; }
     public string? SpicePort { get; set; }
 
     // Resource usage
