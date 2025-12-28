@@ -64,10 +64,10 @@ public class VmSummary
 {
     public string VmId { get; set; } = string.Empty;
     public string? Name { get; set; }
+    public VmState State { get; set; }
     public string TenantId { get; set; } = string.Empty;
     public string TenantWalletAddress { get; set; } = string.Empty;
     public string LeaseId { get; set; } = string.Empty;
-    public VmState State { get; set; }
     public int VCpus { get; set; }
     public int QualityTier { get; set; }
     public long MemoryBytes { get; set; }
