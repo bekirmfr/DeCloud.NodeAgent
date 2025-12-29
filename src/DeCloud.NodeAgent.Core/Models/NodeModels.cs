@@ -108,7 +108,6 @@ public class NodeRegistration
     public string AgentVersion { get; set; } = string.Empty;
     public List<string> SupportedImages { get; set; } = new();
 
-    public bool SupportsGpu { get; set; }
     
     // Staking info
     public string StakingTxHash { get; set; } = string.Empty;
