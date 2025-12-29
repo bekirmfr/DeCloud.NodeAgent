@@ -77,8 +77,7 @@ public class VmRepository : IDisposable
                 Name TEXT NOT NULL,
                 OwnerId TEXT NOT NULL,
                 OwnerWallet TEXT,
-                LeaseId TEXT,
-                VCpus INTEGER NOT NULL,
+                VirtualCpuCores INTEGER NOT NULL,
                 MemoryBytes INTEGER NOT NULL,
                 DiskBytes INTEGER NOT NULL,
                 State TEXT NOT NULL,
@@ -121,12 +120,12 @@ public class VmRepository : IDisposable
         {
             var sql = @"
                 INSERT OR REPLACE INTO VmRecords 
-                (VmId, Name, OwnerId, OwnerWallet,LeaseId, VCpus, MemoryBytes, DiskBytes, 
+                (VmId, Name, OwnerId, OwnerWallet, VirtualCpuCores, MemoryBytes, DiskBytes, 
                  State, IpAddress, MacAddress, VncPort, Pid,
                  CreatedAt, StartedAt, StoppedAt, LastUpdated, DiskPath, ConfigPath,
                  BaseImageUrl, BaseImageHash, SshPublicKey, EncryptedPassword)
                 VALUES 
-                (@VmId, @Name, @OwnerId, @OwnerWallet, @LeaseId, @VCpus, @MemoryBytes, @DiskBytes,
+                (@VmId, @Name, @OwnerId, @OwnerWallet, @VirtualCpuCores, @MemoryBytes, @DiskBytes,
                  @State, @IpAddress, @MacAddress, @VncPort, @Pid,
                  @CreatedAt, @StartedAt, @StoppedAt, @LastUpdated, @DiskPath, @ConfigPath,
                  @BaseImageUrl, @BaseImageHash, @SshPublicKey, @EncryptedPassword)
@@ -139,13 +138,12 @@ public class VmRepository : IDisposable
             cmd.Parameters.AddWithValue("@Name", vm.Name);
             cmd.Parameters.AddWithValue("@OwnerId", vm.Spec.OwnerId);
             cmd.Parameters.AddWithValue("@OwnerWallet", vm.Spec.OwnerWallet ?? (object)DBNull.Value);
-            cmd.Parameters.AddWithValue("@LeaseId", vm.Spec.LeaseId ?? (object)DBNull.Value);
-            cmd.Parameters.AddWithValue("@VCpus", vm.Spec.VirtualCpuCores);
+            cmd.Parameters.AddWithValue("@VirtualCpuCores", vm.Spec.VirtualCpuCores);
             cmd.Parameters.AddWithValue("@MemoryBytes", vm.Spec.MemoryBytes);
             cmd.Parameters.AddWithValue("@DiskBytes", vm.Spec.DiskBytes);
             cmd.Parameters.AddWithValue("@State", vm.State.ToString());
-            cmd.Parameters.AddWithValue("@IpAddress", vm.Spec.Network.IpAddress ?? (object)DBNull.Value);
-            cmd.Parameters.AddWithValue("@MacAddress", vm.Spec.Network.MacAddress ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@IpAddress", vm.Spec.IpAddress ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@MacAddress", vm.Spec.MacAddress ?? (object)DBNull.Value);
             cmd.Parameters.AddWithValue("@VncPort", vm.VncPort ?? (object)DBNull.Value);
             cmd.Parameters.AddWithValue("@Pid", vm.Pid ?? (object)DBNull.Value);
             cmd.Parameters.AddWithValue("@CreatedAt", vm.CreatedAt.ToString("O"));
@@ -419,15 +417,11 @@ public class VmRepository : IDisposable
                     Name = reader.GetString(1),
                     OwnerId = reader.GetString(2),
                     OwnerWallet = reader.GetString(3),
-                    LeaseId = reader.IsDBNull(4) ? null : reader.GetString(4),
                     VirtualCpuCores = reader.GetInt32(5),
                     MemoryBytes = reader.GetInt64(6),
                     DiskBytes = reader.GetInt64(7),
-                    Network = new VmNetworkConfig
-                    {
-                        IpAddress = reader.IsDBNull(9) ? null : reader.GetString(9),
-                        MacAddress = reader.IsDBNull(10) ? null : reader.GetString(10)
-                    },
+                    IpAddress = reader.IsDBNull(9) ? null : reader.GetString(9),
+                    MacAddress = reader.IsDBNull(10) ? null : reader.GetString(10),
                     BaseImageUrl = reader.IsDBNull(19) ? null : reader.GetString(19),
                     BaseImageHash = reader.IsDBNull(20) ? null : reader.GetString(20),
                     SshPublicKey = reader.IsDBNull(21) ? null : reader.GetString(21),
