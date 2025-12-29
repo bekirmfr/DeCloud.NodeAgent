@@ -47,13 +47,13 @@ public class OrchestratorClient : IOrchestratorClient
         _httpClient.Timeout = _options.Timeout;
     }
 
-    public async Task<bool> RegisterNodeAsync(NodeRegistration registration, CancellationToken ct = default)
+    public async Task<bool> RegisterNodeAsync(NodeRegistration request, CancellationToken ct = default)
     {
         try
         {
             _logger.LogInformation("Registering node with orchestrator at {Url}", _options.BaseUrl);
 
-            var response = await _httpClient.PostAsJsonAsync("/api/nodes/register", registration, ct);
+            var response = await _httpClient.PostAsJsonAsync("/api/nodes/register", request, ct);
 
             if (response.IsSuccessStatusCode)
             {

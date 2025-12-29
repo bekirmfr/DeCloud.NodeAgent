@@ -104,9 +104,9 @@ public class NodeRegistration
     public int AgentPort { get; set; }
 
     // Full resource inventory
-    public HardwareInventory HardwareInventory { get; set; } = new();
-    public string AgentVersion { get; set; } = string.Empty;
-    public List<string> SupportedImages { get; set; } = new();
+    public required HardwareInventory HardwareInventory { get; set; } = new();
+    public required string AgentVersion { get; set; } = string.Empty;
+    public required List<string> SupportedImages { get; set; } = new();
 
     
     // Staking info
