@@ -39,10 +39,10 @@ public class HealthCheck
 public class ResourceSnapshot
 {
     // CPU
-    public int TotalVCpus { get; set; }
-    public int UsedVCpus { get; set; }
-    public int AvailableVCpus => TotalVCpus - UsedVCpus;
-    public double CpuUsagePercent { get; set; }
+    public int TotalVirtualCpuCores { get; set; }
+    public int UsedVirtualCpuCores { get; set; }
+    public int AvailableVirtualCpuCores => TotalVirtualCpuCores - UsedVirtualCpuCores;
+    public double VirtualCpuUsagePercent { get; set; }
     
     // Memory
     public long TotalMemoryBytes { get; set; }
@@ -62,18 +62,17 @@ public class ResourceSnapshot
 
 public class VmSummary
 {
-    public string Id { get; set; } = string.Empty;
+    public string VmId { get; set; } = string.Empty;
     public string? Name { get; set; }
     public VmState State { get; set; }
     public string OwnerId { get; set; } = string.Empty;
     public string OwnerWallet { get; set; } = string.Empty;
-    public string LeaseId { get; set; } = string.Empty;
-    public int CpuCores { get; set; }
+    public int VirtualCpuCores { get; set; }
     public int QualityTier { get; set; }
     public int ComputePointCost { get; set; }
     public long MemoryBytes { get; set; }
     public long? DiskBytes { get; set; }
-    public double CpuUsagePercent { get; set; }
+    public double VirtualCpuUsagePercent { get; set; }
     public bool IsIpAssigned { get; set; }
     public string? IpAddress { get; set; }
     public int? VncPort { get; set; }
@@ -96,12 +95,12 @@ public class NodeRegistration
     /// Machine fingerprint for validation
     /// </summary>
     public required string MachineId { get; set; }
+    public string Name { get; set; } = string.Empty;
 
     /// <summary>
     /// Wallet address for ownership/billing
     /// </summary>
     public required string WalletAddress { get; set; }
-    public string Name { get; set; } = string.Empty;
     public string PublicIp { get; set; } = string.Empty;
     public int AgentPort { get; set; }
 

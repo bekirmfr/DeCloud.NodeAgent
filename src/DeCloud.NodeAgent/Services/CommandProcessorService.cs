@@ -132,62 +132,68 @@ public class CommandProcessorService : BackgroundService
             using var doc = JsonDocument.Parse(payload);
             var root = doc.RootElement;
 
-            if (GetStringProperty(root, "OwnerId", "ownerId") == null || GetStringProperty(root, "TenantWalletAddress", "tenantWalletAddress") == null)
+            if(string.IsNullOrWhiteSpace(GetStringProperty(root, "VmId", "vmId")))
+            {
+                _logger.LogWarning("CreateVm command is missing vm ID");
+                return false;
+            }
+
+            if(string.IsNullOrWhiteSpace(GetStringProperty(root, "Password", "password")))
+            {
+                _logger.LogWarning("CreateVm command is missing Password");
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(GetStringProperty(root, "OwnerId", "ownerId")) || 
+                string.IsNullOrWhiteSpace(GetStringProperty(root, "OwnerWallet", "ownerWallet")))
             {
                 _logger.LogWarning("CreateVm command is missing OwnerId or OwnerWallet");
                 return false;
             }
 
             // Parse the new flat format from Orchestrator
-            var vmId = GetStringProperty(root, "VmId", "vmId") ?? Guid.NewGuid().ToString();
-            var name = GetStringProperty(root, "Name", "name") ?? vmId;
-            var ownerId = GetStringProperty(root, "OwnerId", "ownerId");
-            var ownerWallet = GetStringProperty(root, "OwnerWallet", "ownerWallet");
-
+            var vmId = GetStringProperty(root, "VmId", "vmId")!;
+            var name = GetStringProperty(root, "Name", "name") ?? "Unknown";
+            string ownerId = GetStringProperty(root, "OwnerId", "ownerId")!;
+            string ownerWallet = GetStringProperty(root, "OwnerWallet", "ownerWallet")!;
+            string password = GetStringProperty(root, "Password", "password")!;
             // Try new flat format first, then fall back to nested Spec format
-            int cpuCores = GetIntProperty(root, "cpuCores", "CpuCores") ?? 1;;
+            int virtualCpuCores = GetIntProperty(root, "virtualCpuCores", "VirtualCpuCores") ?? 1;;
             int qualityTier = GetIntProperty(root, "qualityTier", "QualityTier") ?? 1;
             var computePointCost = GetIntProperty(root, "computePointCost", "ComputePointCost") ?? 0;
-            var memoryMb = GetLongProperty(root, "memoryMb", "MemoryMb") ?? 1024;
-            long memoryBytes = memoryMb * 1024 * 1024;
-            var diskGb = GetLongProperty(root, "diskGb", "DiskGb") ?? 10;
-            long diskBytes = diskGb * 1024 * 1024 * 1024;
-            string? imageUrl = GetStringProperty(root, "imageUrl", "ImageUrl");
+            long memoryBytes = GetLongProperty(root, "memoryBytes", "MemoryBytes") ?? 1024;
+            long diskBytes = GetLongProperty(root, "diskBytes", "DiskBytes") ?? 10;
+            string? baseImageUrl = GetStringProperty(root, "baseImageUrl", "BaseImageUrl");
             string? imageId = GetStringProperty(root, "imageId", "ImageId");
             string? sshPublicKey = GetStringProperty(root, "sshPublicKey", "SshPublicKey");
-            string? password = GetStringProperty(root, "Password", "password");
-            string? leaseId = vmId;
 
             // Resolve image URL if not provided directly
-            if (string.IsNullOrEmpty(imageUrl))
+            if (string.IsNullOrEmpty(baseImageUrl))
             {
-                imageUrl = ImageUrls.GetValueOrDefault(imageId ?? "ubuntu-22.04", ImageUrls["ubuntu-22.04"]);
-                _logger.LogInformation("Resolved imageId '{ImageId}' to URL: {ImageUrl}", imageId, imageUrl);
+                baseImageUrl = ImageUrls.GetValueOrDefault(imageId ?? "ubuntu-22.04", ImageUrls["ubuntu-22.04"]);
+                _logger.LogInformation("Resolved imageId '{ImageId}' to URL: {ImageUrl}", imageId, baseImageUrl);
             }
 
             var vmSpec = new VmSpec
             {
                 Id = vmId,
                 Name = name,
-                CpuCores = cpuCores,
+                VirtualCpuCores = virtualCpuCores,
                 QualityTier = qualityTier,
                 ComputePointCost = computePointCost,
                 MemoryBytes = memoryBytes,
                 DiskBytes = diskBytes,
-                BaseImageUrl = imageUrl,
-                BaseImageHash = "",
+                BaseImageUrl = baseImageUrl,
                 SshPublicKey = sshPublicKey,
-                Password = password,
                 OwnerId = ownerId,
-                OwnerWallet = ownerWallet,
-                LeaseId = leaseId
+                OwnerWallet = ownerWallet
             };
 
             _logger.LogInformation("Creating VM {VmId}: {VCpus} vCPUs, {MemoryMB}MB RAM, {DiskGB}GB disk, image: {ImageUrl}, SSH key: {HasKey}, quality tier: {QualityTier}",
-                vmId, cpuCores, memoryBytes / 1024 / 1024, diskBytes / 1024 / 1024 / 1024, imageUrl,
+                vmId, virtualCpuCores, memoryBytes / 1024 / 1024, diskBytes / 1024 / 1024 / 1024, baseImageUrl,
                 !string.IsNullOrEmpty(sshPublicKey) ? "yes" : "no", qualityTier);
 
-            var result = await _vmManager.CreateVmAsync(vmSpec, ct);
+            var result = await _vmManager.CreateVmAsync(vmSpec, password, ct);
 
             if (result.Success)
             {

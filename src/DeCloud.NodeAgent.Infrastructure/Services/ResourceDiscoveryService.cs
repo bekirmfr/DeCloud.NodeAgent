@@ -435,9 +435,9 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
         return new ResourceSnapshot
         {
-            TotalVCpus = cpu.AvailableVCpus,
-            UsedVCpus = 0,
-            CpuUsagePercent = cpu.UsagePercent,
+            TotalVirtualCpuCores = cpu.AvailableVCpus,
+            UsedVirtualCpuCores = 0,
+            VirtualCpuUsagePercent = cpu.UsagePercent,
             TotalMemoryBytes = memory.TotalBytes - memory.ReservedBytes,
             UsedMemoryBytes = memory.UsedBytes,
             TotalStorageBytes = storage.Sum(s => s.TotalBytes),

@@ -53,36 +53,7 @@ public class OrchestratorClient : IOrchestratorClient
         {
             _logger.LogInformation("Registering node with orchestrator at {Url}", _options.BaseUrl);
 
-            var request = new
-            {
-                nodeId = registration.NodeId,
-                machineId = registration.MachineId,
-                name = registration.Name,
-                walletAddress = registration.WalletAddress,
-                publicIp = registration.PublicIp,
-                agentPort = registration.AgentPort,
-                resources = new
-                {
-                    cpuCores = registration.Resources.Cpu.LogicalCores,
-                    memoryMb = registration.Resources.Memory.TotalBytes / 1024 / 1024,
-                    storageGb = registration.Resources.Storage.Sum(s => s.TotalBytes) / 1024 / 1024 / 1024,
-                    bandwidthMbps = 1000
-                },
-                agentVersion = registration.AgentVersion,
-                supportedImages = registration.SupportedImages,
-                supportsGpu = registration.SupportsGpu,
-                gpuInfo = registration.GpuInfo != null ? new
-                {
-                    model = registration.GpuInfo.Model,
-                    vramMb = registration.GpuInfo.MemoryBytes / 1024 / 1024,
-                    count = 1,
-                    driver = registration.GpuInfo.DriverVersion
-                } : null,
-                region = registration.Region,
-                zone = registration.Zone
-            };
-
-            var response = await _httpClient.PostAsJsonAsync("/api/nodes/register", request, ct);
+            var response = await _httpClient.PostAsJsonAsync("/api/nodes/register", registration, ct);
 
             if (response.IsSuccessStatusCode)
             {
@@ -124,7 +95,7 @@ public class OrchestratorClient : IOrchestratorClient
             request.Headers.Add("X-Node-Token", _authToken);
 
             // Calculate resource metrics
-            var cpuUsage = heartbeat.Resources.CpuUsagePercent;
+            var cpuUsage = heartbeat.Resources.VirtualCpuUsagePercent;
             var memUsage = heartbeat.Resources.TotalMemoryBytes > 0
                 ? (double)heartbeat.Resources.UsedMemoryBytes / heartbeat.Resources.TotalMemoryBytes * 100
                 : 0;
@@ -141,33 +112,34 @@ public class OrchestratorClient : IOrchestratorClient
                     cpuUsagePercent = cpuUsage,
                     memoryUsagePercent = memUsage,
                     storageUsagePercent = storageUsage,
-                    networkInMbps = 0,
-                    networkOutMbps = 0,
+                    //networkInMbps = 0,
+                    //networkOutMbps = 0,
                     activeVmCount = heartbeat.ActiveVmDetails.Count,
-                    loadAverage = 0.0
+                    //loadAverage = 0.0
                 },
                 availableResources = new
                 {
-                    cpuCores = heartbeat.Resources.AvailableVCpus,
-                    memoryMb = heartbeat.Resources.AvailableMemoryBytes / 1024 / 1024,
-                    storageGb = heartbeat.Resources.AvailableStorageBytes / 1024 / 1024 / 1024,
-                    bandwidthMbps = 1000
+                    cpuCores = heartbeat.Resources.AvailableVirtualCpuCores,
+                    memoryBytes = heartbeat.Resources.AvailableMemoryBytes,
+                    storageBytes = heartbeat.Resources.AvailableStorageBytes,
+                    //bandwidthMbps = 1000
                 },
                 activeVms = heartbeat.ActiveVmDetails.Select(v => new
                 {
-                    vmId = v.Id,
+                    vmId = v.VmId,
                     name = v.Name,
+                    ownerId = v.OwnerId,
                     qualityTier = v.QualityTier,
                     computePointCost = v.ComputePointCost,
-                    ownerId = v.OwnerId,
                     state = v.State.ToString(),  // Convert enum to string
-                    ipAddress = v.IpAddress,
-                    cpuUsagePercent = v.CpuUsagePercent,
+                    cpuUsagePercent = v.VirtualCpuUsagePercent,
                     startedAt = v.StartedAt.ToString("O"),
-                    cpuCores = v.CpuCores,
+                    virtualCpuCores = v.VirtualCpuCores,
                     memoryBytes = v.MemoryBytes,
                     diskBytes = v.DiskBytes,
                     // These fields are populated by HeartbeatService from VmInstance
+                    isIpAssigned = v.IsIpAssigned,
+                    ipAddress = v.IpAddress,
                     vncPort = v.VncPort,
                     macAddress = v.MacAddress,
                     encryptedPassword = v.EncryptedPassword

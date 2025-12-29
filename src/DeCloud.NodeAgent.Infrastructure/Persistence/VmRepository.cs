@@ -140,7 +140,7 @@ public class VmRepository : IDisposable
             cmd.Parameters.AddWithValue("@OwnerId", vm.Spec.OwnerId);
             cmd.Parameters.AddWithValue("@OwnerWallet", vm.Spec.OwnerWallet ?? (object)DBNull.Value);
             cmd.Parameters.AddWithValue("@LeaseId", vm.Spec.LeaseId ?? (object)DBNull.Value);
-            cmd.Parameters.AddWithValue("@VCpus", vm.Spec.CpuCores);
+            cmd.Parameters.AddWithValue("@VCpus", vm.Spec.VirtualCpuCores);
             cmd.Parameters.AddWithValue("@MemoryBytes", vm.Spec.MemoryBytes);
             cmd.Parameters.AddWithValue("@DiskBytes", vm.Spec.DiskBytes);
             cmd.Parameters.AddWithValue("@State", vm.State.ToString());
@@ -159,7 +159,7 @@ public class VmRepository : IDisposable
             cmd.Parameters.AddWithValue("@SshPublicKey", vm.Spec.SshPublicKey ?? (object)DBNull.Value);
 
             // SECURITY: Only store encrypted password, NEVER plaintext
-            cmd.Parameters.AddWithValue("@EncryptedPassword", vm.Spec.EncryptedPassword ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@EncryptedPassword", vm.Spec.WalletEncryptedPassword ?? (object)DBNull.Value);
 
             await cmd.ExecuteNonQueryAsync();
 
@@ -420,7 +420,7 @@ public class VmRepository : IDisposable
                     OwnerId = reader.GetString(2),
                     OwnerWallet = reader.GetString(3),
                     LeaseId = reader.IsDBNull(4) ? null : reader.GetString(4),
-                    CpuCores = reader.GetInt32(5),
+                    VirtualCpuCores = reader.GetInt32(5),
                     MemoryBytes = reader.GetInt64(6),
                     DiskBytes = reader.GetInt64(7),
                     Network = new VmNetworkConfig
@@ -431,7 +431,7 @@ public class VmRepository : IDisposable
                     BaseImageUrl = reader.IsDBNull(19) ? null : reader.GetString(19),
                     BaseImageHash = reader.IsDBNull(20) ? null : reader.GetString(20),
                     SshPublicKey = reader.IsDBNull(21) ? null : reader.GetString(21),
-                    EncryptedPassword = reader.IsDBNull(22) ? null : reader.GetString(22)
+                    WalletEncryptedPassword = reader.IsDBNull(22) ? null : reader.GetString(22)
                 },
                 State = Enum.Parse<VmState>(reader.GetString(8)),
                 VncPort = reader.IsDBNull(11) ? null : reader.GetInt32(11),

@@ -232,7 +232,7 @@ public class LibvirtVmManager : IVmManager
             var state = await GetVmStateFromLibvirtAsync(vmId, ct);
 
             var vmDir = Path.Combine(_options.VmStoragePath, vmId);
-            string? tenantId = null;
+            string? ownerId = null;
             string? leaseId = null;
             string? vmName = null;
 
@@ -243,8 +243,7 @@ public class LibvirtVmManager : IVmManager
                 {
                     var metadata = System.Text.Json.JsonDocument.Parse(
                         await File.ReadAllTextAsync(metadataPath, ct));
-                    tenantId = metadata.RootElement.TryGetProperty("tenantId", out var t) ? t.GetString() : null;
-                    leaseId = metadata.RootElement.TryGetProperty("leaseId", out var l) ? l.GetString() : null;
+                    ownerId = metadata.RootElement.TryGetProperty("ownerId", out var t) ? t.GetString() : null;
                     vmName = metadata.RootElement.TryGetProperty("name", out var n) ? n.GetString() : null;
                 }
                 catch { }
@@ -258,11 +257,10 @@ public class LibvirtVmManager : IVmManager
                 {
                     Id = vmId,
                     Name = vmName ?? domain.Element("name")?.Value ?? vmId,
-                    CpuCores = vcpus,
+                    VirtualCpuCores = vcpus,
                     MemoryBytes = memoryBytes,
                     DiskBytes = await GetDiskSizeAsync(diskPath, ct),
-                    OwnerId = tenantId ?? "unknown",
-                    LeaseId = leaseId ?? "unknown"
+                    OwnerId = ownerId ?? "unknown",
                 },
                 State = state,
                 DiskPath = diskPath,
@@ -336,7 +334,7 @@ public class LibvirtVmManager : IVmManager
         };
     }
 
-    public async Task<VmOperationResult> CreateVmAsync(VmSpec spec, CancellationToken ct = default)
+    public async Task<VmOperationResult> CreateVmAsync(VmSpec spec, string password, CancellationToken ct = default)
     {
         if (_isWindows)
         {
@@ -374,7 +372,7 @@ public class LibvirtVmManager : IVmManager
             await _repository.SaveVmAsync(instance);
 
             _logger.LogInformation("Creating VM {VmId}: {VCpus} vCPUs, {MemMB}MB RAM, {DiskGB}GB disk",
-                spec.Id, spec.CpuCores, spec.MemoryBytes / 1024 / 1024, spec.DiskBytes / 1024 / 1024 / 1024);
+                spec.Id, spec.VirtualCpuCores, spec.MemoryBytes / 1024 / 1024, spec.DiskBytes / 1024 / 1024 / 1024);
 
             var vmDir = Path.Combine(_options.VmStoragePath, spec.Id);
             Directory.CreateDirectory(vmDir);
@@ -435,7 +433,7 @@ public class LibvirtVmManager : IVmManager
             string cloudInitIso;
             try
             {
-                cloudInitIso = await CreateCloudInitIsoAsync(spec, vmDir, ct);
+                cloudInitIso = await CreateCloudInitIsoAsync(spec, password, vmDir, ct);
                 if (!string.IsNullOrEmpty(cloudInitIso))
                 {
                     _logger.LogInformation("VM {VmId}: Cloud-init ISO created at {Path}", spec.Id, cloudInitIso);
@@ -575,10 +573,9 @@ public class LibvirtVmManager : IVmManager
         {
             vmId = spec.Id,
             name = spec.Name,
-            tenantId = spec.OwnerId,
-            leaseId = spec.LeaseId,
+            ownerId = spec.OwnerId,
             createdAt = DateTime.UtcNow,
-            vcpus = spec.CpuCores,
+            virtualCpuCores = spec.VirtualCpuCores,
             memoryBytes = spec.MemoryBytes,
             diskBytes = spec.DiskBytes
         };
@@ -985,9 +982,9 @@ public class LibvirtVmManager : IVmManager
     /// Create cloud-init ISO with proper network config and authentication.
     /// Includes machine-id regeneration to prevent DHCP IP collisions.
     /// </summary>
-    private async Task<string> CreateCloudInitIsoAsync(VmSpec spec, string vmDir, CancellationToken ct)
+    private async Task<string> CreateCloudInitIsoAsync(VmSpec spec, string password, string vmDir, CancellationToken ct)
     {
-        var hasPassword = !string.IsNullOrEmpty(spec.Password);
+        var hasPassword = !string.IsNullOrEmpty(password);
         var hasSshKey = !string.IsNullOrEmpty(spec.SshPublicKey);
 
         var sb = new StringBuilder();
@@ -1031,11 +1028,11 @@ public class LibvirtVmManager : IVmManager
         {
             sb.AppendLine("chpasswd:");
             sb.AppendLine("  list: |");
-            sb.AppendLine($"    root:{spec.Password}");
+            sb.AppendLine($"    root:{password}");
             sb.AppendLine("  expire: false");
             sb.AppendLine();
             sb.AppendLine("ssh_pwauth: true");
-            _logger.LogInformation("Using root password: {Password}", spec.Password);
+            _logger.LogInformation("Using root password: {Password}", password);
         }
 
         sb.AppendLine();
@@ -1171,7 +1168,7 @@ public class LibvirtVmManager : IVmManager
             _ => 4   // Default to Standard
         };
 
-        spec.ComputePointCost = spec.CpuCores * pointsPerVCpu;
+        spec.ComputePointCost = spec.VirtualCpuCores * pointsPerVCpu;
         var cpuShares = spec.ComputePointCost * 1000;
 
         // Ensure shares is at least 1 burstable tier equivalent
@@ -1256,7 +1253,7 @@ public class LibvirtVmManager : IVmManager
               <name>{spec.Id}</name>
               <uuid>{spec.Id}</uuid>
               <memory unit='bytes'>{spec.MemoryBytes}</memory>
-              <vcpu placement='static'>{spec.CpuCores}</vcpu>
+              <vcpu placement='static'>{spec.VirtualCpuCores}</vcpu>
               {cpuTune}
               <os>
                 <type arch='x86_64' machine='q35'>hvm</type>

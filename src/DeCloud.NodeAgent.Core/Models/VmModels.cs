@@ -9,7 +9,7 @@ public class VmSpec
     public string Name { get; set; } = string.Empty;
 
     // Resource allocation
-    public int CpuCores { get; set; } = 1;
+    public int VirtualCpuCores { get; set; } = 1;
     public long MemoryBytes { get; set; } = 1024 * 1024 * 1024; // 1GB default
     public long DiskBytes { get; set; } = 10L * 1024 * 1024 * 1024; // 10GB default
 
@@ -31,21 +31,17 @@ public class VmSpec
     // Cloud-init configuration (optional)
     public string? CloudInitUserData { get; set; }
     public string? SshPublicKey { get; set; }
-
-    // SECURITY: Password fields - only one should be set
-    public string? Password { get; set; }              // Plaintext (transient, cleared after VM creation)
     
     /// <summary>
     /// Wallet-encrypted password (stored permanently)
     /// Format: base64(iv):base64(ciphertext):base64(tag)
     /// SECURITY: Only store encrypted passwords, never plaintext
     /// </summary>
-    public string? EncryptedPassword { get; set; }     // Wallet-encrypted (persistent)
+    public string? WalletEncryptedPassword { get; set; }     // Wallet-encrypted (persistent)
 
     // Billing and ownership
     public string OwnerId { get; set; } = string.Empty;      // Tenant/user ID
     public string OwnerWallet { get; set; } = string.Empty; // Tenant's wallet address
-    public string LeaseId { get; set; } = string.Empty;       // On-chain lease reference
 }
 
 public class VmNetworkConfig

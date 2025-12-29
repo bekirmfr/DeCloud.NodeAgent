@@ -21,7 +21,7 @@ public interface IResourceDiscoveryService
 /// </summary>
 public interface IVmManager
 {
-    Task<VmOperationResult> CreateVmAsync(VmSpec spec, CancellationToken ct = default);
+    Task<VmOperationResult> CreateVmAsync(VmSpec spec, string password, CancellationToken ct = default);
     Task<VmOperationResult> StartVmAsync(string vmId, CancellationToken ct = default);
     Task<VmOperationResult> StopVmAsync(string vmId, bool force = false, CancellationToken ct = default);
     Task<VmOperationResult> DeleteVmAsync(string vmId, CancellationToken ct = default);

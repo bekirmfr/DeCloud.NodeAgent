@@ -145,14 +145,15 @@ public class HeartbeatService : BackgroundService
                     Resources = resources,
                     AgentVersion = "2.0.0",
                     SupportedImages = new List<string>
-                {
-                    "ubuntu-24.04", "ubuntu-22.04", "ubuntu-20.04",
-                    "debian-12", "debian-11",
-                    "fedora-40", "fedora-39",
-                    "alpine-3.19", "alpine-3.18"
-                },
+                    {
+                        "ubuntu-24.04", "ubuntu-22.04", "ubuntu-20.04",
+                        "debian-12", "debian-11",
+                        "fedora-40", "fedora-39",
+                        "alpine-3.19", "alpine-3.18"
+                    },
                     SupportsGpu = resources.Gpus.Any(),
                     GpuInfo = resources.Gpus.FirstOrDefault(),
+                    // TO-DO: Implement region and zone discovery
                     Region = "default",
                     Zone = "default"
                 };
@@ -243,24 +244,23 @@ public class HeartbeatService : BackgroundService
 
                     vmSummaries.Add(new VmSummary
                     {
-                        Id = vm.VmId,
+                        VmId = vm.VmId,
                         Name = vm.Name,
                         OwnerId = vm.Spec.OwnerId,
                         OwnerWallet = vm.Spec.OwnerWallet,
-                        LeaseId = vm.Spec.LeaseId,
                         State = vm.State,
-                        CpuCores = vm.Spec.CpuCores,
+                        VirtualCpuCores = vm.Spec.VirtualCpuCores,
                         QualityTier = vm.Spec.QualityTier,
                         ComputePointCost = vm.Spec.ComputePointCost,
                         MemoryBytes = vm.Spec.MemoryBytes,
                         DiskBytes = vm.Spec.DiskBytes,
-                        CpuUsagePercent = usage?.CpuPercent ?? 0,
+                        VirtualCpuUsagePercent = usage?.CpuPercent ?? 0,
                         StartedAt = vm.StartedAt ?? vm.CreatedAt,
                         IsIpAssigned = isIpAssigned,
                         IpAddress = ipAddress,
                         VncPort = vm.VncPort,
                         MacAddress = vm.Spec.MacAddress,
-                        EncryptedPassword = vm.Spec.EncryptedPassword
+                        EncryptedPassword = vm.Spec.WalletEncryptedPassword
                     });
                 }
                 catch (Exception ex)
@@ -270,7 +270,7 @@ public class HeartbeatService : BackgroundService
             }
 
             // Update resource usage based on running VMs
-            snapshot.UsedVCpus = activeVms.Where(v => v.State == VmState.Running).Sum(v => v.Spec.CpuCores);
+            snapshot.UsedVirtualCpuCores = activeVms.Where(v => v.State == VmState.Running).Sum(v => v.Spec.VirtualCpuCores);
             snapshot.UsedMemoryBytes = activeVms.Where(v => v.State == VmState.Running).Sum(v => v.Spec.MemoryBytes);
 
             // Create heartbeat using the standard Heartbeat model
@@ -291,7 +291,7 @@ public class HeartbeatService : BackgroundService
                 _lastHeartbeat = heartbeat;
                 _logger.LogDebug("Heartbeat sent: {VmCount} VMs, CPU {Cpu}%, MEM {Mem}%",
                     activeVms.Count,
-                    snapshot.CpuUsagePercent,
+                    snapshot.VirtualCpuUsagePercent,
                     snapshot.TotalMemoryBytes > 0
                         ? (double)snapshot.UsedMemoryBytes / snapshot.TotalMemoryBytes * 100
                         : 0);
@@ -352,7 +352,7 @@ public class HeartbeatService : BackgroundService
 
             // Calculate quota: 50% per vCPU
             var quotaPerVCpu = 50000; // 50ms per 100ms period = 50%
-            var totalQuota = vm.Spec.CpuCores * quotaPerVCpu;
+            var totalQuota = vm.Spec.VirtualCpuCores * quotaPerVCpu;
 
             var success = await _vmManager.ApplyQuotaCapAsync(
                 vm.VmId,
@@ -364,7 +364,7 @@ public class HeartbeatService : BackgroundService
             {
                 _logger.LogInformation(
                     "✓ Applied {Percent}% CPU quota to Burstable VM {VmId} ({VCpus} vCPUs)",
-                    50, vm.VmId, vm.Spec.CpuCores);
+                    50, vm.VmId, vm.Spec.VirtualCpuCores);
             }
             else
             {
