@@ -25,7 +25,8 @@ public class VmSpec
     public string? GpuPciAddress { get; set; }
 
     // Network configuration
-    public VmNetworkConfig Network { get; set; } = new();
+    public string IpAddress { get; set; } = string.Empty;  // Within overlay network
+    public string MacAddress { get; set; } = string.Empty;
 
     // Cloud-init configuration (optional)
     public string? CloudInitUserData { get; set; }
@@ -51,9 +52,6 @@ public class VmNetworkConfig
 {
     public string MacAddress { get; set; } = string.Empty;
     public string IpAddress { get; set; } = string.Empty;  // Within overlay network
-    public string Gateway { get; set; } = string.Empty;
-    public int VxlanVni { get; set; }  // Tenant isolation
-    public List<int> AllowedPorts { get; set; } = new();  // Security group rules
 }
 
 /// <summary>

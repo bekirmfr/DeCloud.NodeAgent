@@ -13,7 +13,7 @@ public class VmDto
     public required string OwnerWallet { get; set; }
     
     // Resources (use smallest unit - bytes)
-    public required int VCpus { get; set; }
+    public required int CpuCores { get; set; }
     public required long MemoryBytes { get; set; }
     public required long DiskBytes { get; set; }
     
@@ -27,7 +27,7 @@ public class VmDto
     // Network (aligned naming)
     public required string? MacAddress { get; set; }
     public required string? IpAddress { get; set; }
-    public required string? VncPort { get; set; }
+    public required int? VncPort { get; set; }
     
     // Auth (support both methods)
     public required string? SshPublicKey { get; set; }

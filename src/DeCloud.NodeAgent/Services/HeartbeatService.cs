@@ -237,7 +237,7 @@ public class HeartbeatService : BackgroundService
                         // Always get fresh libvirt IP first, fall back to stored IP
                         var vmIpAddress = await _vmManager.GetVmIpAddressAsync(vm.VmId, ct);
                         isIpAssigned = !string.IsNullOrEmpty(vmIpAddress);
-                        ipAddress = vmIpAddress ?? vm.Spec.Network.IpAddress;
+                        ipAddress = vmIpAddress ?? vm.Spec.IpAddress;
                         var vncPort = vm.VncPort;
                     }
 
@@ -259,7 +259,7 @@ public class HeartbeatService : BackgroundService
                         IsIpAssigned = isIpAssigned,
                         IpAddress = ipAddress,
                         VncPort = vm.VncPort,
-                        MacAddress = vm.Spec.Network.MacAddress,
+                        MacAddress = vm.Spec.MacAddress,
                         EncryptedPassword = vm.Spec.EncryptedPassword
                     });
                 }
@@ -324,7 +324,7 @@ public class HeartbeatService : BackgroundService
             return false;
 
         // VM must have an IP (indicates guest agent is working)
-        if (string.IsNullOrEmpty(vm.Spec.Network.IpAddress))
+        if (string.IsNullOrEmpty(vm.Spec.IpAddress))
             return false;
 
         // VM must be running for at least 60 seconds

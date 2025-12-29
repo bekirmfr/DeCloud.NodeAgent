@@ -376,22 +376,6 @@ public class LibvirtVmManager : IVmManager
             _logger.LogInformation("Creating VM {VmId}: {VCpus} vCPUs, {MemMB}MB RAM, {DiskGB}GB disk",
                 spec.Id, spec.CpuCores, spec.MemoryBytes / 1024 / 1024, spec.DiskBytes / 1024 / 1024 / 1024);
 
-            // Log authentication method
-            if (!string.IsNullOrEmpty(spec.SshPublicKey))
-            {
-                _logger.LogInformation("VM {VmId} will use SSH key authentication ({KeyLength} chars)",
-                    spec.Id, spec.SshPublicKey.Length);
-            }
-            else if (!string.IsNullOrEmpty(spec.Password))
-            {
-                _logger.LogInformation("VM {VmId} will use password authentication", spec.Id);
-            }
-            else
-            {
-                _logger.LogWarning("VM {VmId} has no SSH key or password - will use fallback password 'decloud'", spec.Id);
-                spec.Password = "decloud"; // Fallback password
-            }
-
             var vmDir = Path.Combine(_options.VmStoragePath, spec.Id);
             Directory.CreateDirectory(vmDir);
 
@@ -541,7 +525,7 @@ public class LibvirtVmManager : IVmManager
                             var ip = await GetVmIpAddressAsync(spec.Id, ct);
                             if (!string.IsNullOrEmpty(ip))
                             {
-                                vm.Spec.Network.IpAddress = ip;
+                                vm.Spec.IpAddress = ip;
                                 await _repository.SaveVmAsync(vm);
                                 _logger.LogInformation("VM {VmId} obtained IP: {Ip}", spec.Id, ip);
 
