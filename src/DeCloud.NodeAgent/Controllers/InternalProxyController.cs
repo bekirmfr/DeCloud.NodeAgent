@@ -71,7 +71,7 @@ public class InternalProxyController : ControllerBase
             // Fall back to stored IP if fresh lookup fails
             if (string.IsNullOrEmpty(vmIp))
             {
-                vmIp = vm.Spec.Network?.IpAddress;
+                vmIp = vm.Spec.IpAddress;
             }
 
             if (string.IsNullOrEmpty(vmIp))
@@ -246,7 +246,7 @@ public class InternalProxyController : ControllerBase
 
         if (string.IsNullOrEmpty(vmIp))
         {
-            vmIp = vm.Spec.Network?.IpAddress;
+            vmIp = vm.Spec.IpAddress;
         }
 
         if (string.IsNullOrEmpty(vmIp))

@@ -43,11 +43,11 @@ public class VmsController : ControllerBase
     /// Create a new VM
     /// </summary>
     [HttpPost]
-    public async Task<ActionResult<VmOperationResult>> Create([FromBody] VmSpec spec, CancellationToken ct)
+    public async Task<ActionResult<VmOperationResult>> Create([FromBody] VmSpec spec, string password, CancellationToken ct)
     {
         _logger.LogInformation("API: Creating VM {Name}", spec.Name);
         
-        var result = await _vmManager.CreateVmAsync(spec, ct);
+        var result = await _vmManager.CreateVmAsync(spec, password, ct);
         
         if (!result.Success)
             return BadRequest(result);

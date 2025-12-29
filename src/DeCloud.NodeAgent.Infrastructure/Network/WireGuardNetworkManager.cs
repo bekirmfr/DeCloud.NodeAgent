@@ -300,7 +300,7 @@ public class WireGuardNetworkManager : INetworkManager
             return $"vnic-{vmId[..8]}";
         }
 
-        _logger.LogInformation("Creating network for VM {VmId} with VNI {Vni}", vmId, config.VxlanVni);
+        _logger.LogInformation("Creating network for VM {VmId}", vmId);
 
         var tapName = $"tap-{vmId[..Math.Min(8, vmId.Length)]}";
 

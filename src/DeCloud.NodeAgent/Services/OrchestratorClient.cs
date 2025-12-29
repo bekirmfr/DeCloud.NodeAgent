@@ -141,8 +141,7 @@ public class OrchestratorClient : IOrchestratorClient
                     isIpAssigned = v.IsIpAssigned,
                     ipAddress = v.IpAddress,
                     vncPort = v.VncPort,
-                    macAddress = v.MacAddress,
-                    encryptedPassword = v.EncryptedPassword
+                    macAddress = v.MacAddress
                 }).ToList()
             };
 
