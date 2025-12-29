@@ -23,19 +23,27 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         _nodeId = GetOrCreateNodeId();
     }
 
-    public async Task<NodeResources> DiscoverAllAsync(CancellationToken ct = default)
+    public async Task<HardwareInventory> DiscoverAllAsync(CancellationToken ct = default)
     {
         _logger.LogInformation("Starting full resource discovery (Platform: {Platform})", 
             _isWindows ? "Windows" : "Linux");
 
-        var resources = new NodeResources
+        var cpu = await GetCpuInfoAsync(ct);
+        var memory = await GetMemoryInfoAsync(ct);
+        var storage = await GetStorageInfoAsync(ct);
+        var gpus = await GetGpuInfoAsync(ct);
+        var supportsGpu = gpus.Any();
+        var network = await GetNetworkInfoAsync(ct);
+
+        var resources = new HardwareInventory
         {
             NodeId = _nodeId,
-            Cpu = await GetCpuInfoAsync(ct),
-            Memory = await GetMemoryInfoAsync(ct),
-            Storage = await GetStorageInfoAsync(ct),
-            Gpus = await GetGpuInfoAsync(ct),
-            Network = await GetNetworkInfoAsync(ct),
+            Cpu = cpu,
+            Memory = memory,
+            Storage = storage,
+            SupportsGpu = supportsGpu,
+            Gpus = gpus,
+            Network = network,
             CollectedAt = DateTime.UtcNow
         };
 
@@ -435,7 +443,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
         return new ResourceSnapshot
         {
-            TotalVirtualCpuCores = cpu.AvailableVCpus,
+            TotalVirtualCpuCores = cpu.PhysicalCores,
             UsedVirtualCpuCores = 0,
             VirtualCpuUsagePercent = cpu.UsagePercent,
             TotalMemoryBytes = memory.TotalBytes - memory.ReservedBytes,

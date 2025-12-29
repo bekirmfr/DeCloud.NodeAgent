@@ -3,12 +3,13 @@ namespace DeCloud.NodeAgent.Core.Models;
 /// <summary>
 /// Complete hardware inventory of a node
 /// </summary>
-public class NodeResources
+public class HardwareInventory
 {
     public string NodeId { get; set; } = string.Empty;
     public CpuInfo Cpu { get; set; } = new();
     public MemoryInfo Memory { get; set; } = new();
     public List<StorageInfo> Storage { get; set; } = new();
+    public bool SupportsGpu { get; set; }
     public List<GpuInfo> Gpus { get; set; } = new();
     public NetworkInfo Network { get; set; } = new();
     public DateTime CollectedAt { get; set; } = DateTime.UtcNow;

@@ -30,7 +30,7 @@ public class NodeController : ControllerBase
     /// Get full node resource inventory
     /// </summary>
     [HttpGet("resources")]
-    public async Task<ActionResult<NodeResources>> GetResources(CancellationToken ct)
+    public async Task<ActionResult<HardwareInventory>> GetResources(CancellationToken ct)
     {
         var resources = await _resourceDiscovery.DiscoverAllAsync(ct);
         return Ok(resources);

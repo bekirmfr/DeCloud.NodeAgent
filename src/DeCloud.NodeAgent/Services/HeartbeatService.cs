@@ -142,7 +142,7 @@ public class HeartbeatService : BackgroundService
                     WalletAddress = walletAddress,
                     PublicIp = publicIp ?? "127.0.0.1",
                     AgentPort = 5100,
-                    Resources = resources,
+                    HardwareInventory = resources,
                     AgentVersion = "2.0.0",
                     SupportedImages = new List<string>
                     {
@@ -151,8 +151,6 @@ public class HeartbeatService : BackgroundService
                         "fedora-40", "fedora-39",
                         "alpine-3.19", "alpine-3.18"
                     },
-                    SupportsGpu = resources.Gpus.Any(),
-                    GpuInfo = resources.Gpus.FirstOrDefault(),
                     // TO-DO: Implement region and zone discovery
                     Region = "default",
                     Zone = "default"

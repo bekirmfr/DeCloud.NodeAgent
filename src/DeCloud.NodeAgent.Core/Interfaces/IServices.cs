@@ -7,7 +7,7 @@ namespace DeCloud.NodeAgent.Core.Interfaces;
 /// </summary>
 public interface IResourceDiscoveryService
 {
-    Task<NodeResources> DiscoverAllAsync(CancellationToken ct = default);
+    Task<HardwareInventory> DiscoverAllAsync(CancellationToken ct = default);
     Task<CpuInfo> GetCpuInfoAsync(CancellationToken ct = default);
     Task<MemoryInfo> GetMemoryInfoAsync(CancellationToken ct = default);
     Task<List<StorageInfo>> GetStorageInfoAsync(CancellationToken ct = default);

@@ -104,15 +104,11 @@ public class NodeRegistration
     public int AgentPort { get; set; }
 
     // Full resource inventory
-    public NodeResources Resources { get; set; } = new();
+    public HardwareInventory HardwareInventory { get; set; } = new();
     public string AgentVersion { get; set; } = string.Empty;
     public List<string> SupportedImages { get; set; } = new();
 
     public bool SupportsGpu { get; set; }
-    public GpuInfo? GpuInfo { get; set; }
-
-    // Pricing (optional, for marketplace)
-    public NodePricing? Pricing { get; set; }
     
     // Staking info
     public string StakingTxHash { get; set; } = string.Empty;
