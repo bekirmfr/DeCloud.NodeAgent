@@ -32,7 +32,8 @@ public interface IEphemeralSshKeyService
         CancellationToken ct = default);
 
     /// <summary>
-    /// Generate a new ephemeral Ed25519 keypair.
+    /// Gene
+    /// a new ephemeral Ed25519 keypair.
     /// </summary>
     EphemeralKeyPair GenerateKeyPair(string comment = "decloud-terminal");
 }

@@ -259,8 +259,7 @@ public class HeartbeatService : BackgroundService
                         IsIpAssigned = isIpAssigned,
                         IpAddress = ipAddress,
                         VncPort = vm.VncPort,
-                        MacAddress = vm.Spec.MacAddress,
-                        EncryptedPassword = vm.Spec.WalletEncryptedPassword
+                        MacAddress = vm.Spec.MacAddress
                     });
                 }
                 catch (Exception ex)

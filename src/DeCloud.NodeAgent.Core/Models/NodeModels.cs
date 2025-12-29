@@ -77,7 +77,6 @@ public class VmSummary
     public string? IpAddress { get; set; }
     public int? VncPort { get; set; }
     public string? MacAddress { get; set; }
-    public string? EncryptedPassword { get; set; }
     public DateTime StartedAt { get; set; }
 }
 
