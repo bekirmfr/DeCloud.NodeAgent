@@ -236,7 +236,7 @@ public class HeartbeatService : BackgroundService
                         // Always get fresh libvirt IP first, fall back to stored IP
                         var vmIpAddress = await _vmManager.GetVmIpAddressAsync(vm.VmId, ct);
                         isIpAssigned = !string.IsNullOrEmpty(vmIpAddress);
-                        //ipAddress = vmIpAddress ?? vm.Spec.IpAddress;
+                        ipAddress = vmIpAddress;
                         var vncPort = vm.VncPort;
                     }
 
