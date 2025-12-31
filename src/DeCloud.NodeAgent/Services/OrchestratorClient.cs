@@ -186,8 +186,24 @@ public class OrchestratorClient : IOrchestratorClient
         {
             var json = JsonDocument.Parse(content);
 
-            if (json.RootElement.TryGetProperty("data", out var data) &&
-                data.TryGetProperty("pendingCommands", out var commands) &&
+            if (!json.RootElement.TryGetProperty("data", out var data))
+            {
+                _logger.LogWarning("Heartbeat response missing 'data' property");
+                throw new ArgumentException("Invalid heartbeat response format");
+            }
+
+            if (data.TryGetProperty("cgnatInfo", out var cgnatInfo))
+            {
+                _logger.LogInformation(
+                    "Received relay assignment: Relay {RelayId}, Tunnel IP {TunnelIp}",
+                    cgnatInfo.GetProperty("assignedRelayNodeId"),
+                    cgnatInfo.GetProperty("tunnelIp"));
+
+                // TODO: Store this for WireGuardAutoConfigService to use
+                // For now, just log it
+            }
+
+            if (data.TryGetProperty("pendingCommands", out var commands) &&
                 commands.ValueKind == JsonValueKind.Array)
             {
                 foreach (var cmd in commands.EnumerateArray())

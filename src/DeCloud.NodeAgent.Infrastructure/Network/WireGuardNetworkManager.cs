@@ -327,4 +327,33 @@ public class WireGuardNetworkManager : INetworkManager
         await _executor.ExecuteAsync("ip", $"link set {tapName} nomaster", ct);
         await _executor.ExecuteAsync("ip", $"link delete {tapName}", ct);
     }
+
+    public async Task<bool> StartWireGuardInterfaceAsync(string interfaceName, CancellationToken ct = default)
+    {
+        if (_isWindows)
+        {
+            _logger.LogWarning("wg-quick not available on Windows - use WireGuard GUI");
+            return false;
+        }
+
+        _logger.LogInformation("Starting WireGuard interface: {Interface}", interfaceName);
+
+        var result = await _executor.ExecuteAsync("wg-quick", $"up {interfaceName}", ct);
+
+        if (result.Success)
+        {
+            _logger.LogInformation("WireGuard interface {Interface} started successfully", interfaceName);
+            return true;
+        }
+
+        if (result.StandardError.Contains("already exists") || result.StandardError.Contains("RTNETLINK answers: File exists"))
+        {
+            _logger.LogInformation("WireGuard interface {Interface} already running", interfaceName);
+            return true;
+        }
+
+        _logger.LogError("Failed to start WireGuard interface {Interface}: {Error}",
+            interfaceName, result.StandardError);
+        return false;
+    }
 }

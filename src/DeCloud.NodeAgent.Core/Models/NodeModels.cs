@@ -10,6 +10,22 @@ public class Heartbeat
     public NodeStatus Status { get; set; }
     public ResourceSnapshot Resources { get; set; } = new();
     public List<VmSummary> ActiveVmDetails { get; set; } = new();
+    public CgnatNodeInfo? CgnatInfo { get; set; }
+}
+
+public class HeartbeatResponseData
+{
+    public bool acknowledged { get; set; }
+    public List<object>? pendingCommands { get; set; }
+    public CgnatInfoDto? cgnatInfo { get; set; }
+}
+
+public class CgnatInfoDto
+{
+    public string? assignedRelayNodeId { get; set; }
+    public string tunnelIp { get; set; } = string.Empty;
+    public string? wireGuardConfig { get; set; }
+    public string publicEndpoint { get; set; } = string.Empty;
 }
 
 public enum NodeStatus

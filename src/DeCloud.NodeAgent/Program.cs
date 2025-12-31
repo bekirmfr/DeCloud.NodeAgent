@@ -117,6 +117,7 @@ builder.Services.AddSingleton<IOrchestratorClient>(sp =>
 // Background Services
 // =====================================================
 builder.Services.AddHostedService<HeartbeatService>();
+builder.Services.AddHostedService<WireGuardAutoConfigService>();
 builder.Services.AddHostedService<CommandProcessorService>();
 builder.Services.AddHostedService<DatabaseMaintenanceService>();
 

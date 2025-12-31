@@ -81,6 +81,10 @@ public interface INetworkManager
     // VM networking
     Task<string> CreateVmNetworkAsync(string vmId, VmNetworkConfig config, CancellationToken ct = default);
     Task DeleteVmNetworkAsync(string vmId, CancellationToken ct = default);
+    /// <summary>
+    /// Start WireGuard interface using wg-quick
+    /// </summary>
+    Task<bool> StartWireGuardInterfaceAsync(string interfaceName, CancellationToken ct = default);
 }
 
 public class WireGuardPeer
