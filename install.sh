@@ -470,6 +470,7 @@ install_libvirt() {
     PACKAGES="qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virtinst"
     PACKAGES="$PACKAGES cloud-image-utils genisoimage qemu-utils"
     PACKAGES="$PACKAGES libguestfs-tools openssh-client"
+    PACKAGES="$PACKAGES sysbench"  # ← ADD THIS LINE for CPU benchmarking
     
     apt-get install -y -qq $PACKAGES > /dev/null 2>&1
     

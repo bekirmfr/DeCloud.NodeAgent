@@ -29,6 +29,14 @@ public class CpuInfo
     
     // Available for VMs (considering overcommit ratio)
     public int AvailableVCpus { get; set; }
+    /// <summary>
+    /// CPU benchmark score - measured during node registration
+    /// 1000 = Burstable baseline
+    /// 1500 = Balanced tier minimum
+    /// 2500 = Standard tier minimum  
+    /// 4000 = Guaranteed tier minimum
+    /// </summary>
+    public int BenchmarkScore { get; set; } = 1000;
 }
 
 public class MemoryInfo

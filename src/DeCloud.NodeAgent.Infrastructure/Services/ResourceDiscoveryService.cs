@@ -10,15 +10,18 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 {
     private readonly ICommandExecutor _executor;
     private readonly ILogger<ResourceDiscoveryService> _logger;
+    private readonly ICpuBenchmarkService _benchmarkService;
     private readonly string _nodeId;
     private readonly bool _isWindows;
 
     public ResourceDiscoveryService(
         ICommandExecutor executor,
-        ILogger<ResourceDiscoveryService> logger)
+        ILogger<ResourceDiscoveryService> logger,
+        ICpuBenchmarkService benchmarkService)
     {
         _executor = executor;
         _logger = logger;
+        _benchmarkService = benchmarkService;
         _isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
         _nodeId = GetOrCreateNodeId();
     }
@@ -107,6 +110,25 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         }
 
         info.AvailableVCpus = Math.Max(1, info.LogicalCores);
+
+        try
+        {
+            _logger.LogInformation("Running CPU benchmark for node performance evaluation...");
+            var benchmarkResult = await _benchmarkService.RunBenchmarkAsync(ct);
+            info.BenchmarkScore = benchmarkResult.Score;
+
+            _logger.LogInformation(
+                "CPU Benchmark: {Score} score via {Method} ({Details})",
+                benchmarkResult.Score,
+                benchmarkResult.Method,
+                benchmarkResult.Details);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "CPU benchmark failed, using default score of 1000");
+            info.BenchmarkScore = 1000; // Fallback to baseline
+        }
+
         return info;
     }
 
@@ -169,6 +191,24 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         if (info.LogicalCores == 0) info.LogicalCores = Environment.ProcessorCount;
         if (info.PhysicalCores == 0) info.PhysicalCores = info.LogicalCores;
         info.AvailableVCpus = info.LogicalCores;
+
+        try
+        {
+            _logger.LogInformation("Running CPU benchmark for node performance evaluation...");
+            var benchmarkResult = await _benchmarkService.RunBenchmarkAsync(ct);
+            info.BenchmarkScore = benchmarkResult.Score;
+
+            _logger.LogInformation(
+                "CPU Benchmark: {Score} score via {Method} ({Details})",
+                benchmarkResult.Score,
+                benchmarkResult.Method,
+                benchmarkResult.Details);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "CPU benchmark failed, using default score of 1000");
+            info.BenchmarkScore = 1000; // Fallback to baseline
+        }
 
         return info;
     }

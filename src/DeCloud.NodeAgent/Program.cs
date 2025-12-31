@@ -32,6 +32,7 @@ builder.Services.Configure<AuditLogOptions>(
 // =====================================================
 builder.Services.AddSingleton<ICommandExecutor, CommandExecutor>();
 builder.Services.AddSingleton<IResourceDiscoveryService, ResourceDiscoveryService>();
+builder.Services.AddSingleton<ICpuBenchmarkService, CpuBenchmarkService>();
 builder.Services.AddSingleton<IImageManager, ImageManager>();
 
 // =====================================================
