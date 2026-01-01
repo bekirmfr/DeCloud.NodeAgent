@@ -136,7 +136,7 @@ public class VmRepository : IDisposable
 
             cmd.Parameters.AddWithValue("@VmId", vm.VmId);
             cmd.Parameters.AddWithValue("@Name", vm.Name);
-            cmd.Parameters.AddWithValue("@OwnerId", vm.Spec.OwnerId);
+            cmd.Parameters.AddWithValue("@OwnerId", vm.Spec.OwnerId ?? (object)DBNull.Value);
             cmd.Parameters.AddWithValue("@OwnerWallet", vm.Spec.OwnerWallet ?? (object)DBNull.Value);
             cmd.Parameters.AddWithValue("@VirtualCpuCores", vm.Spec.VirtualCpuCores);
             cmd.Parameters.AddWithValue("@MemoryBytes", vm.Spec.MemoryBytes);
