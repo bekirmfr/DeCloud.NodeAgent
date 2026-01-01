@@ -182,6 +182,7 @@ public class OrchestratorClient : IOrchestratorClient
 
     private Task ProcessHeartbeatResponseAsync(string content, CancellationToken ct)
     {
+        _logger.LogDebug("Processing heartbeat response: {ResponseContent}", content);
         try
         {
             var json = JsonDocument.Parse(content);
