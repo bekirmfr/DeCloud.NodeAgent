@@ -154,6 +154,7 @@ public class CommandProcessorService : BackgroundService
             // Parse the new flat format from Orchestrator
             var vmId = GetStringProperty(root, "VmId", "vmId")!;
             var name = GetStringProperty(root, "Name", "name") ?? "Unknown";
+            var vmType = GetIntProperty(root, "VmType", "vmType") ?? (int) VmType.General;
             string ownerId = GetStringProperty(root, "OwnerId", "ownerId")!;
             string ownerWallet = GetStringProperty(root, "OwnerWallet", "ownerWallet")!;
             string password = GetStringProperty(root, "Password", "password")!;
@@ -178,6 +179,7 @@ public class CommandProcessorService : BackgroundService
             {
                 Id = vmId,
                 Name = name,
+                VmType = (VmType)vmType,
                 VirtualCpuCores = virtualCpuCores,
                 QualityTier = qualityTier,
                 ComputePointCost = computePointCost,
@@ -194,6 +196,76 @@ public class CommandProcessorService : BackgroundService
                 !string.IsNullOrEmpty(sshPublicKey) ? "yes" : "no", qualityTier);
 
             var result = await _vmManager.CreateVmAsync(vmSpec, password, ct);
+
+            if (result.Success)
+            {
+                _logger.LogInformation("VM {VmId} created and started successfully", vmId);
+                return true;
+            }
+
+            _logger.LogError("CreateVm failed: {Error}", result.ErrorMessage);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling CreateVm command");
+            return false;
+        }
+    }
+
+    private async Task<bool> HandleCreateRelayVmAsync(string payload, CancellationToken ct)
+    {
+        try
+        {
+            _logger.LogInformation("Handling CreateRelayVm command: {Payload}", payload);
+
+            using var doc = JsonDocument.Parse(payload);
+            var root = doc.RootElement;
+
+            if (string.IsNullOrWhiteSpace(GetStringProperty(root, "VmId", "vmId")))
+            {
+                _logger.LogWarning("CreateVm command is missing vm ID");
+                return false;
+            }
+
+            // Parse the new flat format from Orchestrator
+            var vmId = GetStringProperty(root, "VmId", "vmId")!;
+            var name = GetStringProperty(root, "Name", "name") ?? "Unknown";
+            string nodeId = GetStringProperty(root, "NodeId", "nodeId")!;
+            // Try new flat format first, then fall back to nested Spec format
+            int virtualCpuCores = GetIntProperty(root, "virtualCpuCores", "VirtualCpuCores") ?? 1; ;
+            int qualityTier = GetIntProperty(root, "qualityTier", "QualityTier") ?? 1;
+            var computePointCost = GetIntProperty(root, "computePointCost", "ComputePointCost") ?? 0;
+            long memoryBytes = GetLongProperty(root, "memoryBytes", "MemoryBytes") ?? 1024;
+            long diskBytes = GetLongProperty(root, "diskBytes", "DiskBytes") ?? 10;
+            string? baseImageUrl = GetStringProperty(root, "baseImageUrl", "BaseImageUrl");
+            string? imageId = GetStringProperty(root, "imageId", "ImageId");
+
+            // Resolve image URL if not provided directly
+            if (string.IsNullOrEmpty(baseImageUrl))
+            {
+                baseImageUrl = ImageUrls.GetValueOrDefault(imageId ?? "ubuntu-22.04", ImageUrls["ubuntu-22.04"]);
+                _logger.LogInformation("Resolved imageId '{ImageId}' to URL: {ImageUrl}", imageId, baseImageUrl);
+            }
+
+            var vmSpec = new VmSpec
+            {
+                Id = vmId,
+                Name = name,
+                VmType = VmType.Relay,
+                NodeId = nodeId,
+                VirtualCpuCores = virtualCpuCores,
+                QualityTier = qualityTier,
+                ComputePointCost = computePointCost,
+                MemoryBytes = memoryBytes,
+                DiskBytes = diskBytes,
+                BaseImageUrl = baseImageUrl
+            };
+
+            _logger.LogInformation("Creating Relay VM {VmId}: {VCpus} vCPUs, {MemoryMB} MB RAM, {DiskGB} GB disk, image: {ImageUrl}, quality tier: {QualityTier}",
+                vmId, virtualCpuCores, memoryBytes / 1024 / 1024, diskBytes / 1024 / 1024 / 1024, baseImageUrl, qualityTier);
+
+            var result = await _vmManager.CreateVmAsync(vmSpec, null, ct);
 
             if (result.Success)
             {

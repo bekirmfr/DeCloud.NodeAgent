@@ -334,7 +334,7 @@ public class LibvirtVmManager : IVmManager
         };
     }
 
-    public async Task<VmOperationResult> CreateVmAsync(VmSpec spec, string password, CancellationToken ct = default)
+    public async Task<VmOperationResult> CreateVmAsync(VmSpec spec, string? password = null, CancellationToken ct = default)
     {
         if (_isWindows)
         {
@@ -433,7 +433,7 @@ public class LibvirtVmManager : IVmManager
             string cloudInitIso;
             try
             {
-                cloudInitIso = await CreateCloudInitIsoAsync(spec, password, vmDir, ct);
+                cloudInitIso = await CreateCloudInitIsoAsync(spec, vmDir, password, ct);
                 if (!string.IsNullOrEmpty(cloudInitIso))
                 {
                     _logger.LogInformation("VM {VmId}: Cloud-init ISO created at {Path}", spec.Id, cloudInitIso);
@@ -982,7 +982,7 @@ public class LibvirtVmManager : IVmManager
     /// Create cloud-init ISO with proper network config and authentication.
     /// Includes machine-id regeneration to prevent DHCP IP collisions.
     /// </summary>
-    private async Task<string> CreateCloudInitIsoAsync(VmSpec spec, string password, string vmDir, CancellationToken ct)
+    private async Task<string> CreateCloudInitIsoAsync(VmSpec spec, string vmDir, string? password = null, CancellationToken ct = default)
     {
         var hasPassword = !string.IsNullOrEmpty(password);
         var hasSshKey = !string.IsNullOrEmpty(spec.SshPublicKey);
@@ -1005,11 +1005,12 @@ public class LibvirtVmManager : IVmManager
         // This is appropriate for isolated VMs where users expect
         // full admin access (similar to Hetzner, Vultr, Linode)
         // ============================================================
-        sb.AppendLine("disable_root: false");
+        var disable_root = spec.VmType == VmType.Relay;
+        sb.AppendLine($"disable_root: {disable_root}");
         sb.AppendLine();
 
         // SSH keys for root
-        if (hasSshKey)
+        if (hasSshKey && spec.VmType != VmType.Relay)
         {
             sb.AppendLine("ssh_authorized_keys:");
             foreach (var key in spec.SshPublicKey!.Split('\n', StringSplitOptions.RemoveEmptyEntries))
@@ -1024,7 +1025,7 @@ public class LibvirtVmManager : IVmManager
         }
 
         // Password configuration for root
-        if (hasPassword)
+        if (hasPassword && spec.VmType != VmType.Relay)
         {
             sb.AppendLine("chpasswd:");
             sb.AppendLine("  list: |");
@@ -1033,6 +1034,16 @@ public class LibvirtVmManager : IVmManager
             sb.AppendLine();
             sb.AppendLine("ssh_pwauth: true");
             _logger.LogInformation("Using root password: {Password}", password);
+        }
+        else if (spec.VmType == VmType.Relay)
+        {
+            sb.AppendLine("users:");
+            sb.AppendLine("- name: ubuntu");
+            sb.AppendLine("  lock_passwd: true");
+            sb.AppendLine("  sudo: ['ALL=(ALL) NOPASSWD:ALL']");
+            sb.AppendLine();
+            sb.AppendLine("ssh_pwauth: false");
+            _logger.LogInformation("Disabled password and SSH auth");
         }
 
         sb.AppendLine();
@@ -1104,7 +1115,7 @@ public class LibvirtVmManager : IVmManager
         sb.AppendLine("  - systemctl restart sshd || systemctl restart ssh");
 
         // Ensure SSH allows password auth if password is set
-        if (hasPassword)
+        if (hasSshKey && hasPassword && spec.VmType != VmType.Relay)
         {
             sb.AppendLine("  - sed -i 's/^#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config");
             sb.AppendLine("  - sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config");
@@ -1310,11 +1321,17 @@ public class LibvirtVmManager : IVmManager
     /// Apply CPU quota cap to a running VM (for Burstable tier after boot)
     /// </summary>
     public async Task<bool> ApplyQuotaCapAsync(
-        string vmId,
+        VmInstance vm,
         int quotaMicroseconds,
         int periodMicroseconds = 100000,
         CancellationToken ct = default)
     {
+        var vmId = vm.VmId;
+        if (vm.Spec.VmType == VmType.Relay)
+        {
+            _logger.LogInformation("VM {VmId} is Relay type - skipping quota application", vmId);
+            return false;
+        }
         try
         {
             _logger.LogInformation(

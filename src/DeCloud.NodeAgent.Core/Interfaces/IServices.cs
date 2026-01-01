@@ -21,7 +21,7 @@ public interface IResourceDiscoveryService
 /// </summary>
 public interface IVmManager
 {
-    Task<VmOperationResult> CreateVmAsync(VmSpec spec, string password, CancellationToken ct = default);
+    Task<VmOperationResult> CreateVmAsync(VmSpec spec, string? password = null, CancellationToken ct = default);
     Task<VmOperationResult> StartVmAsync(string vmId, CancellationToken ct = default);
     Task<VmOperationResult> StopVmAsync(string vmId, bool force = false, CancellationToken ct = default);
     Task<VmOperationResult> DeleteVmAsync(string vmId, CancellationToken ct = default);
@@ -38,7 +38,7 @@ public interface IVmManager
     /// Apply CPU quota cap to a running VM
     /// </summary>
     Task<bool> ApplyQuotaCapAsync(
-        string vmId,
+        VmInstance vm,
         int quotaMicroseconds,
         int periodMicroseconds = 100000,
         CancellationToken ct = default);

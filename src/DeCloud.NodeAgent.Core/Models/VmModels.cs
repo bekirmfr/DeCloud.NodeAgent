@@ -7,6 +7,8 @@ public class VmSpec
 {
     public string Id { get; set; } = Guid.NewGuid().ToString();
     public string Name { get; set; } = string.Empty;
+    public VmType VmType { get; set; } = VmType.Relay;
+    public string NodeId { get; set; } = string.Empty; // Target node ID
 
     // Resource allocation
     public int VirtualCpuCores { get; set; } = 1;
@@ -97,6 +99,16 @@ public enum VmState
     Failed,
     Deleted,
     Migrating
+}
+
+public enum VmType
+{
+    General,
+    Compute,
+    Memory,
+    Storage,
+    Gpu,
+    Relay
 }
 
 public class VmResourceUsage

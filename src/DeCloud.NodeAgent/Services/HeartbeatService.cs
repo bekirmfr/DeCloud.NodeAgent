@@ -352,7 +352,7 @@ public class HeartbeatService : BackgroundService
             var totalQuota = vm.Spec.VirtualCpuCores * quotaPerVCpu;
 
             var success = await _vmManager.ApplyQuotaCapAsync(
-                vm.VmId,
+                vm,
                 totalQuota,
                 periodMicroseconds: 100000,
                 ct);
