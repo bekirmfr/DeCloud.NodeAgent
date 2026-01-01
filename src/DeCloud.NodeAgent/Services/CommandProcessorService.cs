@@ -132,22 +132,29 @@ public class CommandProcessorService : BackgroundService
             using var doc = JsonDocument.Parse(payload);
             var root = doc.RootElement;
 
-            if(string.IsNullOrWhiteSpace(GetStringProperty(root, "VmId", "vmId")))
+            var isRelayVm = GetIntProperty(root, "VmType", "vmType") == (int) VmType.Relay;
+
+            if (string.IsNullOrWhiteSpace(GetStringProperty(root, "VmId", "vmId")))
             {
                 _logger.LogWarning("CreateVm command is missing vm ID");
                 return false;
             }
 
-            if(string.IsNullOrWhiteSpace(GetStringProperty(root, "Password", "password")))
+            if(!isRelayVm && string.IsNullOrWhiteSpace(GetStringProperty(root, "Password", "password")))
             {
                 _logger.LogWarning("CreateVm command is missing Password");
                 return false;
             }
 
-            if (string.IsNullOrWhiteSpace(GetStringProperty(root, "OwnerId", "ownerId")) || 
-                string.IsNullOrWhiteSpace(GetStringProperty(root, "OwnerWallet", "ownerWallet")))
+            if (!isRelayVm && string.IsNullOrWhiteSpace(GetStringProperty(root, "OwnerId", "ownerId")))
             {
-                _logger.LogWarning("CreateVm command is missing OwnerId or OwnerWallet");
+                _logger.LogWarning("CreateVm command is missing OwnerId");
+                return false;
+            }
+
+            if (!isRelayVm && string.IsNullOrWhiteSpace(GetStringProperty(root, "OwnerWallet", "ownerWallet")))
+            {
+                _logger.LogWarning("CreateVm command is missing OwnerWallet");
                 return false;
             }
 
@@ -155,8 +162,8 @@ public class CommandProcessorService : BackgroundService
             var vmId = GetStringProperty(root, "VmId", "vmId")!;
             var name = GetStringProperty(root, "Name", "name") ?? "Unknown";
             var vmType = GetIntProperty(root, "VmType", "vmType") ?? (int) VmType.General;
-            string ownerId = GetStringProperty(root, "OwnerId", "ownerId")!;
-            string ownerWallet = GetStringProperty(root, "OwnerWallet", "ownerWallet")!;
+            string? ownerId = GetStringProperty(root, "OwnerId", "ownerId");
+            string? ownerWallet = GetStringProperty(root, "OwnerWallet", "ownerWallet");
             string password = GetStringProperty(root, "Password", "password")!;
             // Try new flat format first, then fall back to nested Spec format
             int virtualCpuCores = GetIntProperty(root, "virtualCpuCores", "VirtualCpuCores") ?? 1;;
@@ -179,6 +186,8 @@ public class CommandProcessorService : BackgroundService
             {
                 Id = vmId,
                 Name = name,
+                OwnerId = ownerId,
+                OwnerWallet = ownerWallet,
                 VmType = (VmType)vmType,
                 VirtualCpuCores = virtualCpuCores,
                 QualityTier = qualityTier,
@@ -186,90 +195,18 @@ public class CommandProcessorService : BackgroundService
                 MemoryBytes = memoryBytes,
                 DiskBytes = diskBytes,
                 BaseImageUrl = baseImageUrl,
-                SshPublicKey = sshPublicKey,
-                OwnerId = ownerId,
-                OwnerWallet = ownerWallet
+                SshPublicKey = sshPublicKey
             };
 
-            _logger.LogInformation("Creating VM {VmId}: {VCpus} vCPUs, {MemoryMB}MB RAM, {DiskGB}GB disk, image: {ImageUrl}, SSH key: {HasKey}, quality tier: {QualityTier}",
-                vmId, virtualCpuCores, memoryBytes / 1024 / 1024, diskBytes / 1024 / 1024 / 1024, baseImageUrl,
-                !string.IsNullOrEmpty(sshPublicKey) ? "yes" : "no", qualityTier);
+            _logger.LogInformation("Creating {VmType} type VM {VmId}: {VCpus} vCPUs, {MemoryMB}MB RAM, {DiskGB}GB disk, image: {ImageUrl},  quality tier: {QualityTier}",
+                vmSpec.VmType.ToString(), vmId, virtualCpuCores, memoryBytes / 1024 / 1024, diskBytes / 1024 / 1024 / 1024, baseImageUrl,
+                qualityTier);
 
             var result = await _vmManager.CreateVmAsync(vmSpec, password, ct);
 
             if (result.Success)
             {
-                _logger.LogInformation("VM {VmId} created and started successfully", vmId);
-                return true;
-            }
-
-            _logger.LogError("CreateVm failed: {Error}", result.ErrorMessage);
-            return false;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error handling CreateVm command");
-            return false;
-        }
-    }
-
-    private async Task<bool> HandleCreateRelayVmAsync(string payload, CancellationToken ct)
-    {
-        try
-        {
-            _logger.LogInformation("Handling CreateRelayVm command: {Payload}", payload);
-
-            using var doc = JsonDocument.Parse(payload);
-            var root = doc.RootElement;
-
-            if (string.IsNullOrWhiteSpace(GetStringProperty(root, "VmId", "vmId")))
-            {
-                _logger.LogWarning("CreateVm command is missing vm ID");
-                return false;
-            }
-
-            // Parse the new flat format from Orchestrator
-            var vmId = GetStringProperty(root, "VmId", "vmId")!;
-            var name = GetStringProperty(root, "Name", "name") ?? "Unknown";
-            string nodeId = GetStringProperty(root, "NodeId", "nodeId")!;
-            // Try new flat format first, then fall back to nested Spec format
-            int virtualCpuCores = GetIntProperty(root, "virtualCpuCores", "VirtualCpuCores") ?? 1; ;
-            int qualityTier = GetIntProperty(root, "qualityTier", "QualityTier") ?? 1;
-            var computePointCost = GetIntProperty(root, "computePointCost", "ComputePointCost") ?? 0;
-            long memoryBytes = GetLongProperty(root, "memoryBytes", "MemoryBytes") ?? 1024;
-            long diskBytes = GetLongProperty(root, "diskBytes", "DiskBytes") ?? 10;
-            string? baseImageUrl = GetStringProperty(root, "baseImageUrl", "BaseImageUrl");
-            string? imageId = GetStringProperty(root, "imageId", "ImageId");
-
-            // Resolve image URL if not provided directly
-            if (string.IsNullOrEmpty(baseImageUrl))
-            {
-                baseImageUrl = ImageUrls.GetValueOrDefault(imageId ?? "ubuntu-22.04", ImageUrls["ubuntu-22.04"]);
-                _logger.LogInformation("Resolved imageId '{ImageId}' to URL: {ImageUrl}", imageId, baseImageUrl);
-            }
-
-            var vmSpec = new VmSpec
-            {
-                Id = vmId,
-                Name = name,
-                VmType = VmType.Relay,
-                NodeId = nodeId,
-                VirtualCpuCores = virtualCpuCores,
-                QualityTier = qualityTier,
-                ComputePointCost = computePointCost,
-                MemoryBytes = memoryBytes,
-                DiskBytes = diskBytes,
-                BaseImageUrl = baseImageUrl
-            };
-
-            _logger.LogInformation("Creating Relay VM {VmId}: {VCpus} vCPUs, {MemoryMB} MB RAM, {DiskGB} GB disk, image: {ImageUrl}, quality tier: {QualityTier}",
-                vmId, virtualCpuCores, memoryBytes / 1024 / 1024, diskBytes / 1024 / 1024 / 1024, baseImageUrl, qualityTier);
-
-            var result = await _vmManager.CreateVmAsync(vmSpec, null, ct);
-
-            if (result.Success)
-            {
-                _logger.LogInformation("VM {VmId} created and started successfully", vmId);
+                _logger.LogInformation("{VmType} VM {VmId} created and started successfully", vmSpec.VmType.ToString(), vmId);
                 return true;
             }
 
