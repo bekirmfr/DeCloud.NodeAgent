@@ -75,7 +75,7 @@ public class VmRepository : IDisposable
             CREATE TABLE IF NOT EXISTS VmRecords (
                 VmId TEXT PRIMARY KEY,
                 Name TEXT NOT NULL,
-                OwnerId TEXT NOT NULL,
+                OwnerId TEXT,
                 OwnerWallet TEXT,
                 VirtualCpuCores INTEGER NOT NULL,
                 MemoryBytes INTEGER NOT NULL,
