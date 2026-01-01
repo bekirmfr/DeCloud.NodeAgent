@@ -193,7 +193,7 @@ public class OrchestratorClient : IOrchestratorClient
                 throw new ArgumentException("Invalid heartbeat response format");
             }
 
-            if (data.TryGetProperty("cgnatInfo", out var cgnatInfo))
+            if (data.TryGetProperty("cgnatInfo", out var cgnatInfo) && cgnatInfo.ValueKind != JsonValueKind.Null)
             {
                 _logger.LogInformation(
                     "Received relay assignment: Relay {RelayId}, Tunnel IP {TunnelIp}",
