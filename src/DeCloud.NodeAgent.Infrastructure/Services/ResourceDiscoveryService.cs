@@ -471,6 +471,39 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                 info.PrivateIp = ipResult.StandardOutput.Trim().Split(' ').FirstOrDefault() ?? "";
         }
 
+        // ✅ NEW: Determine NAT type by comparing public and private IPs
+        if (!string.IsNullOrEmpty(info.PublicIp) && !string.IsNullOrEmpty(info.PrivateIp))
+        {
+            // Check if public IP matches any of the private IPs (for multi-interface systems)
+            var privateIps = info.PrivateIp.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+            if (privateIps.Contains(info.PublicIp))
+            {
+                // Public IP matches one of the private IPs = direct connection, no NAT
+                info.NatType = NatType.None;
+                _logger.LogInformation(
+                    "✓ NAT detection: Public IP {PublicIp} matches private IP - NatType.None (direct internet connection)",
+                    info.PublicIp);
+            }
+            else
+            {
+                // Public IP differs from all private IPs = behind NAT
+                // For now, mark as Unknown (could be enhanced with STUN for specific NAT type)
+                info.NatType = NatType.Unknown;
+                _logger.LogInformation(
+                    "⚠ NAT detection: Public IP {PublicIp} != Private IP {PrivateIp} - behind NAT/CGNAT (NatType.Unknown)",
+                    info.PublicIp, info.PrivateIp);
+            }
+        }
+        else
+        {
+            info.NatType = NatType.Unknown;
+            _logger.LogWarning(
+                "⚠ NAT detection: Could not determine NAT type (PublicIP: {PublicIp}, PrivateIP: {PrivateIp})",
+                info.PublicIp ?? "null",
+                info.PrivateIp ?? "null");
+        }
+
         return info;
     }
 
