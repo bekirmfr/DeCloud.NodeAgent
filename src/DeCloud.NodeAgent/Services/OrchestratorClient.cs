@@ -193,17 +193,6 @@ public class OrchestratorClient : IOrchestratorClient
                 throw new ArgumentException("Invalid heartbeat response format");
             }
 
-            if (data.TryGetProperty("cgnatInfo", out var cgnatInfo) && cgnatInfo.ValueKind != JsonValueKind.Null)
-            {
-                _logger.LogInformation(
-                    "Received relay assignment: Relay {RelayId}, Tunnel IP {TunnelIp}",
-                    cgnatInfo.GetProperty("assignedRelayNodeId"),
-                    cgnatInfo.GetProperty("tunnelIp"));
-
-                // TODO: Store this for WireGuardAutoConfigService to use
-                // For now, just log it
-            }
-
             if (data.TryGetProperty("pendingCommands", out var commands) &&
                 commands.ValueKind == JsonValueKind.Array)
             {
@@ -256,6 +245,17 @@ public class OrchestratorClient : IOrchestratorClient
                     _logger.LogInformation("Enqueued {Count} command(s) for processing",
                         commands.GetArrayLength());
                 }
+            }
+
+            if (data.TryGetProperty("cgnatInfo", out var cgnatInfo) && cgnatInfo.ValueKind != JsonValueKind.Null)
+            {
+                _logger.LogInformation(
+                    "Received relay assignment: Relay {RelayId}, Tunnel IP {TunnelIp}",
+                    cgnatInfo.GetProperty("assignedRelayNodeId"),
+                    cgnatInfo.GetProperty("tunnelIp"));
+
+                // TODO: Store this for WireGuardAutoConfigService to use
+                // For now, just log it
             }
         }
         catch (Exception ex)
