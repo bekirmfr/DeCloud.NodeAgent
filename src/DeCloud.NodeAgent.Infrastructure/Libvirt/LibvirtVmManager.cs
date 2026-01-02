@@ -832,27 +832,41 @@ public class LibvirtVmManager : IVmManager
             }
         }
 
-        var interfaceNames = new[] { "vnet0", "vnet1", "vnet2", "vnet3", "vnet4", "vnet5", "vnet6", "vnet7", "vnet8", "vnet9" };
-
-        foreach (var iface in interfaceNames)
+        // Dynamically discover network interface using virsh domiflist
+        var iflistResult = await _executor.ExecuteAsync("virsh", $"domiflist {vmId}", ct);
+        if (iflistResult.Success)
         {
-            var netResult = await _executor.ExecuteAsync("virsh",
-                $"domifstat {vmId} {iface}", ct);
-
-            if (netResult.Success)
+            // Parse output to find the interface name
+            // Format: "vnet165     network   default   virtio   52:54:00:3f:cf:bf"
+            var lines = iflistResult.StandardOutput.Split('\n');
+            foreach (var line in lines)
             {
-                // Found the right interface, parse stats
-                var rxMatch = Regex.Match(netResult.StandardOutput, @"rx_bytes\s+(\d+)");
-                var txMatch = Regex.Match(netResult.StandardOutput, @"tx_bytes\s+(\d+)");
-
-                if (rxMatch.Success && txMatch.Success)
+                var parts = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 2 && parts[0].StartsWith("vnet"))
                 {
-                    usage.NetworkRxBytes = long.Parse(rxMatch.Groups[1].Value);
-                    usage.NetworkTxBytes = long.Parse(txMatch.Groups[1].Value);
-                    break; // Found it, no need to try other interfaces
+                    var interfaceName = parts[0];
+
+                    // Query network stats for the discovered interface
+                    var netResult = await _executor.ExecuteAsync("virsh",
+                        $"domifstat {vmId} {interfaceName}", ct);
+
+                    if (netResult.Success)
+                    {
+                        var rxMatch = Regex.Match(netResult.StandardOutput, @"rx_bytes\s+(\d+)");
+                        var txMatch = Regex.Match(netResult.StandardOutput, @"tx_bytes\s+(\d+)");
+
+                        if (rxMatch.Success && txMatch.Success)
+                        {
+                            usage.NetworkRxBytes = long.Parse(rxMatch.Groups[1].Value);
+                            usage.NetworkTxBytes = long.Parse(txMatch.Groups[1].Value);
+
+                            _logger.LogDebug("VM {VmId}: Network stats from interface {Interface}: RX={RxBytes}, TX={TxBytes}",
+                                vmId, interfaceName, usage.NetworkRxBytes, usage.NetworkTxBytes);
+                            break; // Found it, stop searching
+                        }
+                    }
                 }
             }
-            // If it fails, just try the next interface (don't log errors)
         }
 
         return usage;
