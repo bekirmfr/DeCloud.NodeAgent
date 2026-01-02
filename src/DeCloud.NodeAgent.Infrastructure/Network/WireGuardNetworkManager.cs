@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
@@ -9,12 +9,11 @@ namespace DeCloud.NodeAgent.Infrastructure.Network;
 
 public class WireGuardOptions
 {
-    public string InterfaceName { get; set; } = "wg0";
+    // ❌ REMOVED: InterfaceName - now dynamic per method call
     public string ConfigPath { get; set; } = "";  // Auto-detected based on OS
     public int ListenPort { get; set; } = 51820;
     public string PrivateKeyPath { get; set; } = "";  // Auto-detected
     public string PublicKeyPath { get; set; } = "";   // Auto-detected
-    public string Address { get; set; } = "";
 }
 
 public class WireGuardNetworkManager : INetworkManager
@@ -40,7 +39,7 @@ public class WireGuardNetworkManager : INetworkManager
         // Set platform-specific paths
         if (_isWindows)
         {
-            _configPath = string.IsNullOrEmpty(_options.ConfigPath) 
+            _configPath = string.IsNullOrEmpty(_options.ConfigPath)
                 ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "WireGuard", "Data")
                 : _options.ConfigPath;
         }
@@ -52,141 +51,10 @@ public class WireGuardNetworkManager : INetworkManager
         _privateKeyPath = string.IsNullOrEmpty(_options.PrivateKeyPath)
             ? Path.Combine(_configPath, "private.key")
             : _options.PrivateKeyPath;
-            
+
         _publicKeyPath = string.IsNullOrEmpty(_options.PublicKeyPath)
             ? Path.Combine(_configPath, "public.key")
             : _options.PublicKeyPath;
-    }
-
-    public async Task<bool> InitializeWireGuardAsync(CancellationToken ct = default)
-    {
-        _logger.LogInformation("Initializing WireGuard (Platform: {Platform})", _isWindows ? "Windows" : "Linux");
-
-        // Check if WireGuard is installed
-        var checkResult = await _executor.ExecuteAsync(
-            _isWindows ? "where" : "which",
-            _isWindows ? "wg" : "wg",
-            ct);
-
-        if (!checkResult.Success)
-        {
-            _logger.LogWarning("WireGuard not found. Install WireGuard to enable overlay networking.");
-            _logger.LogWarning(_isWindows 
-                ? "Download from: https://www.wireguard.com/install/" 
-                : "Install with: apt install wireguard");
-            return false;
-        }
-
-        try
-        {
-            Directory.CreateDirectory(_configPath);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Cannot create WireGuard config directory at {Path}", _configPath);
-            return false;
-        }
-
-        // Generate keys if they don't exist
-        if (!File.Exists(_privateKeyPath))
-        {
-            _logger.LogInformation("Generating new WireGuard keypair");
-
-            var genKeyResult = await _executor.ExecuteAsync("wg", "genkey", ct);
-            if (!genKeyResult.Success)
-            {
-                _logger.LogError("Failed to generate private key: {Error}", genKeyResult.StandardError);
-                return false;
-            }
-
-            var privateKey = genKeyResult.StandardOutput.Trim();
-            
-            try
-            {
-                await File.WriteAllTextAsync(_privateKeyPath, privateKey, ct);
-                
-                if (!_isWindows)
-                {
-                    await _executor.ExecuteAsync("chmod", $"600 {_privateKeyPath}", ct);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to save private key");
-                return false;
-            }
-
-            // Generate public key
-            CommandResult pubKeyResult;
-            if (_isWindows)
-            {
-                pubKeyResult = await _executor.ExecuteAsync("powershell",
-                    $"-NoProfile -Command \"'{privateKey}' | wg pubkey\"", ct);
-            }
-            else
-            {
-                pubKeyResult = await _executor.ExecuteAsync("sh",
-                    $"-c \"echo '{privateKey}' | wg pubkey\"", ct);
-            }
-
-            if (!pubKeyResult.Success)
-            {
-                _logger.LogError("Failed to generate public key: {Error}", pubKeyResult.StandardError);
-                return false;
-            }
-
-            await File.WriteAllTextAsync(_publicKeyPath, pubKeyResult.StandardOutput.Trim(), ct);
-        }
-
-        // On Windows, WireGuard uses its own service/GUI - we just prepare the config
-        if (_isWindows)
-        {
-            _logger.LogInformation("WireGuard keys ready. Use WireGuard GUI to manage tunnels on Windows.");
-            return true;
-        }
-
-        // Linux: Create and configure interface
-        var showResult = await _executor.ExecuteAsync("ip", $"link show {_options.InterfaceName}", ct);
-        if (!showResult.Success)
-        {
-            var createResult = await _executor.ExecuteAsync("ip", 
-                $"link add {_options.InterfaceName} type wireguard", ct);
-            
-            if (!createResult.Success && !createResult.StandardError.Contains("exists"))
-            {
-                _logger.LogError("Failed to create WireGuard interface: {Error}", createResult.StandardError);
-                return false;
-            }
-        }
-
-        // Set private key
-        var privateKeyContent = await File.ReadAllTextAsync(_privateKeyPath, ct);
-        var setKeyResult = await _executor.ExecuteAsync("sh",
-            $"-c \"echo '{privateKeyContent.Trim()}' | wg set {_options.InterfaceName} private-key /dev/stdin listen-port {_options.ListenPort}\"",
-            ct);
-
-        if (!setKeyResult.Success)
-        {
-            _logger.LogError("Failed to set WireGuard private key: {Error}", setKeyResult.StandardError);
-            return false;
-        }
-
-        // Set address if configured
-        if (!string.IsNullOrEmpty(_options.Address))
-        {
-            await _executor.ExecuteAsync("ip", $"addr add {_options.Address} dev {_options.InterfaceName}", ct);
-        }
-
-        // Bring up interface
-        var upResult = await _executor.ExecuteAsync("ip", $"link set {_options.InterfaceName} up", ct);
-        if (!upResult.Success)
-        {
-            _logger.LogError("Failed to bring up WireGuard interface: {Error}", upResult.StandardError);
-            return false;
-        }
-
-        _logger.LogInformation("WireGuard interface {Interface} initialized successfully", _options.InterfaceName);
-        return true;
     }
 
     public async Task<string> GetWireGuardPublicKeyAsync(CancellationToken ct = default)
@@ -201,14 +69,34 @@ public class WireGuardNetworkManager : INetworkManager
             return string.Empty;  // On Windows, keys managed by WG GUI
         }
 
-        var result = await _executor.ExecuteAsync("wg", $"show {_options.InterfaceName} public-key", ct);
-        return result.Success ? result.StandardOutput.Trim() : string.Empty;
+        // Try to get from any active interface
+        var interfacesResult = await _executor.ExecuteAsync("wg", "show interfaces", ct);
+        if (interfacesResult.Success && !string.IsNullOrWhiteSpace(interfacesResult.StandardOutput))
+        {
+            var firstInterface = interfacesResult.StandardOutput.Split(' ')[0];
+            var result = await _executor.ExecuteAsync("wg", $"show {firstInterface} public-key", ct);
+            return result.Success ? result.StandardOutput.Trim() : string.Empty;
+        }
+
+        return string.Empty;
     }
 
-    public async Task AddPeerAsync(string publicKey, string endpoint, string allowedIps, CancellationToken ct = default)
+    /// <summary>
+    /// Add peer to specific WireGuard interface
+    /// ✅ NOW TAKES INTERFACE NAME AS PARAMETER
+    /// </summary>
+    public async Task AddPeerAsync(
+        string interfaceName,  // ← ADDED PARAMETER
+        string publicKey,
+        string endpoint,
+        string allowedIps,
+        CancellationToken ct = default)
     {
-        _logger.LogInformation("Adding WireGuard peer: {PublicKey} at {Endpoint}", 
-            publicKey.Length > 8 ? publicKey[..8] + "..." : publicKey, endpoint);
+        _logger.LogInformation(
+            "Adding WireGuard peer to {Interface}: {PublicKey} at {Endpoint}",
+            interfaceName,
+            publicKey.Length > 8 ? publicKey[..8] + "..." : publicKey,
+            endpoint);
 
         if (_isWindows)
         {
@@ -216,18 +104,18 @@ public class WireGuardNetworkManager : INetworkManager
             return;
         }
 
-        var args = $"set {_options.InterfaceName} peer {publicKey}";
-        
+        var args = $"set {interfaceName} peer {publicKey}";
+
         if (!string.IsNullOrEmpty(endpoint))
             args += $" endpoint {endpoint}";
-        
+
         if (!string.IsNullOrEmpty(allowedIps))
             args += $" allowed-ips {allowedIps}";
 
         args += " persistent-keepalive 25";
 
         var result = await _executor.ExecuteAsync("wg", args, ct);
-        
+
         if (!result.Success)
             throw new Exception($"Failed to add WireGuard peer: {result.StandardError}");
 
@@ -235,12 +123,19 @@ public class WireGuardNetworkManager : INetworkManager
         {
             foreach (var ip in allowedIps.Split(','))
             {
-                await _executor.ExecuteAsync("ip", $"route add {ip.Trim()} dev {_options.InterfaceName}", ct);
+                await _executor.ExecuteAsync("ip", $"route add {ip.Trim()} dev {interfaceName}", ct);
             }
         }
     }
 
-    public async Task RemovePeerAsync(string publicKey, CancellationToken ct = default)
+    /// <summary>
+    /// Remove peer from specific WireGuard interface
+    /// ✅ NOW TAKES INTERFACE NAME AS PARAMETER
+    /// </summary>
+    public async Task RemovePeerAsync(
+        string interfaceName,  // ← ADDED PARAMETER
+        string publicKey,
+        CancellationToken ct = default)
     {
         if (_isWindows)
         {
@@ -248,27 +143,37 @@ public class WireGuardNetworkManager : INetworkManager
             return;
         }
 
-        _logger.LogInformation("Removing WireGuard peer: {PublicKey}", 
+        _logger.LogInformation(
+            "Removing WireGuard peer from {Interface}: {PublicKey}",
+            interfaceName,
             publicKey.Length > 8 ? publicKey[..8] + "..." : publicKey);
 
-        var result = await _executor.ExecuteAsync("wg", 
-            $"set {_options.InterfaceName} peer {publicKey} remove", ct);
+        var result = await _executor.ExecuteAsync("wg",
+            $"set {interfaceName} peer {publicKey} remove", ct);
 
         if (!result.Success && !result.StandardError.Contains("not found"))
             throw new Exception($"Failed to remove WireGuard peer: {result.StandardError}");
     }
 
-    public async Task<List<WireGuardPeer>> GetPeersAsync(CancellationToken ct = default)
+    /// <summary>
+    /// Get peers from specific WireGuard interface
+    /// ✅ NOW TAKES INTERFACE NAME AS PARAMETER
+    /// </summary>
+    public async Task<List<WireGuardPeer>> GetPeersAsync(
+        string interfaceName,  // ← ADDED PARAMETER
+        CancellationToken ct = default)
     {
         var peers = new List<WireGuardPeer>();
 
-        var result = await _executor.ExecuteAsync("wg", $"show {_options.InterfaceName} dump", ct);
+        var result = await _executor.ExecuteAsync("wg", $"show {interfaceName} dump", ct);
         if (!result.Success) return peers;
 
         var lines = result.StandardOutput.Split('\n').Skip(1);
-        
+
         foreach (var line in lines)
         {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+
             var parts = line.Split('\t');
             if (parts.Length < 5) continue;
 
@@ -346,7 +251,8 @@ public class WireGuardNetworkManager : INetworkManager
             return true;
         }
 
-        if (result.StandardError.Contains("already exists") || result.StandardError.Contains("RTNETLINK answers: File exists"))
+        if (result.StandardError.Contains("already exists") ||
+            result.StandardError.Contains("RTNETLINK answers: File exists"))
         {
             _logger.LogInformation("WireGuard interface {Interface} already running", interfaceName);
             return true;

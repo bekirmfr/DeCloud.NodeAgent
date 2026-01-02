@@ -68,7 +68,6 @@ WIREGUARD_PORT=51820
 # WireGuard
 WIREGUARD_HUB_IP="10.10.0.1"
 SKIP_WIREGUARD=false
-ENABLE_WIREGUARD_HUB=true
 
 # SSH CA
 SSH_CA_KEY_PATH="/etc/decloud/ssh_ca"
@@ -114,16 +113,8 @@ parse_args() {
                 WIREGUARD_PORT="$2"
                 shift 2
                 ;;
-            --wg-ip)
-                WIREGUARD_HUB_IP="$2"
-                shift 2
-                ;;
             --skip-wireguard)
                 SKIP_WIREGUARD=true
-                shift
-                ;;
-            --no-wireguard-hub)
-                ENABLE_WIREGUARD_HUB=false
                 shift
                 ;;
             --skip-libvirt)
@@ -163,9 +154,7 @@ Node Identity:
 Network (all ports are configurable!):
   --port <port>          Agent API port (default: 5100)
   --wg-port <port>       WireGuard listen port (default: 51820)
-  --wg-ip <ip>           WireGuard hub IP (default: 10.10.0.1)
   --skip-wireguard       Skip WireGuard installation
-  --no-wireguard-hub     Install WireGuard but don't configure hub
 
 Other:
   --skip-libvirt         Skip libvirt installation (testing only)
@@ -534,72 +523,42 @@ install_wireguard() {
     log_success "WireGuard installed"
 }
 
-configure_wireguard_hub() {
+configure_wireguard_keys() {
     if [ "$SKIP_WIREGUARD" = true ]; then
-        log_info "Skipping WireGuard configuration (--skip-wireguard)"
+        log_info "Skipping WireGuard setup (--skip-wireguard)"
         return
     fi
     
-    log_step "Configuring WireGuard..."
+    log_step "Preparing WireGuard environment..."
     
-    # Ensure config directory exists (for both hub and client modes)
+    # Create config directory
     mkdir -p /etc/wireguard
     chmod 700 /etc/wireguard
     
-    if [ "$ENABLE_WIREGUARD_HUB" = false ]; then
-        log_info "WireGuard hub disabled (--no-wireguard-hub)"
-        log_info "Node will operate in client mode only"
-        log_info "→ Suitable for CGNAT nodes that will connect to relays"
-        return
-    fi
-    
-    # Generate keys if they don't exist
-    if [ ! -f /etc/wireguard/wg0-private.key ]; then
+    # Generate generic keypair if doesn't exist
+    # Note: Keys are NOT interface-specific anymore
+    if [ ! -f /etc/wireguard/private.key ]; then
         log_info "Generating WireGuard keypair..."
-        wg genkey | tee /etc/wireguard/wg0-private.key | wg pubkey > /etc/wireguard/wg0-public.key
-        chmod 600 /etc/wireguard/wg0-private.key
-        chmod 644 /etc/wireguard/wg0-public.key
+        wg genkey | tee /etc/wireguard/private.key | wg pubkey > /etc/wireguard/public.key
+        chmod 600 /etc/wireguard/private.key
+        chmod 644 /etc/wireguard/public.key
         log_success "WireGuard keys generated"
+    else
+        log_success "WireGuard keys already exist"
     fi
     
-    WG_PRIVATE_KEY=$(cat /etc/wireguard/wg0-private.key)
-    WG_PUBLIC_KEY=$(cat /etc/wireguard/wg0-public.key)
-    
-    # Create WireGuard hub configuration (for relay nodes)
-    cat > /etc/wireguard/wg0.conf << EOFWG
-[Interface]
-PrivateKey = ${WG_PRIVATE_KEY}
-Address = ${WIREGUARD_HUB_IP}/16
-ListenPort = ${WIREGUARD_PORT}
-PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
-
-# Peers will be added dynamically via orchestrator commands
-# This node can act as a relay for CGNAT nodes
-EOFWG
-    
-    chmod 600 /etc/wireguard/wg0.conf
-    
-    # Enable IP forwarding (required for relay nodes)
+    # Enable IP forwarding (needed for potential relay role)
     if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf; then
         echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
         sysctl -p > /dev/null 2>&1
+        log_info "IP forwarding enabled (for relay capability)"
     fi
     
-    # Start WireGuard (if not already running)
-    if ! systemctl is-active --quiet wg-quick@wg0; then
-        systemctl enable wg-quick@wg0 > /dev/null 2>&1
-        systemctl start wg-quick@wg0 > /dev/null 2>&1
-        
-        if systemctl is-active --quiet wg-quick@wg0; then
-            log_success "WireGuard hub started on ${WIREGUARD_HUB_IP}:${WIREGUARD_PORT}"
-            log_info "WireGuard Public Key: ${WG_PUBLIC_KEY}"
-        else
-            log_warn "WireGuard failed to start - check logs: journalctl -u wg-quick@wg0"
-        fi
-    else
-        log_success "WireGuard already running"
-    fi
+    log_success "WireGuard environment ready"
+    log_info "→ Interface configuration will be automatic based on node role"
+    log_info "   CGNAT nodes → wg-relay tunnel"
+    log_info "   Relay VMs → wg-relay-server"
+    log_info "   Regular nodes → wg-hub (optional)"
 }
 
 # ============================================================
@@ -835,15 +794,14 @@ configure_firewall() {
         ufw allow ${WIREGUARD_PORT}/udp comment "DeCloud WireGuard" > /dev/null 2>&1 || true
         log_success "Firewall: WireGuard port ${WIREGUARD_PORT}/udp"
         
-        # If this is a relay node (has WireGuard hub), allow forwarding
-        if [ "$ENABLE_WIREGUARD_HUB" = true ]; then
-            # Allow forwarding for relay functionality
-            if ! grep -q "^DEFAULT_FORWARD_POLICY=\"ACCEPT\"" /etc/default/ufw; then
-                sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
-                log_info "Firewall: Enabled forwarding (relay node capability)"
-            fi
+        # Enable forwarding for potential relay role
+        if ! grep -q "^DEFAULT_FORWARD_POLICY=\"ACCEPT\"" /etc/default/ufw; then
+            sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw 2>/dev/null || true
+            log_info "Firewall: Forwarding enabled (for relay capability)"
         fi
     fi
+
+
     
     log_success "Firewall configured"
 }
@@ -851,14 +809,103 @@ configure_firewall() {
 create_helper_scripts() {
     log_step "Creating helper scripts..."
     
-    # WireGuard helper
+    # WireGuard helper - supports dynamic interface names
     cat > /usr/local/bin/decloud-wg << 'EOFWG'
 #!/bin/bash
+# DeCloud WireGuard Helper
+# Interfaces are managed automatically by WireGuardConfigManager
+
+show_help() {
+    cat << EOF
+DeCloud WireGuard Helper
+
+Usage: decloud-wg <command> [args]
+
+Commands:
+  status              Show all WireGuard interfaces and their status
+  interfaces          List active interface names
+  show <interface>    Show detailed info for specific interface
+  
+Examples:
+  decloud-wg status
+  decloud-wg interfaces
+  decloud-wg show wg-relay
+  decloud-wg show wg-hub
+
+Notes:
+  • Interfaces are automatically created by the node agent
+  • CGNAT nodes use 'wg-relay' tunnel to assigned relay
+  • Relay VMs use 'wg-relay-server' to serve CGNAT clients
+  • Regular nodes may use 'wg-hub' for peer-to-peer mesh
+  • Interface selection is automatic based on orchestrator assignment
+EOF
+}
+
 case "$1" in
-    status) wg show ;;
-    add) wg set wg0 peer "$2" allowed-ips "$3/32" ;;
-    remove) wg set wg0 peer "$2" remove ;;
-    *) echo "Usage: decloud-wg {status|add <pubkey> <ip>|remove <pubkey>}" ;;
+    status)
+        echo "═══════════════════════════════════════════════════════"
+        echo "  DeCloud WireGuard Status"
+        echo "═══════════════════════════════════════════════════════"
+        
+        if ! command -v wg &> /dev/null; then
+            echo "Error: WireGuard not installed"
+            exit 1
+        fi
+        
+        interfaces=$(wg show interfaces 2>/dev/null)
+        
+        if [ -z "$interfaces" ]; then
+            echo "No WireGuard interfaces active"
+            echo ""
+            echo "This is normal if:"
+            echo "  • Node is newly installed (interfaces created on first heartbeat)"
+            echo "  • WireGuard not needed for current node role"
+            echo ""
+            echo "Check node agent logs: journalctl -u decloud-node-agent -f | grep -i wireguard"
+        else
+            wg show
+            echo ""
+            echo "Active interfaces: $interfaces"
+        fi
+        ;;
+        
+    interfaces)
+        wg show interfaces 2>/dev/null || echo "No interfaces"
+        ;;
+        
+    show)
+        if [ -z "$2" ]; then
+            echo "Error: Interface name required"
+            echo ""
+            echo "Usage: decloud-wg show <interface>"
+            echo "Example: decloud-wg show wg-relay"
+            echo ""
+            echo "Available interfaces:"
+            wg show interfaces 2>/dev/null || echo "  (none)"
+            exit 1
+        fi
+        
+        if ! wg show "$2" &>/dev/null; then
+            echo "Error: Interface '$2' not found"
+            echo ""
+            echo "Available interfaces:"
+            wg show interfaces 2>/dev/null || echo "  (none)"
+            exit 1
+        fi
+        
+        wg show "$2"
+        ;;
+        
+    help|-h|--help|"")
+        show_help
+        ;;
+        
+    *)
+        echo "Error: Unknown command '$1'"
+        echo ""
+        show_help
+        exit 1
+        ;;
 esac
 EOFWG
     chmod +x /usr/local/bin/decloud-wg
@@ -906,13 +953,16 @@ print_summary() {
     
     if [ "$SKIP_WIREGUARD" = false ]; then
         echo "    WireGuard:     Port ${WIREGUARD_PORT}/udp"
-        if [ "$ENABLE_WIREGUARD_HUB" = true ]; then
-            local wg_pubkey=$(cat /etc/wireguard/wg0-public.key 2>/dev/null || echo "N/A")
-            echo "    WireGuard Hub: ${WIREGUARD_HUB_IP}:${WIREGUARD_PORT}"
-            echo "    Public Key:    ${wg_pubkey}"
-        else
-            echo "    Mode:          Client only (for CGNAT nodes)"
-        fi
+        
+        local wg_pubkey=$(cat /etc/wireguard/public.key 2>/dev/null || echo "Not generated")
+        echo "    Public Key:    ${wg_pubkey:0:16}...${wg_pubkey: -8}"
+        echo ""
+        echo "    ${CYAN}Interface Configuration:${NC}"
+        echo "      → Automatic based on node role and network"
+        echo "      → CGNAT nodes: 'wg-relay' tunnel to relay"
+        echo "      → Relay VMs: 'wg-relay-server' accepts clients"
+        echo "      → Regular nodes: 'wg-hub' for mesh (optional)"
+        echo "      → Check status: decloud-wg status"
     fi
     
     echo ""
@@ -921,48 +971,55 @@ print_summary() {
     echo ""
     
     # ADD RELAY ARCHITECTURE INFO
-    echo "  ═══════════════════════════════════════════════════════════"
+    echo "  ═══════════════════════════════════════════════════════"
     echo "  Relay Architecture (CGNAT Support):"
-    echo "  ═══════════════════════════════════════════════════════════"
+    echo "  ═══════════════════════════════════════════════════════"
     
     local public_ip=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || echo "unknown")
     local private_ip=$(hostname -I | awk '{print $1}')
     
     if [ "$public_ip" != "unknown" ]; then
         if [[ "$public_ip" != "$private_ip" ]]; then
-            echo "    ${YELLOW}✓ CGNAT Node Detected${NC}"
-            echo "    Your node is behind NAT/CGNAT"
-            echo "    → Will auto-connect to a relay node"
-            echo "    → No static IP required!"
+            echo "    ${YELLOW}✓ CGNAT/NAT Detected${NC}"
+            echo "    Your node is behind NAT (no public IP)"
+            echo "    → Will auto-connect to relay node via WireGuard"
+            echo "    → Interface 'wg-relay' created automatically"
             echo "    → Relay fees: ~\$0.001/hour (~\$0.72/month)"
+            echo "    → No port forwarding or static IP needed!"
         else
-            echo "    ${GREEN}✓ Public IP Node Detected${NC}"
-            echo "    Your node has a public IP"
+            echo "    ${GREEN}✓ Public IP Detected${NC}"
+            echo "    Your node has direct internet access"
             
             local cpu_cores=$(nproc)
             local memory_gb=$(free -g | awk '/^Mem:/{print $2}')
             
             if [ "$cpu_cores" -ge 16 ] && [ "$memory_gb" -ge 32 ]; then
                 echo "    → ${GREEN}Eligible to be a RELAY node!${NC}"
-                echo "    → Can earn relay fees from CGNAT nodes"
-                echo "    → Estimated capacity: $((cpu_cores / 4)) CGNAT nodes"
+                echo "    → Can earn fees serving CGNAT clients"
+                echo "    → Interface 'wg-relay-server' created if assigned"
+                echo "    → Estimated capacity: $((cpu_cores / 4)) clients"
             else
-                echo "    → Standard compute node"
+                echo "    → Standard node"
+                echo "    → May use 'wg-hub' for peer mesh (if enabled)"
                 echo "    → (Relay requires: 16+ cores, 32GB+ RAM)"
             fi
         fi
+    else
+        echo "    ${CYAN}Network Status Unknown${NC}"
+        echo "    → WireGuard interface determined by orchestrator"
+        echo "    → Configuration is automatic"
     fi
     
     echo ""
-    echo "  ═══════════════════════════════════════════════════════════"
+    echo "  ═══════════════════════════════════════════════════════"
     echo "  Commands:"
-    echo "  ═══════════════════════════════════════════════════════════"
+    echo "  ═══════════════════════════════════════════════════════"
     echo "    Status:        sudo systemctl status decloud-node-agent"
     echo "    Logs:          sudo journalctl -u decloud-node-agent -f"
     echo "    Restart:       sudo systemctl restart decloud-node-agent"
     if [ "$SKIP_WIREGUARD" = false ]; then
-        echo "    WireGuard:     sudo wg show"
-        echo "                   sudo systemctl status wg-quick@wg0"
+        echo "    WireGuard:     decloud-wg status"
+        echo "                   decloud-wg show wg-relay"
     fi
     echo ""
     echo "  ═══════════════════════════════════════════════════════════"
@@ -1009,7 +1066,7 @@ main() {
     install_dotnet
     install_libvirt
     install_wireguard
-    configure_wireguard_hub
+    configure_wireguard_keys
     
     # SSH CA
     setup_ssh_ca

@@ -1257,6 +1257,9 @@ public class LibvirtVmManager : IVmManager
         spec.ComputePointCost = spec.VirtualCpuCores * pointsPerVCpu;
         var cpuShares = spec.ComputePointCost * 1000;
 
+        // Cap at libvirt maximum
+        cpuShares = Math.Min(10000, cpuShares);
+
         // Ensure shares is at least 1 burstable tier equivalent
         cpuShares = Math.Max(1000, cpuShares);
 

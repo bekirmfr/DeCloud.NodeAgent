@@ -1,4 +1,4 @@
-using DeCloud.NodeAgent.Core.Models;
+﻿using DeCloud.NodeAgent.Core.Models;
 
 namespace DeCloud.NodeAgent.Core.Interfaces;
 
@@ -72,15 +72,40 @@ public class CachedImage
 /// </summary>
 public interface INetworkManager
 {
-    Task<bool> InitializeWireGuardAsync(CancellationToken ct = default);
     Task<string> GetWireGuardPublicKeyAsync(CancellationToken ct = default);
-    Task AddPeerAsync(string publicKey, string endpoint, string allowedIps, CancellationToken ct = default);
-    Task RemovePeerAsync(string publicKey, CancellationToken ct = default);
-    Task<List<WireGuardPeer>> GetPeersAsync(CancellationToken ct = default);
-    
-    // VM networking
+
+    /// <summary>
+    /// Add peer to specified WireGuard interface
+    /// </summary>
+    /// <param name="interfaceName">Interface name (e.g., wg-relay, wg-hub)</param>
+    Task AddPeerAsync(
+        string interfaceName,  // ← ADDED
+        string publicKey,
+        string endpoint,
+        string allowedIps,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Remove peer from specified WireGuard interface
+    /// </summary>
+    /// <param name="interfaceName">Interface name (e.g., wg-relay, wg-hub)</param>
+    Task RemovePeerAsync(
+        string interfaceName,  // ← ADDED
+        string publicKey,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Get peers from specified WireGuard interface
+    /// </summary>
+    /// <param name="interfaceName">Interface name (e.g., wg-relay, wg-hub)</param>
+    Task<List<WireGuardPeer>> GetPeersAsync(
+        string interfaceName,  // ← ADDED
+        CancellationToken ct = default);
+
+    // VM networking - unchanged
     Task<string> CreateVmNetworkAsync(string vmId, VmNetworkConfig config, CancellationToken ct = default);
     Task DeleteVmNetworkAsync(string vmId, CancellationToken ct = default);
+
     /// <summary>
     /// Start WireGuard interface using wg-quick
     /// </summary>
