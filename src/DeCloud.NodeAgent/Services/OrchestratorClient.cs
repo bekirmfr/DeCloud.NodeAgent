@@ -4,6 +4,7 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
+using System.Net.Mail;
 using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Services;
@@ -128,20 +129,19 @@ public class OrchestratorClient : IOrchestratorClient
                 {
                     vmId = v.VmId,
                     name = v.Name,
-                    ownerId = v.OwnerId,
-                    qualityTier = v.QualityTier,
-                    computePointCost = v.ComputePointCost,
                     state = v.State.ToString(),  // Convert enum to string
-                    cpuUsagePercent = v.VirtualCpuUsagePercent,
-                    startedAt = v.StartedAt.ToString("O"),
-                    virtualCpuCores = v.VirtualCpuCores,
-                    memoryBytes = v.MemoryBytes,
-                    diskBytes = v.DiskBytes,
-                    // These fields are populated by HeartbeatService from VmInstance
+                    ownerId = v.OwnerId,
                     isIpAssigned = v.IsIpAssigned,
                     ipAddress = v.IpAddress,
+                    macAddress = v.MacAddress,
+                    sshPort = 2222,
                     vncPort = v.VncPort,
-                    macAddress = v.MacAddress
+                    virtualCpuCores = v.VirtualCpuCores,  
+                    qualityTier = v.QualityTier,
+                    computePointCost = v.ComputePointCost,
+                    memoryBytes = v.MemoryBytes,
+                    diskBytes = v.DiskBytes,
+                    startedAt = v.StartedAt.ToString("O")
                 }).ToList()
             };
 
