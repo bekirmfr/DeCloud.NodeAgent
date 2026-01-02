@@ -983,10 +983,6 @@ public class LibvirtVmManager : IVmManager
     }
 
     /// <summary>
-    /// Create cloud-init ISO with proper network config and authentication.
-    /// Includes machine-id regeneration to prevent DHCP IP collisions.
-    /// </summary>
-    /// <summary>
     /// Create cloud-init ISO using template-based configuration.
     /// Supports multiple VM types through specialized templates.
     /// </summary>
@@ -1000,8 +996,8 @@ public class LibvirtVmManager : IVmManager
     /// - __HOSTNAME__: System hostname
     /// - __WIREGUARD_PRIVATE_KEY__: Generated WireGuard private key (relay VMs)
     /// - __WIREGUARD_PUBLIC_KEY__: Generated WireGuard public key (relay VMs)
-    /// - __SSH_AUTHORIZED_KEYS__: User's SSH public keys
-    /// - __PASSWORD_CONFIG__: Password configuration block
+    /// - __SSH_AUTHORIZED_KEYS_BLOCK__: User's SSH public keys
+    /// - __PASSWORD_CONFIG_BLOCK__: Password configuration block
     /// - __CA_PUBLIC_KEY__: SSH CA public key for certificate auth
     /// - And many more...
     /// </remarks>
@@ -1018,7 +1014,7 @@ public class LibvirtVmManager : IVmManager
         try
         {
             // =====================================================
-            // STEP 1: Build template variables
+            // STEP 1: Build base template variables
             // =====================================================
             var variables = new Dictionary<string, string>
             {
@@ -1028,75 +1024,96 @@ public class LibvirtVmManager : IVmManager
             };
 
             // =====================================================
-            // STEP 2: SSH Public Key Configuration
+            // STEP 2: Build SSH Authorized Keys Block
             // =====================================================
             var hasSshKey = !string.IsNullOrEmpty(spec.SshPublicKey);
+            string sshKeysBlock = "";
+
             if (hasSshKey && spec.VmType != VmType.Relay)
             {
-                var sshKeysBlock = new StringBuilder();
-                sshKeysBlock.AppendLine("ssh_authorized_keys:");
+                var sb = new StringBuilder();
+                sb.AppendLine("ssh_authorized_keys:");
 
                 foreach (var key in spec.SshPublicKey!.Split('\n', StringSplitOptions.RemoveEmptyEntries))
                 {
                     var trimmedKey = key.Trim();
                     if (!string.IsNullOrEmpty(trimmedKey))
                     {
-                        sshKeysBlock.AppendLine($"  - {trimmedKey}");
+                        sb.AppendLine($"  - {trimmedKey}");
                     }
                 }
 
-                variables["__SSH_AUTHORIZED_KEYS__"] = sshKeysBlock.ToString();
+                sshKeysBlock = sb.ToString().TrimEnd();
                 _logger.LogInformation("VM {VmId}: Including SSH public keys", spec.Id);
             }
             else
             {
-                variables["__SSH_AUTHORIZED_KEYS__"] = "# No SSH keys provided";
+                sshKeysBlock = "# No SSH keys provided";
             }
 
+            variables["__SSH_AUTHORIZED_KEYS_BLOCK__"] = sshKeysBlock;
+
             // =====================================================
-            // STEP 3: Password Configuration
+            // STEP 3: Build Password Configuration Block
             // =====================================================
             var hasPassword = !string.IsNullOrEmpty(password);
+            string passwordBlock = "";
+
             if (hasPassword && spec.VmType != VmType.Relay)
             {
-                var passwordBlock = new StringBuilder();
-                passwordBlock.AppendLine("chpasswd:");
-                passwordBlock.AppendLine("  list: |");
-                passwordBlock.AppendLine($"    root:{password}");
-                passwordBlock.AppendLine("  expire: false");
+                var sb = new StringBuilder();
+                sb.AppendLine("chpasswd:");
+                sb.AppendLine("  list: |");
+                sb.AppendLine($"    root:{password}");
+                sb.AppendLine("  expire: false");
 
-                variables["__PASSWORD_CONFIG__"] = passwordBlock.ToString();
+                passwordBlock = sb.ToString().TrimEnd();
                 variables["__SSH_PASSWORD_AUTH__"] = "true";
-
-                // Add password SSH commands
-                var passwordSshCommands = new StringBuilder();
-                passwordSshCommands.AppendLine("  # Enable password authentication for SSH");
-                passwordSshCommands.AppendLine("  - sed -i 's/^#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config");
-                passwordSshCommands.AppendLine("  - sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config");
-                passwordSshCommands.AppendLine("  - sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config");
-                passwordSshCommands.AppendLine("  - sed -i 's/^#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config");
-                passwordSshCommands.AppendLine("  - systemctl restart sshd || systemctl restart ssh");
-
-                variables["__PASSWORD_SSH_COMMANDS__"] = passwordSshCommands.ToString();
 
                 _logger.LogInformation("VM {VmId}: Using root password authentication", spec.Id);
             }
             else
             {
-                variables["__PASSWORD_CONFIG__"] = "# No password authentication";
+                passwordBlock = "# No password authentication";
                 variables["__SSH_PASSWORD_AUTH__"] = "false";
-                variables["__PASSWORD_SSH_COMMANDS__"] = "  # Password authentication disabled";
             }
 
+            variables["__PASSWORD_CONFIG_BLOCK__"] = passwordBlock;
+
             // =====================================================
-            // STEP 4: SSH Certificate Authority Public Key
+            // STEP 4: Build Password SSH Commands Block
+            // =====================================================
+            string passwordSshCommandsBlock = "";
+
+            if (hasPassword && spec.VmType != VmType.Relay)
+            {
+                var sb = new StringBuilder();
+                sb.AppendLine("  # Enable password authentication for SSH");
+                sb.AppendLine("  - sed -i 's/^#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config");
+                sb.AppendLine("  - sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config");
+                sb.AppendLine("  - sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config");
+                sb.AppendLine("  - sed -i 's/^#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config");
+                sb.AppendLine("  - systemctl restart sshd || systemctl restart ssh");
+
+                passwordSshCommandsBlock = sb.ToString().TrimEnd();
+            }
+            else
+            {
+                passwordSshCommandsBlock = "  # Password authentication disabled";
+            }
+
+            variables["__PASSWORD_SSH_COMMANDS_BLOCK__"] = passwordSshCommandsBlock;
+
+            // =====================================================
+            // STEP 5: SSH Certificate Authority Public Key
             // =====================================================
             var caPublicKeyPath = "/etc/ssh/decloud_ca.pub";
             if (File.Exists(caPublicKeyPath))
             {
                 var caPublicKey = await File.ReadAllTextAsync(caPublicKeyPath, ct);
-                var caKeyIndented = new StringBuilder();
 
+                // Indent the CA key content for YAML (6 spaces for write_files content)
+                var caKeyIndented = new StringBuilder();
                 foreach (var line in caPublicKey.Split('\n', StringSplitOptions.RemoveEmptyEntries))
                 {
                     caKeyIndented.AppendLine($"      {line.Trim()}");
@@ -1114,7 +1131,7 @@ public class LibvirtVmManager : IVmManager
             }
 
             // =====================================================
-            // STEP 5: Process template using CloudInitTemplateService
+            // STEP 6: Process template using CloudInitTemplateService
             // =====================================================
             string cloudInitYaml;
 
@@ -1140,7 +1157,7 @@ public class LibvirtVmManager : IVmManager
             }
 
             // =====================================================
-            // STEP 6: Write user-data and meta-data files
+            // STEP 7: Write user-data and meta-data files
             // =====================================================
             var userDataPath = Path.Combine(vmDir, "user-data");
             var metaDataPath = Path.Combine(vmDir, "meta-data");
@@ -1155,7 +1172,7 @@ public class LibvirtVmManager : IVmManager
                 spec.Id, cloudInitYaml);
 
             // =====================================================
-            // STEP 7: Create cloud-init ISO
+            // STEP 8: Create cloud-init ISO
             // =====================================================
             var isoPath = Path.Combine(vmDir, "cloud-init.iso");
 

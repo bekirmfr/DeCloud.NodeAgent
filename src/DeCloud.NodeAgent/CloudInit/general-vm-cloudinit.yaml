@@ -16,12 +16,15 @@ bootcmd:
 # Single-tenant VMs get direct root access (similar to Hetzner, Vultr, Linode)
 disable_root: false
 
-# SSH public key authentication (if provided)
-__SSH_AUTHORIZED_KEYS__
+# SSH public key authentication (placeholder will be replaced with actual block)
+# Format: ssh_authorized_keys:\n  - ssh-rsa AAA...
+# __SSH_AUTHORIZED_KEYS_BLOCK__
 
-# Password authentication (if provided)
-__PASSWORD_CONFIG__
+# Password authentication (placeholder will be replaced with actual block)
+# Format: chpasswd:\n  list: |\n    root:password
+# __PASSWORD_CONFIG_BLOCK__
 
+# SSH password authentication flag
 ssh_pwauth: __SSH_PASSWORD_AUTH__
 
 # Essential packages
@@ -34,7 +37,7 @@ write_files:
   - path: /etc/ssh/decloud_ca.pub
     permissions: '0644'
     content: |
-__CA_PUBLIC_KEY__
+      __CA_PUBLIC_KEY__
 
   # DeCloud Welcome Page HTML
   - path: /var/www/index.html
@@ -162,7 +165,7 @@ runcmd:
   
   # Restart SSH to apply CA configuration
   - systemctl restart sshd || systemctl restart ssh
-  
-__PASSWORD_SSH_COMMANDS__
+
+# __PASSWORD_SSH_COMMANDS_BLOCK__
 
 final_message: "DeCloud VM __VM_NAME__ is ready!"
