@@ -12,6 +12,8 @@ namespace DeCloud.NodeAgent.Infrastructure.Persistence;
 /// 
 /// SECURITY: Supports encryption using a deterministic key derived from node ID and wallet.
 /// SECURITY: Never stores plaintext passwords - only wallet-encrypted passwords.
+/// 
+/// SCHEMA VERSIONING: Automatically migrates database schema on startup
 /// </summary>
 public class VmRepository : IDisposable
 {
@@ -19,6 +21,8 @@ public class VmRepository : IDisposable
     private readonly ILogger _logger;
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly bool _encrypted;
+
+    private const int CURRENT_SCHEMA_VERSION = 2; // Incremented when schema changes
 
     public VmRepository(string databasePath, ILogger logger, string? encryptionKey = null)
     {
@@ -47,7 +51,7 @@ public class VmRepository : IDisposable
         }
 
         _connection.Open();
-        InitializeDatabase();
+        InitializeOrMigrateDatabase();
     }
 
     /// <summary>
@@ -69,7 +73,84 @@ public class VmRepository : IDisposable
         return Convert.ToBase64String(pbkdf2.GetBytes(32));
     }
 
-    private void InitializeDatabase()
+    /// <summary>
+    /// Initialize database or migrate to latest schema version
+    /// </summary>
+    private void InitializeOrMigrateDatabase()
+    {
+        // Create schema version table if it doesn't exist
+        using (var cmd = _connection.CreateCommand())
+        {
+            cmd.CommandText = @"
+                CREATE TABLE IF NOT EXISTS SchemaVersion (
+                    Version INTEGER PRIMARY KEY,
+                    AppliedAt TEXT NOT NULL
+                )";
+            cmd.ExecuteNonQuery();
+        }
+
+        // Get current schema version
+        var currentVersion = GetSchemaVersion();
+        _logger.LogInformation("Current database schema version: {Version}", currentVersion);
+
+        // Apply migrations if needed
+        if (currentVersion < CURRENT_SCHEMA_VERSION)
+        {
+            _logger.LogWarning("Database schema outdated (v{Current}). Migrating to v{Target}...",
+                currentVersion, CURRENT_SCHEMA_VERSION);
+
+            MigrateSchema(currentVersion, CURRENT_SCHEMA_VERSION);
+
+            _logger.LogInformation("✓ Database schema migrated successfully to v{Version}", CURRENT_SCHEMA_VERSION);
+        }
+        else if (currentVersion == 0)
+        {
+            // Fresh database - create initial schema
+            CreateInitialSchema();
+            SetSchemaVersion(CURRENT_SCHEMA_VERSION);
+            _logger.LogInformation("✓ Database schema initialized at v{Version}", CURRENT_SCHEMA_VERSION);
+        }
+        else
+        {
+            _logger.LogDebug("Database schema is up to date (v{Version})", currentVersion);
+        }
+    }
+
+    /// <summary>
+    /// Get current schema version from database
+    /// </summary>
+    private int GetSchemaVersion()
+    {
+        try
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT MAX(Version) FROM SchemaVersion";
+            var result = cmd.ExecuteScalar();
+            return result is DBNull or null ? 0 : Convert.ToInt32(result);
+        }
+        catch
+        {
+            // SchemaVersion table doesn't exist yet
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// Set schema version after successful migration
+    /// </summary>
+    private void SetSchemaVersion(int version)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "INSERT INTO SchemaVersion (Version, AppliedAt) VALUES (@Version, @AppliedAt)";
+        cmd.Parameters.AddWithValue("@Version", version);
+        cmd.Parameters.AddWithValue("@AppliedAt", DateTime.UtcNow.ToString("O"));
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Create initial database schema (v2 - with QualityTier and ComputePointCost)
+    /// </summary>
+    private void CreateInitialSchema()
     {
         var createTable = @"
             CREATE TABLE IF NOT EXISTS VmRecords (
@@ -77,13 +158,15 @@ public class VmRepository : IDisposable
                 Name TEXT NOT NULL,
                 OwnerId TEXT,
                 OwnerWallet TEXT,
+                QualityTier INTEGER NOT NULL DEFAULT 3,
+                ComputePointCost INTEGER NOT NULL DEFAULT 4,
                 VirtualCpuCores INTEGER NOT NULL,
                 MemoryBytes INTEGER NOT NULL,
                 DiskBytes INTEGER NOT NULL,
                 State TEXT NOT NULL,
                 IpAddress TEXT,
                 MacAddress TEXT,
-                VncPort TEXT,
+                VncPort INTEGER,
                 Pid INTEGER,
                 CreatedAt TEXT NOT NULL,
                 StartedAt TEXT,
@@ -100,14 +183,134 @@ public class VmRepository : IDisposable
             CREATE INDEX IF NOT EXISTS idx_tenant ON VmRecords(OwnerId);
             CREATE INDEX IF NOT EXISTS idx_state ON VmRecords(State);
             CREATE INDEX IF NOT EXISTS idx_updated ON VmRecords(LastUpdated);
+            CREATE INDEX IF NOT EXISTS idx_quality_tier ON VmRecords(QualityTier);
         ";
 
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = createTable;
         cmd.ExecuteNonQuery();
 
-        _logger.LogDebug("Database schema initialized{Encrypted}",
+        _logger.LogDebug("Database schema created{Encrypted}",
             _encrypted ? " with encryption" : "");
+    }
+
+    /// <summary>
+    /// Migrate database schema from old version to new version
+    /// </summary>
+    private void MigrateSchema(int fromVersion, int toVersion)
+    {
+        using var transaction = _connection.BeginTransaction();
+        try
+        {
+            // Migration from v0 (or v1 without QualityTier/ComputePointCost) to v2
+            if (fromVersion < 2)
+            {
+                _logger.LogInformation("Applying migration: v{From} → v{To}", fromVersion, 2);
+                MigrateToV2();
+                SetSchemaVersion(2);
+            }
+
+            // Future migrations go here
+            // if (fromVersion < 3) { MigrateToV3(); }
+
+            transaction.Commit();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Schema migration failed. Rolling back...");
+            transaction.Rollback();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Migrate to schema v2: Add QualityTier and ComputePointCost columns
+    /// </summary>
+    private void MigrateToV2()
+    {
+        _logger.LogInformation("Adding QualityTier and ComputePointCost columns...");
+
+        // Check if VmRecords table exists
+        using (var cmd = _connection.CreateCommand())
+        {
+            cmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name='VmRecords'";
+            var tableExists = cmd.ExecuteScalar() != null;
+
+            if (!tableExists)
+            {
+                // Table doesn't exist - create new schema
+                _logger.LogInformation("VmRecords table doesn't exist. Creating fresh schema...");
+                CreateInitialSchema();
+                return;
+            }
+        }
+
+        // Check if columns already exist
+        var hasQualityTier = ColumnExists("VmRecords", "QualityTier");
+        var hasComputePointCost = ColumnExists("VmRecords", "ComputePointCost");
+
+        if (hasQualityTier && hasComputePointCost)
+        {
+            _logger.LogInformation("QualityTier and ComputePointCost columns already exist. No migration needed.");
+            return;
+        }
+
+        // Create backup table name
+        var backupTable = $"VmRecords_backup_{DateTime.UtcNow:yyyyMMddHHmmss}";
+        _logger.LogInformation("Creating backup table: {Table}", backupTable);
+
+        // Rename old table to backup
+        using (var cmd = _connection.CreateCommand())
+        {
+            cmd.CommandText = $"ALTER TABLE VmRecords RENAME TO {backupTable}";
+            cmd.ExecuteNonQuery();
+        }
+
+        // Create new table with correct schema
+        CreateInitialSchema();
+
+        // Migrate data from backup to new table
+        _logger.LogInformation("Migrating data from backup table...");
+        using (var cmd = _connection.CreateCommand())
+        {
+            cmd.CommandText = $@"
+                INSERT INTO VmRecords 
+                SELECT 
+                    VmId, Name, OwnerId, OwnerWallet,
+                    3 as QualityTier,      -- Default to Burstable tier
+                    4 as ComputePointCost, -- Default compute points for Burstable
+                    VirtualCpuCores, MemoryBytes, DiskBytes,
+                    State, IpAddress, MacAddress, VncPort, Pid,
+                    CreatedAt, StartedAt, StoppedAt, LastUpdated,
+                    DiskPath, ConfigPath, BaseImageUrl, BaseImageHash,
+                    SshPublicKey, EncryptedPassword
+                FROM {backupTable}";
+
+            var rowsMigrated = cmd.ExecuteNonQuery();
+            _logger.LogInformation("✓ Migrated {Count} VM records", rowsMigrated);
+        }
+
+        // Keep backup table for safety (can be manually dropped later)
+        _logger.LogInformation("Backup table {Table} retained for safety", backupTable);
+    }
+
+    /// <summary>
+    /// Check if a column exists in a table
+    /// </summary>
+    private bool ColumnExists(string tableName, string columnName)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = $"PRAGMA table_info({tableName})";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var name = reader.GetString(1); // Column name is at index 1
+            if (name.Equals(columnName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// <summary>
@@ -120,12 +323,14 @@ public class VmRepository : IDisposable
         {
             var sql = @"
                 INSERT OR REPLACE INTO VmRecords 
-                (VmId, Name, OwnerId, OwnerWallet, VirtualCpuCores, MemoryBytes, DiskBytes, 
+                (VmId, Name, OwnerId, OwnerWallet, QualityTier, ComputePointCost,
+                 VirtualCpuCores, MemoryBytes, DiskBytes, 
                  State, IpAddress, MacAddress, VncPort, Pid,
                  CreatedAt, StartedAt, StoppedAt, LastUpdated, DiskPath, ConfigPath,
                  BaseImageUrl, BaseImageHash, SshPublicKey, EncryptedPassword)
                 VALUES 
-                (@VmId, @Name, @OwnerId, @OwnerWallet, @VirtualCpuCores, @MemoryBytes, @DiskBytes,
+                (@VmId, @Name, @OwnerId, @OwnerWallet, @QualityTier, @ComputePointCost,
+                 @VirtualCpuCores, @MemoryBytes, @DiskBytes,
                  @State, @IpAddress, @MacAddress, @VncPort, @Pid,
                  @CreatedAt, @StartedAt, @StoppedAt, @LastUpdated, @DiskPath, @ConfigPath,
                  @BaseImageUrl, @BaseImageHash, @SshPublicKey, @EncryptedPassword)
@@ -138,6 +343,8 @@ public class VmRepository : IDisposable
             cmd.Parameters.AddWithValue("@Name", vm.Name);
             cmd.Parameters.AddWithValue("@OwnerId", vm.Spec.OwnerId ?? (object)DBNull.Value);
             cmd.Parameters.AddWithValue("@OwnerWallet", vm.Spec.OwnerWallet ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@QualityTier", vm.Spec.QualityTier);
+            cmd.Parameters.AddWithValue("@ComputePointCost", vm.Spec.ComputePointCost);
             cmd.Parameters.AddWithValue("@VirtualCpuCores", vm.Spec.VirtualCpuCores);
             cmd.Parameters.AddWithValue("@MemoryBytes", vm.Spec.MemoryBytes);
             cmd.Parameters.AddWithValue("@DiskBytes", vm.Spec.DiskBytes);
@@ -401,41 +608,44 @@ public class VmRepository : IDisposable
     }
 
     /// <summary>
-    /// Parse VmInstance from database reader
+    /// Parse VmInstance from database reader using COLUMN NAMES (robust against schema changes)
     /// </summary>
     private VmInstance? ParseVmFromReader(SqliteDataReader reader)
     {
         try
         {
+            // Use column names instead of indices for robustness
             var vm = new VmInstance
             {
-                VmId = reader.GetString(0),
-                Name = reader.GetString(1),
+                VmId = reader.GetString(reader.GetOrdinal("VmId")),
+                Name = reader.GetString(reader.GetOrdinal("Name")),
                 Spec = new VmSpec
                 {
-                    Id = reader.GetString(0),
-                    Name = reader.GetString(1),
-                    OwnerId = reader.GetString(2),
-                    OwnerWallet = reader.GetString(3),
-                    VirtualCpuCores = reader.GetInt32(5),
-                    MemoryBytes = reader.GetInt64(6),
-                    DiskBytes = reader.GetInt64(7),
-                    IpAddress = reader.IsDBNull(9) ? null : reader.GetString(9),
-                    MacAddress = reader.IsDBNull(10) ? null : reader.GetString(10),
-                    BaseImageUrl = reader.IsDBNull(19) ? null : reader.GetString(19),
-                    BaseImageHash = reader.IsDBNull(20) ? null : reader.GetString(20),
-                    SshPublicKey = reader.IsDBNull(21) ? null : reader.GetString(21),
-                    WalletEncryptedPassword = reader.IsDBNull(22) ? null : reader.GetString(22)
+                    Id = reader.GetString(reader.GetOrdinal("VmId")),
+                    Name = reader.GetString(reader.GetOrdinal("Name")),
+                    OwnerId = GetNullableString(reader, "OwnerId"),
+                    OwnerWallet = GetNullableString(reader, "OwnerWallet"),
+                    QualityTier = reader.GetInt32(reader.GetOrdinal("QualityTier")),
+                    ComputePointCost = reader.GetInt32(reader.GetOrdinal("ComputePointCost")),
+                    VirtualCpuCores = reader.GetInt32(reader.GetOrdinal("VirtualCpuCores")),
+                    MemoryBytes = reader.GetInt64(reader.GetOrdinal("MemoryBytes")),
+                    DiskBytes = reader.GetInt64(reader.GetOrdinal("DiskBytes")),
+                    IpAddress = GetNullableString(reader, "IpAddress"),
+                    MacAddress = GetNullableString(reader, "MacAddress"),
+                    BaseImageUrl = GetNullableString(reader, "BaseImageUrl"),
+                    BaseImageHash = GetNullableString(reader, "BaseImageHash"),
+                    SshPublicKey = GetNullableString(reader, "SshPublicKey"),
+                    WalletEncryptedPassword = GetNullableString(reader, "EncryptedPassword")
                 },
-                State = Enum.Parse<VmState>(reader.GetString(8)),
-                VncPort = reader.IsDBNull(11) ? null : reader.GetInt32(11),
-                Pid = reader.IsDBNull(12) ? null : reader.GetInt32(12),
-                CreatedAt = DateTime.Parse(reader.GetString(13)),
-                StartedAt = reader.IsDBNull(14) ? null : DateTime.Parse(reader.GetString(14)),
-                StoppedAt = reader.IsDBNull(15) ? null : DateTime.Parse(reader.GetString(15)),
-                LastHeartbeat = DateTime.Parse(reader.GetString(16)),
-                DiskPath = reader.IsDBNull(17) ? string.Empty : reader.GetString(17),
-                ConfigPath = reader.IsDBNull(18) ? string.Empty : reader.GetString(18)
+                State = Enum.Parse<VmState>(reader.GetString(reader.GetOrdinal("State"))),
+                VncPort = GetNullableInt(reader, "VncPort"),
+                Pid = GetNullableInt(reader, "Pid"),
+                CreatedAt = DateTime.Parse(reader.GetString(reader.GetOrdinal("CreatedAt"))),
+                StartedAt = GetNullableDateTime(reader, "StartedAt"),
+                StoppedAt = GetNullableDateTime(reader, "StoppedAt"),
+                LastHeartbeat = DateTime.Parse(reader.GetString(reader.GetOrdinal("LastUpdated"))),
+                DiskPath = GetNullableString(reader, "DiskPath") ?? string.Empty,
+                ConfigPath = GetNullableString(reader, "ConfigPath") ?? string.Empty
             };
 
             return vm;
@@ -445,6 +655,25 @@ public class VmRepository : IDisposable
             _logger.LogError(ex, "Failed to parse VM from database row");
             return null;
         }
+    }
+
+    // Helper methods for nullable value parsing
+    private string? GetNullableString(SqliteDataReader reader, string columnName)
+    {
+        var ordinal = reader.GetOrdinal(columnName);
+        return reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
+    }
+
+    private int? GetNullableInt(SqliteDataReader reader, string columnName)
+    {
+        var ordinal = reader.GetOrdinal(columnName);
+        return reader.IsDBNull(ordinal) ? null : reader.GetInt32(ordinal);
+    }
+
+    private DateTime? GetNullableDateTime(SqliteDataReader reader, string columnName)
+    {
+        var ordinal = reader.GetOrdinal(columnName);
+        return reader.IsDBNull(ordinal) ? null : DateTime.Parse(reader.GetString(ordinal));
     }
 
     public void Dispose()
