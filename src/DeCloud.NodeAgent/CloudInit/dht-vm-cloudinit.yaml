@@ -1,0 +1,140 @@
+#cloud-config
+
+# DeCloud DHT VM Configuration
+# For distributed hash table storage nodes
+
+hostname: __HOSTNAME__
+manage_etc_hosts: true
+
+# Regenerate machine-id to prevent conflicts
+bootcmd:
+  - rm -f /etc/machine-id /var/lib/dbus/machine-id
+  - systemd-machine-id-setup
+
+# DHT nodes use dedicated dht user (not root)
+disable_root: true
+
+users:
+  - name: dht
+    groups: [docker, sudo]
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    shell: /bin/bash
+    lock_passwd: true
+
+# SSH key authentication for dht user
+__SSH_AUTHORIZED_KEYS__
+
+ssh_pwauth: false
+
+# DHT-specific packages
+packages:
+  - qemu-guest-agent
+  - docker.io
+  - docker-compose
+  - python3
+  - python3-pip
+  - git
+
+# DHT configuration files
+write_files:
+  # DHT node configuration
+  - path: /etc/decloud-dht/config.json
+    permissions: '0644'
+    content: |
+      {
+        "node_id": "__VM_ID__",
+        "node_name": "__VM_NAME__",
+        "dht_port": __DHT_PORT__,
+        "storage_path": "__DHT_STORAGE_PATH__",
+        "max_storage_gb": __DHT_MAX_STORAGE_GB__,
+        "bootstrap_nodes": [
+          "dht-bootstrap.decloud.io:6881"
+        ],
+        "enable_encryption": true,
+        "enable_replication": true,
+        "replication_factor": 3
+      }
+
+  # DHT systemd service
+  - path: /etc/systemd/system/decloud-dht.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=DeCloud DHT Node
+      After=network.target docker.service
+      Requires=docker.service
+      
+      [Service]
+      Type=simple
+      User=dht
+      WorkingDirectory=/opt/decloud-dht
+      ExecStart=/usr/bin/docker-compose up
+      ExecStop=/usr/bin/docker-compose down
+      Restart=always
+      RestartSec=10
+      
+      [Install]
+      WantedBy=multi-user.target
+
+  # Docker Compose for DHT node
+  - path: /opt/decloud-dht/docker-compose.yml
+    permissions: '0644'
+    owner: dht:dht
+    content: |
+      version: '3.8'
+      
+      services:
+        dht-node:
+          image: decloud/dht-node:latest
+          container_name: dht-node-__VM_ID__
+          restart: unless-stopped
+          ports:
+            - "__DHT_PORT__:__DHT_PORT__/tcp"
+            - "__DHT_PORT__:__DHT_PORT__/udp"
+          volumes:
+            - dht-storage:__DHT_STORAGE_PATH__
+            - /etc/decloud-dht/config.json:/config/config.json:ro
+          environment:
+            - NODE_ID=__VM_ID__
+            - LOG_LEVEL=info
+          networks:
+            - dht-network
+      
+      volumes:
+        dht-storage:
+          driver: local
+      
+      networks:
+        dht-network:
+          driver: bridge
+
+# Runtime commands
+runcmd:
+  # Start QEMU guest agent
+  - systemctl enable qemu-guest-agent
+  - systemctl start qemu-guest-agent
+  
+  # Create DHT directories
+  - mkdir -p /etc/decloud-dht
+  - mkdir -p __DHT_STORAGE_PATH__
+  - chown -R dht:dht /etc/decloud-dht
+  - chown -R dht:dht __DHT_STORAGE_PATH__
+  - chown -R dht:dht /opt/decloud-dht
+  
+  # Enable Docker
+  - systemctl enable docker
+  - systemctl start docker
+  - usermod -aG docker dht
+  
+  # Pull DHT node image
+  - docker pull decloud/dht-node:latest || true
+  
+  # Start DHT service
+  - systemctl daemon-reload
+  - systemctl enable decloud-dht
+  - systemctl start decloud-dht
+  
+  # Log completion
+  - echo "DeCloud DHT node __VM_ID__ initialized" > /var/log/dht-bootstrap.log
+
+final_message: "DeCloud DHT Node __VM_NAME__ is ready!"

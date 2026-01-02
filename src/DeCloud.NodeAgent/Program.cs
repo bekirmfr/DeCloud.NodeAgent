@@ -95,6 +95,7 @@ builder.Services.AddSingleton<VmRepository>(sp =>
 // =====================================================
 // VM Manager with Repository Integration
 // =====================================================
+builder.Services.AddSingleton<ICloudInitTemplateService, CloudInitTemplateService>();
 builder.Services.AddSingleton<LibvirtVmManager>();
 builder.Services.AddSingleton<IVmManager>(sp => sp.GetRequiredService<LibvirtVmManager>());
 

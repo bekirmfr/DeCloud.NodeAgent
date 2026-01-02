@@ -12,6 +12,13 @@
     <ProjectReference Include="..\DeCloud.NodeAgent.Infrastructure\DeCloud.NodeAgent.Infrastructure.csproj" />
   </ItemGroup>
 
+	<ItemGroup>
+	    <!-- Include all cloud-init templates in build output -->
+	    <None Update="CloudInit\Templates\*.yaml">
+		    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	    </None>
+    </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />

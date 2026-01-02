@@ -1,0 +1,168 @@
+#cloud-config
+
+# DeCloud General VM Configuration
+# For standard user VMs with full root access
+
+hostname: __HOSTNAME__
+manage_etc_hosts: true
+
+# CRITICAL: Regenerate machine-id BEFORE networking starts
+# Prevents DHCP IP address collisions when cloning from base image
+bootcmd:
+  - rm -f /etc/machine-id /var/lib/dbus/machine-id
+  - systemd-machine-id-setup
+
+# Root user configuration
+# Single-tenant VMs get direct root access (similar to Hetzner, Vultr, Linode)
+disable_root: false
+
+# SSH public key authentication (if provided)
+__SSH_AUTHORIZED_KEYS__
+
+# Password authentication (if provided)
+__PASSWORD_CONFIG__
+
+ssh_pwauth: __SSH_PASSWORD_AUTH__
+
+# Essential packages
+packages:
+  - qemu-guest-agent
+
+# Configuration files
+write_files:
+  # SSH Certificate Authority public key
+  - path: /etc/ssh/decloud_ca.pub
+    permissions: '0644'
+    content: |
+__CA_PUBLIC_KEY__
+
+  # DeCloud Welcome Page HTML
+  - path: /var/www/index.html
+    permissions: '0644'
+    content: |
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>__VM_NAME__</title>
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <style>
+          * { margin: 0; padding: 0; box-sizing: border-box; }
+          body {
+            font-family: system-ui, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: linear-gradient(135deg, #0f0f23, #1a1a3e);
+            color: #fff;
+          }
+          .card {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 3rem;
+            border-radius: 16px;
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            max-width: 500px;
+          }
+          h1 { font-size: 2rem; margin-bottom: 0.5rem; }
+          .name { color: #4ade80; font-family: monospace; }
+          p { color: #94a3b8; margin-top: 0.5rem; }
+          .status {
+            display: inline-block;
+            padding: 0.4rem 1rem;
+            background: rgba(34, 197, 94, 0.2);
+            border: 1px solid rgba(34, 197, 94, 0.3);
+            border-radius: 9999px;
+            margin-top: 1rem;
+            font-size: 0.875rem;
+          }
+          .dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background: #22c55e;
+            border-radius: 50%;
+            margin-right: 0.5rem;
+            animation: pulse 2s infinite;
+          }
+          @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+          }
+          .note {
+            margin-top: 2rem;
+            padding: 1rem;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            font-size: 0.8rem;
+            color: #64748b;
+          }
+          code {
+            background: rgba(0, 0, 0, 0.4);
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            color: #f59e0b;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h1>Virtual Machine <span class="name">__VM_NAME__</span></h1>
+          <p>Decentralized compute, running on your terms.</p>
+          <div class="status">
+            <span class="dot"></span>Online
+          </div>
+          <div class="note">
+            To remove this page and free port 80:<br>
+            <code>sudo systemctl disable --now welcome</code>
+          </div>
+        </div>
+      </body>
+      </html>
+
+  # Welcome page systemd service
+  - path: /etc/systemd/system/welcome.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=DeCloud Welcome Page
+      After=network.target
+      
+      [Service]
+      ExecStart=/usr/bin/python3 -m http.server 80 --directory /var/www
+      Restart=always
+      
+      [Install]
+      WantedBy=multi-user.target
+
+# Runtime commands
+runcmd:
+  # Start QEMU guest agent
+  - systemctl enable qemu-guest-agent
+  - systemctl start qemu-guest-agent
+  
+  # Configure SSH Certificate Authority
+  - |
+    cat >> /etc/ssh/sshd_config << 'DECLOUD_EOF'
+    
+    # DeCloud: SSH Certificate Authority
+    TrustedUserCAKeys /etc/ssh/decloud_ca.pub
+    AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
+    DECLOUD_EOF
+  
+  # Create SSH principals for certificate-based auth
+  - mkdir -p /etc/ssh/auth_principals
+  - echo vm-__VM_ID__ > /etc/ssh/auth_principals/root
+  - chmod 644 /etc/ssh/auth_principals/root
+  
+  # Start welcome page service
+  - systemctl daemon-reload
+  - systemctl enable --now welcome
+  
+  # Restart SSH to apply CA configuration
+  - systemctl restart sshd || systemctl restart ssh
+  
+__PASSWORD_SSH_COMMANDS__
+
+final_message: "DeCloud VM __VM_NAME__ is ready!"

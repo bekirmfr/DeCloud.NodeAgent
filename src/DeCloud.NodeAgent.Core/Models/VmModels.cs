@@ -108,7 +108,9 @@ public enum VmType
     Memory,
     Storage,
     Gpu,
-    Relay
+    Relay,
+    Dht,
+    Inference
 }
 
 public class VmResourceUsage

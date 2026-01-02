@@ -1,6 +1,7 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
+using DeCloud.NodeAgent.Infrastructure.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Text;
@@ -22,6 +23,7 @@ public class LibvirtVmManager : IVmManager
 {
     private readonly ICommandExecutor _executor;
     private readonly IImageManager _imageManager;
+    private readonly ICloudInitTemplateService _templateService;
     private readonly ILogger<LibvirtVmManager> _logger;
     private readonly LibvirtVmManagerOptions _options;
     private readonly VmRepository _repository;
@@ -38,10 +40,12 @@ public class LibvirtVmManager : IVmManager
         IImageManager imageManager,
         IOptions<LibvirtVmManagerOptions> options,
         VmRepository repository,
+        ICloudInitTemplateService templateService,
         ILogger<LibvirtVmManager> logger)
     {
         _executor = executor;
         _imageManager = imageManager;
+        _templateService = templateService;
         _logger = logger;
         _options = options.Value;
         _repository = repository;
@@ -982,185 +986,225 @@ public class LibvirtVmManager : IVmManager
     /// Create cloud-init ISO with proper network config and authentication.
     /// Includes machine-id regeneration to prevent DHCP IP collisions.
     /// </summary>
-    private async Task<string> CreateCloudInitIsoAsync(VmSpec spec, string vmDir, string? password = null, CancellationToken ct = default)
+    /// <summary>
+    /// Create cloud-init ISO using template-based configuration.
+    /// Supports multiple VM types through specialized templates.
+    /// </summary>
+    /// <remarks>
+    /// This method completely replaces inline cloud-init generation with a template-based approach.
+    /// Templates are loaded from CloudInit/Templates/ directory and processed with runtime variables.
+    /// 
+    /// Template placeholders are replaced with actual values:
+    /// - __VM_ID__: Unique VM identifier
+    /// - __VM_NAME__: Human-readable VM name
+    /// - __HOSTNAME__: System hostname
+    /// - __WIREGUARD_PRIVATE_KEY__: Generated WireGuard private key (relay VMs)
+    /// - __WIREGUARD_PUBLIC_KEY__: Generated WireGuard public key (relay VMs)
+    /// - __SSH_AUTHORIZED_KEYS__: User's SSH public keys
+    /// - __PASSWORD_CONFIG__: Password configuration block
+    /// - __CA_PUBLIC_KEY__: SSH CA public key for certificate auth
+    /// - And many more...
+    /// </remarks>
+    private async Task<string> CreateCloudInitIsoAsync(
+        VmSpec spec,
+        string vmDir,
+        string? password = null,
+        CancellationToken ct = default)
     {
-        var hasPassword = !string.IsNullOrEmpty(password);
-        var hasSshKey = !string.IsNullOrEmpty(spec.SshPublicKey);
-
-        var sb = new StringBuilder();
-        sb.AppendLine("#cloud-config");
-        sb.AppendLine($"hostname: {spec.Name}");
-        sb.AppendLine("manage_etc_hosts: true");
-        sb.AppendLine();
-
-        // CRITICAL: Regenerate machine-id BEFORE networking starts
-        sb.AppendLine("bootcmd:");
-        sb.AppendLine("  - rm -f /etc/machine-id /var/lib/dbus/machine-id");
-        sb.AppendLine("  - systemd-machine-id-setup");
-        sb.AppendLine();
-
-        // ============================================================
-        // ROOT USER CONFIGURATION
-        // Enable direct root login for single-tenant VMs
-        // This is appropriate for isolated VMs where users expect
-        // full admin access (similar to Hetzner, Vultr, Linode)
-        // ============================================================
-        var disable_root = spec.VmType == VmType.Relay;
-        sb.AppendLine($"disable_root: {disable_root}");
-        sb.AppendLine();
-
-        // SSH keys for root
-        if (hasSshKey && spec.VmType != VmType.Relay)
-        {
-            sb.AppendLine("ssh_authorized_keys:");
-            foreach (var key in spec.SshPublicKey!.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-            {
-                var trimmedKey = key.Trim();
-                if (!string.IsNullOrEmpty(trimmedKey))
-                {
-                    sb.AppendLine($"  - {trimmedKey}");
-                }
-            }
-            sb.AppendLine();
-        }
-
-        // Password configuration for root
-        if (hasPassword && spec.VmType != VmType.Relay)
-        {
-            sb.AppendLine("chpasswd:");
-            sb.AppendLine("  list: |");
-            sb.AppendLine($"    root:{password}");
-            sb.AppendLine("  expire: false");
-            sb.AppendLine();
-            sb.AppendLine("ssh_pwauth: true");
-            _logger.LogInformation("Using root password: {Password}", password);
-        }
-        else if (spec.VmType == VmType.Relay)
-        {
-            sb.AppendLine("users:");
-            sb.AppendLine("- name: ubuntu");
-            sb.AppendLine("  lock_passwd: true");
-            sb.AppendLine("  sudo: ['ALL=(ALL) NOPASSWD:ALL']");
-            sb.AppendLine();
-            sb.AppendLine("ssh_pwauth: false");
-            _logger.LogInformation("Disabled password and SSH auth");
-        }
-
-        sb.AppendLine();
-        sb.AppendLine("packages:");
-        sb.AppendLine("  - qemu-guest-agent");
-        sb.AppendLine();
-
-        // =====================================================
-        // SECURITY: Write SSH CA public key
-        // =====================================================
-        sb.AppendLine("write_files:");
-        sb.AppendLine("  - path: /etc/ssh/decloud_ca.pub");
-        sb.AppendLine("    permissions: '0644'");
-        sb.AppendLine("    content: |");
-
-        var caPublicKeyPath = "/etc/ssh/decloud_ca.pub";
-        if (File.Exists(caPublicKeyPath))
-        {
-            var caPublicKey = await File.ReadAllTextAsync(caPublicKeyPath, ct);
-            foreach (var line in caPublicKey.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-            {
-                sb.AppendLine($"      {line.Trim()}");
-            }
-            _logger.LogInformation("VM {VmId}: Including SSH CA public key in cloud-init", spec.Id);
-        }
-        else
-        {
-            _logger.LogWarning(
-                "VM {VmId}: SSH CA public key not found at {Path} - certificate auth will not work!",
-                spec.Id, caPublicKeyPath);
-            sb.AppendLine("      # ERROR: CA public key not available");
-        }
-
-        // =====================================================
-        // Runtime commands - Using heredoc to avoid quote issues
-        // =====================================================
-        sb.AppendLine();
-        sb.AppendLine("runcmd:");
-        sb.AppendLine("  - systemctl enable qemu-guest-agent");
-        sb.AppendLine("  - systemctl start qemu-guest-agent");
-
-        // Use heredoc to write SSH config - avoids ALL quote escaping issues
-        sb.AppendLine("  - |");
-        sb.AppendLine("    cat >> /etc/ssh/sshd_config << 'DECLOUD_EOF'");
-        sb.AppendLine("");
-        sb.AppendLine("    # DeCloud: SSH Certificate Authority");
-        sb.AppendLine("    TrustedUserCAKeys /etc/ssh/decloud_ca.pub");
-        sb.AppendLine("    AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u");
-        sb.AppendLine("    DECLOUD_EOF");
-
-        // ============================================================
-        // Cloud-Init Snippet for DeCloud Welcome Page
-        // Zero dependencies - uses Python stdlib http.server
-        // Self-documenting - includes removal instructions on the page
-        // ============================================================
-        sb.AppendLine("  # DeCloud Welcome Page (port 80)");
-        sb.AppendLine("  - mkdir -p /var/www");
-        sb.AppendLine($"  - echo '<!DOCTYPE html><html><head><title>{spec.Name}</title><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>*{{margin:0;padding:0;box-sizing:border-box}}body{{font-family:system-ui,sans-serif;min-height:100vh;display:flex;justify-content:center;align-items:center;background:linear-gradient(135deg,#0f0f23,#1a1a3e);color:#fff}}.card{{background:rgba(255,255,255,.05);padding:3rem;border-radius:16px;text-align:center;border:1px solid rgba(255,255,255,.1);max-width:500px}}h1{{font-size:2rem;margin-bottom:.5rem}}.name{{color:#4ade80;font-family:monospace}}p{{color:#94a3b8}}.status{{display:inline-block;padding:.4rem 1rem;background:rgba(34,197,94,.2);border:1px solid rgba(34,197,94,.3);border-radius:9999px;margin-top:1rem;font-size:.875rem}}.dot{{display:inline-block;width:8px;height:8px;background:#22c55e;border-radius:50%;margin-right:.5rem;animation:pulse 2s infinite}}@keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.5}}}}.note{{margin-top:2rem;padding:1rem;background:rgba(0,0,0,.3);border-radius:8px;font-size:.8rem;color:#64748b}}code{{background:rgba(0,0,0,.4);padding:.2rem .4rem;border-radius:4px;font-size:.75rem;color:#f59e0b}}</style></head><body><div class=\"card\"><h1>Virtual Machine <span class=\"name\">{spec.Name}</span></h1><p>Decentralized compute, running on your terms.</p><div class=\"status\"><span class=\"dot\"></span>Online</div><div class=\"note\">To remove this page and free port 80:<br><code>sudo systemctl disable --now welcome</code></div></div></body></html>' > /var/www/index.html");
-        sb.AppendLine("  - printf '[Unit]\\nDescription=DeCloud Welcome Page\\nAfter=network.target\\n[Service]\\nExecStart=/usr/bin/python3 -m http.server 80 --directory /var/www\\nRestart=always\\n[Install]\\nWantedBy=multi-user.target' > /etc/systemd/system/welcome.service");
-        sb.AppendLine("  - systemctl daemon-reload");
-        sb.AppendLine("  - systemctl enable --now welcome");
-
-        // Create principals directory and file
-        sb.AppendLine("  - mkdir -p /etc/ssh/auth_principals");
-        sb.AppendLine($"  - echo vm-{spec.Id} > /etc/ssh/auth_principals/root");
-        sb.AppendLine("  - chmod 644 /etc/ssh/auth_principals/root");
-
-        // Restart SSH to apply configuration
-        sb.AppendLine("  - systemctl restart sshd || systemctl restart ssh");
-
-        // Ensure SSH allows password auth if password is set
-        if (hasSshKey && hasPassword && spec.VmType != VmType.Relay)
-        {
-            sb.AppendLine("  - sed -i 's/^#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config");
-            sb.AppendLine("  - sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config");
-            sb.AppendLine("  - sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config");
-            sb.AppendLine("  - sed -i 's/^#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config");
-            sb.AppendLine("  - systemctl restart sshd || systemctl restart ssh");
-        }
-
-        var userData = sb.ToString();
-
-        _logger.LogDebug("Cloud-init user-data for VM {VmId}:\n{UserData}", spec.Id, userData);
-
-        var userDataPath = Path.Combine(vmDir, "user-data");
-        var metaDataPath = Path.Combine(vmDir, "meta-data");
-
-        await File.WriteAllTextAsync(userDataPath, userData, ct);
-
-        var metaData = $"instance-id: {spec.Id}\nlocal-hostname: {spec.Name}\n";
-        await File.WriteAllTextAsync(metaDataPath, metaData, ct);
-
-        var isoPath = Path.Combine(vmDir, "cloud-init.iso");
-        var result = await _executor.ExecuteAsync(
-            "genisoimage",
-            $"-output {isoPath} -volid cidata -joliet -rock {userDataPath} {metaDataPath}",
-            ct);
-
-        if (!result.Success)
-        {
-            result = await _executor.ExecuteAsync(
-                "cloud-localds",
-                $"{isoPath} {userDataPath} {metaDataPath}",
-                ct);
-        }
-
-        if (!result.Success)
-        {
-            _logger.LogWarning("Failed to create cloud-init ISO: {Error}", result.StandardError);
-            return string.Empty;
-        }
-
         _logger.LogInformation(
-            "Created cloud-init ISO at {Path} (root password: {HasPassword}, ssh key: {HasSshKey}, CA trust: {HasCA})",
-            isoPath, hasPassword, hasSshKey, File.Exists(caPublicKeyPath));
+            "VM {VmId}: Creating cloud-init ISO using template for VM type {VmType}",
+            spec.Id, spec.VmType);
 
-        return isoPath;
+        try
+        {
+            // =====================================================
+            // STEP 1: Build template variables
+            // =====================================================
+            var variables = new Dictionary<string, string>
+            {
+                ["__VM_ID__"] = spec.Id,
+                ["__VM_NAME__"] = spec.Name,
+                ["__HOSTNAME__"] = spec.Name
+            };
+
+            // =====================================================
+            // STEP 2: SSH Public Key Configuration
+            // =====================================================
+            var hasSshKey = !string.IsNullOrEmpty(spec.SshPublicKey);
+            if (hasSshKey && spec.VmType != VmType.Relay)
+            {
+                var sshKeysBlock = new StringBuilder();
+                sshKeysBlock.AppendLine("ssh_authorized_keys:");
+
+                foreach (var key in spec.SshPublicKey!.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var trimmedKey = key.Trim();
+                    if (!string.IsNullOrEmpty(trimmedKey))
+                    {
+                        sshKeysBlock.AppendLine($"  - {trimmedKey}");
+                    }
+                }
+
+                variables["__SSH_AUTHORIZED_KEYS__"] = sshKeysBlock.ToString();
+                _logger.LogInformation("VM {VmId}: Including SSH public keys", spec.Id);
+            }
+            else
+            {
+                variables["__SSH_AUTHORIZED_KEYS__"] = "# No SSH keys provided";
+            }
+
+            // =====================================================
+            // STEP 3: Password Configuration
+            // =====================================================
+            var hasPassword = !string.IsNullOrEmpty(password);
+            if (hasPassword && spec.VmType != VmType.Relay)
+            {
+                var passwordBlock = new StringBuilder();
+                passwordBlock.AppendLine("chpasswd:");
+                passwordBlock.AppendLine("  list: |");
+                passwordBlock.AppendLine($"    root:{password}");
+                passwordBlock.AppendLine("  expire: false");
+
+                variables["__PASSWORD_CONFIG__"] = passwordBlock.ToString();
+                variables["__SSH_PASSWORD_AUTH__"] = "true";
+
+                // Add password SSH commands
+                var passwordSshCommands = new StringBuilder();
+                passwordSshCommands.AppendLine("  # Enable password authentication for SSH");
+                passwordSshCommands.AppendLine("  - sed -i 's/^#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config");
+                passwordSshCommands.AppendLine("  - sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config");
+                passwordSshCommands.AppendLine("  - sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config");
+                passwordSshCommands.AppendLine("  - sed -i 's/^#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config");
+                passwordSshCommands.AppendLine("  - systemctl restart sshd || systemctl restart ssh");
+
+                variables["__PASSWORD_SSH_COMMANDS__"] = passwordSshCommands.ToString();
+
+                _logger.LogInformation("VM {VmId}: Using root password authentication", spec.Id);
+            }
+            else
+            {
+                variables["__PASSWORD_CONFIG__"] = "# No password authentication";
+                variables["__SSH_PASSWORD_AUTH__"] = "false";
+                variables["__PASSWORD_SSH_COMMANDS__"] = "  # Password authentication disabled";
+            }
+
+            // =====================================================
+            // STEP 4: SSH Certificate Authority Public Key
+            // =====================================================
+            var caPublicKeyPath = "/etc/ssh/decloud_ca.pub";
+            if (File.Exists(caPublicKeyPath))
+            {
+                var caPublicKey = await File.ReadAllTextAsync(caPublicKeyPath, ct);
+                var caKeyIndented = new StringBuilder();
+
+                foreach (var line in caPublicKey.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    caKeyIndented.AppendLine($"      {line.Trim()}");
+                }
+
+                variables["__CA_PUBLIC_KEY__"] = caKeyIndented.ToString().TrimEnd();
+                _logger.LogInformation("VM {VmId}: Including SSH CA public key", spec.Id);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "VM {VmId}: SSH CA public key not found at {Path} - certificate auth will not work!",
+                    spec.Id, caPublicKeyPath);
+                variables["__CA_PUBLIC_KEY__"] = "      # ERROR: CA public key not available";
+            }
+
+            // =====================================================
+            // STEP 5: Process template using CloudInitTemplateService
+            // =====================================================
+            string cloudInitYaml;
+
+            try
+            {
+                cloudInitYaml = await _templateService.ProcessTemplateAsync(
+                    spec.VmType,
+                    spec,
+                    variables,
+                    ct);
+
+                _logger.LogInformation(
+                    "VM {VmId}: Successfully processed cloud-init template for {VmType}",
+                    spec.Id, spec.VmType);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(
+                    ex,
+                    "VM {VmId}: Failed to process cloud-init template for {VmType}",
+                    spec.Id, spec.VmType);
+                throw;
+            }
+
+            // =====================================================
+            // STEP 6: Write user-data and meta-data files
+            // =====================================================
+            var userDataPath = Path.Combine(vmDir, "user-data");
+            var metaDataPath = Path.Combine(vmDir, "meta-data");
+
+            await File.WriteAllTextAsync(userDataPath, cloudInitYaml, ct);
+
+            var metaData = $"instance-id: {spec.Id}\nlocal-hostname: {spec.Name}\n";
+            await File.WriteAllTextAsync(metaDataPath, metaData, ct);
+
+            _logger.LogDebug(
+                "VM {VmId}: Cloud-init configuration:\n{UserData}",
+                spec.Id, cloudInitYaml);
+
+            // =====================================================
+            // STEP 7: Create cloud-init ISO
+            // =====================================================
+            var isoPath = Path.Combine(vmDir, "cloud-init.iso");
+
+            // Try genisoimage first (most common)
+            var result = await _executor.ExecuteAsync(
+                "genisoimage",
+                $"-output {isoPath} -volid cidata -joliet -rock {userDataPath} {metaDataPath}",
+                ct);
+
+            // Fallback to cloud-localds if genisoimage not available
+            if (!result.Success)
+            {
+                _logger.LogDebug(
+                    "VM {VmId}: genisoimage failed, trying cloud-localds: {Error}",
+                    spec.Id, result.StandardError);
+
+                result = await _executor.ExecuteAsync(
+                    "cloud-localds",
+                    $"{isoPath} {userDataPath} {metaDataPath}",
+                    ct);
+            }
+
+            if (!result.Success)
+            {
+                _logger.LogError(
+                    "VM {VmId}: Failed to create cloud-init ISO: {Error}",
+                    spec.Id, result.StandardError);
+                return string.Empty;
+            }
+
+            _logger.LogInformation(
+                "✓ VM {VmId}: Created cloud-init ISO at {Path} (type: {VmType}, password: {HasPassword}, ssh: {HasSshKey}, CA: {HasCA})",
+                spec.Id,
+                isoPath,
+                spec.VmType,
+                hasPassword,
+                hasSshKey,
+                File.Exists(caPublicKeyPath));
+
+            return isoPath;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "VM {VmId}: Unexpected error creating cloud-init ISO",
+                spec.Id);
+            throw;
+        }
     }
 
     private string GenerateLibvirtXml(VmSpec spec, string diskPath, string? cloudInitIso, int vncPort)
