@@ -43,7 +43,6 @@ public class VmSpec
 
     // Billing and ownership
     public string? OwnerId { get; set; } = string.Empty;      // Tenant/user ID
-    public string? OwnerWallet { get; set; } = string.Empty; // Tenant's wallet address
 }
 
 public class VmNetworkConfig

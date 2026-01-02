@@ -10,7 +10,6 @@ public class VmDto
     public required string VmId { get; set; }
     public required string Name { get; set; }
     public required string OwnerId { get; set; }
-    public required string OwnerWallet { get; set; }
     
     // Resources (use smallest unit - bytes)
     public required int CpuCores { get; set; }

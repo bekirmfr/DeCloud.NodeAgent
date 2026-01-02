@@ -245,7 +245,6 @@ public class HeartbeatService : BackgroundService
                         VmId = vm.VmId,
                         Name = vm.Name,
                         OwnerId = vm.Spec.OwnerId,
-                        OwnerWallet = vm.Spec.OwnerWallet,
                         State = vm.State,
                         VirtualCpuCores = vm.Spec.VirtualCpuCores,
                         QualityTier = vm.Spec.QualityTier,

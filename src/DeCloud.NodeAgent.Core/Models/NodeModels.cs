@@ -82,7 +82,6 @@ public class VmSummary
     public string? Name { get; set; }
     public VmState State { get; set; }
     public string OwnerId { get; set; } = string.Empty;
-    public string OwnerWallet { get; set; } = string.Empty;
     public int VirtualCpuCores { get; set; }
     public int QualityTier { get; set; }
     public int ComputePointCost { get; set; }

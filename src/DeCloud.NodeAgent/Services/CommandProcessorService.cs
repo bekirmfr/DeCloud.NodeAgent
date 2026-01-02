@@ -152,18 +152,11 @@ public class CommandProcessorService : BackgroundService
                 return false;
             }
 
-            if (!isRelayVm && string.IsNullOrWhiteSpace(GetStringProperty(root, "OwnerWallet", "ownerWallet")))
-            {
-                _logger.LogWarning("CreateVm command is missing OwnerWallet");
-                return false;
-            }
-
             // Parse the new flat format from Orchestrator
             var vmId = GetStringProperty(root, "VmId", "vmId")!;
             var name = GetStringProperty(root, "Name", "name") ?? "Unknown";
             var vmType = GetIntProperty(root, "VmType", "vmType") ?? (int) VmType.General;
             string? ownerId = GetStringProperty(root, "OwnerId", "ownerId");
-            string? ownerWallet = GetStringProperty(root, "OwnerWallet", "ownerWallet");
             string password = GetStringProperty(root, "Password", "password")!;
             // Try new flat format first, then fall back to nested Spec format
             int virtualCpuCores = GetIntProperty(root, "virtualCpuCores", "VirtualCpuCores") ?? 1;;
@@ -187,7 +180,6 @@ public class CommandProcessorService : BackgroundService
                 Id = vmId,
                 Name = name,
                 OwnerId = ownerId,
-                OwnerWallet = ownerWallet,
                 VmType = (VmType)vmType,
                 VirtualCpuCores = virtualCpuCores,
                 QualityTier = qualityTier,

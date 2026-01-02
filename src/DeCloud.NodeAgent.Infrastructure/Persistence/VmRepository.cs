@@ -157,7 +157,6 @@ public class VmRepository : IDisposable
                 VmId TEXT PRIMARY KEY,
                 Name TEXT NOT NULL,
                 OwnerId TEXT,
-                OwnerWallet TEXT,
                 QualityTier INTEGER NOT NULL DEFAULT 3,
                 ComputePointCost INTEGER NOT NULL DEFAULT 4,
                 VirtualCpuCores INTEGER NOT NULL,
@@ -276,7 +275,7 @@ public class VmRepository : IDisposable
             cmd.CommandText = $@"
                 INSERT INTO VmRecords 
                 SELECT 
-                    VmId, Name, OwnerId, OwnerWallet,
+                    VmId, Name, OwnerId,
                     3 as QualityTier,      -- Default to Burstable tier
                     4 as ComputePointCost, -- Default compute points for Burstable
                     VirtualCpuCores, MemoryBytes, DiskBytes,
@@ -323,13 +322,13 @@ public class VmRepository : IDisposable
         {
             var sql = @"
                 INSERT OR REPLACE INTO VmRecords 
-                (VmId, Name, OwnerId, OwnerWallet, QualityTier, ComputePointCost,
+                (VmId, Name, OwnerId, QualityTier, ComputePointCost,
                  VirtualCpuCores, MemoryBytes, DiskBytes, 
                  State, IpAddress, MacAddress, VncPort, Pid,
                  CreatedAt, StartedAt, StoppedAt, LastUpdated, DiskPath, ConfigPath,
                  BaseImageUrl, BaseImageHash, SshPublicKey, EncryptedPassword)
                 VALUES 
-                (@VmId, @Name, @OwnerId, @OwnerWallet, @QualityTier, @ComputePointCost,
+                (@VmId, @Name, @OwnerId, @QualityTier, @ComputePointCost,
                  @VirtualCpuCores, @MemoryBytes, @DiskBytes,
                  @State, @IpAddress, @MacAddress, @VncPort, @Pid,
                  @CreatedAt, @StartedAt, @StoppedAt, @LastUpdated, @DiskPath, @ConfigPath,
@@ -342,7 +341,6 @@ public class VmRepository : IDisposable
             cmd.Parameters.AddWithValue("@VmId", vm.VmId);
             cmd.Parameters.AddWithValue("@Name", vm.Name);
             cmd.Parameters.AddWithValue("@OwnerId", vm.Spec.OwnerId ?? (object)DBNull.Value);
-            cmd.Parameters.AddWithValue("@OwnerWallet", vm.Spec.OwnerWallet ?? (object)DBNull.Value);
             cmd.Parameters.AddWithValue("@QualityTier", vm.Spec.QualityTier);
             cmd.Parameters.AddWithValue("@ComputePointCost", vm.Spec.ComputePointCost);
             cmd.Parameters.AddWithValue("@VirtualCpuCores", vm.Spec.VirtualCpuCores);
@@ -624,7 +622,6 @@ public class VmRepository : IDisposable
                     Id = reader.GetString(reader.GetOrdinal("VmId")),
                     Name = reader.GetString(reader.GetOrdinal("Name")),
                     OwnerId = GetNullableString(reader, "OwnerId"),
-                    OwnerWallet = GetNullableString(reader, "OwnerWallet"),
                     QualityTier = reader.GetInt32(reader.GetOrdinal("QualityTier")),
                     ComputePointCost = reader.GetInt32(reader.GetOrdinal("ComputePointCost")),
                     VirtualCpuCores = reader.GetInt32(reader.GetOrdinal("VirtualCpuCores")),
@@ -634,8 +631,7 @@ public class VmRepository : IDisposable
                     MacAddress = GetNullableString(reader, "MacAddress"),
                     BaseImageUrl = GetNullableString(reader, "BaseImageUrl"),
                     BaseImageHash = GetNullableString(reader, "BaseImageHash"),
-                    SshPublicKey = GetNullableString(reader, "SshPublicKey"),
-                    WalletEncryptedPassword = GetNullableString(reader, "EncryptedPassword")
+                    SshPublicKey = GetNullableString(reader, "SshPublicKey")
                 },
                 State = Enum.Parse<VmState>(reader.GetString(reader.GetOrdinal("State"))),
                 VncPort = GetNullableInt(reader, "VncPort"),
