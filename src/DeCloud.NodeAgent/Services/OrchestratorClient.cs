@@ -115,17 +115,17 @@ public class OrchestratorClient : IOrchestratorClient
                     storageUsagePercent = storageUsage,
                     //networkInMbps = 0,
                     //networkOutMbps = 0,
-                    activeVmCount = heartbeat.ActiveVmDetails.Count,
+                    activeVmCount = heartbeat.ActiveVms.Count,
                     //loadAverage = 0.0
                 },
                 availableResources = new
                 {
-                    cpuCores = heartbeat.Resources.AvailableVirtualCpuCores,
+                    computePoints = heartbeat.Resources.AvailableVirtualCpuCores,
                     memoryBytes = heartbeat.Resources.AvailableMemoryBytes,
                     storageBytes = heartbeat.Resources.AvailableStorageBytes,
                     //bandwidthMbps = 1000
                 },
-                activeVms = heartbeat.ActiveVmDetails.Select(v => new
+                activeVms = heartbeat.ActiveVms.Select(v => new
                 {
                     vmId = v.VmId,
                     name = v.Name,
@@ -147,6 +147,8 @@ public class OrchestratorClient : IOrchestratorClient
 
             request.Content = JsonContent.Create(payload);
 
+            _logger.LogDebug("Sending heartbeat: {request}", request.Content);
+
             var response = await _httpClient.SendAsync(request, ct);
 
             if (response.IsSuccessStatusCode)
@@ -156,10 +158,10 @@ public class OrchestratorClient : IOrchestratorClient
                 var content = await response.Content.ReadAsStringAsync(ct);
                 await ProcessHeartbeatResponseAsync(content, ct);
 
-                if (heartbeat.ActiveVmDetails.Count > 0)
+                if (heartbeat.ActiveVms.Count > 0)
                 {
                     _logger.LogDebug("Heartbeat sent successfully: {VmCount} VMs",
-                        heartbeat.ActiveVmDetails.Count);
+                        heartbeat.ActiveVms.Count);
                 }
 
                 return true;

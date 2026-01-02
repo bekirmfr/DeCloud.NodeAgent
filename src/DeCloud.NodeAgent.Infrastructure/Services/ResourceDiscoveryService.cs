@@ -516,10 +516,11 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
         return new ResourceSnapshot
         {
-            TotalVirtualCpuCores = cpu.PhysicalCores,
-            UsedVirtualCpuCores = 0,
+            TotalPhysicalCores = cpu.PhysicalCores,
+            TotalVirtualCpuCores = cpu.LogicalCores,
+            UsedVirtualCpuCores = cpu.LogicalCores - cpu.AvailableVCpus,
             VirtualCpuUsagePercent = cpu.UsagePercent,
-            TotalMemoryBytes = memory.TotalBytes - memory.ReservedBytes,
+            TotalMemoryBytes = memory.TotalBytes,
             UsedMemoryBytes = memory.UsedBytes,
             TotalStorageBytes = storage.Sum(s => s.TotalBytes),
             UsedStorageBytes = storage.Sum(s => s.UsedBytes),

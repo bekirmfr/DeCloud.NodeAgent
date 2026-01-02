@@ -276,7 +276,7 @@ public class HeartbeatService : BackgroundService
                 Timestamp = DateTime.UtcNow,
                 Status = _currentStatus,
                 Resources = snapshot,
-                ActiveVmDetails = vmSummaries  // Now includes VncPort, MacAddress, EncryptedPassword
+                ActiveVms = vmSummaries  // Now includes VncPort, MacAddress, EncryptedPassword
             };
 
             // Send heartbeat - OrchestratorClient will transform to API format

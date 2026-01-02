@@ -9,7 +9,7 @@ public class Heartbeat
     public DateTime Timestamp { get; set; }
     public NodeStatus Status { get; set; }
     public ResourceSnapshot Resources { get; set; } = new();
-    public List<VmSummary> ActiveVmDetails { get; set; } = new();
+    public List<VmSummary> ActiveVms { get; set; } = new();
     public CgnatNodeInfo? CgnatInfo { get; set; }
 }
 
@@ -55,11 +55,18 @@ public class HealthCheck
 public class ResourceSnapshot
 {
     // CPU
+    public int TotalPhysicalCores { get; set; }
     public int TotalVirtualCpuCores { get; set; }
     public int UsedVirtualCpuCores { get; set; }
     public int AvailableVirtualCpuCores => TotalVirtualCpuCores - UsedVirtualCpuCores;
     public double VirtualCpuUsagePercent { get; set; }
-    
+
+    // Compute Points
+    public int TotalComputePoints { get; set; }
+    public int UsedComputePoints { get; set; }
+    public int AvailableComputePoints => TotalComputePoints - UsedComputePoints;
+    public double ComputePointUsagePercent => TotalComputePoints == 0 ? 0 : (double)UsedComputePoints / TotalComputePoints * 100.0;
+
     // Memory
     public long TotalMemoryBytes { get; set; }
     public long UsedMemoryBytes { get; set; }
