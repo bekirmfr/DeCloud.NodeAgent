@@ -130,7 +130,7 @@ public class OrchestratorClient : IOrchestratorClient
                     vmId = v.VmId,
                     name = v.Name,
                     state = v.State.ToString(),  // Convert enum to string
-                    ownerId = v.OwnerId,
+                    ownerId = v.OwnerId ?? string.Empty,
                     isIpAssigned = v.IsIpAssigned,
                     ipAddress = v.IpAddress,
                     macAddress = v.MacAddress,
