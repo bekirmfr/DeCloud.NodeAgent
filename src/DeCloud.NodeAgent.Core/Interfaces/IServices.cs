@@ -120,6 +120,7 @@ public class PendingCommand
     public string CommandId { get; set; } = string.Empty;
     public CommandType Type { get; set; }
     public string Payload { get; set; } = string.Empty;  // JSON payload
+    public bool RequiresAck { get; set; } = true;
     public DateTime IssuedAt { get; set; }
 }
 

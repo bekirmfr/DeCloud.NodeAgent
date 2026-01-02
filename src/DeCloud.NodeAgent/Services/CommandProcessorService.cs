@@ -84,7 +84,7 @@ public class CommandProcessorService : BackgroundService
             try
             {
                 var success = await ExecuteCommandAsync(command, ct);
-                await _orchestratorClient.AcknowledgeCommandAsync(
+                if (command.RequiresAck) await _orchestratorClient.AcknowledgeCommandAsync(
                     command.CommandId, success, null, ct);
 
                 _logger.LogInformation("Command {CommandId} completed: {Success}", command.CommandId, success);
@@ -92,7 +92,7 @@ public class CommandProcessorService : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Command {CommandId} failed", command.CommandId);
-                await _orchestratorClient.AcknowledgeCommandAsync(
+                if (command.RequiresAck) await _orchestratorClient.AcknowledgeCommandAsync(
                     command.CommandId, false, ex.Message, ct);
             }
         }
