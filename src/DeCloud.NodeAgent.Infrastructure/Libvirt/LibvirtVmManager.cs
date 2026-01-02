@@ -1101,19 +1101,25 @@ public class LibvirtVmManager : IVmManager
 
             if (hasPassword && spec.VmType != VmType.Relay)
             {
-                var sb = new StringBuilder();
-                sb.AppendLine("  # Enable password authentication for SSH");
-                sb.AppendLine("  - sed -i 's/^#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config");
-                sb.AppendLine("  - sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config");
-                sb.AppendLine("  - sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config");
-                sb.AppendLine("  - sed -i 's/^#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config");
-                sb.AppendLine("  - systemctl restart sshd || systemctl restart ssh");
+                // Generate a single compound command with && to chain multiple operations
+                var commands = new[]
+                {
+        "sed -i 's/^#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config",
+        "sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config",
+        "sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config",
+        "sed -i 's/^#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config",
+        "systemctl restart sshd || systemctl restart ssh"
+    };
 
-                passwordSshCommandsBlock = sb.ToString().TrimEnd();
+                // Join with && to make one compound command
+                passwordSshCommandsBlock = string.Join(" && ", commands);
+
+                _logger.LogInformation("VM {VmId}: Password authentication will be enabled via compound command", spec.Id);
             }
             else
             {
-                passwordSshCommandsBlock = "  # Password authentication disabled";
+                // When no password, use a no-op command
+                passwordSshCommandsBlock = "echo 'Password authentication not configured'";
             }
 
             variables["__PASSWORD_SSH_COMMANDS_BLOCK__"] = passwordSshCommandsBlock;
