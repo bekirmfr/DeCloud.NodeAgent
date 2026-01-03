@@ -22,7 +22,7 @@ disable_root: false
 
 # Password authentication (placeholder will be replaced with actual block)
 # Format: chpasswd:\n  list: |\n    root:password
-# __PASSWORD_CONFIG_BLOCK__
+__PASSWORD_CONFIG_BLOCK__
 
 # SSH password authentication flag
 ssh_pwauth: __SSH_PASSWORD_AUTH__
