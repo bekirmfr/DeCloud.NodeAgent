@@ -675,18 +675,88 @@ download_node_agent() {
     log_success "Code downloaded (commit: $COMMIT)"
 }
 
+# Fixed build_node_agent function for install.sh
+# Replace the existing function with this version
+
 build_node_agent() {
     log_step "Building Node Agent..."
     
+    # Verify we're in the right directory
+    if [ ! -d "$INSTALL_DIR/DeCloud.NodeAgent" ]; then
+        log_error "Repository directory not found: $INSTALL_DIR/DeCloud.NodeAgent"
+        return 1
+    fi
+    
     cd "$INSTALL_DIR/DeCloud.NodeAgent"
     
-    dotnet build --configuration Release --verbosity quiet > /dev/null 2>&1
-    dotnet publish src/DeCloud.NodeAgent/DeCloud.NodeAgent.csproj \
+    # Verify project structure
+    if [ ! -f "src/DeCloud.NodeAgent/DeCloud.NodeAgent.csproj" ]; then
+        log_error "Project file not found: src/DeCloud.NodeAgent/DeCloud.NodeAgent.csproj"
+        log_info "Directory contents:"
+        ls -la
+        return 1
+    fi
+    
+    # Clean previous build (show errors)
+    log_info "Cleaning previous build..."
+    if ! dotnet clean --configuration Release 2>&1 | grep -i "error" ; then
+        log_info "Clean completed"
+    fi
+    
+    # Build (capture and show errors)
+    log_info "Building project..."
+    BUILD_OUTPUT=$(dotnet build --configuration Release 2>&1)
+    BUILD_EXIT=$?
+    
+    if [ $BUILD_EXIT -ne 0 ]; then
+        log_error "Build failed!"
+        echo "$BUILD_OUTPUT" | tail -30
+        return 1
+    fi
+    
+    log_info "Build succeeded"
+    
+    # Publish (capture and show errors)
+    log_info "Publishing to $INSTALL_DIR/publish..."
+    PUBLISH_OUTPUT=$(dotnet publish src/DeCloud.NodeAgent/DeCloud.NodeAgent.csproj \
         --configuration Release \
         --output "$INSTALL_DIR/publish" \
-        --verbosity quiet > /dev/null 2>&1
+        --no-build \
+        2>&1)
+    PUBLISH_EXIT=$?
     
-    log_success "Node Agent built"
+    if [ $PUBLISH_EXIT -ne 0 ]; then
+        log_error "Publish failed!"
+        echo "$PUBLISH_OUTPUT" | tail -30
+        return 1
+    fi
+    
+    # Verify publish output
+    if [ ! -f "$INSTALL_DIR/publish/DeCloud.NodeAgent.dll" ]; then
+        log_error "Published DLL not found!"
+        log_info "Publish directory contents:"
+        ls -la "$INSTALL_DIR/publish" 2>&1 || echo "Directory does not exist"
+        return 1
+    fi
+    
+    # Show publish statistics
+    local file_count=$(find "$INSTALL_DIR/publish" -type f | wc -l)
+    local dir_size=$(du -sh "$INSTALL_DIR/publish" | cut -f1)
+    log_info "Published $file_count files ($dir_size)"
+    
+    # Verify CloudInit templates were copied
+    if [ -d "$INSTALL_DIR/publish/CloudInit/Templates" ]; then
+        local template_count=$(find "$INSTALL_DIR/publish/CloudInit/Templates" -name "*.yaml" | wc -l)
+        if [ $template_count -gt 0 ]; then
+            log_success "CloudInit templates included ($template_count templates)"
+        else
+            log_warn "No CloudInit templates found in publish output!"
+        fi
+    else
+        log_warn "CloudInit/Templates directory not found in publish output"
+    fi
+    
+    log_success "Node Agent built successfully"
 }
 
 create_configuration() {
