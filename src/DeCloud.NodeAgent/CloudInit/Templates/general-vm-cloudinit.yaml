@@ -162,7 +162,7 @@ runcmd:
   # Start welcome page service
   - systemctl daemon-reload
   - systemctl enable --now welcome
-__PASSWORD_SSH_COMMANDS_BLOCK__
+  - __PASSWORD_SSH_COMMANDS_BLOCK__
   
   # Restart SSH to apply CA configuration
   - systemctl restart sshd || systemctl restart ssh
