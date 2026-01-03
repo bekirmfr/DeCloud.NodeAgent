@@ -30,7 +30,7 @@ write_files:
       [Interface]
       # Relay server listening on all interfaces
       Address = 10.20.0.254/24
-      PrivateKey = __RELAY_PRIVATE_KEY__
+      PrivateKey = __WIREGUARD_PRIVATE_KEY__
       ListenPort = 51820
       
       # Enable IP forwarding
@@ -54,13 +54,13 @@ write_files:
   - path: /etc/wireguard/private.key
     permissions: '0600'
     content: |
-      __RELAY_PRIVATE_KEY__
+      __WIREGUARD_PRIVATE_KEY__
 
   # Store relay public key
   - path: /etc/wireguard/public.key
     permissions: '0644'
     content: |
-      __RELAY_PUBLIC_KEY__
+      __WIREGUARD_PUBLIC_KEY__
 
   # Nginx reverse proxy configuration
   - path: /etc/nginx/sites-available/relay-proxy
@@ -259,7 +259,7 @@ write_files:
         "region": "__RELAY_REGION__",
         "max_capacity": __RELAY_CAPACITY__,
         "wireguard_endpoint": "__PUBLIC_IP__:51820",
-        "wireguard_public_key": "__RELAY_PUBLIC_KEY__",
+        "wireguard_public_key": "__WIREGUARD_PUBLIC_KEY__",
         "orchestrator_public_key": "__ORCHESTRATOR_PUBLIC_KEY__",
         "created_at": "__TIMESTAMP__",
         "version": "2.0"
@@ -318,7 +318,7 @@ runcmd:
   - echo "DeCloud relay VM bootstrap complete at $(date)" > /var/log/decloud-relay-bootstrap.log
   - echo "Relay ID: __VM_ID__" >> /var/log/decloud-relay-bootstrap.log
   - echo "Region: __RELAY_REGION__" >> /var/log/decloud-relay-bootstrap.log
-  - echo "WireGuard Public Key: __RELAY_PUBLIC_KEY__" >> /var/log/decloud-relay-bootstrap.log
+  - echo "WireGuard Public Key: __WIREGUARD_PUBLIC_KEY__" >> /var/log/decloud-relay-bootstrap.log
   - echo "Orchestrator Public Key: __ORCHESTRATOR_PUBLIC_KEY__" >> /var/log/decloud-relay-bootstrap.log
   - echo "Orchestrator peer configured: YES" >> /var/log/decloud-relay-bootstrap.log
 
