@@ -150,25 +150,53 @@ public class CloudInitTemplateService : ICloudInitTemplateService
         // Build template variables
         var variables = await BuildTemplateVariablesAsync(vmType, spec, ct);
 
-        // Merge additional variables if provided
+        // Get base replacements dictionary first
+        var replacements = variables.ToDictionary();
+
+        // Merge additionalVariables DIRECTLY (don't go through Custom)
         if (additionalVariables != null)
         {
             foreach (var (key, value) in additionalVariables)
             {
-                variables.Custom[key] = value;
+                // Keys already have __ prefix/suffix from LibvirtVmManager
+                replacements[key] = value;
             }
         }
 
         // Replace variables in template
-        var processed = ReplaceTemplateVariables(template, variables);
+        var result = template;
+        foreach (var (placeholder, value) in replacements)
+        {
+            result = result.Replace(placeholder, value);
+        }
+
+        // Validate no unreplaced placeholders remain
+        if (result.Contains("__"))
+        {
+            var unreplaced = System.Text.RegularExpressions.Regex.Matches(
+                result, @"__[A-Z_]+__")
+                .Select(m => m.Value)
+                .Distinct()
+                .ToList();
+
+            if (unreplaced.Any())
+            {
+                _logger.LogWarning(
+                    "Template has unreplaced placeholders: {Placeholders}",
+                    string.Join(", ", unreplaced));
+            }
+            else
+            {
+                _logger.LogDebug("✓ All placeholders successfully replaced");
+            }
+        }
 
         _logger.LogInformation(
             "Cloud-init template processed for VM {VmId} (type: {VmType})",
             spec.Id, vmType);
 
-        return processed;
+        return result;
     }
-
     private async Task<string> LoadTemplateAsync(VmType vmType, CancellationToken ct)
     {
         await _cacheLock.WaitAsync(ct);
