@@ -1,147 +1,131 @@
 #cloud-config
+# DeCloud Relay VM Cloud-Init Configuration
+# This VM serves as a WireGuard relay for CGNAT nodes
+# Version: 2.0 (with orchestrator peer pre-configured)
 
-# DeCloud Relay VM Bootstrap Configuration
-# This VM acts as a WireGuard relay and reverse proxy for CGNAT nodes
-# Provides: WireGuard server, Nginx reverse proxy, Management API, Firewall
-
-hostname: __HOSTNAME__
-
-manage_etc_hosts: true
+hostname: __VM_NAME__
 
 # =====================================================
-# SYSTEM UPDATES
-# =====================================================
-package_update: true
-package_upgrade: true
-
-# =====================================================
-# REQUIRED PACKAGES
+# SYSTEM PACKAGES
 # =====================================================
 packages:
   - wireguard
   - wireguard-tools
   - nginx
-  - iptables
-  - curl
-  - wget
-  - net-tools
-  - htop
   - fail2ban
-  - ufw
+  - qemu-guest-agent
   - python3
   - python3-pip
-  - qemu-guest-agent
+  - curl
+  - jq
 
 # =====================================================
-# CRITICAL: Regenerate machine-id
-# =====================================================
-bootcmd:
-  - rm -f /etc/machine-id /var/lib/dbus/machine-id
-  - systemd-machine-id-setup
-
-# =====================================================
-# USER CONFIGURATION
-# Relay VMs use ubuntu user (no root login for security)
-# =====================================================
-disable_root: true
-
-users:
-  - name: ubuntu
-    lock_passwd: true
-    sudo: ['ALL=(ALL) NOPASSWD:ALL']
-    shell: /bin/bash
-
-ssh_pwauth: false
-
-# =====================================================
-# FILES CONFIGURATION
+# SYSTEM CONFIGURATION
 # =====================================================
 write_files:
-  # WireGuard configuration template
-  - path: /etc/wireguard/wg0.conf
+  # WireGuard configuration (includes orchestrator as peer)
+  - path: /etc/wireguard/wg-relay-server.conf
     permissions: '0600'
     content: |
       [Interface]
-      PrivateKey = __WIREGUARD_PRIVATE_KEY__
-      Address = 10.20.0.1/16
+      # Relay server listening on all interfaces
+      Address = 10.20.0.254/24
+      PrivateKey = __RELAY_PRIVATE_KEY__
       ListenPort = 51820
-      PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-      PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
       
-      # CGNAT node peers will be added dynamically via API
-      # Use: POST /api/relay/add-peer with {public_key, tunnel_ip}
-  
+      # Enable IP forwarding
+      PostUp = iptables -A FORWARD -i wg-relay-server -j ACCEPT
+      PostUp = iptables -A FORWARD -o wg-relay-server -j ACCEPT
+      PostUp = iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+      PreDown = iptables -D FORWARD -i wg-relay-server -j ACCEPT
+      PreDown = iptables -D FORWARD -o wg-relay-server -j ACCEPT
+      PreDown = iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+      
+      # Orchestrator peer (pre-configured during provisioning)
+      [Peer]
+      # DeCloud Orchestrator
+      PublicKey = __ORCHESTRATOR_PUBLIC_KEY__
+      AllowedIPs = 10.20.0.1/32
+      PersistentKeepalive = 25
+      
+      # NOTE: CGNAT nodes will be added dynamically by relay API
+
+  # Store relay private key separately
+  - path: /etc/wireguard/private.key
+    permissions: '0600'
+    content: |
+      __RELAY_PRIVATE_KEY__
+
+  # Store relay public key
+  - path: /etc/wireguard/public.key
+    permissions: '0644'
+    content: |
+      __RELAY_PUBLIC_KEY__
+
   # Nginx reverse proxy configuration
   - path: /etc/nginx/sites-available/relay-proxy
     permissions: '0644'
     content: |
-      # Relay proxy configuration for CGNAT nodes
-      upstream cgnat_nodes {
-          least_conn;
-          # CGNAT node backends added dynamically
-          # Use: POST /api/relay/add-backend with {node_id, backend_ip, backend_port}
-      }
-      
+      # HTTP proxy for CGNAT node traffic
       server {
           listen 80 default_server;
           listen [::]:80 default_server;
           
           server_name _;
           
-          # Health check endpoint
+          # Health check
           location /health {
-              access_log off;
               return 200 "OK\n";
               add_header Content-Type text/plain;
           }
           
-          # Relay status page
-          location /relay/status {
-              default_type application/json;
-              return 200 '{"relay_id":"__VM_ID__","status":"online","region":"__RELAY_REGION__","capacity":__RELAY_CAPACITY__}';
-          }
-          
-          # Proxy to CGNAT nodes
-          location / {
-              proxy_pass http://cgnat_nodes;
-              proxy_set_header Host $host;
-              proxy_set_header X-Real-IP $remote_addr;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto $scheme;
-              
-              # WebSocket support
-              proxy_http_version 1.1;
-              proxy_set_header Upgrade $http_upgrade;
-              proxy_set_header Connection "upgrade";
-              
-              # Timeouts
-              proxy_connect_timeout 60s;
-              proxy_send_timeout 60s;
-              proxy_read_timeout 60s;
-          }
+          # Proxy to CGNAT nodes (added dynamically)
+          # Managed by relay API
       }
-  
+
   # Relay management API
-  - path: /opt/decloud-relay/relay-api.py
+  - path: /etc/systemd/system/decloud-relay-api.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=DeCloud Relay Management API
+      After=network.target wg-quick@wg-relay-server.service
+      Wants=wg-quick@wg-relay-server.service
+      
+      [Service]
+      Type=simple
+      ExecStart=/usr/bin/python3 /opt/decloud-relay/api.py
+      Restart=always
+      RestartSec=10
+      
+      [Install]
+      WantedBy=multi-user.target
+
+  # Relay API script (Python)
+  - path: /opt/decloud-relay/api.py
     permissions: '0755'
     content: |
       #!/usr/bin/env python3
       """
       DeCloud Relay Management API
-      Provides endpoints for dynamic peer and backend management
+      Handles dynamic CGNAT peer management
       """
-      from http.server import HTTPServer, BaseHTTPRequestHandler
       import json
       import subprocess
       import logging
+      from http.server import HTTPServer, BaseHTTPRequestHandler
       
       logging.basicConfig(level=logging.INFO)
-      logger = logging.getLogger('relay-api')
+      logger = logging.getLogger(__name__)
       
-      class RelayAPI(BaseHTTPRequestHandler):
+      RELAY_ID = "__VM_ID__"
+      RELAY_CAPACITY = __RELAY_CAPACITY__
+      RELAY_REGION = "__RELAY_REGION__"
+      
+      class RelayAPIHandler(BaseHTTPRequestHandler):
           def log_message(self, format, *args):
               logger.info("%s - - [%s] %s" % (
-                  self.client_address[0],
+                  self.address_string(),
                   self.log_date_time_string(),
                   format % args))
           
@@ -153,18 +137,24 @@ write_files:
                   
                   # Get WireGuard status
                   try:
-                      result = subprocess.run(['wg', 'show', 'wg0'], 
-                                            capture_output=True, text=True)
+                      result = subprocess.run(
+                          ['wg', 'show', 'wg-relay-server'],
+                          capture_output=True,
+                          text=True)
                       peer_count = result.stdout.count('peer:')
+                      
+                      # Orchestrator peer doesn't count toward capacity
+                      cgnat_peer_count = max(0, peer_count - 1)
                   except:
-                      peer_count = 0
+                      cgnat_peer_count = 0
                   
                   status = {
-                      'relay_id': '__VM_ID__',
+                      'relay_id': RELAY_ID,
                       'status': 'online',
-                      'region': '__RELAY_REGION__',
-                      'capacity': __RELAY_CAPACITY__,
-                      'connected_peers': peer_count
+                      'region': RELAY_REGION,
+                      'max_capacity': RELAY_CAPACITY,
+                      'current_load': cgnat_peer_count,
+                      'available_slots': max(0, RELAY_CAPACITY - cgnat_peer_count)
                   }
                   self.wfile.write(json.dumps(status).encode())
               else:
@@ -175,8 +165,6 @@ write_files:
                   self.add_wireguard_peer()
               elif self.path == '/api/relay/remove-peer':
                   self.remove_wireguard_peer()
-              elif self.path == '/api/relay/add-backend':
-                  self.add_nginx_backend()
               else:
                   self.send_error(404)
           
@@ -186,28 +174,27 @@ write_files:
                   post_data = self.rfile.read(content_length)
                   peer = json.loads(post_data)
                   
-                  # Validate required fields
                   if 'public_key' not in peer or 'tunnel_ip' not in peer:
                       self.send_error(400, 'Missing public_key or tunnel_ip')
                       return
                   
                   # Add WireGuard peer
                   cmd = [
-                      'wg', 'set', 'wg0',
+                      'wg', 'set', 'wg-relay-server',
                       'peer', peer['public_key'],
                       'allowed-ips', peer['tunnel_ip'] + '/32'
                   ]
                   
-                  if 'endpoint' in peer:
-                      cmd.extend(['endpoint', peer['endpoint']])
+                  if 'persistent_keepalive' in peer:
+                      cmd.extend(['persistent-keepalive', str(peer['persistent_keepalive'])])
                   
                   result = subprocess.run(cmd, capture_output=True)
                   
                   if result.returncode == 0:
-                      logger.info(f"Added WireGuard peer: {peer['public_key'][:12]}...")
+                      logger.info(f"Added WireGuard peer: {peer['public_key'][:12]}... -> {peer['tunnel_ip']}")
                       
                       # Persist configuration
-                      subprocess.run(['wg-quick', 'save', 'wg0'])
+                      subprocess.run(['wg-quick', 'save', 'wg-relay-server'])
                       
                       self.send_response(200)
                       self.send_header('Content-Type', 'application/json')
@@ -233,12 +220,12 @@ write_files:
                       self.send_error(400, 'Missing public_key')
                       return
                   
-                  cmd = ['wg', 'set', 'wg0', 'peer', peer['public_key'], 'remove']
+                  cmd = ['wg', 'set', 'wg-relay-server', 'peer', peer['public_key'], 'remove']
                   result = subprocess.run(cmd, capture_output=True)
                   
                   if result.returncode == 0:
                       logger.info(f"Removed WireGuard peer: {peer['public_key'][:12]}...")
-                      subprocess.run(['wg-quick', 'save', 'wg0'])
+                      subprocess.run(['wg-quick', 'save', 'wg-relay-server'])
                       
                       self.send_response(200)
                       self.send_header('Content-Type', 'application/json')
@@ -248,60 +235,20 @@ write_files:
                           'message': 'Peer removed successfully'
                       }).encode())
                   else:
+                      logger.error(f"Failed to remove peer: {result.stderr.decode()}")
                       self.send_error(500, result.stderr.decode())
               except Exception as e:
                   logger.exception("Error removing peer")
                   self.send_error(500, str(e))
-          
-          def add_nginx_backend(self):
-              try:
-                  content_length = int(self.headers['Content-Length'])
-                  post_data = self.rfile.read(content_length)
-                  backend = json.loads(post_data)
-                  
-                  # TODO: Implement dynamic nginx backend management
-                  # This requires nginx with ngx_http_api_module or dynamic reconfiguration
-                  
-                  logger.info(f"Backend registration request: {backend}")
-                  
-                  self.send_response(200)
-                  self.send_header('Content-Type', 'application/json')
-                  self.end_headers()
-                  self.wfile.write(json.dumps({
-                      'status': 'accepted',
-                      'message': 'Backend registered (requires nginx reload)'
-                  }).encode())
-              except Exception as e:
-                  logger.exception("Error adding backend")
-                  self.send_error(500, str(e))
       
       if __name__ == '__main__':
-          logger.info('Starting DeCloud Relay API on port 8080')
-          server = HTTPServer(('0.0.0.0', 8080), RelayAPI)
-          try:
-              server.serve_forever()
-          except KeyboardInterrupt:
-              logger.info('Shutting down relay API')
-              server.shutdown()
-  
-  # Relay API systemd service
-  - path: /etc/systemd/system/decloud-relay-api.service
-    permissions: '0644'
-    content: |
-      [Unit]
-      Description=DeCloud Relay Management API
-      After=network.target wireguard@wg0.service
-      
-      [Service]
-      Type=simple
-      User=root
-      ExecStart=/usr/bin/python3 /opt/decloud-relay/relay-api.py
-      Restart=always
-      RestartSec=10
-      
-      [Install]
-      WantedBy=multi-user.target
-  
+          server = HTTPServer(('0.0.0.0', 8080), RelayAPIHandler)
+          logger.info(f"Relay API listening on port 8080")
+          logger.info(f"Relay ID: {RELAY_ID}")
+          logger.info(f"Region: {RELAY_REGION}")
+          logger.info(f"Capacity: {RELAY_CAPACITY}")
+          server.serve_forever()
+
   # DeCloud relay metadata
   - path: /etc/decloud/relay-info.json
     permissions: '0644'
@@ -312,8 +259,10 @@ write_files:
         "region": "__RELAY_REGION__",
         "max_capacity": __RELAY_CAPACITY__,
         "wireguard_endpoint": "__PUBLIC_IP__:51820",
-        "wireguard_public_key": "__WIREGUARD_PUBLIC_KEY__",
-        "created_at": "__TIMESTAMP__"
+        "wireguard_public_key": "__RELAY_PUBLIC_KEY__",
+        "orchestrator_public_key": "__ORCHESTRATOR_PUBLIC_KEY__",
+        "created_at": "__TIMESTAMP__",
+        "version": "2.0"
       }
 
 # =====================================================
@@ -338,9 +287,12 @@ runcmd:
   - systemctl enable qemu-guest-agent
   - systemctl start qemu-guest-agent
   
-  # Start WireGuard
-  - systemctl enable wg-quick@wg0
-  - systemctl start wg-quick@wg0
+  # Start WireGuard (orchestrator peer already configured)
+  - systemctl enable wg-quick@wg-relay-server
+  - systemctl start wg-relay-server 2>/dev/null || wg-quick up wg-relay-server
+  
+  # Verify orchestrator peer is configured
+  - wg show wg-relay-server | grep -A 5 "__ORCHESTRATOR_PUBLIC_KEY__" || echo "WARNING: Orchestrator peer not found!"
   
   # Configure and start Nginx
   - ln -sf /etc/nginx/sites-available/relay-proxy /etc/nginx/sites-enabled/
@@ -366,6 +318,8 @@ runcmd:
   - echo "DeCloud relay VM bootstrap complete at $(date)" > /var/log/decloud-relay-bootstrap.log
   - echo "Relay ID: __VM_ID__" >> /var/log/decloud-relay-bootstrap.log
   - echo "Region: __RELAY_REGION__" >> /var/log/decloud-relay-bootstrap.log
-  - echo "WireGuard Public Key: __WIREGUARD_PUBLIC_KEY__" >> /var/log/decloud-relay-bootstrap.log
+  - echo "WireGuard Public Key: __RELAY_PUBLIC_KEY__" >> /var/log/decloud-relay-bootstrap.log
+  - echo "Orchestrator Public Key: __ORCHESTRATOR_PUBLIC_KEY__" >> /var/log/decloud-relay-bootstrap.log
+  - echo "Orchestrator peer configured: YES" >> /var/log/decloud-relay-bootstrap.log
 
-final_message: "DeCloud Relay VM __VM_NAME__ is ready! WireGuard endpoint: __PUBLIC_IP__:51820"
+final_message: "DeCloud Relay VM __VM_NAME__ is ready! Orchestrator peer pre-configured. WireGuard endpoint: __PUBLIC_IP__:51820"
