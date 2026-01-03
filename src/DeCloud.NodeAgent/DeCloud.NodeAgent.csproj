@@ -16,6 +16,7 @@
 	    <!-- Include all cloud-init templates in build output -->
 	    <None Update="CloudInit\Templates\*.yaml">
 		    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
 	    </None>
     </ItemGroup>
 
