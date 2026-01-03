@@ -292,7 +292,7 @@ runcmd:
   - systemctl start wg-relay-server 2>/dev/null || wg-quick up wg-relay-server
   
   # Verify orchestrator peer is configured
-  - wg show wg-relay-server | grep -A 5 "__ORCHESTRATOR_PUBLIC_KEY__" || echo "WARNING: Orchestrator peer not found!"
+  - wg show wg-relay-server | grep -A 5 "__ORCHESTRATOR_PUBLIC_KEY__" || echo "WARNING - Orchestrator peer not found!"
   
   # Configure and start Nginx
   - ln -sf /etc/nginx/sites-available/relay-proxy /etc/nginx/sites-enabled/
