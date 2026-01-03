@@ -72,44 +72,65 @@ public class CachedImage
 /// </summary>
 public interface INetworkManager
 {
+    /// <summary>
+    /// Get the node's WireGuard public key
+    /// </summary>
     Task<string> GetWireGuardPublicKeyAsync(CancellationToken ct = default);
 
     /// <summary>
-    /// Add peer to specified WireGuard interface
+    /// Add a peer to a specific WireGuard interface
     /// </summary>
-    /// <param name="interfaceName">Interface name (e.g., wg-relay, wg-hub)</param>
+    /// <param name="interfaceName">WireGuard interface name (e.g., wg-relay, wg-hub, wg-relay-server)</param>
+    /// <param name="publicKey">Peer's WireGuard public key</param>
+    /// <param name="endpoint">Peer's endpoint (IP:port)</param>
+    /// <param name="allowedIps">Comma-separated list of allowed IPs</param>
     Task AddPeerAsync(
-        string interfaceName,  // ← ADDED
+        string interfaceName,
         string publicKey,
         string endpoint,
         string allowedIps,
         CancellationToken ct = default);
 
     /// <summary>
-    /// Remove peer from specified WireGuard interface
+    /// Remove a peer from a specific WireGuard interface
     /// </summary>
-    /// <param name="interfaceName">Interface name (e.g., wg-relay, wg-hub)</param>
+    /// <param name="interfaceName">WireGuard interface name (e.g., wg-relay, wg-hub, wg-relay-server)</param>
+    /// <param name="publicKey">Peer's WireGuard public key</param>
     Task RemovePeerAsync(
-        string interfaceName,  // ← ADDED
+        string interfaceName,
         string publicKey,
         CancellationToken ct = default);
 
     /// <summary>
-    /// Get peers from specified WireGuard interface
+    /// Get all peers from a specific WireGuard interface
     /// </summary>
-    /// <param name="interfaceName">Interface name (e.g., wg-relay, wg-hub)</param>
+    /// <param name="interfaceName">WireGuard interface name (e.g., wg-relay, wg-hub, wg-relay-server)</param>
     Task<List<WireGuardPeer>> GetPeersAsync(
-        string interfaceName,  // ← ADDED
+        string interfaceName,
         CancellationToken ct = default);
 
-    // VM networking - unchanged
-    Task<string> CreateVmNetworkAsync(string vmId, VmNetworkConfig config, CancellationToken ct = default);
-    Task DeleteVmNetworkAsync(string vmId, CancellationToken ct = default);
+    /// <summary>
+    /// Create network interface for a VM
+    /// </summary>
+    Task<string> CreateVmNetworkAsync(
+        string vmId,
+        VmNetworkConfig config,
+        CancellationToken ct = default);
 
     /// <summary>
-    /// Start WireGuard interface using wg-quick
+    /// Delete network interface for a VM
     /// </summary>
-    Task<bool> StartWireGuardInterfaceAsync(string interfaceName, CancellationToken ct = default);
+    Task DeleteVmNetworkAsync(
+        string vmId,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Start a WireGuard interface using wg-quick
+    /// </summary>
+    /// <param name="interfaceName">Interface name to start (e.g., wg-relay, wg-hub)</param>
+    Task<bool> StartWireGuardInterfaceAsync(
+        string interfaceName,
+        CancellationToken ct = default);
 }
 
 public class WireGuardPeer

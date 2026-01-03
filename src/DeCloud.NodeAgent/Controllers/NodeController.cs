@@ -10,18 +10,15 @@ namespace DeCloud.NodeAgent.Controllers;
 public class NodeController : ControllerBase
 {
     private readonly IResourceDiscoveryService _resourceDiscovery;
-    private readonly INetworkManager _networkManager;
     private readonly IOrchestratorClient _orchestratorClient;
     private readonly ILogger<NodeController> _logger;
 
     public NodeController(
         IResourceDiscoveryService resourceDiscovery,
-        INetworkManager networkManager,
         IOrchestratorClient orchestratorClient,
         ILogger<NodeController> logger)
     {
         _resourceDiscovery = resourceDiscovery;
-        _networkManager = networkManager;
         _orchestratorClient = orchestratorClient;
         _logger = logger;
     }
@@ -94,26 +91,6 @@ public class NodeController : ControllerBase
     {
         var network = await _resourceDiscovery.GetNetworkInfoAsync(ct);
         return Ok(network);
-    }
-
-    /// <summary>
-    /// Get WireGuard peers
-    /// </summary>
-    [HttpGet("wireguard/peers")]
-    public async Task<ActionResult<List<WireGuardPeer>>> GetWireGuardPeers(CancellationToken ct)
-    {
-        var peers = await _networkManager.GetPeersAsync(ct);
-        return Ok(peers);
-    }
-
-    /// <summary>
-    /// Get WireGuard public key
-    /// </summary>
-    [HttpGet("wireguard/pubkey")]
-    public async Task<ActionResult<string>> GetWireGuardPublicKey(CancellationToken ct)
-    {
-        var pubkey = await _networkManager.GetWireGuardPublicKeyAsync(ct);
-        return Ok(pubkey);
     }
 
     /// <summary>
