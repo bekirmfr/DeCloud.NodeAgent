@@ -1,4 +1,4 @@
-// Sends enhanced heartbeat with detailed VM information
+﻿// Sends enhanced heartbeat with detailed VM information
 
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
@@ -249,15 +249,47 @@ public class OrchestratorClient : IOrchestratorClient
                 }
             }
 
-            if (data.TryGetProperty("cgnatInfo", out var cgnatInfo) && cgnatInfo.ValueKind != JsonValueKind.Null)
+            // ========================================
+            // Extract and store cgnatInfo
+            // ========================================
+            if (data.TryGetProperty("cgnatInfo", out var cgnatInfoElement) &&
+                cgnatInfoElement.ValueKind != JsonValueKind.Null)
             {
+                var relayId = cgnatInfoElement.GetProperty("assignedRelayNodeId").GetString();
+                var tunnelIp = cgnatInfoElement.GetProperty("tunnelIp").GetString() ?? "";
+                var wgConfig = cgnatInfoElement.TryGetProperty("wireGuardConfig", out var wgConfigProp)
+                    ? wgConfigProp.GetString()
+                    : null;
+                var publicEndpoint = cgnatInfoElement.TryGetProperty("publicEndpoint", out var endpointProp)
+                    ? endpointProp.GetString() ?? ""
+                    : "";
+
                 _logger.LogInformation(
                     "Received relay assignment: Relay {RelayId}, Tunnel IP {TunnelIp}",
-                    cgnatInfo.GetProperty("assignedRelayNodeId"),
-                    cgnatInfo.GetProperty("tunnelIp"));
+                    relayId, tunnelIp);
 
-                // TODO: Store this for WireGuardAutoConfigService to use
-                // For now, just log it
+                // Store cgnatInfo in the heartbeat
+                if (_lastHeartbeat != null)
+                {
+                    _lastHeartbeat.CgnatInfo = new CgnatNodeInfo
+                    {
+                        AssignedRelayNodeId = relayId,
+                        TunnelIp = tunnelIp,
+                        WireGuardConfig = wgConfig,
+                        PublicEndpoint = publicEndpoint,
+                        TunnelStatus = TunnelStatus.Disconnected, // WireGuard will update this
+                        LastHandshake = null
+                    };
+
+                    _logger.LogInformation(
+                        "✓ Stored CGNAT info in heartbeat for WireGuard configuration");
+                }
+            }
+            else if (_lastHeartbeat != null && _lastHeartbeat.CgnatInfo != null)
+            {
+                // No cgnatInfo in response but we had it before - clear it
+                _logger.LogInformation("Clearing previous CGNAT info - node no longer behind NAT");
+                _lastHeartbeat.CgnatInfo = null;
             }
         }
         catch (Exception ex)
