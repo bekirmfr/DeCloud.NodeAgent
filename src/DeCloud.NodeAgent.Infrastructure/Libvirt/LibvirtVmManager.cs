@@ -1151,6 +1151,34 @@ public class LibvirtVmManager : IVmManager
             }
 
             // =====================================================
+            // STEP 5.5: Orchestrator Public Key (for Relay VMs)
+            // =====================================================
+            if (spec.VmType == VmType.Relay)
+            {
+                const string orchestratorPubKeyPath = "/etc/wireguard/orchestrator-public.key";
+
+                if (File.Exists(orchestratorPubKeyPath))
+                {
+                    var orchestratorPublicKey = await File.ReadAllTextAsync(orchestratorPubKeyPath, ct);
+                    variables["__ORCHESTRATOR_PUBLIC_KEY__"] = orchestratorPublicKey.Trim();
+
+                    _logger.LogInformation(
+                        "VM {VmId}: Including orchestrator WireGuard public key for relay peer pre-configuration",
+                        spec.Id);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "VM {VmId}: Orchestrator WireGuard public key not found at {Path} - " +
+                        "relay will not have orchestrator peer pre-configured! " +
+                        "Ensure orchestrator was installed with --enable-wireguard flag.",
+                        spec.Id, orchestratorPubKeyPath);
+
+                    variables["__ORCHESTRATOR_PUBLIC_KEY__"] = "# ERROR: Orchestrator public key not available";
+                }
+            }
+
+            // =====================================================
             // STEP 6: Process template using CloudInitTemplateService
             // =====================================================
             string cloudInitYaml;
