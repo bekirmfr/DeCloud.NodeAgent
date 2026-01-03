@@ -39,6 +39,19 @@ write_files:
     content: |
       __CA_PUBLIC_KEY__
 
+
+  # Universal SSH Password Authentication
+  - path: /etc/ssh/sshd_config.d/99-decloud-password-auth.conf
+    permissions: '0644'
+    owner: root:root
+    content: |
+      # DeCloud: Enable password authentication for root
+      # This file has priority over cloud-init's 50-cloud-init.conf
+      PasswordAuthentication yes
+      PermitRootLogin yes
+      ChallengeResponseAuthentication no
+      UsePAM yes
+
   # DeCloud Welcome Page HTML
   - path: /var/www/index.html
     permissions: '0644'
@@ -162,9 +175,8 @@ runcmd:
   # Start welcome page service
   - systemctl daemon-reload
   - systemctl enable --now welcome
-  - __PASSWORD_SSH_COMMANDS_BLOCK__
   
-  # Restart SSH to apply CA configuration
+  # Restart SSH to apply all configurations
   - systemctl restart sshd || systemctl restart ssh
 
 
