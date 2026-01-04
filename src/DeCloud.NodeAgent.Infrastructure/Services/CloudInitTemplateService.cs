@@ -288,27 +288,53 @@ public class CloudInitTemplateService : ICloudInitTemplateService
     }
 
     private async Task PopulateRelayVariablesAsync(
-        CloudInitTemplateVariables variables,
-        VmSpec spec,
-        CancellationToken ct)
+    CloudInitTemplateVariables variables,
+    VmSpec spec,
+    CancellationToken ct)
     {
-        _logger.LogInformation("Generating WireGuard keypair for relay VM {VmId}", spec.Id);
+        string privateKey;
 
+        // Check if orchestrator provided a WireGuard private key via Labels
+        if (spec.Labels?.TryGetValue("wireguard-private-key", out var providedKey) == true
+            && !string.IsNullOrWhiteSpace(providedKey))
+        {
+            _logger.LogInformation(
+                "Using WireGuard private key from orchestrator for relay VM {VmId}",
+                spec.Id);
+
+            privateKey = providedKey;
+        }
+        else
+        {
+            _logger.LogInformation(
+                "No WireGuard key provided - generating new keypair for relay VM {VmId}",
+                spec.Id);
+
+            try
+            {
+                // Generate WireGuard private key
+                var genKeyResult = await _executor.ExecuteAsync("wg", "genkey", ct);
+
+                if (!genKeyResult.Success)
+                {
+                    throw new InvalidOperationException(
+                        $"Failed to generate WireGuard private key: {genKeyResult.StandardError}");
+                }
+
+                privateKey = genKeyResult.StandardOutput.Trim();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to generate WireGuard keys for relay VM {VmId}", spec.Id);
+                throw;
+            }
+        }
+
+        variables.WireGuardPrivateKey = privateKey;
+
+        // Derive public key from private key
         try
         {
-            // Generate WireGuard private key
-            var genKeyResult = await _executor.ExecuteAsync("wg", "genkey", ct);
-
-            if (!genKeyResult.Success)
-            {
-                throw new InvalidOperationException(
-                    $"Failed to generate WireGuard private key: {genKeyResult.StandardError}");
-            }
-
-            var privateKey = genKeyResult.StandardOutput.Trim();
-            variables.WireGuardPrivateKey = privateKey;
-
-            // Generate public key from private key
             var pubKeyResult = await _executor.ExecuteAsync(
                 "sh",
                 $"-c \"echo '{privateKey}' | wg pubkey\"",
@@ -323,13 +349,13 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             variables.WireGuardPublicKey = pubKeyResult.StandardOutput.Trim();
 
             _logger.LogInformation(
-                "Generated WireGuard keypair for relay VM {VmId} (pubkey: {PubKey})",
+                "Configured WireGuard keypair for relay VM {VmId} (pubkey: {PubKey})",
                 spec.Id,
                 variables.WireGuardPublicKey.Substring(0, Math.Min(12, variables.WireGuardPublicKey.Length)) + "...");
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to generate WireGuard keys for relay VM {VmId}", spec.Id);
+            _logger.LogError(ex, "Failed to derive WireGuard public key for relay VM {VmId}", spec.Id);
             throw;
         }
     }
