@@ -24,6 +24,7 @@ public class OrchestratorClient : IOrchestratorClient
 
     private string? _nodeId;
     private string? _authToken;
+    private string? _orchestratorPublicKey;
     private string? _walletAddress;
     private Heartbeat? _lastHeartbeat = null;
 
@@ -72,11 +73,11 @@ public class OrchestratorClient : IOrchestratorClient
                     if (data.TryGetProperty("orchestratorWireGuardPublicKey", out var pubKeyProp) &&
                         pubKeyProp.ValueKind == JsonValueKind.String)
                     {
-                        var orchestratorPublicKey = pubKeyProp.GetString();
+                        _orchestratorPublicKey = pubKeyProp.GetString();
 
-                        if (!string.IsNullOrWhiteSpace(orchestratorPublicKey))
+                        if (!string.IsNullOrWhiteSpace(_orchestratorPublicKey))
                         {
-                            await SaveOrchestratorPublicKeyAsync(orchestratorPublicKey, ct);
+                            await SaveOrchestratorPublicKeyAsync(_orchestratorPublicKey, ct);
                         }
                     }
                     else
@@ -86,7 +87,7 @@ public class OrchestratorClient : IOrchestratorClient
                             "WireGuard may not be enabled on orchestrator");
                     }
 
-                    _logger.LogInformation("Node registered successfully. NodeId: {NodeId}", _nodeId);
+                    _logger.LogInformation("Node registered successfully. NodeId: {NodeId} Response: {ResponseJson}", _nodeId, json.ToString());
                     return true;
                 }
             }

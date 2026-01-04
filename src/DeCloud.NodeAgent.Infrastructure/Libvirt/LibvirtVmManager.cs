@@ -1176,6 +1176,15 @@ public class LibvirtVmManager : IVmManager
 
                     variables["__ORCHESTRATOR_PUBLIC_KEY__"] = "# ERROR: Orchestrator public key not available";
                 }
+
+                // Relay VM metadata placeholders
+                variables["__RELAY_CAPACITY__"] = "10";
+                variables["__RELAY_REGION__"] = "default";
+                variables["__TIMESTAMP__"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+                _logger.LogInformation(
+                    "VM {VmId}: Added relay metadata (capacity=10, region=default)",
+                    spec.Id);
             }
 
             // =====================================================
