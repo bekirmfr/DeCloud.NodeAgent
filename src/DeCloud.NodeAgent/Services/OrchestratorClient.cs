@@ -66,6 +66,26 @@ public class OrchestratorClient : IOrchestratorClient
                     _nodeId = data.GetProperty("nodeId").GetString();
                     _authToken = data.GetProperty("authToken").GetString();
 
+                    // =====================================================
+                    // Handle orchestrator WireGuard public key
+                    // =====================================================
+                    if (data.TryGetProperty("orchestratorWireGuardPublicKey", out var pubKeyProp) &&
+                        pubKeyProp.ValueKind == JsonValueKind.String)
+                    {
+                        var orchestratorPublicKey = pubKeyProp.GetString();
+
+                        if (!string.IsNullOrWhiteSpace(orchestratorPublicKey))
+                        {
+                            await SaveOrchestratorPublicKeyAsync(orchestratorPublicKey, ct);
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogInformation(
+                            "No orchestrator WireGuard public key in registration response - " +
+                            "WireGuard may not be enabled on orchestrator");
+                    }
+
                     _logger.LogInformation("Node registered successfully. NodeId: {NodeId}", _nodeId);
                     return true;
                 }
@@ -79,6 +99,65 @@ public class OrchestratorClient : IOrchestratorClient
         {
             _logger.LogError(ex, "Failed to register node");
             return false;
+        }
+    }
+
+    // =====================================================
+    // Save orchestrator public key
+    // =====================================================
+    private async Task SaveOrchestratorPublicKeyAsync(string publicKey, CancellationToken ct)
+    {
+        const string wireGuardDir = "/etc/wireguard";
+        const string publicKeyPath = "/etc/wireguard/orchestrator-public.key";
+
+        try
+        {
+            // Ensure directory exists
+            if (!Directory.Exists(wireGuardDir))
+            {
+                Directory.CreateDirectory(wireGuardDir);
+                _logger.LogInformation("Created WireGuard directory: {Dir}", wireGuardDir);
+            }
+
+            // Write orchestrator public key
+            await File.WriteAllTextAsync(publicKeyPath, publicKey.Trim() + "\n", ct);
+
+            // Set proper permissions (readable by all, writable by root)
+            var chmodProcess = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "chmod",
+                Arguments = $"644 {publicKeyPath}",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            });
+
+            if (chmodProcess != null)
+            {
+                await chmodProcess.WaitForExitAsync(ct);
+
+                if (chmodProcess.ExitCode != 0)
+                {
+                    var error = await chmodProcess.StandardError.ReadToEndAsync(ct);
+                    _logger.LogWarning("chmod failed: {Error}", error);
+                }
+            }
+
+            _logger.LogInformation(
+                "✓ Saved orchestrator WireGuard public key to {Path} - " +
+                "relay VMs on this node will have orchestrator peer pre-configured",
+                publicKeyPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to save orchestrator WireGuard public key to {Path} - " +
+                "relay VMs will not have orchestrator peer pre-configured. " +
+                "Ensure node agent has write permissions to /etc/wireguard/",
+                publicKeyPath);
+
+            // Don't throw - registration can still succeed without this
         }
     }
 
