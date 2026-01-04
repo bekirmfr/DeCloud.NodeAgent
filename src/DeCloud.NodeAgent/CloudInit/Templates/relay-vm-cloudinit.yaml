@@ -315,11 +315,11 @@ runcmd:
   - mkdir -p /etc/decloud
   
   # Log completion
-  - echo "DeCloud relay VM bootstrap complete at $(date)" > /var/log/decloud-relay-bootstrap.log
-  - echo "Relay ID: __VM_ID__" >> /var/log/decloud-relay-bootstrap.log
-  - echo "Region: __RELAY_REGION__" >> /var/log/decloud-relay-bootstrap.log
-  - echo "WireGuard Public Key: __WIREGUARD_PUBLIC_KEY__" >> /var/log/decloud-relay-bootstrap.log
-  - echo "Orchestrator Public Key: __ORCHESTRATOR_PUBLIC_KEY__" >> /var/log/decloud-relay-bootstrap.log
-  - echo "Orchestrator peer configured: YES" >> /var/log/decloud-relay-bootstrap.log
+  - 'echo "DeCloud relay VM bootstrap complete at $(date)" > /var/log/decloud-relay-bootstrap.log'
+  - 'echo "Relay ID: __VM_ID__" >> /var/log/decloud-relay-bootstrap.log'
+  - 'echo "Region: __RELAY_REGION__" >> /var/log/decloud-relay-bootstrap.log'
+  - 'echo "WireGuard Public Key: __WIREGUARD_PUBLIC_KEY__" >> /var/log/decloud-relay-bootstrap.log'
+  - 'echo "Orchestrator Public Key: __ORCHESTRATOR_PUBLIC_KEY__" >> /var/log/decloud-relay-bootstrap.log'
+  - 'echo "Orchestrator peer configured: YES" >> /var/log/decloud-relay-bootstrap.log'
 
 final_message: "DeCloud Relay VM __VM_NAME__ is ready! Orchestrator peer pre-configured. WireGuard endpoint: __PUBLIC_IP__:51820"
