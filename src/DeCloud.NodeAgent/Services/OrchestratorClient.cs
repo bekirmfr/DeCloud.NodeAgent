@@ -87,7 +87,7 @@ public class OrchestratorClient : IOrchestratorClient
                             "WireGuard may not be enabled on orchestrator");
                     }
 
-                    _logger.LogInformation("Node registered successfully. NodeId: {NodeId} Response: {ResponseJson}", _nodeId, json.ToString());
+                    _logger.LogInformation("Node registered successfully. NodeId: {NodeId} Orchestrator WireGuard Public Key: {OrchestratorPublicKey}", _nodeId, _orchestratorPublicKey);
                     return true;
                 }
             }
