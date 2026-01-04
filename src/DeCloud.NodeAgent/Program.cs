@@ -30,6 +30,7 @@ builder.Services.Configure<AuditLogOptions>(
 // =====================================================
 // Core Services
 // =====================================================
+builder.Services.AddSingleton<INodeMetadataService, NodeMetadataService>();
 builder.Services.AddSingleton<ICommandExecutor, CommandExecutor>();
 builder.Services.AddSingleton<IResourceDiscoveryService, ResourceDiscoveryService>();
 builder.Services.AddSingleton<ICpuBenchmarkService, CpuBenchmarkService>();
@@ -157,6 +158,9 @@ builder.Services.AddSwaggerGen(c =>
 });
 
 var app = builder.Build();
+
+var nodeMetadata = app.Services.GetRequiredService<INodeMetadataService>();
+await nodeMetadata.InitializeAsync();
 
 // =====================================================
 // Startup Checks

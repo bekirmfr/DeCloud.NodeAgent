@@ -21,6 +21,7 @@ public class LibvirtVmManagerOptions
 
 public class LibvirtVmManager : IVmManager
 {
+    private readonly INodeMetadataService _nodeMetadata;
     private readonly ICommandExecutor _executor;
     private readonly IImageManager _imageManager;
     private readonly ICloudInitTemplateService _templateService;
@@ -41,11 +42,13 @@ public class LibvirtVmManager : IVmManager
         IOptions<LibvirtVmManagerOptions> options,
         VmRepository repository,
         ICloudInitTemplateService templateService,
+        INodeMetadataService nodeMetadata,
         ILogger<LibvirtVmManager> logger)
     {
         _executor = executor;
         _imageManager = imageManager;
         _templateService = templateService;
+        _nodeMetadata = nodeMetadata;
         _logger = logger;
         _options = options.Value;
         _repository = repository;
@@ -1104,12 +1107,12 @@ public class LibvirtVmManager : IVmManager
                 // Generate a single compound command with && to chain multiple operations
                 var commands = new[]
                 {
-        "sed -i 's/^#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config",
-        "sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config",
-        "sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config",
-        "sed -i 's/^#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config",
-        "systemctl restart sshd || systemctl restart ssh"
-    };
+                    "sed -i 's/^#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config",
+                    "sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config",
+                    "sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config",
+                    "sed -i 's/^#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config",
+                    "systemctl restart sshd || systemctl restart ssh"
+                };
 
                 // Join with && to make one compound command
                 passwordSshCommandsBlock = string.Join(" && ", commands);
@@ -1156,6 +1159,13 @@ public class LibvirtVmManager : IVmManager
             if (spec.VmType == VmType.Relay)
             {
                 const string orchestratorPubKeyPath = "/etc/wireguard/orchestrator-public.key";
+                var relayCapacity = spec.Labels?.GetValueOrDefault("relay-capacity", "10") ?? "10";
+                var relayRegion = spec.Labels?.GetValueOrDefault("relay-region")
+                               ?? _nodeMetadata.Region
+                               ?? "default";
+                var publicIp = spec.Labels?.GetValueOrDefault("node-public-ip")
+                            ?? _nodeMetadata.PublicIp
+                            ?? "";
 
                 if (File.Exists(orchestratorPubKeyPath))
                 {
@@ -1178,13 +1188,14 @@ public class LibvirtVmManager : IVmManager
                 }
 
                 // Relay VM metadata placeholders
-                variables["__RELAY_CAPACITY__"] = "10";
-                variables["__RELAY_REGION__"] = "default";
+                variables["__PUBLIC_IP__"] = publicIp;
+                variables["__RELAY_CAPACITY__"] = relayCapacity;
+                variables["__RELAY_REGION__"] = relayRegion;
                 variables["__TIMESTAMP__"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
                 _logger.LogInformation(
-                    "VM {VmId}: Added relay metadata (capacity=10, region=default)",
-                    spec.Id);
+                    "VM {VmId}: Set relay metadata - Capacity={Capacity}, Region={Region}, PublicIP={PublicIp}",
+                    spec.Id, relayCapacity, relayRegion, publicIp);
             }
 
             // =====================================================

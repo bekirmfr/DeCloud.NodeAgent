@@ -43,6 +43,7 @@ public class VmSpec
 
     // Billing and ownership
     public string? OwnerId { get; set; } = string.Empty;      // Tenant/user ID
+    public Dictionary<string, string>? Labels { get; set; }
 }
 
 public class VmNetworkConfig

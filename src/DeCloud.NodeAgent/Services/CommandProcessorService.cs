@@ -167,6 +167,13 @@ public class CommandProcessorService : BackgroundService
             string? baseImageUrl = GetStringProperty(root, "baseImageUrl", "BaseImageUrl");
             string? imageId = GetStringProperty(root, "imageId", "ImageId");
             string? sshPublicKey = GetStringProperty(root, "sshPublicKey", "SshPublicKey");
+            Dictionary<string, string>? labels = null;
+            if (root.TryGetProperty("Labels", out var labelsElement) ||
+                root.TryGetProperty("labels", out labelsElement))
+            {
+                labels = JsonSerializer.Deserialize<Dictionary<string, string>>(
+                    labelsElement.GetRawText());
+            }
 
             // Resolve image URL if not provided directly
             if (string.IsNullOrEmpty(baseImageUrl))
@@ -187,7 +194,8 @@ public class CommandProcessorService : BackgroundService
                 MemoryBytes = memoryBytes,
                 DiskBytes = diskBytes,
                 BaseImageUrl = baseImageUrl,
-                SshPublicKey = sshPublicKey
+                SshPublicKey = sshPublicKey,
+                Labels = labels
             };
 
             _logger.LogInformation("Creating {VmType} type VM {VmId}: {VCpus} vCPUs, {MemoryMB}MB RAM, {DiskGB}GB disk, image: {ImageUrl},  quality tier: {QualityTier}",

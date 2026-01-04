@@ -375,38 +375,6 @@ public class CloudInitTemplateService : ICloudInitTemplateService
         return Task.CompletedTask;
     }
 
-    private string ReplaceTemplateVariables(
-        string template,
-        CloudInitTemplateVariables variables)
-    {
-        var result = template;
-        var replacements = variables.ToDictionary();
-
-        foreach (var (placeholder, value) in replacements)
-        {
-            result = result.Replace(placeholder, value);
-        }
-
-        // Validate no unreplaced placeholders remain
-        if (result.Contains("__") && result.Contains("__"))
-        {
-            var unreplaced = System.Text.RegularExpressions.Regex.Matches(
-                result, @"__[A-Z_]+__")
-                .Select(m => m.Value)
-                .Distinct()
-                .ToList();
-
-            if (unreplaced.Any())
-            {
-                _logger.LogWarning(
-                    "Template has unreplaced placeholders: {Placeholders}",
-                    string.Join(", ", unreplaced));
-            }
-        }
-
-        return result;
-    }
-
     private string GenerateSecurePassword(int length = 16)
     {
         // Generate cryptographically secure random password
