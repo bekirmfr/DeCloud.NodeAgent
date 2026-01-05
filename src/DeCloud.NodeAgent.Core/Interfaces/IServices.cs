@@ -161,6 +161,17 @@ public interface IOrchestratorClient
     Heartbeat? GetLastHeartbeat();
 }
 
+/// <summary>
+/// Manages iptables NAT rules for relay VM port forwarding
+/// </summary>
+public interface INatRuleManager
+{
+    Task<bool> AddPortForwardingAsync(string vmIp, int port, string protocol = "udp", CancellationToken ct = default);
+    Task<bool> RemovePortForwardingAsync(string vmIp, int port, string protocol = "udp", CancellationToken ct = default);
+    Task<bool> RuleExistsAsync(string vmIp, int port, string protocol = "udp", CancellationToken ct = default);
+    Task<bool> SaveRulesAsync(CancellationToken ct = default);
+}
+
 public class PendingCommand
 {
     public string CommandId { get; set; } = string.Empty;
