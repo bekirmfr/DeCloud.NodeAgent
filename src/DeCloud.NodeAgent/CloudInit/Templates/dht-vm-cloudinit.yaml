@@ -4,7 +4,6 @@
 # For distributed hash table storage nodes
 
 hostname: __HOSTNAME__
-manage_etc_hosts: true
 
 # Regenerate machine-id to prevent conflicts
 bootcmd:

@@ -4,6 +4,7 @@
 # Version: 3.0 (with comprehensive debug dashboard)
 
 hostname: __VM_NAME__
+manage_etc_hosts: true
 
 # =====================================================
 # SYSTEM PACKAGES
@@ -21,6 +22,7 @@ packages:
   - htop
   - iftop
   - net-tools
+  - openssl
 
 # =====================================================
 # SYSTEM CONFIGURATION
@@ -1038,12 +1040,8 @@ runcmd:
       exit 1
     fi
     
-    # Get machine ID for authentication
-    if [ -f "/etc/machine-id" ]; then
-      MACHINE_ID=$(cat /etc/machine-id | tr -d '\n')
-    else
-      MACHINE_ID=$(hostname)
-    fi
+    # Use host machine ID for authentication (passed from node agent)
+    MACHINE_ID="__HOST_MACHINE_ID__"
     
     # Compute callback token using HMAC-SHA256
     MESSAGE="${VM_ID}:${VM_IP}"

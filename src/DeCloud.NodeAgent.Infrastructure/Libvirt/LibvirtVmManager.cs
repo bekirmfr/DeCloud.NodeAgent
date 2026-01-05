@@ -1195,14 +1195,15 @@ public class LibvirtVmManager : IVmManager
                 variables["__ORCHESTRATOR_IP__"] = orchestratorUri.Host;
                 variables["__ORCHESTRATOR_PORT__"] = "51821";
                 variables["__NODE_ID__"] = _nodeMetadata.NodeId;
+                variables["__HOST_MACHINE_ID__"] = _nodeMetadata.MachineId;
                 variables["__PUBLIC_IP__"] = publicIp;
                 variables["__RELAY_CAPACITY__"] = relayCapacity;
                 variables["__RELAY_REGION__"] = relayRegion;
                 variables["__TIMESTAMP__"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
                 _logger.LogInformation(
-                    "VM {VmId}: Set relay metadata - Capacity={Capacity}, Region={Region}, PublicIP={PublicIp}",
-                    spec.Id, relayCapacity, relayRegion, publicIp);
+                    "VM {VmId}: Set relay metadata - Capacity={Capacity}, Region={Region}, PublicIP={PublicIp}, HostMachineId={MachineId}",
+                    spec.Id, relayCapacity, relayRegion, publicIp, _nodeMetadata.MachineId);
             }
 
             // =====================================================
