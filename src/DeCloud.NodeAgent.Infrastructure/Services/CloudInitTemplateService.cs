@@ -2,6 +2,7 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Logging;
+using System.Text.RegularExpressions;
 
 namespace DeCloud.NodeAgent.Infrastructure.Services;
 
@@ -206,7 +207,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
     }
 
     /// <summary>
-    /// Load and inject external template files for relay VMs
+    /// Load and inject external template files for relay VMs with proper YAML indentation
     /// </summary>
     private async Task<string> InjectRelayExternalTemplatesAsync(
         string template,
@@ -222,12 +223,11 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             var dashboardJs = await LoadExternalTemplateAsync("dashboard.js", ct);
             var relayApi = await LoadExternalTemplateAsync("relay-api.py", ct);
 
-            // Replace placeholders in main template
-            var result = template
-                .Replace("__DASHBOARD_HTML__", dashboardHtml)
-                .Replace("__DASHBOARD_CSS__", dashboardCss)
-                .Replace("__DASHBOARD_JS__", dashboardJs)
-                .Replace("__RELAY_API__", relayApi);
+            // Replace placeholders with properly indented content
+            var result = ReplaceWithIndentation(template, "__DASHBOARD_HTML__", dashboardHtml);
+            result = ReplaceWithIndentation(result, "__DASHBOARD_CSS__", dashboardCss);
+            result = ReplaceWithIndentation(result, "__DASHBOARD_JS__", dashboardJs);
+            result = ReplaceWithIndentation(result, "__RELAY_API__", relayApi);
 
             _logger.LogInformation(
                 "✓ Injected external templates: " +
@@ -245,6 +245,32 @@ public class CloudInitTemplateService : ICloudInitTemplateService
                 "Failed to load relay VM templates. Ensure all template files exist in " +
                 $"{Path.Combine(_templateBasePath, "relay-vm")}/", ex);
         }
+    }
+
+    /// <summary>
+    /// Replace placeholder with content, preserving YAML indentation
+    /// </summary>
+    private string ReplaceWithIndentation(string template, string placeholder, string content)
+    {
+        // Find all occurrences of the placeholder and detect indentation
+        var regex = new Regex($@"^(\s*){Regex.Escape(placeholder)}$", RegexOptions.Multiline);
+
+        return regex.Replace(template, match =>
+        {
+            var indentation = match.Groups[1].Value;
+
+            // Split content into lines
+            var lines = content.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
+
+            // First line doesn't need extra indentation (it inherits from placeholder position)
+            // All subsequent lines need the same indentation
+            for (int i = 1; i < lines.Length; i++)
+            {
+                lines[i] = indentation + lines[i];
+            }
+
+            return indentation + string.Join("\n", lines);
+        });
     }
 
     /// <summary>
