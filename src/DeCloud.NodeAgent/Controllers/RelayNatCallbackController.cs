@@ -82,6 +82,8 @@ public class RelayNatCallbackController : ControllerBase
         // =====================================================
         try
         {
+            await _natRuleManager.RemoveAllRelayNatRulesAsync(HttpContext.RequestAborted);
+
             _logger.LogInformation(
                 "Configuring NAT rule: UDP/51820 → {VmIp}:51820",
                 notification.VmIp);
@@ -138,6 +140,21 @@ public class RelayNatCallbackController : ControllerBase
                 message = ex.Message
             });
         }
+    }
+
+    [HttpGet("nat-status/{vmId}")]
+    public async Task<IActionResult> GetNatStatus(string vmId)
+    {
+        var rules = await _natRuleManager.GetExistingRulesAsync(HttpContext.RequestAborted);
+        var relayRule = rules.FirstOrDefault(r => r.Contains(vmId));
+
+        return Ok(new
+        {
+            vmId,
+            hasNatRule = relayRule != null,
+            rule = relayRule,
+            timestamp = DateTime.UtcNow
+        });
     }
 
     /// <summary>

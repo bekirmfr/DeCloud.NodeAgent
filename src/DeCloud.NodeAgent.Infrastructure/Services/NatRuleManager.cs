@@ -255,6 +255,75 @@ public class NatRuleManager : INatRuleManager
             return false;
         }
     }
+
+    public async Task<bool> RemoveAllRelayNatRulesAsync(CancellationToken ct = default)
+    {
+        if (!_isLinux) return false;
+
+        try
+        {
+            _logger.LogInformation("Cleaning up stale relay NAT rules...");
+
+            // Remove all DNAT rules for port 51820
+            var listResult = await _executor.ExecuteAsync(
+                "iptables",
+                "-t nat -L PREROUTING -n --line-numbers | grep 'dpt:51820'",
+                ct);
+
+            if (listResult.Success && !string.IsNullOrWhiteSpace(listResult.StandardError))
+            {
+                var lines = listResult.StandardError.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+
+                // Remove rules in reverse order (to preserve line numbers)
+                foreach (var line in lines.Reverse())
+                {
+                    var lineNumber = line.Split(' ')[0];
+                    if (int.TryParse(lineNumber, out var num))
+                    {
+                        await _executor.ExecuteAsync(
+                            "iptables",
+                            $"-t nat -D PREROUTING {num}",
+                            ct);
+                    }
+                }
+            }
+
+            _logger.LogInformation("✓ Stale NAT rules cleaned up");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error cleaning up stale NAT rules");
+            return false;
+        }
+    }
+    public async Task<List<string>> GetExistingRulesAsync(CancellationToken ct = default)
+    {
+        if (!_isLinux) return new List<string>();
+
+        try
+        {
+            var listResult = await _executor.ExecuteAsync(
+                "iptables",
+                "-t nat -L PREROUTING -n -v",
+                ct);
+
+            if (listResult.Success && !string.IsNullOrWhiteSpace(listResult.StandardOutput))
+            {
+                return listResult.StandardOutput
+                    .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                    .Where(line => line.Contains("DNAT"))
+                    .ToList();
+            }
+
+            return new List<string>();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error getting existing NAT rules");
+            return new List<string>();
+        }
+    }
 }
 
 // =====================================================

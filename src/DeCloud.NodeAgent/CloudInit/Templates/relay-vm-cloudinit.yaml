@@ -41,10 +41,10 @@ write_files:
       # Enable IP forwarding
       PostUp = iptables -A FORWARD -i wg-relay-server -j ACCEPT
       PostUp = iptables -A FORWARD -o wg-relay-server -j ACCEPT
-      PostUp = iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+      PostUp = bash -c 'DEFAULT_IFACE=$(ip route | grep default | awk "{print \$5}"); iptables -t nat -A POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE'
       PreDown = iptables -D FORWARD -i wg-relay-server -j ACCEPT
       PreDown = iptables -D FORWARD -o wg-relay-server -j ACCEPT
-      PreDown = iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+      PreDown = bash -c 'DEFAULT_IFACE=$(ip route | grep default | awk "{print \$5}"); iptables -t nat -D POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE'
       
       # Orchestrator peer (pre-configured during provisioning)
       [Peer]

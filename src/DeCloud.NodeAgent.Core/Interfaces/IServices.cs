@@ -170,6 +170,8 @@ public interface INatRuleManager
     Task<bool> RemovePortForwardingAsync(string vmIp, int port, string protocol = "udp", CancellationToken ct = default);
     Task<bool> RuleExistsAsync(string vmIp, int port, string protocol = "udp", CancellationToken ct = default);
     Task<bool> SaveRulesAsync(CancellationToken ct = default);
+    Task<bool> RemoveAllRelayNatRulesAsync(CancellationToken ct = default);
+    Task<List<string>> GetExistingRulesAsync(CancellationToken ct = default);
 }
 
 public class PendingCommand
