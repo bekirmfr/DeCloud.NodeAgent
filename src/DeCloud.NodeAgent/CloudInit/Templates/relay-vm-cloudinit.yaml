@@ -983,10 +983,12 @@ runcmd:
     PUBLIC_KEY="__WIREGUARD_PUBLIC_KEY__"
     PUBLIC_IP="__PUBLIC_IP__"
     
-    # Compute callback token (must match orchestrator's algorithm)
+    # Read WireGuard private key
+    WIREGUARD_PRIVATE_KEY=$(cat /etc/wireguard/private.key | tr -d '\n')
+
+    # Compute callback token using WireGuard private key
     MESSAGE="${NODE_ID}:${RELAY_VM_ID}"
-    SECRET="${RELAY_CALLBACK_SECRET:-default-secret-change-in-production}"
-    TOKEN=$(echo -n "$MESSAGE" | openssl dgst -sha256 -hmac "$SECRET" -binary | base64)
+    TOKEN=$(echo -n "$MESSAGE" | openssl dgst -sha256 -hmac "$WIREGUARD_PRIVATE_KEY" -binary | base64)
     
     # Call orchestrator callback endpoint
     curl -X POST "$ORCHESTRATOR_URL/api/relay/register-callback" \
