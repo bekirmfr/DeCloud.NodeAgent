@@ -92,6 +92,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
 
     // Cache for loaded templates
     private readonly Dictionary<VmType, string> _templateCache = new();
+    private readonly Dictionary<string, string> _externalTemplateCache = new();
     private readonly SemaphoreSlim _cacheLock = new(1, 1);
 
     public CloudInitTemplateService(
@@ -147,6 +148,12 @@ public class CloudInitTemplateService : ICloudInitTemplateService
                 $"No cloud-init template found for VM type {vmType}");
         }
 
+        // For relay VMs, inject external templates (dashboard and API)
+        if (vmType == VmType.Relay)
+        {
+            template = await InjectRelayExternalTemplatesAsync(template, ct);
+        }
+
         // Build template variables
         var variables = await BuildTemplateVariablesAsync(vmType, spec, ct);
 
@@ -197,6 +204,96 @@ public class CloudInitTemplateService : ICloudInitTemplateService
 
         return result;
     }
+
+    /// <summary>
+    /// Load and inject external template files for relay VMs
+    /// </summary>
+    private async Task<string> InjectRelayExternalTemplatesAsync(
+        string template,
+        CancellationToken ct)
+    {
+        _logger.LogInformation("Loading external relay VM templates...");
+
+        try
+        {
+            // Load external template files
+            var dashboardHtml = await LoadExternalTemplateAsync("dashboard.html", ct);
+            var dashboardCss = await LoadExternalTemplateAsync("dashboard.css", ct);
+            var dashboardJs = await LoadExternalTemplateAsync("dashboard.js", ct);
+            var relayApi = await LoadExternalTemplateAsync("relay-api.py", ct);
+
+            // Replace placeholders in main template
+            var result = template
+                .Replace("__DASHBOARD_HTML__", dashboardHtml)
+                .Replace("__DASHBOARD_CSS__", dashboardCss)
+                .Replace("__DASHBOARD_JS__", dashboardJs)
+                .Replace("__RELAY_API__", relayApi);
+
+            _logger.LogInformation(
+                "✓ Injected external templates: " +
+                "HTML ({HtmlSize} chars), CSS ({CssSize} chars), " +
+                "JS ({JsSize} chars), API ({ApiSize} chars)",
+                dashboardHtml.Length, dashboardCss.Length,
+                dashboardJs.Length, relayApi.Length);
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load external relay VM templates");
+            throw new InvalidOperationException(
+                "Failed to load relay VM templates. Ensure all template files exist in " +
+                $"{Path.Combine(_templateBasePath, "relay-vm")}/", ex);
+        }
+    }
+
+    /// <summary>
+    /// Load an external template file from the relay-vm subdirectory
+    /// </summary>
+    private async Task<string> LoadExternalTemplateAsync(
+        string filename,
+        CancellationToken ct)
+    {
+        await _cacheLock.WaitAsync(ct);
+        try
+        {
+            // Check cache first
+            if (_externalTemplateCache.TryGetValue(filename, out var cached))
+            {
+                _logger.LogDebug("Using cached external template: {FileName}", filename);
+                return cached;
+            }
+
+            // Load from disk
+            var templatePath = Path.Combine(_templateBasePath, "relay-vm", filename);
+
+            _logger.LogDebug("Loading external template: {Path}", templatePath);
+
+            if (!File.Exists(templatePath))
+            {
+                throw new FileNotFoundException(
+                    $"External template file not found: {filename}. " +
+                    $"Expected at: {templatePath}",
+                    templatePath);
+            }
+
+            var content = await File.ReadAllTextAsync(templatePath, ct);
+
+            // Cache for future use
+            _externalTemplateCache[filename] = content;
+
+            _logger.LogDebug(
+                "Loaded external template: {FileName} ({Length} chars)",
+                filename, content.Length);
+
+            return content;
+        }
+        finally
+        {
+            _cacheLock.Release();
+        }
+    }
+
     private async Task<string> LoadTemplateAsync(VmType vmType, CancellationToken ct)
     {
         await _cacheLock.WaitAsync(ct);
@@ -288,9 +385,9 @@ public class CloudInitTemplateService : ICloudInitTemplateService
     }
 
     private async Task PopulateRelayVariablesAsync(
-    CloudInitTemplateVariables variables,
-    VmSpec spec,
-    CancellationToken ct)
+        CloudInitTemplateVariables variables,
+        VmSpec spec,
+        CancellationToken ct)
     {
         string privateKey;
 
