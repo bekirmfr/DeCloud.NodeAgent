@@ -1024,13 +1024,19 @@ runcmd:
     NODE_AGENT_URL="http://10.0.2.2:5100"  # Host IP from guest perspective
     VM_ID="__VM_ID__"
     
-    # Wait for network to be fully up and obtain IP
+    # Wait for network to be fully up and obtain IP using dynamic interface detection
     echo "Waiting for IP address..."
     for i in {1..30}; do
-      VM_IP=$(ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
-      if [ -n "$VM_IP" ]; then
-        echo "✓ Obtained IP address: $VM_IP"
-        break
+      # Dynamically detect the default route interface (works for eth0, enp1s0, ens3, etc.)
+      DEFAULT_INTERFACE=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'dev \K\S+' | head -1)
+      
+      if [ -n "$DEFAULT_INTERFACE" ]; then
+        VM_IP=$(ip -4 addr show "$DEFAULT_INTERFACE" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+        
+        if [ -n "$VM_IP" ]; then
+          echo "✓ Obtained IP address: $VM_IP on interface $DEFAULT_INTERFACE"
+          break
+        fi
       fi
       sleep 2
     done
@@ -1042,6 +1048,8 @@ runcmd:
     
     # Use host machine ID for authentication (passed from node agent)
     MACHINE_ID="__HOST_MACHINE_ID__"
+
+    echo "Using machine ID for authentication: ${MACHINE_ID:0:8}..."
     
     # Compute callback token using HMAC-SHA256
     MESSAGE="${VM_ID}:${VM_IP}"
