@@ -48,6 +48,7 @@ write_files:
       [Peer]
       # DeCloud Orchestrator
       PublicKey = __ORCHESTRATOR_PUBLIC_KEY__
+      Endpoint = __ORCHESTRATOR_IP__:__ORCHESTRATOR_PORT__
       AllowedIPs = 10.20.0.1/32
       PersistentKeepalive = 25
       

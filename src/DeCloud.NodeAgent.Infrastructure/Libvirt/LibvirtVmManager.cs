@@ -1191,6 +1191,9 @@ public class LibvirtVmManager : IVmManager
 
                 // Relay VM metadata placeholders
                 variables["__ORCHESTRATOR_URL__"] = orchestratorUrl;
+                var orchestratorUri = new Uri(orchestratorUrl);
+                variables["__ORCHESTRATOR_IP__"] = orchestratorUri.Host;
+                variables["__ORCHESTRATOR_PORT__"] = "51821";
                 variables["__NODE_ID__"] = _nodeMetadata.NodeId;
                 variables["__PUBLIC_IP__"] = publicIp;
                 variables["__RELAY_CAPACITY__"] = relayCapacity;
