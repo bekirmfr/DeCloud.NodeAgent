@@ -211,12 +211,6 @@ public class CommandProcessorService : BackgroundService
             if (result.Success)
             {
                 _logger.LogInformation("{VmType} VM {VmId} created and started successfully", vmSpec.VmType.ToString(), vmId);
-
-                if (vmSpec.VmType == VmType.Relay)
-                {
-                    await ConfigureRelayNatAsync(vmId, ct);
-                }
-
                 return true;
             }
 
@@ -285,88 +279,6 @@ public class CommandProcessorService : BackgroundService
         var resources = await _resourceDiscovery.DiscoverAllAsync(ct);
         _logger.LogInformation("Benchmark complete");
         return true;
-    }
-
-    /// <summary>
-    /// Configure NAT port forwarding for relay VM after creation
-    /// </summary>
-    private async Task ConfigureRelayNatAsync(string vmId, CancellationToken ct)
-    {
-        try
-        {
-            _logger.LogInformation("Configuring NAT rules for relay VM {VmId}...", vmId);
-
-            // Wait for VM to obtain IP address (up to 60 seconds)
-            string? vmIp = null;
-            var maxRetries = 12; // 12 * 5 seconds = 60 seconds
-
-            for (int i = 0; i < maxRetries; i++)
-            {
-                var vmInstance = await _vmManager.GetVmAsync(vmId, ct);
-                if (vmInstance != null && !string.IsNullOrEmpty(vmInstance.Spec.IpAddress))
-                {
-                    vmIp = vmInstance.Spec.IpAddress;
-                    _logger.LogInformation(
-                        "Relay VM {VmId} obtained IP: {IpAddress}",
-                        vmId, vmIp);
-                    break;
-                }
-
-                if (i < maxRetries - 1)
-                {
-                    _logger.LogDebug(
-                        "Waiting for relay VM {VmId} to obtain IP address (attempt {Attempt}/{Max})",
-                        vmId, i + 1, maxRetries);
-                    await Task.Delay(5000, ct);
-                }
-            }
-
-            if (string.IsNullOrEmpty(vmIp))
-            {
-                _logger.LogError(
-                    "❌ Relay VM {VmId} did not obtain IP address within 60 seconds. " +
-                    "NAT rules NOT configured! CGNAT nodes will not be able to connect.",
-                    vmId);
-                return;
-            }
-
-            // Add NAT rule to forward WireGuard traffic to relay VM
-            _logger.LogInformation(
-                "Adding NAT rule: UDP/51820 → {VmIp}:51820",
-                vmIp);
-
-            var natSuccess = await _natRuleManager.AddPortForwardingAsync(
-                vmIp,
-                51820,  // WireGuard port
-                "udp",
-                ct);
-
-            if (natSuccess)
-            {
-                _logger.LogInformation(
-                    "✓ Relay VM {VmId} NAT configured successfully: " +
-                    "Public UDP/51820 → {VmIp}:51820",
-                    vmId, vmIp);
-
-                _logger.LogInformation(
-                    "✓ CGNAT nodes can now connect to this relay at the host's public IP");
-            }
-            else
-            {
-                _logger.LogError(
-                    "❌ Failed to configure NAT rule for relay VM {VmId}. " +
-                    "CGNAT nodes will NOT be able to connect! " +
-                    "Manual fix: sudo iptables -t nat -A PREROUTING -p udp --dport 51820 " +
-                    "-j DNAT --to-destination {VmIp}:51820",
-                    vmId, vmIp);
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex,
-                "Error configuring NAT rules for relay VM {VmId}",
-                vmId);
-        }
     }
 
     // Helper methods to handle case-insensitive property names
