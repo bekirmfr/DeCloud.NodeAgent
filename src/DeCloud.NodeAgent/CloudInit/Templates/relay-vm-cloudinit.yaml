@@ -1021,8 +1021,27 @@ runcmd:
   - |
     cat > /usr/local/bin/notify-nat-ready.sh <<'EOF'
     #!/bin/bash
-    NODE_AGENT_URL="http://10.0.2.2:5100"  # Host IP from guest perspective
+    
+    # Dynamically detect the gateway IP (host from VM perspective)
+    # Method 1: Default route (most reliable)
+    GATEWAY_IP=$(ip route | grep default | awk '{print $3}' | head -1)
+
+    # Method 2: Parse route to external IP
+    if [ -z "$GATEWAY_IP" ]; then
+      GATEWAY_IP=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'via \K[\d.]+' | head -1)
+    fi
+
+    # Method 3: Fallback to common libvirt gateway
+    if [ -z "$GATEWAY_IP" ]; then
+      echo "⚠ Using fallback gateway 192.168.122.1"
+      GATEWAY_IP="192.168.122.1"
+    fi
+    
+    NODE_AGENT_URL="http://${GATEWAY_IP}:5100"
     VM_ID="__VM_ID__"
+    
+    echo "Detected gateway IP: $GATEWAY_IP"
+    echo "Node agent URL: $NODE_AGENT_URL"
     
     # Wait for network to be fully up and obtain IP using dynamic interface detection
     echo "Waiting for IP address..."
@@ -1076,7 +1095,7 @@ runcmd:
     if [ "$HTTP_CODE" = "200" ]; then
       echo "✓ Successfully notified node agent - NAT rule configured!"
       echo "✓ CGNAT nodes can now connect to this relay"
-      logger -t decloud-relay "NAT rule configured successfully for $VM_IP"
+      logger -t decloud-relay "NAT rule configured successfully for $VM_IP via gateway $GATEWAY_IP"
     else
       echo "⚠ Failed to notify node agent (HTTP $HTTP_CODE)"
       echo "Response: $RESPONSE"
