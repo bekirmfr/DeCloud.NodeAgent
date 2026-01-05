@@ -1159,6 +1159,8 @@ public class LibvirtVmManager : IVmManager
             if (spec.VmType == VmType.Relay)
             {
                 const string orchestratorPubKeyPath = "/etc/wireguard/orchestrator-public.key";
+
+                var orchestratorUrl = _nodeMetadata.OrchestratorUrl;
                 var relayCapacity = spec.Labels?.GetValueOrDefault("relay-capacity", "10") ?? "10";
                 var relayRegion = spec.Labels?.GetValueOrDefault("relay-region")
                                ?? _nodeMetadata.Region
@@ -1188,6 +1190,8 @@ public class LibvirtVmManager : IVmManager
                 }
 
                 // Relay VM metadata placeholders
+                variables["__ORCHESTRATOR_URL__"] = orchestratorUrl;
+                variables["__NODE_ID__"] = _nodeMetadata.NodeId;
                 variables["__PUBLIC_IP__"] = publicIp;
                 variables["__RELAY_CAPACITY__"] = relayCapacity;
                 variables["__RELAY_REGION__"] = relayRegion;

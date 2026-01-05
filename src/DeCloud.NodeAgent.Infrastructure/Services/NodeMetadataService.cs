@@ -4,6 +4,7 @@ using DeCloud.Shared;
 
 public interface INodeMetadataService
 {
+    string OrchestratorUrl { get; }
     string NodeId { get; }
     string MachineId { get; }
     string Name { get; }
@@ -21,6 +22,7 @@ public class NodeMetadataService : INodeMetadataService
     private readonly IConfiguration _configuration;
     private readonly ILogger<NodeMetadataService> _logger;
 
+    public string OrchestratorUrl { get; private set; } = string.Empty;
     public string NodeId { get; private set; } = string.Empty;
     public string MachineId { get; private set; } = string.Empty;
     public string Name { get; private set; } = string.Empty;
@@ -42,6 +44,8 @@ public class NodeMetadataService : INodeMetadataService
 
         // Get wallet from config
         WalletAddress = _configuration["OrchestratorClient:WalletAddress"] ?? "";
+
+        OrchestratorUrl = _configuration["OrchestratorClient:BaseUrl"] ?? "";
 
         // Generate deterministic node ID
         NodeId = NodeIdGenerator.GenerateNodeId(MachineId, WalletAddress);
