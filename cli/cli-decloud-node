@@ -349,15 +349,18 @@ def register_node(orchestrator_url: str, machine_id: str, wallet_address: str,
         if response.status_code == 200:
             data = response.json()
             if data.get("success"):
-                api_key = data.get("data", {}).get("apiKey")
-                if not api_key:
-                    api_key = data.get("apiKey")
-                
-                if api_key:
-                    return api_key
-                else:
+                response_data = data.get("data", {})
+        
+                # Validate required fields
+                if not response_data.get("nodeId"):
+                    log_error("Node ID not found in response")
+                    return None
+        
+                if not response_data.get("apiKey"):
                     log_error("API key not found in response")
                     return None
+        
+                return response_data
         
         log_error(f"Registration failed: {response.status_code}")
         if response.text:
@@ -440,11 +443,15 @@ def login_with_web_signing(orchestrator_url: str, wallet_address: str = None, ve
         hardware=hardware
     )
 
-    node_id = response['nodeId']
-    api_key = response['apiKey']
+    if response:
+        returned_node_id = response.get('nodeId')
+        api_key = response.get('apiKey')
     
-    if api_key:
-        # Save credentials
+        # Verify it matches
+        if returned_node_id != node_id:
+            log_warn("Using orchestrator's node ID")
+            node_id = returned_node_id
+    
         save_credentials(node_id, api_key, wallet_address, signature, message)
         
         # Save orchestrator URL to config
