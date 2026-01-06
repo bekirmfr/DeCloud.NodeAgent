@@ -444,13 +444,8 @@ def login_with_web_signing(orchestrator_url: str, wallet_address: str = None, ve
     )
 
     if response:
-        returned_node_id = response.get('nodeId')
+        node_id = response.get('nodeId')
         api_key = response.get('apiKey')
-    
-        # Verify it matches
-        if returned_node_id != node_id:
-            log_warn("Using orchestrator's node ID")
-            node_id = returned_node_id
     
         save_credentials(node_id, api_key, wallet_address, signature, message)
         
