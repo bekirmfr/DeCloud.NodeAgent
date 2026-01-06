@@ -562,6 +562,99 @@ configure_wireguard_keys() {
 }
 
 # ============================================================
+# WalletConnect CLI Installation
+# ============================================================
+
+install_python_dependencies() {
+    log_step "Installing Python dependencies for authentication..."
+    
+    # Check if Python 3.8+ is installed
+    if ! command -v python3 &> /dev/null; then
+        log_info "Installing Python..."
+        apt-get install -y -qq python3 python3-pip > /dev/null 2>&1
+    fi
+    
+    local python_version=$(python3 --version 2>&1 | awk '{print $2}' | cut -d'.' -f1,2)
+    local major=$(echo "$python_version" | cut -d'.' -f1)
+    local minor=$(echo "$python_version" | cut -d'.' -f2)
+    
+    if [ "$major" -lt 3 ] || ([ "$major" -eq 3 ] && [ "$minor" -lt 8 ]); then
+        log_error "Python 3.8+ required, found $python_version"
+        exit 1
+    fi
+    
+    log_info "Python $python_version detected"
+    
+    # Install WalletConnect dependencies
+    log_info "Installing WalletConnect libraries..."
+    pip3 install --quiet --no-warn-script-location \
+        walletconnect-python \
+        qrcode \
+        eth-account \
+        web3 \
+        requests \
+        pillow \
+        2>&1 | grep -v "WARNING" || true
+    
+    # Verify installation
+    if python3 -c "import walletconnect, qrcode, eth_account, web3" 2>/dev/null; then
+        log_success "Python dependencies installed"
+    else
+        log_error "Failed to install Python dependencies"
+        exit 1
+    fi
+}
+
+install_walletconnect_cli() {
+    log_step "Installing DeCloud authentication CLI..."
+    
+    # The CLI is in the repository we just cloned
+    local cli_source="$INSTALL_DIR/DeCloud.NodeAgent/cli/decloud-node"
+    local cli_dest="/usr/local/bin/decloud-node"
+    
+    if [ ! -f "$cli_source" ]; then
+        log_error "CLI script not found at $cli_source"
+        log_error "Repository may be incomplete"
+        exit 1
+    fi
+    
+    # Copy CLI to /usr/local/bin
+    cp "$cli_source" "$cli_dest"
+    chmod +x "$cli_dest"
+    
+    # Verify CLI works
+    if decloud-node version &> /dev/null; then
+        log_success "Authentication CLI installed"
+        log_info "CLI: decloud-node (v$(decloud-node version 2>/dev/null | awk '{print $NF}'))"
+    else
+        log_error "CLI installation failed"
+        exit 1
+    fi
+}
+
+run_node_authentication() {
+    log_step "Authenticating node with WalletConnect..."
+    
+    echo ""
+    log_info "You will now authorize this node using your wallet."
+    log_info "This process uses WalletConnect - you'll scan a QR code with your mobile wallet."
+    echo ""
+    
+    # Run the CLI login
+    if decloud-node login --orchestrator "$ORCHESTRATOR_URL"; then
+        log_success "Node authenticated successfully"
+        return 0
+    else
+        log_error "Authentication failed"
+        echo ""
+        log_info "You can re-run authentication later with:"
+        log_info "  sudo decloud-node login"
+        echo ""
+        return 1
+    fi
+}
+
+# ============================================================
 # SSH CA Setup
 # ============================================================
 setup_ssh_ca() {
@@ -1005,81 +1098,28 @@ start_service() {
 print_summary() {
     echo ""
     echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║       DeCloud Node Agent Installation Complete!              ║"
+    echo "║                 ✅ Installation Complete!                    ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo ""
-    echo "  ═══════════════════════════════════════════════════════════"
-    echo "  Connection Information:"
-    echo "  ═══════════════════════════════════════════════════════════"
-    echo "    Orchestrator:  ${ORCHESTRATOR_URL}"
-    echo "    Wallet:        ${NODE_WALLET}"
-    echo "    Node Name:     ${NODE_NAME}"
-    echo "    Region/Zone:   ${NODE_REGION}/${NODE_ZONE}"
-    echo ""
-    echo "  ═══════════════════════════════════════════════════════════"
-    echo "  Network Configuration:"
-    echo "  ═══════════════════════════════════════════════════════════"
-    echo "    Agent API:     http://$(hostname -I | awk '{print $1}'):${AGENT_PORT}"
+    echo "  ═══════════════════════════════════════════════════════"
+    echo "  Node Information:"
+    echo "  ═══════════════════════════════════════════════════════"
     
+    # Get credentials
+    local node_id="Unknown"
+    local wallet="Unknown"
+    if [ -f "/etc/decloud/credentials" ]; then
+        node_id=$(grep "NODE_ID=" /etc/decloud/credentials | cut -d'=' -f2)
+        wallet=$(grep "WALLET_ADDRESS=" /etc/decloud/credentials | cut -d'=' -f2)
+    fi
+    
+    echo "    Node ID:       $node_id"
+    echo "    Wallet:        $wallet"
+    echo "    Orchestrator:  $ORCHESTRATOR_URL"
+    echo "    Agent Port:    $AGENT_PORT"
     if [ "$SKIP_WIREGUARD" = false ]; then
-        echo "    WireGuard:     Port ${WIREGUARD_PORT}/udp"
-        
-        local wg_pubkey=$(cat /etc/wireguard/public.key 2>/dev/null || echo "Not generated")
-        echo "    Public Key:    ${wg_pubkey:0:16}...${wg_pubkey: -8}"
-        echo ""
-        echo "    ${CYAN}Interface Configuration:${NC}"
-        echo "      → Automatic based on node role and network"
-        echo "      → CGNAT nodes: 'wg-relay' tunnel to relay"
-        echo "      → Relay VMs: 'wg-relay-server' accepts clients"
-        echo "      → Regular nodes: 'wg-hub' for mesh (optional)"
-        echo "      → Check status: decloud-wg status"
+        echo "    WireGuard:     $WIREGUARD_PORT"
     fi
-    
-    echo ""
-    echo "  ${CYAN}NOTE: HTTP ingress is handled centrally by the Orchestrator.${NC}"
-    echo "    Ports 80/443 are NOT required on nodes."
-    echo ""
-    
-    # ADD RELAY ARCHITECTURE INFO
-    echo "  ═══════════════════════════════════════════════════════"
-    echo "  Relay Architecture (CGNAT Support):"
-    echo "  ═══════════════════════════════════════════════════════"
-    
-    local public_ip=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || echo "unknown")
-    local private_ip=$(hostname -I | awk '{print $1}')
-    
-    if [ "$public_ip" != "unknown" ]; then
-        if [[ "$public_ip" != "$private_ip" ]]; then
-            echo "    ${YELLOW}✓ CGNAT/NAT Detected${NC}"
-            echo "    Your node is behind NAT (no public IP)"
-            echo "    → Will auto-connect to relay node via WireGuard"
-            echo "    → Interface 'wg-relay' created automatically"
-            echo "    → Relay fees: ~\$0.001/hour (~\$0.72/month)"
-            echo "    → No port forwarding or static IP needed!"
-        else
-            echo "    ${GREEN}✓ Public IP Detected${NC}"
-            echo "    Your node has direct internet access"
-            
-            local cpu_cores=$(nproc)
-            local memory_gb=$(free -g | awk '/^Mem:/{print $2}')
-            
-            if [ "$cpu_cores" -ge 16 ] && [ "$memory_gb" -ge 32 ]; then
-                echo "    → ${GREEN}Eligible to be a RELAY node!${NC}"
-                echo "    → Can earn fees serving CGNAT clients"
-                echo "    → Interface 'wg-relay-server' created if assigned"
-                echo "    → Estimated capacity: $((cpu_cores / 4)) clients"
-            else
-                echo "    → Standard node"
-                echo "    → May use 'wg-hub' for peer mesh (if enabled)"
-                echo "    → (Relay requires: 16+ cores, 32GB+ RAM)"
-            fi
-        fi
-    else
-        echo "    ${CYAN}Network Status Unknown${NC}"
-        echo "    → WireGuard interface determined by orchestrator"
-        echo "    → Configuration is automatic"
-    fi
-    
     echo ""
     echo "  ═══════════════════════════════════════════════════════"
     echo "  Commands:"
@@ -1087,18 +1127,44 @@ print_summary() {
     echo "    Status:        sudo systemctl status decloud-node-agent"
     echo "    Logs:          sudo journalctl -u decloud-node-agent -f"
     echo "    Restart:       sudo systemctl restart decloud-node-agent"
+    echo "    Auth Status:   decloud-node status"
+    echo "    Re-auth:       sudo decloud-node login --force"
     if [ "$SKIP_WIREGUARD" = false ]; then
         echo "    WireGuard:     decloud-wg status"
-        echo "                   decloud-wg show wg-relay"
     fi
     echo ""
-    echo "  ═══════════════════════════════════════════════════════════"
-    echo "  Important Notes:"
-    echo "  ═══════════════════════════════════════════════════════════"
-    echo "  • Node ID is deterministic (hardware + wallet)"
-    echo "  • Relay assignment is automatic (orchestrator decides)"
-    echo "  • CGNAT nodes work seamlessly with relay infrastructure"
-    echo "  • Keep your wallet address secure and documented"
+    echo "  ═══════════════════════════════════════════════════════"
+    echo "  Authentication:"
+    echo "  ═══════════════════════════════════════════════════════"
+    echo "    ✓ Node authenticated with WalletConnect"
+    echo "    ✓ Credentials saved to /etc/decloud/credentials"
+    echo "    ✓ Node agent started and running"
+    echo ""
+    echo "  If you need to re-authenticate:"
+    echo "    sudo decloud-node logout"
+    echo "    sudo decloud-node login"
+    echo ""
+}
+
+print_summary_unauthenticated() {
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║                 Installation Complete!                       ║"
+    echo "║              (Authentication Required)                       ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+    echo "  ⚠  Node agent installed but NOT authenticated"
+    echo ""
+    echo "  To complete setup, run:"
+    echo "    sudo decloud-node login"
+    echo ""
+    echo "  This will:"
+    echo "    1. Display a QR code"
+    echo "    2. You scan it with your mobile wallet"
+    echo "    3. Sign the message on your phone"
+    echo "    4. Node gets authorized automatically"
+    echo ""
+    echo "  After authentication, the node agent will start automatically."
     echo ""
 }
 
@@ -1108,7 +1174,7 @@ print_summary() {
 main() {
     echo ""
     echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║       DeCloud Node Agent Installer v${VERSION}                    ║"
+    echo "║       DeCloud Node Agent Installer v${VERSION}               ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo ""
     
@@ -1116,7 +1182,6 @@ main() {
     
     # CRITICAL: Validate required parameters FIRST
     check_required_params
-    
     
     # Checks
     check_root
@@ -1138,6 +1203,9 @@ main() {
     install_wireguard
     configure_wireguard_keys
     
+    # NEW: Install Python & WalletConnect CLI
+    install_python_dependencies
+    
     # SSH CA
     setup_ssh_ca
     setup_decloud_user
@@ -1146,11 +1214,27 @@ main() {
     # Application
     create_directories
     download_node_agent
+    
+    # NEW: Install CLI from downloaded repo
+    install_walletconnect_cli
+    
     build_node_agent
     create_configuration
     create_systemd_service
     configure_firewall
     create_helper_scripts
+    
+    # NEW: Authenticate node before starting
+    if ! run_node_authentication; then
+        log_warn "Node agent installed but not authenticated"
+        log_warn "The service will not start until you authenticate"
+        log_warn "Run: sudo decloud-node login"
+        echo ""
+        print_summary_unauthenticated
+        exit 0
+    fi
+    
+    # Start service (only if authenticated)
     start_service
     
     # Done
