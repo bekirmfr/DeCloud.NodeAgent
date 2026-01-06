@@ -625,9 +625,9 @@ install_python_dependencies() {
     # STEP 3: Upgrade pip
     # =====================================================
     log_info "Upgrading pip..."
-    # Try with --break-system-packages for Ubuntu 24.04+ (PEP 668)
-    if python3 -m pip install --upgrade pip --break-system-packages --quiet 2>/dev/null; then
-        log_info "✓ pip upgraded (with --break-system-packages)"
+    # Try with environment variable for Ubuntu 24.04+ (PEP 668)
+    if PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --upgrade pip --quiet 2>/dev/null; then
+        log_info "✓ pip upgraded"
     elif python3 -m pip install --upgrade pip --quiet 2>/dev/null; then
         log_info "✓ pip upgraded"
     else
@@ -649,15 +649,17 @@ install_python_dependencies() {
         if [[ "$ID" == "ubuntu" && "${VERSION_ID}" > "23" ]] || \
            [[ "$ID" == "debian" && "${VERSION_ID}" > "11" ]]; then
             USE_BREAK_PACKAGES=true
-            log_info "Detected PEP 668 system, using --break-system-packages"
+            log_info "Detected PEP 668 system (Ubuntu 24.04+)"
         fi
     fi
     
-    # Method 1: Try with --break-system-packages (for Ubuntu 24.04+)
+    # Method 1: For Ubuntu 24.04+ - Install system-wide with environment variable
     if [ "$USE_BREAK_PACKAGES" = true ]; then
-        if python3 -m pip install --break-system-packages $PACKAGES --quiet 2>/dev/null; then
+        log_info "Installing packages system-wide..."
+        # Use environment variable to bypass PEP 668 AND force system-wide installation
+        if PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install $PACKAGES 2>/dev/null; then
             INSTALL_SUCCESS=true
-            log_info "✓ Installed with --break-system-packages"
+            log_info "✓ Installed system-wide (PEP 668 bypass)"
         fi
     fi
     
@@ -678,22 +680,22 @@ install_python_dependencies() {
         fi
     fi
     
-    # Method 4: Try with --break-system-packages (for older Ubuntu with PEP 668)
+    # Method 4: Try with --break-system-packages flag
     if [ "$INSTALL_SUCCESS" = false ]; then
         log_info "Trying with --break-system-packages flag..."
-        if python3 -m pip install --break-system-packages $PACKAGES --quiet 2>/dev/null; then
+        if PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install $PACKAGES --quiet 2>/dev/null; then
             INSTALL_SUCCESS=true
-            log_info "✓ Installed with --break-system-packages"
+            log_info "✓ Installed with PIP_BREAK_SYSTEM_PACKAGES"
         fi
     fi
     
-    # Method 5: Install what we can from apt, rest from pip with --break-system-packages
+    # Method 5: Install what we can from apt, rest from pip with environment variable
     if [ "$INSTALL_SUCCESS" = false ]; then
         log_info "Trying hybrid apt + pip installation..."
         apt-get install -y python3-requests python3-pil > /dev/null 2>&1 || true
-        if python3 -m pip install --break-system-packages web3 eth-account qrcode --quiet 2>/dev/null; then
+        if PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install web3 eth-account qrcode --quiet 2>/dev/null; then
             INSTALL_SUCCESS=true
-            log_info "✓ Installed via apt + pip"
+            log_info "✓ Installed via apt + pip (system-wide)"
         elif python3 -m pip install --user web3 eth-account qrcode --quiet 2>/dev/null; then
             INSTALL_SUCCESS=true
             log_info "✓ Installed via apt + pip (--user)"
@@ -749,6 +751,9 @@ install_python_dependencies() {
         log_error "Failed to install Python dependencies"
         echo ""
         log_info "Manual installation required. For Ubuntu 24.04+ use:"
+        log_info "  sudo PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install web3 eth-account requests qrcode pillow"
+        echo ""
+        log_info "Or use the --break-system-packages flag:"
         log_info "  python3 -m pip install --break-system-packages web3 eth-account requests qrcode pillow"
         echo ""
         log_info "For older Ubuntu/Debian use:"
