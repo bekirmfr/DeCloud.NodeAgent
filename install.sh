@@ -565,6 +565,10 @@ configure_wireguard_keys() {
 # WalletConnect CLI Installation
 # ============================================================
 
+# =============================================================================
+# UPDATED INSTALL.SH FUNCTIONS FOR REAL WALLETCONNECT
+# =============================================================================
+
 install_python_dependencies() {
     log_step "Installing Python dependencies for authentication..."
     
@@ -626,13 +630,13 @@ install_walletconnect_cli() {
     log_step "Installing DeCloud authentication CLI..."
     
     # The CLI is in the repository we just cloned
-    local cli_source="$INSTALL_DIR/DeCloud.NodeAgent/cli/decloud-node"
-    local cli_dest="/usr/local/bin/decloud-node"
+    local cli_source="$INSTALL_DIR/DeCloud.NodeAgent/cli/cli-decloud-node"
+    local cli_dest="/usr/local/bin/cli-decloud-node"
     
     if [ ! -f "$cli_source" ]; then
         log_error "CLI script not found at $cli_source"
-        log_warn "Repository may be incomplete or CLI not committed yet"
-        return 1
+        log_error "Repository may be incomplete"
+        exit 1
     fi
     
     # Copy CLI to /usr/local/bin
@@ -640,12 +644,12 @@ install_walletconnect_cli() {
     chmod +x "$cli_dest"
     
     # Verify CLI works
-    if decloud-node version &> /dev/null; then
-        local cli_version=$(decloud-node version 2>/dev/null | awk '{print $NF}')
+    if cli-decloud-node version &> /dev/null; then
+        local cli_version=$(cli-decloud-node version 2>/dev/null | awk '{print $NF}')
         log_success "Authentication CLI installed"
         
         # Check which version (show feature)
-        if decloud-node version 2>/dev/null | grep -q "WalletConnect"; then
+        if cli-decloud-node version 2>/dev/null | grep -q "WalletConnect"; then
             log_info "CLI: WalletConnect Edition (${cli_version})"
         else
             log_info "CLI: $(basename $cli_source) (v${cli_version})"
@@ -667,14 +671,14 @@ run_node_authentication() {
     echo ""
     
     # Run the CLI login
-    if decloud-node login --orchestrator "$ORCHESTRATOR_URL"; then
+    if cli-decloud-node login --orchestrator "$ORCHESTRATOR_URL"; then
         log_success "Node authenticated successfully"
         return 0
     else
         log_error "Authentication failed"
         echo ""
-        log_info "You can complete authentication later with:"
-        log_info "  sudo decloud-node login --orchestrator $ORCHESTRATOR_URL"
+        log_info "You can re-run authentication later with:"
+        log_info "  sudo cli-decloud-node login"
         echo ""
         return 1
     fi
