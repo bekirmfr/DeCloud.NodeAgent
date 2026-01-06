@@ -1,8 +1,9 @@
-﻿// Enhanced OrchestratorClient with robust authentication and automatic re-registration
-// Handles expired tokens gracefully by re-registering on 401 Unauthorized errors
+﻿// OrchestratorClient with Wallet Signature Authentication
+// Stateless authentication - no tokens, no expiration, no re-registration!
 
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Infrastructure.Services.Auth;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 using System.Net;
@@ -24,51 +25,51 @@ public class OrchestratorClient : IOrchestratorClient
     private readonly HttpClient _httpClient;
     private readonly ILogger<OrchestratorClient> _logger;
     private readonly OrchestratorClientOptions _options;
+    private readonly INodeWalletService _walletService;
 
     private string? _nodeId;
-    private string? _authToken;
     private string? _orchestratorPublicKey;
     private string? _walletAddress;
     private Heartbeat? _lastHeartbeat = null;
-
-    // Track re-registration attempts to prevent infinite loops
-    private int _reregistrationAttempts = 0;
-    private const int MaxReregistrationAttempts = 3;
-    private DateTime _lastReregistrationAttempt = DateTime.MinValue;
-    private readonly TimeSpan _reregistrationCooldown = TimeSpan.FromMinutes(5);
-
-    // Store last registration request for re-registration
-    private NodeRegistration? _lastRegistrationRequest = null;
 
     // Queue for pending commands received from heartbeat responses
     private readonly ConcurrentQueue<PendingCommand> _pendingCommands = new();
 
     public string? NodeId => _nodeId;
-    public bool IsRegistered => !string.IsNullOrEmpty(_nodeId) && !string.IsNullOrEmpty(_authToken);
+    public bool IsRegistered => !string.IsNullOrEmpty(_nodeId);
     public string? WalletAddress => _walletAddress;
 
     public OrchestratorClient(
         HttpClient httpClient,
         IOptions<OrchestratorClientOptions> options,
-        ILogger<OrchestratorClient> logger)
+        ILogger<OrchestratorClient> logger,
+        INodeWalletService walletService)
     {
         _httpClient = httpClient;
         _logger = logger;
         _options = options.Value;
-        _walletAddress = _options.WalletAddress;
+        _walletService = walletService;
+        _walletAddress = _walletService.GetWalletAddress();
 
         _httpClient.BaseAddress = new Uri(_options.BaseUrl.TrimEnd('/'));
         _httpClient.Timeout = _options.Timeout;
+
+        _logger.LogInformation("OrchestratorClient initialized with wallet: {Wallet}",
+            _walletAddress);
     }
 
     /// <summary>
-    /// Register or re-register the node with the orchestrator
+    /// Register the node with the orchestrator.
+    /// No token returned - future requests authenticated via wallet signature!
     /// </summary>
     public async Task<bool> RegisterNodeAsync(NodeRegistration request, CancellationToken ct = default)
     {
         try
         {
             _logger.LogInformation("Registering node with orchestrator at {Url}", _options.BaseUrl);
+
+            // Ensure wallet address is set in request
+            request.WalletAddress = _walletAddress!;
 
             var response = await _httpClient.PostAsJsonAsync("/api/nodes/register", request, ct);
 
@@ -80,18 +81,11 @@ public class OrchestratorClient : IOrchestratorClient
                 if (json.RootElement.TryGetProperty("data", out var data))
                 {
                     _nodeId = data.GetProperty("nodeId").GetString();
-                    _authToken = data.GetProperty("authToken").GetString();
 
-                    // Reset re-registration tracking on successful registration
-                    _reregistrationAttempts = 0;
-                    _lastReregistrationAttempt = DateTime.MinValue;
+                    // ✅ NO MORE AUTH TOKEN!
+                    // Authentication is now done via wallet signatures
 
-                    // Store registration request for potential re-registration
-                    _lastRegistrationRequest = request;
-
-                    // =====================================================
                     // Handle orchestrator WireGuard public key
-                    // =====================================================
                     if (data.TryGetProperty("orchestratorWireGuardPublicKey", out var pubKeyProp) &&
                         pubKeyProp.ValueKind == JsonValueKind.String)
                     {
@@ -102,16 +96,14 @@ public class OrchestratorClient : IOrchestratorClient
                             await SaveOrchestratorPublicKeyAsync(_orchestratorPublicKey, ct);
                         }
                     }
-                    else
-                    {
-                        _logger.LogInformation(
-                            "No orchestrator WireGuard public key in registration response - " +
-                            "WireGuard may not be enabled on orchestrator");
-                    }
 
                     _logger.LogInformation(
-                        "✓ Node registered successfully: {NodeId} | Token: {TokenPreview}...",
-                        _nodeId, _authToken?[..Math.Min(12, _authToken.Length)]);
+                        "✓ Node registered successfully: {NodeId} | Wallet: {Wallet}",
+                        _nodeId, _walletAddress);
+
+                    _logger.LogInformation(
+                        "✓ Wallet-based authentication enabled - no tokens, no expiration!");
+
                     return true;
                 }
             }
@@ -127,9 +119,9 @@ public class OrchestratorClient : IOrchestratorClient
         }
     }
 
-    // =====================================================
-    // Save orchestrator public key
-    // =====================================================
+    /// <summary>
+    /// Save orchestrator public key for WireGuard relay configuration
+    /// </summary>
     private async Task SaveOrchestratorPublicKeyAsync(string publicKey, CancellationToken ct)
     {
         const string wireGuardDir = "/etc/wireguard";
@@ -137,17 +129,14 @@ public class OrchestratorClient : IOrchestratorClient
 
         try
         {
-            // Ensure directory exists
             if (!Directory.Exists(wireGuardDir))
             {
                 Directory.CreateDirectory(wireGuardDir);
                 _logger.LogInformation("Created WireGuard directory: {Dir}", wireGuardDir);
             }
 
-            // Write orchestrator public key
             await File.WriteAllTextAsync(publicKeyPath, publicKey.Trim() + "\n", ct);
 
-            // Set proper permissions (readable by all, writable by root)
             var chmodProcess = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
                 FileName = "chmod",
@@ -161,33 +150,21 @@ public class OrchestratorClient : IOrchestratorClient
             if (chmodProcess != null)
             {
                 await chmodProcess.WaitForExitAsync(ct);
-
-                if (chmodProcess.ExitCode != 0)
-                {
-                    var error = await chmodProcess.StandardError.ReadToEndAsync(ct);
-                    _logger.LogWarning("chmod failed: {Error}", error);
-                }
             }
 
             _logger.LogInformation(
-                "✓ Saved orchestrator WireGuard public key to {Path} - " +
-                "relay VMs on this node will have orchestrator peer pre-configured",
+                "✓ Saved orchestrator WireGuard public key to {Path}",
                 publicKeyPath);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex,
-                "Failed to save orchestrator WireGuard public key to {Path} - " +
-                "relay VMs will not have orchestrator peer pre-configured. " +
-                "Ensure node agent has write permissions to /etc/wireguard/",
-                publicKeyPath);
-
-            // Don't throw - registration can still succeed without this
+            _logger.LogError(ex, "Failed to save orchestrator WireGuard public key");
         }
     }
 
     /// <summary>
-    /// Send heartbeat to orchestrator with automatic re-registration on 401 errors
+    /// Send heartbeat to orchestrator with wallet signature authentication.
+    /// Stateless - no tokens, no 401 errors, no re-registration!
     /// </summary>
     public async Task<bool> SendHeartbeatAsync(Heartbeat heartbeat, CancellationToken ct = default)
     {
@@ -199,8 +176,25 @@ public class OrchestratorClient : IOrchestratorClient
 
         try
         {
-            var request = new HttpRequestMessage(HttpMethod.Post, $"/api/nodes/{_nodeId}/heartbeat");
-            request.Headers.Add("X-Node-Token", _authToken);
+            // =====================================================
+            // Create Request with Wallet Signature Headers
+            // =====================================================
+            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            var requestPath = $"/api/nodes/{_nodeId}/heartbeat";
+
+            // Message format: {nodeId}:{timestamp}:{requestPath}
+            var message = $"{_nodeId}:{timestamp}:{requestPath}";
+
+            // Sign the message with wallet
+            var signature = await _walletService.SignMessageAsync(message);
+
+            var request = new HttpRequestMessage(HttpMethod.Post, requestPath);
+
+            // ✅ NEW: Wallet signature authentication headers
+            request.Headers.Add("X-Node-Signature", signature);
+            request.Headers.Add("X-Node-Timestamp", timestamp.ToString());
+
+            // ❌ OLD: No more X-Node-Token!
 
             // Build heartbeat payload
             var payload = BuildHeartbeatPayload(heartbeat);
@@ -209,33 +203,25 @@ public class OrchestratorClient : IOrchestratorClient
             var response = await _httpClient.SendAsync(request, ct);
 
             // =====================================================
-            // CRITICAL: Handle 401 Unauthorized - Token Expired/Invalid
+            // Handle Response - No More 401 Token Errors!
             // =====================================================
-            if (response.StatusCode == HttpStatusCode.Unauthorized)
-            {
-                _logger.LogWarning(
-                    "❌ Heartbeat rejected with 401 Unauthorized - auth token expired or invalid");
-
-                // Attempt automatic re-registration
-                var reregistered = await AttemptReregistrationAsync(ct);
-
-                if (reregistered)
-                {
-                    // Retry heartbeat with new token
-                    _logger.LogInformation("Retrying heartbeat after successful re-registration");
-                    return await SendHeartbeatAsync(heartbeat, ct);
-                }
-
-                _logger.LogError("Failed to re-register node after 401 error - manual intervention may be required");
-                return false;
-            }
-
             if (!response.IsSuccessStatusCode)
             {
                 var errorContent = await response.Content.ReadAsStringAsync(ct);
-                _logger.LogWarning(
-                    "Heartbeat failed with status {Status}: {Error}",
-                    response.StatusCode, errorContent);
+
+                if (response.StatusCode == HttpStatusCode.Unauthorized)
+                {
+                    _logger.LogError(
+                        "❌ Heartbeat rejected: Signature validation failed. " +
+                        "Check that node wallet matches registered wallet.");
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Heartbeat failed with status {Status}: {Error}",
+                        response.StatusCode, errorContent);
+                }
+
                 return false;
             }
 
@@ -253,71 +239,10 @@ public class OrchestratorClient : IOrchestratorClient
     }
 
     /// <summary>
-    /// Attempt to re-register the node after auth failure
-    /// Includes cooldown period and max attempt limits
-    /// </summary>
-    private async Task<bool> AttemptReregistrationAsync(CancellationToken ct)
-    {
-        // Check cooldown period
-        if (DateTime.UtcNow - _lastReregistrationAttempt < _reregistrationCooldown)
-        {
-            var remainingCooldown = _reregistrationCooldown - (DateTime.UtcNow - _lastReregistrationAttempt);
-            _logger.LogWarning(
-                "Re-registration attempted too recently. Cooldown remaining: {Remaining:N0}s",
-                remainingCooldown.TotalSeconds);
-            return false;
-        }
-
-        // Check max attempts
-        if (_reregistrationAttempts >= MaxReregistrationAttempts)
-        {
-            _logger.LogError(
-                "❌ Maximum re-registration attempts ({Max}) reached. " +
-                "Manual node restart may be required. " +
-                "Check orchestrator connectivity and authentication system.",
-                MaxReregistrationAttempts);
-            return false;
-        }
-
-        _reregistrationAttempts++;
-        _lastReregistrationAttempt = DateTime.UtcNow;
-
-        _logger.LogInformation(
-            "🔄 Re-registration attempt {Attempt}/{Max} due to expired/invalid token",
-            _reregistrationAttempts, MaxReregistrationAttempts);
-
-        // Use stored registration request if available, otherwise build new one
-        if (_lastRegistrationRequest != null)
-        {
-            var success = await RegisterNodeAsync(_lastRegistrationRequest, ct);
-
-            if (success)
-            {
-                _logger.LogInformation("✅ Successfully re-registered after 401 error");
-            }
-            else
-            {
-                _logger.LogError("❌ Re-registration failed (attempt {Attempt}/{Max})",
-                    _reregistrationAttempts, MaxReregistrationAttempts);
-            }
-
-            return success;
-        }
-        else
-        {
-            _logger.LogError(
-                "❌ Cannot re-register: No previous registration request stored. " +
-                "Node must restart to re-register.");
-            return false;
-        }
-    }
-
-    /// <summary>
     /// Build heartbeat payload from Heartbeat object
     /// </summary>
     private object BuildHeartbeatPayload(Heartbeat heartbeat)
     {
-        // Calculate resource metrics
         var cpuUsage = heartbeat.Resources.VirtualCpuUsagePercent;
         var memUsage = heartbeat.Resources.TotalMemoryBytes > 0
             ? (double)heartbeat.Resources.UsedMemoryBytes / heartbeat.Resources.TotalMemoryBytes * 100
@@ -352,14 +277,14 @@ public class OrchestratorClient : IOrchestratorClient
                 isIpAssigned = v.IsIpAssigned,
                 ipAddress = v.IpAddress,
                 macAddress = v.MacAddress,
-                sshPort = 2222, // Standard SSH port for VMs
+                sshPort = 2222,
                 vncPort = v.VncPort,
                 virtualCpuCores = v.VirtualCpuCores,
                 qualityTier = v.QualityTier,
                 computePointCost = v.ComputePointCost,
                 memoryBytes = v.MemoryBytes,
                 diskBytes = v.DiskBytes,
-                startedAt = v.StartedAt.ToString("O") // StartedAt is non-nullable DateTime
+                startedAt = v.StartedAt.ToString("O")
             }),
             cgnatInfo = heartbeat.CgnatInfo != null ? new
             {
@@ -380,7 +305,7 @@ public class OrchestratorClient : IOrchestratorClient
     /// </summary>
     private Task ProcessHeartbeatResponseAsync(string content, CancellationToken ct)
     {
-        _logger.LogDebug("Processing heartbeat response: {ResponseContent}", content);
+        _logger.LogDebug("Processing heartbeat response");
         try
         {
             var json = JsonDocument.Parse(content);
@@ -388,12 +313,10 @@ public class OrchestratorClient : IOrchestratorClient
             if (!json.RootElement.TryGetProperty("data", out var data))
             {
                 _logger.LogWarning("Heartbeat response missing 'data' property");
-                throw new ArgumentException("Invalid heartbeat response format");
+                return Task.CompletedTask;
             }
 
-            // =====================================================
             // Process Pending Commands
-            // =====================================================
             if (data.TryGetProperty("pendingCommands", out var commands) &&
                 commands.ValueKind == JsonValueKind.Array)
             {
@@ -401,7 +324,6 @@ public class OrchestratorClient : IOrchestratorClient
                 {
                     var commandId = cmd.GetProperty("commandId").GetString() ?? "";
 
-                    // Handle 'type' as either string OR number (enum integer)
                     CommandType commandType;
                     var typeProp = cmd.GetProperty("type");
 
@@ -429,7 +351,6 @@ public class OrchestratorClient : IOrchestratorClient
                     _logger.LogInformation("Received command from orchestrator: {Type} (ID: {CommandId})",
                         commandType, commandId);
 
-                    // Enqueue command for processing
                     _pendingCommands.Enqueue(new PendingCommand
                     {
                         CommandId = commandId,
@@ -446,9 +367,7 @@ public class OrchestratorClient : IOrchestratorClient
                 }
             }
 
-            // =====================================================
             // Extract and Store CGNAT Info
-            // =====================================================
             if (data.TryGetProperty("cgnatInfo", out var cgnatInfoElement) &&
                 cgnatInfoElement.ValueKind != JsonValueKind.Null)
             {
@@ -465,7 +384,6 @@ public class OrchestratorClient : IOrchestratorClient
                     "Received relay assignment: Relay {RelayId}, Tunnel IP {TunnelIp}",
                     relayId, tunnelIp);
 
-                // Store cgnatInfo in the heartbeat
                 if (_lastHeartbeat != null)
                 {
                     _lastHeartbeat.CgnatInfo = new CgnatNodeInfo
@@ -474,22 +392,20 @@ public class OrchestratorClient : IOrchestratorClient
                         TunnelIp = tunnelIp,
                         WireGuardConfig = wgConfig,
                         PublicEndpoint = publicEndpoint,
-                        TunnelStatus = TunnelStatus.Disconnected, // WireGuard will update this
+                        TunnelStatus = TunnelStatus.Disconnected,
                         LastHandshake = null
                     };
 
-                    _logger.LogInformation(
-                        "✓ Stored CGNAT info in heartbeat for WireGuard configuration");
+                    _logger.LogInformation("✓ Stored CGNAT info in heartbeat");
                 }
             }
             else if (_lastHeartbeat != null && _lastHeartbeat.CgnatInfo != null)
             {
-                // No cgnatInfo in response but we had it before - clear it
                 _logger.LogInformation("Clearing previous CGNAT info - node no longer behind NAT");
                 _lastHeartbeat.CgnatInfo = null;
             }
 
-            _lastHeartbeat = _lastHeartbeat; // Update last heartbeat
+            _lastHeartbeat = _lastHeartbeat;
         }
         catch (Exception ex)
         {
@@ -539,7 +455,7 @@ public class OrchestratorClient : IOrchestratorClient
     }
 
     /// <summary>
-    /// Acknowledge command execution to orchestrator
+    /// Acknowledge command execution to orchestrator with wallet signature
     /// </summary>
     public async Task<bool> AcknowledgeCommandAsync(
         string commandId,
@@ -555,11 +471,20 @@ public class OrchestratorClient : IOrchestratorClient
 
         try
         {
-            var request = new HttpRequestMessage(
-                HttpMethod.Post,
-                $"/api/nodes/{_nodeId}/commands/{commandId}/acknowledge");
+            // =====================================================
+            // Create Request with Wallet Signature Headers
+            // =====================================================
+            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            var requestPath = $"/api/nodes/{_nodeId}/commands/{commandId}/acknowledge";
 
-            request.Headers.Add("X-Node-Token", _authToken);
+            var message = $"{_nodeId}:{timestamp}:{requestPath}";
+            var signature = await _walletService.SignMessageAsync(message);
+
+            var request = new HttpRequestMessage(HttpMethod.Post, requestPath);
+
+            // ✅ NEW: Wallet signature authentication
+            request.Headers.Add("X-Node-Signature", signature);
+            request.Headers.Add("X-Node-Timestamp", timestamp.ToString());
 
             var payload = new
             {
@@ -572,15 +497,6 @@ public class OrchestratorClient : IOrchestratorClient
             request.Content = JsonContent.Create(payload);
 
             var response = await _httpClient.SendAsync(request, ct);
-
-            // Handle 401 on acknowledgment (less critical than heartbeat)
-            if (response.StatusCode == HttpStatusCode.Unauthorized)
-            {
-                _logger.LogWarning(
-                    "Command acknowledgment rejected with 401 - token may have expired. " +
-                    "Will be re-sent after next successful heartbeat.");
-                return false;
-            }
 
             if (response.IsSuccessStatusCode)
             {
