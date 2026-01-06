@@ -1,10 +1,12 @@
-﻿// Sends enhanced heartbeat with detailed VM information
+﻿// Enhanced OrchestratorClient with robust authentication and automatic re-registration
+// Handles expired tokens gracefully by re-registering on 401 Unauthorized errors
 
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
-using System.Net.Mail;
+using System.Net;
+using System.Net.Http.Json;
 using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Services;
@@ -14,6 +16,7 @@ public class OrchestratorClientOptions
     public string BaseUrl { get; set; } = "http://localhost:5000";
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(30);
     public string? WalletAddress { get; set; }
+    public int AgentPort { get; set; } = 5050;
 }
 
 public class OrchestratorClient : IOrchestratorClient
@@ -27,6 +30,15 @@ public class OrchestratorClient : IOrchestratorClient
     private string? _orchestratorPublicKey;
     private string? _walletAddress;
     private Heartbeat? _lastHeartbeat = null;
+
+    // Track re-registration attempts to prevent infinite loops
+    private int _reregistrationAttempts = 0;
+    private const int MaxReregistrationAttempts = 3;
+    private DateTime _lastReregistrationAttempt = DateTime.MinValue;
+    private readonly TimeSpan _reregistrationCooldown = TimeSpan.FromMinutes(5);
+
+    // Store last registration request for re-registration
+    private NodeRegistration? _lastRegistrationRequest = null;
 
     // Queue for pending commands received from heartbeat responses
     private readonly ConcurrentQueue<PendingCommand> _pendingCommands = new();
@@ -49,6 +61,9 @@ public class OrchestratorClient : IOrchestratorClient
         _httpClient.Timeout = _options.Timeout;
     }
 
+    /// <summary>
+    /// Register or re-register the node with the orchestrator
+    /// </summary>
     public async Task<bool> RegisterNodeAsync(NodeRegistration request, CancellationToken ct = default)
     {
         try
@@ -66,6 +81,13 @@ public class OrchestratorClient : IOrchestratorClient
                 {
                     _nodeId = data.GetProperty("nodeId").GetString();
                     _authToken = data.GetProperty("authToken").GetString();
+
+                    // Reset re-registration tracking on successful registration
+                    _reregistrationAttempts = 0;
+                    _lastReregistrationAttempt = DateTime.MinValue;
+
+                    // Store registration request for potential re-registration
+                    _lastRegistrationRequest = request;
 
                     // =====================================================
                     // Handle orchestrator WireGuard public key
@@ -87,7 +109,9 @@ public class OrchestratorClient : IOrchestratorClient
                             "WireGuard may not be enabled on orchestrator");
                     }
 
-                    _logger.LogInformation("Node registered successfully. NodeId: {NodeId} Orchestrator WireGuard Public Key: {OrchestratorPublicKey}", _nodeId, _orchestratorPublicKey);
+                    _logger.LogInformation(
+                        "✓ Node registered successfully: {NodeId} | Token: {TokenPreview}...",
+                        _nodeId, _authToken?[..Math.Min(12, _authToken.Length)]);
                     return true;
                 }
             }
@@ -162,6 +186,9 @@ public class OrchestratorClient : IOrchestratorClient
         }
     }
 
+    /// <summary>
+    /// Send heartbeat to orchestrator with automatic re-registration on 401 errors
+    /// </summary>
     public async Task<bool> SendHeartbeatAsync(Heartbeat heartbeat, CancellationToken ct = default)
     {
         if (!IsRegistered)
@@ -175,80 +202,48 @@ public class OrchestratorClient : IOrchestratorClient
             var request = new HttpRequestMessage(HttpMethod.Post, $"/api/nodes/{_nodeId}/heartbeat");
             request.Headers.Add("X-Node-Token", _authToken);
 
-            // Calculate resource metrics
-            var cpuUsage = heartbeat.Resources.VirtualCpuUsagePercent;
-            var memUsage = heartbeat.Resources.TotalMemoryBytes > 0
-                ? (double)heartbeat.Resources.UsedMemoryBytes / heartbeat.Resources.TotalMemoryBytes * 100
-                : 0;
-            var storageUsage = heartbeat.Resources.TotalStorageBytes > 0
-                ? (double)heartbeat.Resources.UsedStorageBytes / heartbeat.Resources.TotalStorageBytes * 100
-                : 0;
-
-            var payload = new
-            {
-                nodeId = heartbeat.NodeId,
-                metrics = new
-                {
-                    timestamp = heartbeat.Timestamp.ToString("O"),
-                    cpuUsagePercent = cpuUsage,
-                    memoryUsagePercent = memUsage,
-                    storageUsagePercent = storageUsage,
-                    //networkInMbps = 0,
-                    //networkOutMbps = 0,
-                    activeVmCount = heartbeat.ActiveVms.Count,
-                    //loadAverage = 0.0
-                },
-                availableResources = new
-                {
-                    computePoints = heartbeat.Resources.AvailableVirtualCpuCores,
-                    memoryBytes = heartbeat.Resources.AvailableMemoryBytes,
-                    storageBytes = heartbeat.Resources.AvailableStorageBytes,
-                    //bandwidthMbps = 1000
-                },
-                activeVms = heartbeat.ActiveVms.Select(v => new
-                {
-                    vmId = v.VmId,
-                    name = v.Name,
-                    state = v.State.ToString(),  // Convert enum to string
-                    ownerId = v.OwnerId ?? string.Empty,
-                    isIpAssigned = v.IsIpAssigned,
-                    ipAddress = v.IpAddress,
-                    macAddress = v.MacAddress,
-                    sshPort = 2222,
-                    vncPort = v.VncPort,
-                    virtualCpuCores = v.VirtualCpuCores,  
-                    qualityTier = v.QualityTier,
-                    computePointCost = v.ComputePointCost,
-                    memoryBytes = v.MemoryBytes,
-                    diskBytes = v.DiskBytes,
-                    startedAt = v.StartedAt.ToString("O")
-                }).ToList()
-            };
-
+            // Build heartbeat payload
+            var payload = BuildHeartbeatPayload(heartbeat);
             request.Content = JsonContent.Create(payload);
-
-            _logger.LogDebug("Sending heartbeat: {request}", request.Content);
 
             var response = await _httpClient.SendAsync(request, ct);
 
-            if (response.IsSuccessStatusCode)
+            // =====================================================
+            // CRITICAL: Handle 401 Unauthorized - Token Expired/Invalid
+            // =====================================================
+            if (response.StatusCode == HttpStatusCode.Unauthorized)
             {
-                _lastHeartbeat = heartbeat;
+                _logger.LogWarning(
+                    "❌ Heartbeat rejected with 401 Unauthorized - auth token expired or invalid");
 
-                var content = await response.Content.ReadAsStringAsync(ct);
-                await ProcessHeartbeatResponseAsync(content, ct);
+                // Attempt automatic re-registration
+                var reregistered = await AttemptReregistrationAsync(ct);
 
-                if (heartbeat.ActiveVms.Count > 0)
+                if (reregistered)
                 {
-                    _logger.LogDebug("Heartbeat sent successfully: {VmCount} VMs",
-                        heartbeat.ActiveVms.Count);
+                    // Retry heartbeat with new token
+                    _logger.LogInformation("Retrying heartbeat after successful re-registration");
+                    return await SendHeartbeatAsync(heartbeat, ct);
                 }
 
-                return true;
+                _logger.LogError("Failed to re-register node after 401 error - manual intervention may be required");
+                return false;
             }
 
-            _logger.LogWarning("Heartbeat failed with status: {Status}", response.StatusCode);
-            return false;
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorContent = await response.Content.ReadAsStringAsync(ct);
+                _logger.LogWarning(
+                    "Heartbeat failed with status {Status}: {Error}",
+                    response.StatusCode, errorContent);
+                return false;
+            }
+
+            // Parse successful response
+            var content = await response.Content.ReadAsStringAsync(ct);
+            await ProcessHeartbeatResponseAsync(content, ct);
+
+            return true;
         }
         catch (Exception ex)
         {
@@ -257,11 +252,132 @@ public class OrchestratorClient : IOrchestratorClient
         }
     }
 
-    public Heartbeat? GetLastHeartbeat()
+    /// <summary>
+    /// Attempt to re-register the node after auth failure
+    /// Includes cooldown period and max attempt limits
+    /// </summary>
+    private async Task<bool> AttemptReregistrationAsync(CancellationToken ct)
     {
-        return _lastHeartbeat;
+        // Check cooldown period
+        if (DateTime.UtcNow - _lastReregistrationAttempt < _reregistrationCooldown)
+        {
+            var remainingCooldown = _reregistrationCooldown - (DateTime.UtcNow - _lastReregistrationAttempt);
+            _logger.LogWarning(
+                "Re-registration attempted too recently. Cooldown remaining: {Remaining:N0}s",
+                remainingCooldown.TotalSeconds);
+            return false;
+        }
+
+        // Check max attempts
+        if (_reregistrationAttempts >= MaxReregistrationAttempts)
+        {
+            _logger.LogError(
+                "❌ Maximum re-registration attempts ({Max}) reached. " +
+                "Manual node restart may be required. " +
+                "Check orchestrator connectivity and authentication system.",
+                MaxReregistrationAttempts);
+            return false;
+        }
+
+        _reregistrationAttempts++;
+        _lastReregistrationAttempt = DateTime.UtcNow;
+
+        _logger.LogInformation(
+            "🔄 Re-registration attempt {Attempt}/{Max} due to expired/invalid token",
+            _reregistrationAttempts, MaxReregistrationAttempts);
+
+        // Use stored registration request if available, otherwise build new one
+        if (_lastRegistrationRequest != null)
+        {
+            var success = await RegisterNodeAsync(_lastRegistrationRequest, ct);
+
+            if (success)
+            {
+                _logger.LogInformation("✅ Successfully re-registered after 401 error");
+            }
+            else
+            {
+                _logger.LogError("❌ Re-registration failed (attempt {Attempt}/{Max})",
+                    _reregistrationAttempts, MaxReregistrationAttempts);
+            }
+
+            return success;
+        }
+        else
+        {
+            _logger.LogError(
+                "❌ Cannot re-register: No previous registration request stored. " +
+                "Node must restart to re-register.");
+            return false;
+        }
     }
 
+    /// <summary>
+    /// Build heartbeat payload from Heartbeat object
+    /// </summary>
+    private object BuildHeartbeatPayload(Heartbeat heartbeat)
+    {
+        // Calculate resource metrics
+        var cpuUsage = heartbeat.Resources.VirtualCpuUsagePercent;
+        var memUsage = heartbeat.Resources.TotalMemoryBytes > 0
+            ? (double)heartbeat.Resources.UsedMemoryBytes / heartbeat.Resources.TotalMemoryBytes * 100
+            : 0;
+        var storageUsage = heartbeat.Resources.TotalStorageBytes > 0
+            ? (double)heartbeat.Resources.UsedStorageBytes / heartbeat.Resources.TotalStorageBytes * 100
+            : 0;
+
+        var payload = new
+        {
+            nodeId = heartbeat.NodeId,
+            metrics = new
+            {
+                timestamp = heartbeat.Timestamp.ToString("O"),
+                cpuUsagePercent = cpuUsage,
+                memoryUsagePercent = memUsage,
+                storageUsagePercent = storageUsage,
+                activeVmCount = heartbeat.ActiveVms.Count
+            },
+            availableResources = new
+            {
+                computePoints = heartbeat.Resources.AvailableVirtualCpuCores,
+                memoryBytes = heartbeat.Resources.AvailableMemoryBytes,
+                storageBytes = heartbeat.Resources.AvailableStorageBytes
+            },
+            activeVms = heartbeat.ActiveVms.Select(v => new
+            {
+                vmId = v.VmId,
+                name = v.Name,
+                state = v.State.ToString(),
+                ownerId = v.OwnerId ?? "unknown",
+                isIpAssigned = v.IsIpAssigned,
+                ipAddress = v.IpAddress,
+                macAddress = v.MacAddress,
+                sshPort = 2222, // Standard SSH port for VMs
+                vncPort = v.VncPort,
+                virtualCpuCores = v.VirtualCpuCores,
+                qualityTier = v.QualityTier,
+                computePointCost = v.ComputePointCost,
+                memoryBytes = v.MemoryBytes,
+                diskBytes = v.DiskBytes,
+                startedAt = v.StartedAt.ToString("O") // StartedAt is non-nullable DateTime
+            }),
+            cgnatInfo = heartbeat.CgnatInfo != null ? new
+            {
+                assignedRelayNodeId = heartbeat.CgnatInfo.AssignedRelayNodeId,
+                tunnelIp = heartbeat.CgnatInfo.TunnelIp,
+                wireGuardConfig = heartbeat.CgnatInfo.WireGuardConfig,
+                publicEndpoint = heartbeat.CgnatInfo.PublicEndpoint,
+                tunnelStatus = heartbeat.CgnatInfo.TunnelStatus.ToString(),
+                lastHandshake = heartbeat.CgnatInfo.LastHandshake?.ToString("O")
+            } : null
+        };
+
+        return payload;
+    }
+
+    /// <summary>
+    /// Process heartbeat response including pending commands and CGNAT info
+    /// </summary>
     private Task ProcessHeartbeatResponseAsync(string content, CancellationToken ct)
     {
         _logger.LogDebug("Processing heartbeat response: {ResponseContent}", content);
@@ -275,6 +391,9 @@ public class OrchestratorClient : IOrchestratorClient
                 throw new ArgumentException("Invalid heartbeat response format");
             }
 
+            // =====================================================
+            // Process Pending Commands
+            // =====================================================
             if (data.TryGetProperty("pendingCommands", out var commands) &&
                 commands.ValueKind == JsonValueKind.Array)
             {
@@ -310,9 +429,7 @@ public class OrchestratorClient : IOrchestratorClient
                     _logger.LogInformation("Received command from orchestrator: {Type} (ID: {CommandId})",
                         commandType, commandId);
 
-                    // =====================================================
-                    // Without this, commands are never processed!
-                    // =====================================================
+                    // Enqueue command for processing
                     _pendingCommands.Enqueue(new PendingCommand
                     {
                         CommandId = commandId,
@@ -329,9 +446,9 @@ public class OrchestratorClient : IOrchestratorClient
                 }
             }
 
-            // ========================================
-            // Extract and store cgnatInfo
-            // ========================================
+            // =====================================================
+            // Extract and Store CGNAT Info
+            // =====================================================
             if (data.TryGetProperty("cgnatInfo", out var cgnatInfoElement) &&
                 cgnatInfoElement.ValueKind != JsonValueKind.Null)
             {
@@ -371,6 +488,8 @@ public class OrchestratorClient : IOrchestratorClient
                 _logger.LogInformation("Clearing previous CGNAT info - node no longer behind NAT");
                 _lastHeartbeat.CgnatInfo = null;
             }
+
+            _lastHeartbeat = _lastHeartbeat; // Update last heartbeat
         }
         catch (Exception ex)
         {
@@ -380,6 +499,9 @@ public class OrchestratorClient : IOrchestratorClient
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Get all pending commands from the queue
+    /// </summary>
     public Task<List<PendingCommand>> GetPendingCommandsAsync(CancellationToken ct = default)
     {
         var commands = new List<PendingCommand>();
@@ -392,6 +514,9 @@ public class OrchestratorClient : IOrchestratorClient
         return Task.FromResult(commands);
     }
 
+    /// <summary>
+    /// Report VM state change to orchestrator (via next heartbeat)
+    /// </summary>
     public async Task<bool> ReportVmStateChangeAsync(string vmId, VmState newState, CancellationToken ct = default)
     {
         if (!IsRegistered)
@@ -413,6 +538,9 @@ public class OrchestratorClient : IOrchestratorClient
         }
     }
 
+    /// <summary>
+    /// Acknowledge command execution to orchestrator
+    /// </summary>
     public async Task<bool> AcknowledgeCommandAsync(
         string commandId,
         bool success,
@@ -445,6 +573,15 @@ public class OrchestratorClient : IOrchestratorClient
 
             var response = await _httpClient.SendAsync(request, ct);
 
+            // Handle 401 on acknowledgment (less critical than heartbeat)
+            if (response.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                _logger.LogWarning(
+                    "Command acknowledgment rejected with 401 - token may have expired. " +
+                    "Will be re-sent after next successful heartbeat.");
+                return false;
+            }
+
             if (response.IsSuccessStatusCode)
             {
                 _logger.LogDebug("Command {CommandId} acknowledged: {Success}", commandId, success);
@@ -460,5 +597,13 @@ public class OrchestratorClient : IOrchestratorClient
             _logger.LogError(ex, "Error acknowledging command {CommandId}", commandId);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Get the last heartbeat object (for accessing CGNAT info, etc.)
+    /// </summary>
+    public Heartbeat? GetLastHeartbeat()
+    {
+        return _lastHeartbeat;
     }
 }
