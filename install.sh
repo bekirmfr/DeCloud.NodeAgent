@@ -622,6 +622,64 @@ install_python_dependencies() {
     fi
 }
 
+install_walletconnect_cli() {
+    log_step "Installing DeCloud authentication CLI..."
+    
+    # The CLI is in the repository we just cloned
+    local cli_source="$INSTALL_DIR/DeCloud.NodeAgent/cli/decloud-node"
+    local cli_dest="/usr/local/bin/decloud-node"
+    
+    if [ ! -f "$cli_source" ]; then
+        log_error "CLI script not found at $cli_source"
+        log_warn "Repository may be incomplete or CLI not committed yet"
+        return 1
+    fi
+    
+    # Copy CLI to /usr/local/bin
+    cp "$cli_source" "$cli_dest"
+    chmod +x "$cli_dest"
+    
+    # Verify CLI works
+    if decloud-node version &> /dev/null; then
+        local cli_version=$(decloud-node version 2>/dev/null | awk '{print $NF}')
+        log_success "Authentication CLI installed"
+        
+        # Check which version (show feature)
+        if decloud-node version 2>/dev/null | grep -q "WalletConnect"; then
+            log_info "CLI: WalletConnect Edition (${cli_version})"
+        else
+            log_info "CLI: $(basename $cli_source) (v${cli_version})"
+        fi
+    else
+        log_error "CLI installation failed - testing returned error"
+        return 1
+    fi
+    
+    return 0
+}
+
+run_node_authentication() {
+    log_step "Authenticating node with WalletConnect..."
+    
+    echo ""
+    log_info "You will now authorize this node using your wallet."
+    log_info "This process uses WalletConnect - you'll scan a QR code with your mobile wallet."
+    echo ""
+    
+    # Run the CLI login
+    if decloud-node login --orchestrator "$ORCHESTRATOR_URL"; then
+        log_success "Node authenticated successfully"
+        return 0
+    else
+        log_error "Authentication failed"
+        echo ""
+        log_info "You can complete authentication later with:"
+        log_info "  sudo decloud-node login --orchestrator $ORCHESTRATOR_URL"
+        echo ""
+        return 1
+    fi
+}
+
 # ============================================================
 # SSH CA Setup
 # ============================================================
