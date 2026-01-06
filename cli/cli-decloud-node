@@ -20,6 +20,7 @@ import socket
 import subprocess
 import base64
 import urllib.parse
+import uuid
 from datetime import datetime
 from typing import Optional, Dict, Any
 import argparse
@@ -95,26 +96,59 @@ def log_warn(msg):
 # SYSTEM INFORMATION FUNCTIONS
 # =============================================================================
 
-def get_node_id() -> str:
-    """Generate deterministic node ID based on hardware"""
+def get_node_id(machine_id: str, wallet_address: str) -> str:
+    """
+    Generate deterministic node ID using same algorithm as orchestrator
+    
+    Algorithm (from NodeIdGenerator.cs):
+    1. Normalize machine_id and wallet_address (lowercase, trim)
+    2. Create string: "{machine_id}:{wallet_address}:decloud-node-v1"
+    3. SHA256 hash it
+    4. Take first 16 bytes
+    5. Convert to GUID format
+    """
     try:
-        cpu_info = ""
-        if os.path.exists('/proc/cpuinfo'):
-            with open('/proc/cpuinfo', 'r') as f:
-                cpu_info = f.read()
+        # Normalize inputs (same as orchestrator)
+        machine_id_norm = machine_id.strip().lower()
+        wallet_norm = wallet_address.strip().lower()
         
-        machine_id = ""
+        # Reject null wallet address
+        if wallet_norm in ['0x0000000000000000000000000000000000000000', '0000000000000000000000000000000000000000']:
+            raise ValueError("Cannot generate node ID with null wallet address")
+        
+        # Create deterministic hash (same format as C#)
+        salt = "decloud-node-v1"
+        input_string = f"{machine_id_norm}:{wallet_norm}:{salt}"
+        
+        # SHA256 hash
+        hash_bytes = hashlib.sha256(input_string.encode('utf-8')).digest()
+        
+        # Take first 16 bytes and convert to GUID format
+        guid_bytes = hash_bytes[:16]
+        
+        # Convert to GUID string (same format as C# Guid.ToString())
+        # GUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        import uuid
+        node_id = str(uuid.UUID(bytes=guid_bytes))
+        
+        return node_id
+    except Exception as e:
+        log_error(f"Failed to generate node ID: {e}")
+        sys.exit(1)
+
+def get_machine_id() -> str:
+    """Get machine ID from /etc/machine-id"""
+    try:
         if os.path.exists('/etc/machine-id'):
             with open('/etc/machine-id', 'r') as f:
                 machine_id = f.read().strip()
+                if machine_id:
+                    return machine_id
         
-        hostname = socket.gethostname()
-        data = f"{cpu_info}{machine_id}{hostname}"
-        node_hash = hashlib.sha256(data.encode()).hexdigest()[:16]
-        
-        return f"node-{hostname}-{node_hash}"
+        log_error("Could not read /etc/machine-id")
+        sys.exit(1)
     except Exception as e:
-        log_error(f"Failed to generate node ID: {e}")
+        log_error(f"Failed to get machine ID: {e}")
         sys.exit(1)
 
 def get_hardware_info() -> Dict[str, Any]:
@@ -197,13 +231,13 @@ def save_credentials(node_id: str, api_key: str, wallet_address: str, signature:
 # SIGNING URL GENERATION
 # =============================================================================
 
-def create_signing_message(node_id: str, wallet_address: str, hardware: Dict[str, Any]) -> str:
-    """Create message to be signed by wallet"""
+def create_signing_message(machine_id: str, wallet_address: str, hardware: Dict[str, Any]) -> str:
+    """Create message to be signed (NO node_id needed!)"""
     timestamp = int(time.time())
     
     message = f"""Sign this message to authorize your DeCloud node:
 
-Node ID: {node_id}
+Machine ID: {machine_id}
 Wallet: {wallet_address}
 Hardware: {hardware['cpu']}
 Resources: {hardware['cores']} cores / {hardware['memory']}GB RAM
@@ -317,16 +351,10 @@ def verify_signature(message: str, signature: str, expected_address: str) -> boo
 # REGISTRATION
 # =============================================================================
 
-def register_node(orchestrator_url: str, node_id: str, wallet_address: str, 
+def register_node(orchestrator_url: str, node_id: str, machine_id: str, wallet_address: str, 
                  signature: str, message: str, hardware: Dict[str, Any]) -> Optional[str]:
     """Register node with orchestrator and get API key"""
     try:
-        # Get machine ID from /etc/machine-id
-        machine_id = ""
-        if os.path.exists('/etc/machine-id'):
-            with open('/etc/machine-id', 'r') as f:
-                machine_id = f.read().strip()
-        
         # Build proper HardwareInventory structure
         hardware_inventory = {
             "cpuCores": hardware.get('cores', 0),
@@ -383,36 +411,28 @@ def register_node(orchestrator_url: str, node_id: str, wallet_address: str,
         log_error(f"Failed to register node: {e}")
         return None
 
-
 # =============================================================================
 # WEB-BASED AUTHENTICATION FLOW
 # =============================================================================
 
-def login_with_web_signing(orchestrator_url: str, wallet_address: str = None, verbose: bool = False):
-    """Login using web-based WalletConnect signing"""
-    print_banner()
+def login_with_web_signing(orchestrator_url: str, wallet_address: str = None):
+    """Simplified login - no need to generate node_id!"""
     
-    # Get node information
-    node_id = get_node_id()
+    # Get machine_id
+    machine_id = get_machine_id()
+    
+    # Get wallet_address from user
+    if not wallet_address:
+        wallet_address = input("Wallet (0x...): ").strip()
+    
+    # Get hardware info
     hardware = get_hardware_info()
     
-    log_info(f"Node ID: {node_id}")
-    log_info(f"Hardware: {hardware['cpu']}")
-    log_info(f"Resources: {hardware['cores']} cores / {hardware['memory']}GB RAM / {hardware['disk']}GB disk")
-    print()
+    print(f"Machine ID: {machine_id}")
+    print(f"Hardware: {hardware['cpu']}")
     
-    # Get wallet address if not provided
-    if not wallet_address:
-        log_info("Enter your Ethereum wallet address:")
-        wallet_address = input(f"  {Colors.BOLD}Wallet (0x...):{Colors.NC} ").strip()
-        print()
-    
-    if not wallet_address.startswith('0x') or len(wallet_address) != 42:
-        log_error("Invalid wallet address format")
-        return False
-    
-    # Create message
-    message = create_signing_message(node_id, wallet_address, hardware)
+    # Create message WITHOUT node_id
+    message = create_signing_message(machine_id, wallet_address, hardware)
     
     # Generate signing URL
     signing_url = generate_signing_url(message, node_id, wallet_address, hardware)
@@ -446,14 +466,17 @@ def login_with_web_signing(orchestrator_url: str, wallet_address: str = None, ve
     # Register with orchestrator
     log_info("Registering with orchestrator...")
     
-    api_key = register_node(
+    response = register_node(
         orchestrator_url=orchestrator_url,
-        node_id=node_id,
+        machine_id=machine_id,
         wallet_address=wallet_address,
         signature=signature,
         message=message,
         hardware=hardware
     )
+
+    node_id = response['nodeId']
+    api_key = response['apiKey']
     
     if api_key:
         # Save credentials
