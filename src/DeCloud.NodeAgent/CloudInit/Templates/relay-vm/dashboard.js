@@ -279,7 +279,7 @@ function renderCGNATNodes() {
     // Filter out orchestrator peer (CGNAT nodes connect on port 51820)
     const cgnatPeers = peers.filter(p => {
         // CGNAT nodes typically don't have endpoints or have endpoints with port 51820
-        return !p.endpoint || p.endpoint.includes(':51820');
+        return p.allowed_ips !== '10.20.0.1/32';
     });
 
     state.cgnatNodes = cgnatPeers;
