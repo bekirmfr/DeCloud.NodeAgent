@@ -74,7 +74,7 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         
         try:
-            if path == '/api/relay/peer':
+            if path in ['/api/relay/peer', '/api/relay/add-peer']:
                 self.add_cgnat_peer()
             else:
                 self.send_error_response(404, 'Not Found', 'The requested resource was not found')
