@@ -40,11 +40,17 @@ public class HeartbeatService : BackgroundService
         // Initial delay to let other services start
         await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
 
-        // Register with orchestrator
-        var orchestratorClient = _orchestratorClient as OrchestratorClient;
-        if (orchestratorClient != null && !orchestratorClient.IsRegistered)
+        // Check if registered (has API key in credentials)
+        if (!await IsNodeRegisteredAsync())
         {
-            await RegisterWithOrchestratorAsync(stoppingToken);
+            _logger.LogWarning("Node not registered - waiting for CLI authentication");
+            _logger.LogWarning("Run: sudo decloud-node login");
+
+            // Wait for registration
+            while (!await IsNodeRegisteredAsync() && !stoppingToken.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
+            }
         }
 
         _currentStatus = NodeStatus.Online;
@@ -66,7 +72,17 @@ public class HeartbeatService : BackgroundService
         _logger.LogInformation("Heartbeat service stopping");
     }
 
-    // Updated HeartbeatService.RegisterWithOrchestratorAsync
+    private async Task<bool> IsNodeRegisteredAsync()
+    {
+        const string credentialsFile = "/etc/decloud/credentials";
+
+        if (!File.Exists(credentialsFile))
+            return false;
+
+        var lines = await File.ReadAllLinesAsync(credentialsFile);
+        return lines.Any(l => l.StartsWith("API_KEY="));
+    }
+
     // Generates deterministic node ID before registration
 
     private async Task RegisterWithOrchestratorAsync(CancellationToken ct)

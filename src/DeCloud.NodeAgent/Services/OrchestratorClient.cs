@@ -26,6 +26,7 @@ public class OrchestratorClient : IOrchestratorClient
     private readonly OrchestratorClientOptions _options;
 
     private string? _nodeId;
+    private string? _apiKey;
     private string? _orchestratorPublicKey;
     private string? _walletAddress;
     private Heartbeat? _lastHeartbeat = null;
@@ -50,50 +51,52 @@ public class OrchestratorClient : IOrchestratorClient
         _httpClient.BaseAddress = new Uri(_options.BaseUrl.TrimEnd('/'));
         _httpClient.Timeout = _options.Timeout;
 
-        LoadCredentials();
+        _ = LoadCredentialsAsync();
 
         _logger.LogInformation("OrchestratorClient initialized with wallet: {Wallet}",
             _walletAddress);
     }
 
-    private void LoadCredentials()
+    private async Task LoadCredentialsAsync()
     {
-        try
+        const string credentialsFile = "/etc/decloud/credentials";
+
+        if (!File.Exists(credentialsFile))
         {
-            var credentialsPath = "/etc/decloud/credentials";
-
-            if (!File.Exists(credentialsPath))
-            {
-                _logger.LogWarning("Credentials file not found at {Path}", credentialsPath);
-                return;
-            }
-
-            var lines = File.ReadAllLines(credentialsPath);
-            foreach (var line in lines)
-            {
-                if (line.StartsWith("NODE_ID="))
-                {
-                    _nodeId = line.Substring(8);
-                }
-                else if (line.StartsWith("API_KEY="))
-                {
-                    var apiKey = line.Substring(8);
-                    // Set Authorization header for all requests
-                    _httpClient.DefaultRequestHeaders.Authorization =
-                        new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
-
-                    _logger.LogInformation("✓ API key loaded from credentials");
-                }
-                else if (line.StartsWith("WALLET_ADDRESS="))
-                {
-                    _walletAddress = line.Substring(15);
-                }
-            }
+            _logger.LogInformation("No credentials file found - node not registered");
+            return;
         }
-        catch (Exception ex)
+
+        var lines = await File.ReadAllLinesAsync(credentialsFile);
+
+        foreach (var line in lines)
         {
-            _logger.LogError(ex, "Failed to load credentials");
+            if (line.StartsWith("NODE_ID="))
+                _nodeId = line.Split('=')[1];
+            else if (line.StartsWith("WALLET_ADDRESS="))
+                _walletAddress = line.Split('=')[1];
+            else if (line.StartsWith("API_KEY="))
+                _apiKey = line.Split('=')[1];
         }
+
+        if (!string.IsNullOrEmpty(_apiKey))
+        {
+            // Set Authorization header
+            _httpClient.DefaultRequestHeaders.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _apiKey);
+
+            _logger.LogInformation("✓ API key loaded from credentials");
+        }
+    }
+
+    private async Task SaveApiKeyAsync(string apiKey, CancellationToken ct)
+    {
+        const string credentialsFile = "/etc/decloud/credentials";
+
+        // Append API key to existing credentials
+        await File.AppendAllTextAsync(credentialsFile, $"API_KEY={apiKey}\n", ct);
+
+        _logger.LogInformation("✓ API key saved to {File}", credentialsFile);
     }
 
     /// <summary>
@@ -120,9 +123,6 @@ public class OrchestratorClient : IOrchestratorClient
                 {
                     _nodeId = data.GetProperty("nodeId").GetString();
 
-                    // ✅ NO MORE AUTH TOKEN!
-                    // Authentication is now done via wallet signatures
-
                     // Handle orchestrator WireGuard public key
                     if (data.TryGetProperty("orchestratorWireGuardPublicKey", out var pubKeyProp) &&
                         pubKeyProp.ValueKind == JsonValueKind.String)
@@ -133,6 +133,18 @@ public class OrchestratorClient : IOrchestratorClient
                         {
                             await SaveOrchestratorPublicKeyAsync(_orchestratorPublicKey, ct);
                         }
+                    }
+
+                    if (json.RootElement.TryGetProperty("apiKey", out var apiKeyProp))
+                    {
+                        _apiKey = apiKeyProp.GetString();
+                        await SaveApiKeyAsync(_apiKey, ct);
+
+                        // Set Authorization header
+                        _httpClient.DefaultRequestHeaders.Authorization =
+                            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _apiKey);
+
+                        _logger.LogInformation("✓ API key received and configured");
                     }
 
                     _logger.LogInformation(

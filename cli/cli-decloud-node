@@ -222,11 +222,18 @@ def register_node(orchestrator_url: str, node_id: str, wallet_address: str,
             f"{orchestrator_url}/api/nodes/register",
             json={
                 "nodeId": node_id,
+                "machineId": get_machine_id(),  # Need to add this function
+                "name": socket.gethostname(),
                 "walletAddress": wallet_address,
-                "signature": signature,
-                "message": message,
+                "signature": signature,          # ← NEW
+                "message": message,              # ← NEW
+                "publicIp": get_public_ip(),
+                "agentPort": 5100,
                 "hardwareInfo": hardware,
-                "publicIp": get_public_ip()
+                "agentVersion": VERSION,
+                "supportedImages": ["ubuntu-24.04", "ubuntu-22.04", "debian-12"],
+                "region": "default",
+                "zone": "default"
             },
             timeout=30
         )
@@ -234,17 +241,25 @@ def register_node(orchestrator_url: str, node_id: str, wallet_address: str,
         if response.status_code == 200:
             data = response.json()
             if data.get("success"):
-                return data["data"]["apiKey"]
+                return data["data"]["apiKey"]  # ← Extract API key
         
-        log_error(f"Registration failed: {response.status_code}")
-        if response.text:
-            log_error(response.text[:200])
-        
-        return None
-    
+        # ... error handling ...
     except Exception as e:
         log_error(f"Failed to register node: {e}")
         return None
+
+# Also need to add get_machine_id() function to match C# implementation
+def get_machine_id() -> str:
+    """Get machine ID (matches C# NodeIdGenerator)"""
+    if os.path.exists('/etc/machine-id'):
+        with open('/etc/machine-id', 'r') as f:
+            return f.read().strip()
+    
+    # Fallback: use hostname + MAC address
+    import uuid
+    mac = ':'.join(['{:02x}'.format((uuid.getnode() >> elements) & 0xff)
+                    for elements in range(0,2*6,2)][::-1])
+    return hashlib.sha256(f"{socket.gethostname()}{mac}".encode()).hexdigest()[:16]
 
 def login_walletconnect(orchestrator_url: str, verbose: bool = False):
     """Login using WalletConnect"""

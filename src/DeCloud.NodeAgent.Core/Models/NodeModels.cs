@@ -137,6 +137,9 @@ public class NodeRegistration
     public string Region { get; set; } = "default";
     public string Zone { get; set; } = "default";
 
+    public required string Signature { get; set; }
+    public required string Message { get; set; }
+
     public DateTime RegisteredAt { get; set; } = DateTime.UtcNow;
 }
 
