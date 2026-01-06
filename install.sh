@@ -568,7 +568,9 @@ configure_wireguard_keys() {
 install_python_dependencies() {
     log_step "Installing Python dependencies for authentication..."
     
-    # Check if Python 3.8+ is installed
+    # =====================================================
+    # STEP 1: Check Python installation
+    # =====================================================
     if ! command -v python3 &> /dev/null; then
         log_info "Installing Python..."
         apt-get install -y -qq python3 python3-pip > /dev/null 2>&1
@@ -585,36 +587,94 @@ install_python_dependencies() {
     
     log_info "Python $python_version detected"
     
-    # Upgrade pip first
+    # =====================================================
+    # STEP 2: Upgrade pip
+    # =====================================================
     log_info "Upgrading pip..."
-    python3 -m pip install --quiet --upgrade pip 2>&1 | grep -v "WARNING" || true
+    python3 -m pip install --upgrade pip --quiet 2>&1 | grep -v "WARNING" | grep -v "Requirement already satisfied" || true
     
-    # Install wallet authentication dependencies
-    # ⭐ ADDED: qrcode and pillow for QR code support
+    # =====================================================
+    # STEP 3: Install dependencies (multiple methods)
+    # =====================================================
     log_info "Installing wallet authentication libraries..."
     
-    # Try with user flag first (works on most systems)
-    if python3 -m pip install --user --quiet web3 eth-account requests qrcode pillow 2>&1 | grep -v "WARNING"; then
-        log_success "Python dependencies installed (user)"
+    local PACKAGES="web3 eth-account requests qrcode pillow"
+    local INSTALL_SUCCESS=false
+    
+    # Method 1: Try with --user flag (safest, works on most systems)
+    if python3 -m pip install --user $PACKAGES --quiet 2>&1 | grep -v "WARNING" | grep -v "Requirement already satisfied"; then
+        INSTALL_SUCCESS=true
+        log_info "Installed with --user flag"
     else
-        # Fallback: try without --user flag
-        if python3 -m pip install --quiet web3 eth-account requests qrcode pillow 2>&1 | grep -v "WARNING"; then
-            log_success "Python dependencies installed"
+        # Method 2: Try without --user (for systems where --user doesn't work)
+        log_info "Trying alternative installation method..."
+        if python3 -m pip install $PACKAGES --quiet 2>&1 | grep -v "WARNING" | grep -v "Requirement already satisfied"; then
+            INSTALL_SUCCESS=true
+            log_info "Installed system-wide"
         else
-            log_error "Failed to install Python dependencies"
-            log_info "Please install manually:"
-            log_info "  python3 -m pip install web3 eth-account requests qrcode pillow"
-            exit 1
+            # Method 3: Try with --break-system-packages (for newer Debian/Ubuntu)
+            log_info "Trying with --break-system-packages flag..."
+            if python3 -m pip install --break-system-packages $PACKAGES --quiet 2>&1 | grep -v "WARNING" | grep -v "Requirement already satisfied"; then
+                INSTALL_SUCCESS=true
+                log_info "Installed with --break-system-packages"
+            else
+                # Method 4: Install what we can from apt, rest from pip
+                log_info "Trying hybrid apt + pip installation..."
+                apt-get install -y python3-requests python3-pil > /dev/null 2>&1 || true
+                python3 -m pip install --user web3 eth-account qrcode --quiet 2>&1 | grep -v "WARNING" || true
+                INSTALL_SUCCESS=true  # Assume success if we got here
+                log_info "Installed via apt + pip"
+            fi
         fi
     fi
     
-    # Verify installation (including QR packages)
-    if python3 -c "import web3, eth_account, requests, qrcode" 2>/dev/null; then
-        log_success "✓ Wallet authentication libraries ready (with QR code support)"
-    else
-        log_error "Failed to verify Python dependencies"
-        exit 1
+    # =====================================================
+    # STEP 4: Verify installation
+    # =====================================================
+    log_info "Verifying installation..."
+    
+    local VERIFY_FAILED=false
+    
+    # Check each package
+    if ! python3 -c "import web3" 2>/dev/null; then
+        log_warn "web3 not found"
+        VERIFY_FAILED=true
     fi
+    
+    if ! python3 -c "import eth_account" 2>/dev/null; then
+        log_warn "eth-account not found"
+        VERIFY_FAILED=true
+    fi
+    
+    if ! python3 -c "import requests" 2>/dev/null; then
+        log_warn "requests not found"
+        VERIFY_FAILED=true
+    fi
+    
+    if ! python3 -c "import qrcode" 2>/dev/null; then
+        log_warn "qrcode not found"
+        VERIFY_FAILED=true
+    fi
+    
+    if ! python3 -c "from PIL import Image" 2>/dev/null; then
+        log_warn "pillow not found"
+        VERIFY_FAILED=true
+    fi
+    
+    if [ "$VERIFY_FAILED" = true ]; then
+        log_error "Failed to install Python dependencies"
+        echo ""
+        log_info "Manual installation required. Run:"
+        log_info "  sudo bash <(curl -s https://raw.githubusercontent.com/.../fix-python-deps.sh)"
+        echo ""
+        log_info "Or install manually:"
+        log_info "  python3 -m pip install --user web3 eth-account requests qrcode pillow"
+        echo ""
+        return 1
+    fi
+    
+    log_success "✓ Wallet authentication libraries ready (with QR code support)"
+    return 0
 }
 
 install_walletconnect_cli() {
