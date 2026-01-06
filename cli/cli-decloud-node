@@ -321,16 +321,42 @@ def register_node(orchestrator_url: str, node_id: str, wallet_address: str,
                  signature: str, message: str, hardware: Dict[str, Any]) -> Optional[str]:
     """Register node with orchestrator and get API key"""
     try:
+        # Get machine ID from /etc/machine-id
+        machine_id = ""
+        if os.path.exists('/etc/machine-id'):
+            with open('/etc/machine-id', 'r') as f:
+                machine_id = f.read().strip()
+        
+        # Build proper HardwareInventory structure
+        hardware_inventory = {
+            "cpuCores": hardware.get('cores', 0),
+            "memoryBytes": hardware.get('memory', 0) * 1024 * 1024 * 1024,  # GB to bytes
+            "diskBytes": hardware.get('disk', 0) * 1024 * 1024 * 1024,  # GB to bytes
+            "cpuModel": hardware.get('cpu', 'Unknown'),
+            "architecture": "x86_64"
+        }
+        
+        # Build complete registration request
+        registration_request = {
+            "nodeId": node_id,
+            "machineId": machine_id,
+            "name": hardware.get('hostname', socket.gethostname()),
+            "walletAddress": wallet_address,
+            "publicIp": get_public_ip(),
+            "agentPort": 5100,
+            "hardwareInventory": hardware_inventory,
+            "agentVersion": "2.3.0-cli",
+            "supportedImages": ["ubuntu-22.04", "ubuntu-24.04", "debian-12"],
+            "region": "default",
+            "zone": "default",
+            "signature": signature,
+            "message": message,
+            "registeredAt": datetime.utcnow().isoformat() + "Z"
+        }
+        
         response = requests.post(
             f"{orchestrator_url}/api/nodes/register",
-            json={
-                "nodeId": node_id,
-                "walletAddress": wallet_address,
-                "signature": signature,
-                "message": message,
-                "hardwareInfo": hardware,
-                "publicIp": get_public_ip()
-            },
+            json=registration_request,
             timeout=30
         )
         
@@ -356,6 +382,7 @@ def register_node(orchestrator_url: str, node_id: str, wallet_address: str,
     except Exception as e:
         log_error(f"Failed to register node: {e}")
         return None
+
 
 # =============================================================================
 # WEB-BASED AUTHENTICATION FLOW
