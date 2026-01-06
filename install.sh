@@ -695,7 +695,7 @@ install_walletconnect_cli() {
     chmod +x "$cli_dest"
     
     # Verify CLI works
-    if decloud-node version &> /dev/null; then
+    if cli-decloud-node version &> /dev/null; then
         log_success "Authentication CLI installed"
         log_info "CLI: cli-decloud-node (v$(cli-decloud-node version 2>/dev/null | awk '{print $NF}'))"
     else
@@ -713,14 +713,14 @@ run_node_authentication() {
     echo ""
     
     # Run the CLI login
-    if decloud-node login --orchestrator "$ORCHESTRATOR_URL"; then
+    if cli-decloud-node login --orchestrator "$ORCHESTRATOR_URL"; then
         log_success "Node authenticated successfully"
         return 0
     else
         log_error "Authentication failed"
         echo ""
         log_info "You can re-run authentication later with:"
-        log_info "  sudo decloud-node login"
+        log_info "  sudo cli-decloud-node login"
         echo ""
         return 1
     fi
@@ -1199,8 +1199,8 @@ print_summary() {
     echo "    Status:        sudo systemctl status decloud-node-agent"
     echo "    Logs:          sudo journalctl -u decloud-node-agent -f"
     echo "    Restart:       sudo systemctl restart decloud-node-agent"
-    echo "    Auth Status:   decloud-node status"
-    echo "    Re-auth:       sudo decloud-node login --force"
+    echo "    Auth Status:   cli-decloud-node status"
+    echo "    Re-auth:       sudo cli-decloud-node login --force"
     if [ "$SKIP_WIREGUARD" = false ]; then
         echo "    WireGuard:     decloud-wg status"
     fi
@@ -1213,8 +1213,8 @@ print_summary() {
     echo "    ✓ Node agent started and running"
     echo ""
     echo "  If you need to re-authenticate:"
-    echo "    sudo decloud-node logout"
-    echo "    sudo decloud-node login"
+    echo "    sudo cli-decloud-node logout"
+    echo "    sudo cli-decloud-node login"
     echo ""
 }
 
@@ -1228,7 +1228,7 @@ print_summary_unauthenticated() {
     echo "  ⚠  Node agent installed but NOT authenticated"
     echo ""
     echo "  To complete setup, run:"
-    echo "    sudo decloud-node login"
+    echo "    sudo cli-decloud-node login"
     echo ""
     echo "  This will:"
     echo "    1. Display a QR code"
@@ -1300,7 +1300,7 @@ main() {
     if ! run_node_authentication; then
         log_warn "Node agent installed but not authenticated"
         log_warn "The service will not start until you authenticate"
-        log_warn "Run: sudo decloud-node login"
+        log_warn "Run: sudo cli-decloud-node login"
         echo ""
         print_summary_unauthenticated
         exit 0
