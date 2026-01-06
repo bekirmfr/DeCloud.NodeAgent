@@ -137,8 +137,17 @@ public class NodeRegistration
     public string Region { get; set; } = "default";
     public string Zone { get; set; } = "default";
 
-    public required string Signature { get; set; }
-    public required string Message { get; set; }
+    /// <summary>
+    /// Wallet signature proving ownership (from WalletConnect CLI)
+    /// Optional for backward compatibility - will be required in production
+    /// </summary>
+    public string? Signature { get; set; }
+
+    /// <summary>
+    /// Message that was signed (includes node ID, wallet, timestamp)
+    /// Optional for backward compatibility - will be required in production
+    /// </summary>
+    public string? Message { get; set; }
 
     public DateTime RegisteredAt { get; set; } = DateTime.UtcNow;
 }

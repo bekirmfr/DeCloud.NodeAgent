@@ -5,6 +5,7 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.Shared;
 using Microsoft.Extensions.Options;
+using System.Reflection;
 
 namespace DeCloud.NodeAgent.Services;
 
@@ -145,6 +146,20 @@ public class HeartbeatService : BackgroundService
                 }
 
                 // =====================================================
+                // Load signature and message from credentials (if exists)
+                // =====================================================
+                string? signature = null;
+                string? message = null;
+
+                const string credentialsFile = "/etc/decloud/credentials";
+                if (File.Exists(credentialsFile))
+                {
+                    var lines = await File.ReadAllLinesAsync(credentialsFile, ct);
+                    signature = lines.FirstOrDefault(l => l.StartsWith("SIGNATURE="))?.Split('=', 2)[1];
+                    message = lines.FirstOrDefault(l => l.StartsWith("MESSAGE="))?.Split('=', 2)[1];
+                }
+
+                // =====================================================
                 // STEP 4: Build Registration Request
                 // =====================================================
                 var resources = await _resourceDiscovery.DiscoverAllAsync(ct);
@@ -159,7 +174,9 @@ public class HeartbeatService : BackgroundService
                     PublicIp = publicIp ?? "127.0.0.1",
                     AgentPort = 5100,
                     HardwareInventory = resources,
-                    AgentVersion = "2.0.0",
+                    AgentVersion = Assembly.GetExecutingAssembly()
+                        .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+                        ?.InformationalVersion ?? "2.0.0",
                     SupportedImages = new List<string>
                     {
                         "ubuntu-24.04", "ubuntu-22.04", "ubuntu-20.04",
@@ -169,7 +186,9 @@ public class HeartbeatService : BackgroundService
                     },
                     // TO-DO: Implement region and zone discovery
                     Region = "default",
-                    Zone = "default"
+                    Zone = "default",
+                    Signature = signature,
+                    Message = message
                 };
 
                 // =====================================================

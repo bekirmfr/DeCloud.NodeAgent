@@ -192,6 +192,8 @@ def save_credentials(node_id: str, api_key: str, wallet_address: str):
         f.write(f"NODE_ID={node_id}\n")
         f.write(f"API_KEY={api_key}\n")
         f.write(f"WALLET_ADDRESS={wallet_address}\n")
+        f.write(f"SIGNATURE={signature}\n")
+        f.write(f"MESSAGE={message}\n")
         f.write(f"AUTHORIZED_AT={datetime.utcnow().isoformat()}\n")
     
     os.chmod(CREDENTIALS_FILE, 0o600)
