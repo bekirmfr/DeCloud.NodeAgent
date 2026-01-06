@@ -590,6 +590,36 @@ install_python_dependencies() {
     fi
     
     log_info "Python $python_version detected"
+
+    # =====================================================
+    # STEP 2: Ensure pip is installed
+    # =====================================================
+    log_info "Checking pip installation..."
+    
+    # Check if pip module exists
+    if ! python3 -m pip --version &> /dev/null; then
+        log_info "pip not found, installing..."
+        
+        # Method 1: Try apt-get (works on Ubuntu/Debian)
+        if apt-get install -y python3-pip python3-dev > /dev/null 2>&1; then
+            log_info "✓ pip installed via apt-get"
+        else
+            # Method 2: Try get-pip.py (fallback for systems without apt package)
+            log_info "Trying alternative pip installation..."
+            if curl -sSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py 2>/dev/null; then
+                python3 /tmp/get-pip.py > /dev/null 2>&1
+                rm -f /tmp/get-pip.py
+                log_info "✓ pip installed via get-pip.py"
+            else
+                log_error "Failed to install pip"
+                log_info "Manual installation required:"
+                log_info "  sudo apt-get install -y python3-pip"
+                return 1
+            fi
+        fi
+    else
+        log_info "✓ pip already installed"
+    fi
     
     # =====================================================
     # STEP 2: Upgrade pip
