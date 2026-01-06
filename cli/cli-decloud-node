@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-DeCloud Node CLI - QR Code Wallet Authentication
+DeCloud Node CLI - Web-Based WalletConnect Authentication
 
-Custom QR code implementation - simpler than WalletConnect!
-Works with MetaMask mobile, Trust Wallet, Rainbow, and any wallet that can scan QR codes.
+Uses a web page with proper WalletConnect integration for mobile signing.
+The QR code contains a URL that opens the signing page on any device.
 
 Usage:
     decloud-node login
@@ -41,15 +41,17 @@ except ImportError as e:
 # CONFIGURATION
 # =============================================================================
 
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 DEFAULT_ORCHESTRATOR_URL = "https://decloud.stackfi.tech"
+
+# Signing page URL (you'll host this)
+SIGNING_PAGE_URL = "https://decloud.stackfi.tech/sign.html"
+# Alternative: Use localhost for testing
+# SIGNING_PAGE_URL = "http://localhost:8000/sign.html"
 
 # File paths
 CREDENTIALS_FILE = "/etc/decloud/credentials"
 CONFIG_FILE = "/etc/decloud/config.json"
-
-# Signature server (optional - for automated flow)
-SIGNATURE_SERVER_URL = None  # Set to enable automated signature collection
 
 # =============================================================================
 # TERMINAL COLORS
@@ -73,7 +75,7 @@ def print_banner():
     """Print CLI banner"""
     print()
     print(f"{Colors.CYAN}{'='*70}{Colors.NC}")
-    print(f"{Colors.BOLD}         🔐 DeCloud Node Authentication (QR Code){Colors.NC}")
+    print(f"{Colors.BOLD}      🔐 DeCloud Node Authentication (WalletConnect){Colors.NC}")
     print(f"{Colors.CYAN}{'='*70}{Colors.NC}")
     print()
 
@@ -192,7 +194,7 @@ def save_credentials(node_id: str, api_key: str, wallet_address: str, signature:
     log_success(f"Credentials saved to {CREDENTIALS_FILE}")
 
 # =============================================================================
-# QR CODE GENERATION
+# SIGNING URL GENERATION
 # =============================================================================
 
 def create_signing_message(node_id: str, wallet_address: str, hardware: Dict[str, Any]) -> str:
@@ -213,33 +215,29 @@ NO FUNDS WILL BE TRANSFERRED - This is only for node authorization."""
     
     return message
 
-def generate_metamask_deep_link(message: str) -> str:
+def generate_signing_url(message: str, node_id: str, wallet_address: str, hardware: Dict[str, Any]) -> str:
     """
-    Generate MetaMask deep link for mobile signing
-    Format: metamask://sign?message=<base64_encoded_message>
+    Generate URL to signing page with parameters
+    
+    Format: https://decloud.stackfi.tech/sign.html?message=base64&nodeId=xxx&wallet=0x...&hardware=Intel
     """
     # Encode message to base64 for URL
-    encoded_message = base64.b64encode(message.encode()).decode()
-    deep_link = f"metamask://sign?message={urllib.parse.quote(encoded_message)}"
-    return deep_link
-
-def generate_qr_data(message: str, wallet_address: str = None) -> str:
-    """
-    Generate QR code data with signing information
-    Format: JSON with message and optional deep link
-    """
-    qr_data = {
-        "version": "1",
-        "type": "sign_request",
-        "message": message,
-        "wallet": wallet_address,
-        "instructions": "Sign this message with your Ethereum wallet"
+    message_b64 = base64.b64encode(message.encode()).decode()
+    
+    # Build URL parameters
+    params = {
+        'message': message_b64,
+        'nodeId': node_id,
+        'wallet': wallet_address,
+        'hardware': hardware['cpu'][:50]  # Truncate hardware name
     }
     
-    # Create compact JSON
-    return json.dumps(qr_data, separators=(',', ':'))
+    # Create full URL
+    url = f"{SIGNING_PAGE_URL}?{urllib.parse.urlencode(params)}"
+    
+    return url
 
-def display_qr_code(data: str, title: str = "Scan with your mobile wallet"):
+def display_qr_code(data: str, title: str = "Scan to sign"):
     """Display QR code in terminal"""
     qr = qrcode.QRCode(
         version=1,
@@ -256,41 +254,41 @@ def display_qr_code(data: str, title: str = "Scan with your mobile wallet"):
     qr.print_ascii(invert=True)
     print()
 
-def display_signing_options(message: str, wallet_address: str = None):
-    """Display multiple signing options with QR codes"""
+def display_signing_instructions(signing_url: str, message: str, wallet_address: str):
+    """Display signing instructions with QR code"""
     
     print(f"{Colors.BOLD}═══════════════════════════════════════════════════════════════════{Colors.NC}")
-    print(f"{Colors.BOLD}                   📱 SIGNING OPTIONS{Colors.NC}")
+    print(f"{Colors.BOLD}              📱 SCAN QR CODE TO SIGN WITH WALLET{Colors.NC}")
     print(f"{Colors.BOLD}═══════════════════════════════════════════════════════════════════{Colors.NC}")
     print()
     
-    # Option 1: QR Code with message data
-    print(f"{Colors.BOLD}{Colors.GREEN}Option 1: Scan QR Code{Colors.NC}")
-    print("  Scan this QR code with a wallet that supports message signing:")
+    # Display QR code with signing URL
+    display_qr_code(signing_url, "Scan with ANY QR scanner or camera app:")
     
-    qr_data = generate_qr_data(message, wallet_address)
-    display_qr_code(qr_data, "")
-    
-    # Option 2: MetaMask Deep Link
-    print(f"{Colors.BOLD}{Colors.GREEN}Option 2: MetaMask Mobile Deep Link{Colors.NC}")
-    deep_link = generate_metamask_deep_link(message)
-    print(f"  {Colors.CYAN}Open this link on your phone with MetaMask installed:{Colors.NC}")
-    print(f"  {deep_link[:80]}...")
+    print(f"{Colors.BOLD}How it works:{Colors.NC}")
+    print("  1. Scan QR code above with your phone's camera or QR scanner")
+    print("  2. Opens signing page in your browser")
+    print("  3. Click 'Connect Wallet & Sign'")
+    print("  4. Choose your wallet (MetaMask, Trust, Rainbow, etc.)")
+    print("  5. Approve the connection")
+    print("  6. Sign the message")
+    print("  7. Copy the signature from the page")
+    print("  8. Paste it below")
     print()
     
-    # Show shorter QR for deep link
-    print(f"{Colors.BOLD}  Or scan this QR to open MetaMask:{Colors.NC}")
-    display_qr_code(deep_link, "")
-    
-    # Option 3: Manual signing
-    print(f"{Colors.BOLD}{Colors.GREEN}Option 3: Manual Signing{Colors.NC}")
-    print("  Use any wallet:")
-    print("    • MetaMask browser extension")
-    print("    • MyEtherWallet (https://www.myetherwallet.com/wallet/sign)")
-    print("    • Etherscan (https://etherscan.io/verifiedSignatures)")
-    print("    • Hardware wallet (Ledger/Trezor)")
+    print(f"{Colors.CYAN}Or open this URL manually:{Colors.NC}")
+    print(f"  {signing_url[:80]}")
+    if len(signing_url) > 80:
+        print(f"  {signing_url[80:160]}")
+        if len(signing_url) > 160:
+            print(f"  {signing_url[160:]}")
     print()
-    print(f"{Colors.BOLD}  Message to sign:{Colors.NC}")
+    
+    print(f"{Colors.BOLD}═══════════════════════════════════════════════════════════════════{Colors.NC}")
+    print()
+    
+    # Also show the message for reference
+    print(f"{Colors.YELLOW}Message being signed (for reference):{Colors.NC}")
     print(f"{Colors.YELLOW}{'─'*70}{Colors.NC}")
     print(message)
     print(f"{Colors.YELLOW}{'─'*70}{Colors.NC}")
@@ -360,11 +358,11 @@ def register_node(orchestrator_url: str, node_id: str, wallet_address: str,
         return None
 
 # =============================================================================
-# QR CODE AUTHENTICATION FLOW
+# WEB-BASED AUTHENTICATION FLOW
 # =============================================================================
 
-def login_with_qr_code(orchestrator_url: str, wallet_address: str = None, verbose: bool = False):
-    """Login using QR code authentication"""
+def login_with_web_signing(orchestrator_url: str, wallet_address: str = None, verbose: bool = False):
+    """Login using web-based WalletConnect signing"""
     print_banner()
     
     # Get node information
@@ -389,13 +387,14 @@ def login_with_qr_code(orchestrator_url: str, wallet_address: str = None, verbos
     # Create message
     message = create_signing_message(node_id, wallet_address, hardware)
     
-    # Display all signing options
-    display_signing_options(message, wallet_address)
+    # Generate signing URL
+    signing_url = generate_signing_url(message, node_id, wallet_address, hardware)
+    
+    # Display instructions with QR code
+    display_signing_instructions(signing_url, message, wallet_address)
     
     # Wait for signature
-    print(f"{Colors.BOLD}{'═'*70}{Colors.NC}")
-    print()
-    log_info(f"{Colors.BOLD}After signing, paste the signature below:{Colors.NC}")
+    log_info(f"{Colors.BOLD}After signing on the web page, paste the signature below:{Colors.NC}")
     print()
     
     signature = input(f"  {Colors.BOLD}Signature (0x...):{Colors.NC} ").strip()
@@ -411,7 +410,7 @@ def login_with_qr_code(orchestrator_url: str, wallet_address: str = None, verbos
     log_info("Verifying signature...")
     if not verify_signature(message, signature, wallet_address):
         log_error("Signature verification failed!")
-        log_error("Make sure you signed the exact message shown above")
+        log_error("Make sure you signed the exact message shown")
         return False
     
     log_success("Signature verified!")
@@ -481,7 +480,7 @@ def cmd_login(args):
         orchestrator_url = config.get('orchestrator_url', DEFAULT_ORCHESTRATOR_URL)
     
     # Perform login
-    success = login_with_qr_code(orchestrator_url, args.wallet, args.verbose)
+    success = login_with_web_signing(orchestrator_url, args.wallet, args.verbose)
     sys.exit(0 if success else 1)
 
 def cmd_status(args):
@@ -551,7 +550,7 @@ def cmd_logout(args):
 
 def cmd_version(args):
     """Handle version command"""
-    print(f"DeCloud Node CLI v{VERSION} (QR Code Edition)")
+    print(f"DeCloud Node CLI v{VERSION} (WalletConnect Web Edition)")
 
 # =============================================================================
 # MAIN ENTRY POINT
@@ -560,14 +559,14 @@ def cmd_version(args):
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(
-        description="DeCloud Node CLI - QR Code Wallet Authentication",
+        description="DeCloud Node CLI - Web-Based WalletConnect Authentication",
         epilog="For support, visit: https://docs.decloud.io"
     )
     
     subparsers = parser.add_subparsers(dest='command', help='Command to execute')
     
     # Login command
-    login_parser = subparsers.add_parser('login', help='Login with QR code')
+    login_parser = subparsers.add_parser('login', help='Login with WalletConnect')
     login_parser.add_argument('--orchestrator', help='Orchestrator URL (optional)')
     login_parser.add_argument('--wallet', help='Wallet address (optional, will prompt if not provided)')
     login_parser.add_argument('--force', action='store_true', help='Force re-authorization')
