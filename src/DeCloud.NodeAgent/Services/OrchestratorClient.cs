@@ -3,7 +3,6 @@
 
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
-using DeCloud.NodeAgent.Infrastructure.Services.Auth;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 using System.Net;
@@ -25,7 +24,6 @@ public class OrchestratorClient : IOrchestratorClient
     private readonly HttpClient _httpClient;
     private readonly ILogger<OrchestratorClient> _logger;
     private readonly OrchestratorClientOptions _options;
-    private readonly INodeWalletService _walletService;
 
     private string? _nodeId;
     private string? _orchestratorPublicKey;
@@ -42,20 +40,60 @@ public class OrchestratorClient : IOrchestratorClient
     public OrchestratorClient(
         HttpClient httpClient,
         IOptions<OrchestratorClientOptions> options,
-        ILogger<OrchestratorClient> logger,
-        INodeWalletService walletService)
+        ILogger<OrchestratorClient> logger)
     {
         _httpClient = httpClient;
         _logger = logger;
         _options = options.Value;
-        _walletService = walletService;
-        _walletAddress = _walletService.GetWalletAddress();
+        _walletAddress = _options.WalletAddress;
 
         _httpClient.BaseAddress = new Uri(_options.BaseUrl.TrimEnd('/'));
         _httpClient.Timeout = _options.Timeout;
 
+        LoadCredentials();
+
         _logger.LogInformation("OrchestratorClient initialized with wallet: {Wallet}",
             _walletAddress);
+    }
+
+    private void LoadCredentials()
+    {
+        try
+        {
+            var credentialsPath = "/etc/decloud/credentials";
+
+            if (!File.Exists(credentialsPath))
+            {
+                _logger.LogWarning("Credentials file not found at {Path}", credentialsPath);
+                return;
+            }
+
+            var lines = File.ReadAllLines(credentialsPath);
+            foreach (var line in lines)
+            {
+                if (line.StartsWith("NODE_ID="))
+                {
+                    _nodeId = line.Substring(8);
+                }
+                else if (line.StartsWith("API_KEY="))
+                {
+                    var apiKey = line.Substring(8);
+                    // Set Authorization header for all requests
+                    _httpClient.DefaultRequestHeaders.Authorization =
+                        new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
+
+                    _logger.LogInformation("✓ API key loaded from credentials");
+                }
+                else if (line.StartsWith("WALLET_ADDRESS="))
+                {
+                    _walletAddress = line.Substring(15);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load credentials");
+        }
     }
 
     /// <summary>
@@ -176,35 +214,13 @@ public class OrchestratorClient : IOrchestratorClient
 
         try
         {
-            // =====================================================
-            // Create Request with Wallet Signature Headers
-            // =====================================================
-            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             var requestPath = $"/api/nodes/{_nodeId}/heartbeat";
 
-            // Message format: {nodeId}:{timestamp}:{requestPath}
-            var message = $"{_nodeId}:{timestamp}:{requestPath}";
+            // ✅ API key is already in DefaultRequestHeaders.Authorization
 
-            // Sign the message with wallet
-            var signature = await _walletService.SignMessageAsync(message);
-
-            var request = new HttpRequestMessage(HttpMethod.Post, requestPath);
-
-            // ✅ NEW: Wallet signature authentication headers
-            request.Headers.Add("X-Node-Signature", signature);
-            request.Headers.Add("X-Node-Timestamp", timestamp.ToString());
-
-            // ❌ OLD: No more X-Node-Token!
-
-            // Build heartbeat payload
             var payload = BuildHeartbeatPayload(heartbeat);
-            request.Content = JsonContent.Create(payload);
+            var response = await _httpClient.PostAsJsonAsync(requestPath, payload, ct);
 
-            var response = await _httpClient.SendAsync(request, ct);
-
-            // =====================================================
-            // Handle Response - No More 401 Token Errors!
-            // =====================================================
             if (!response.IsSuccessStatusCode)
             {
                 var errorContent = await response.Content.ReadAsStringAsync(ct);
@@ -474,17 +490,9 @@ public class OrchestratorClient : IOrchestratorClient
             // =====================================================
             // Create Request with Wallet Signature Headers
             // =====================================================
-            var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             var requestPath = $"/api/nodes/{_nodeId}/commands/{commandId}/acknowledge";
 
-            var message = $"{_nodeId}:{timestamp}:{requestPath}";
-            var signature = await _walletService.SignMessageAsync(message);
-
             var request = new HttpRequestMessage(HttpMethod.Post, requestPath);
-
-            // ✅ NEW: Wallet signature authentication
-            request.Headers.Add("X-Node-Signature", signature);
-            request.Headers.Add("X-Node-Timestamp", timestamp.ToString());
 
             var payload = new
             {

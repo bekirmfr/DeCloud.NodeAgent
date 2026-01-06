@@ -1,10 +1,8 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
-using DeCloud.NodeAgent.Infrastructure;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using DeCloud.NodeAgent.Infrastructure.Network;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
-using DeCloud.NodeAgent.Infrastructure.Services.Auth;
 using DeCloud.NodeAgent.Services;
 using Microsoft.Extensions.Options;
 
@@ -37,7 +35,6 @@ builder.Services.AddSingleton<INatRuleManager, NatRuleManager>();
 builder.Services.AddSingleton<IResourceDiscoveryService, ResourceDiscoveryService>();
 builder.Services.AddSingleton<ICpuBenchmarkService, CpuBenchmarkService>();
 builder.Services.AddSingleton<IImageManager, ImageManager>();
-builder.Services.AddSingleton<INodeWalletService, NodeWalletService>();
 
 // =====================================================
 // VM Repository with Encryption Support
