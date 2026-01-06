@@ -621,8 +621,8 @@ install_walletconnect_cli() {
     log_step "Installing DeCloud authentication CLI..."
     
     # The CLI is in the repository we just cloned
-    local cli_source="$INSTALL_DIR/DeCloud.NodeAgent/cli/decloud-node"
-    local cli_dest="/usr/local/bin/decloud-node"
+    local cli_source="$INSTALL_DIR/DeCloud.NodeAgent/cli/cli-decloud-node"
+    local cli_dest="/usr/local/bin/cli-decloud-node"
     
     if [ ! -f "$cli_source" ]; then
         log_error "CLI script not found at $cli_source"
@@ -637,7 +637,7 @@ install_walletconnect_cli() {
     # Verify CLI works
     if decloud-node version &> /dev/null; then
         log_success "Authentication CLI installed"
-        log_info "CLI: decloud-node (v$(decloud-node version 2>/dev/null | awk '{print $NF}'))"
+        log_info "CLI: cli-decloud-node (v$(cli-decloud-node version 2>/dev/null | awk '{print $NF}'))"
     else
         log_error "CLI installation failed"
         exit 1
