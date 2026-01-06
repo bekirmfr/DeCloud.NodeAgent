@@ -572,7 +572,9 @@ configure_wireguard_keys() {
 install_python_dependencies() {
     log_step "Installing Python dependencies for authentication..."
     
-    # Check if Python 3.8+ is installed
+    # =====================================================
+    # STEP 1: Check Python installation
+    # =====================================================
     if ! command -v python3 &> /dev/null; then
         log_info "Installing Python..."
         apt-get install -y -qq python3 python3-pip > /dev/null 2>&1
@@ -582,47 +584,149 @@ install_python_dependencies() {
     local major=$(echo "$python_version" | cut -d'.' -f1)
     local minor=$(echo "$python_version" | cut -d'.' -f2)
     
-    if [ "$major" -lt 3 ] || ([ "$major" -eq 3 ] && [ "$minor" -lt 7 ]); then
-        log_error "Python 3.7+ required, found $python_version"
+    if [ "$major" -lt 3 ] || ([ "$major" -eq 3 ] && [ "$minor" -lt 8 ]); then
+        log_error "Python 3.8+ required, found $python_version"
         exit 1
     fi
     
     log_info "Python $python_version detected"
     
-    # Upgrade pip first
+    # =====================================================
+    # STEP 2: Upgrade pip
+    # =====================================================
     log_info "Upgrading pip..."
-    python3 -m pip install --quiet --upgrade pip 2>&1 | grep -v "WARNING" || true
+    python3 -m pip install --upgrade pip --quiet 2>&1 | grep -v "WARNING" | grep -v "Requirement already satisfied" || true
     
-    # Install WalletConnect and dependencies
-    log_info "Installing WalletConnect libraries..."
+    # =====================================================
+    # STEP 3: Install dependencies (multiple methods)
+    # =====================================================
+    log_info "Installing wallet authentication libraries..."
     
-    # List of packages to install
-    local packages="web3 eth-account requests qrcode pillow pywalletconnect cryptography wsproto"
+    local PACKAGES="web3 eth-account requests qrcode pillow"
+    local INSTALL_SUCCESS=false
     
-    # Try different installation methods
-    if python3 -m pip install --user --quiet $packages 2>&1 | grep -v "WARNING"; then
-        log_info "Installed via pip --user"
-    elif python3 -m pip install --break-system-packages --quiet $packages 2>&1 | grep -v "WARNING"; then
-        log_info "Installed via pip --break-system-packages"
-    elif python3 -m pip install --quiet $packages 2>&1 | grep -v "WARNING"; then
-        log_info "Installed via pip"
+    # Method 1: Try with --user flag (safest, works on most systems)
+    if python3 -m pip install --user $PACKAGES --quiet 2>&1 | grep -v "WARNING" | grep -v "Requirement already satisfied"; then
+        INSTALL_SUCCESS=true
+        log_info "Installed with --user flag"
     else
-        # Try hybrid approach
-        log_info "Trying hybrid apt + pip installation..."
-        apt-get install -y python3-web3 python3-requests python3-qrcode python3-pil python3-cryptography 2>/dev/null || true
-        python3 -m pip install --user --quiet pywalletconnect eth-account wsproto 2>&1 | grep -v "WARNING" || true
-        log_info "Installed via apt + pip"
+        # Method 2: Try without --user (for systems where --user doesn't work)
+        log_info "Trying alternative installation method..."
+        if python3 -m pip install $PACKAGES --quiet 2>&1 | grep -v "WARNING" | grep -v "Requirement already satisfied"; then
+            INSTALL_SUCCESS=true
+            log_info "Installed system-wide"
+        else
+            # Method 3: Try with --break-system-packages (for newer Debian/Ubuntu)
+            log_info "Trying with --break-system-packages flag..."
+            if python3 -m pip install --break-system-packages $PACKAGES --quiet 2>&1 | grep -v "WARNING" | grep -v "Requirement already satisfied"; then
+                INSTALL_SUCCESS=true
+                log_info "Installed with --break-system-packages"
+            else
+                # Method 4: Install what we can from apt, rest from pip
+                log_info "Trying hybrid apt + pip installation..."
+                apt-get install -y python3-requests python3-pil > /dev/null 2>&1 || true
+                python3 -m pip install --user web3 eth-account qrcode --quiet 2>&1 | grep -v "WARNING" || true
+                INSTALL_SUCCESS=true  # Assume success if we got here
+                log_info "Installed via apt + pip"
+            fi
+        fi
     fi
     
-    # Verify installation
+    # =====================================================
+    # STEP 4: Verify installation
+    # =====================================================
     log_info "Verifying installation..."
-    if python3 -c "import web3, eth_account, requests, qrcode, pywalletconnect" 2>/dev/null; then
-        log_success "✓ WalletConnect libraries ready"
-    else
-        log_error "Failed to verify Python dependencies"
-        log_info "Please install manually:"
-        log_info "  python3 -m pip install web3 eth-account requests qrcode pillow pywalletconnect"
+    
+    local VERIFY_FAILED=false
+    
+    # Check each package
+    if ! python3 -c "import web3" 2>/dev/null; then
+        log_warn "web3 not found"
+        VERIFY_FAILED=true
+    fi
+    
+    if ! python3 -c "import eth_account" 2>/dev/null; then
+        log_warn "eth-account not found"
+        VERIFY_FAILED=true
+    fi
+    
+    if ! python3 -c "import requests" 2>/dev/null; then
+        log_warn "requests not found"
+        VERIFY_FAILED=true
+    fi
+    
+    if ! python3 -c "import qrcode" 2>/dev/null; then
+        log_warn "qrcode not found"
+        VERIFY_FAILED=true
+    fi
+    
+    if ! python3 -c "from PIL import Image" 2>/dev/null; then
+        log_warn "pillow not found"
+        VERIFY_FAILED=true
+    fi
+    
+    if [ "$VERIFY_FAILED" = true ]; then
+        log_error "Failed to install Python dependencies"
+        echo ""
+        log_info "Manual installation required. Run:"
+        log_info "  sudo bash <(curl -s https://raw.githubusercontent.com/.../fix-python-deps.sh)"
+        echo ""
+        log_info "Or install manually:"
+        log_info "  python3 -m pip install --user web3 eth-account requests qrcode pillow"
+        echo ""
+        return 1
+    fi
+    
+    log_success "✓ Wallet authentication libraries ready (with QR code support)"
+    return 0
+}
+
+install_walletconnect_cli() {
+    log_step "Installing DeCloud authentication CLI..."
+    
+    # The CLI is in the repository we just cloned
+    local cli_source="$INSTALL_DIR/DeCloud.NodeAgent/cli/cli-decloud-node"
+    local cli_dest="/usr/local/bin/cli-decloud-node"
+    
+    if [ ! -f "$cli_source" ]; then
+        log_error "CLI script not found at $cli_source"
+        log_error "Repository may be incomplete"
         exit 1
+    fi
+    
+    # Copy CLI to /usr/local/bin
+    cp "$cli_source" "$cli_dest"
+    chmod +x "$cli_dest"
+    
+    # Verify CLI works
+    if cli-decloud-node version &> /dev/null; then
+        log_success "Authentication CLI installed"
+        log_info "CLI: cli-decloud-node (v$(cli-decloud-node version 2>/dev/null | awk '{print $NF}'))"
+    else
+        log_error "CLI installation failed"
+        exit 1
+    fi
+}
+
+run_node_authentication() {
+    log_step "Authenticating node with WalletConnect..."
+    
+    echo ""
+    log_info "You will now authorize this node using your wallet."
+    log_info "This process uses WalletConnect - you'll scan a QR code with your mobile wallet."
+    echo ""
+    
+    # Run the CLI login
+    if cli-decloud-node login --orchestrator "$ORCHESTRATOR_URL"; then
+        log_success "Node authenticated successfully"
+        return 0
+    else
+        log_error "Authentication failed"
+        echo ""
+        log_info "You can re-run authentication later with:"
+        log_info "  sudo cli-decloud-node login"
+        echo ""
+        return 1
     fi
 }
 
