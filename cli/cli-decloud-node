@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-DeCloud Node CLI - WalletConnect Authentication
+DeCloud Node CLI - QR Code Wallet Authentication
 
-This CLI is automatically installed by the DeCloud node agent installer.
-It enables node operators to authenticate using their mobile wallet via WalletConnect.
+Custom QR code implementation - simpler than WalletConnect!
+Works with MetaMask mobile, Trust Wallet, Rainbow, and any wallet that can scan QR codes.
 
 Usage:
     decloud-node login
     decloud-node status
     decloud-node logout
-    
-The WalletConnect Project ID is pre-configured and managed by DeCloud.
 """
 
 import sys
@@ -19,6 +17,9 @@ import time
 import json
 import hashlib
 import socket
+import subprocess
+import base64
+import urllib.parse
 from datetime import datetime
 from typing import Optional, Dict, Any
 import argparse
@@ -28,30 +29,27 @@ try:
     import qrcode
     import requests
     from eth_account.messages import encode_defunct
+    from eth_account import Account
     from web3 import Web3
-    from walletconnect import WalletConnectClient
 except ImportError as e:
     print(f"Error: Missing required package: {e}")
-    print("\nThis should not happen if installed via install.sh")
-    print("If you see this error, please report it to DeCloud support.")
+    print("\nPlease install dependencies:")
+    print("  pip3 install web3 eth-account requests qrcode pillow")
     sys.exit(1)
 
 # =============================================================================
-# CONFIGURATION - Managed by DeCloud
+# CONFIGURATION
 # =============================================================================
 
-VERSION = "2.1.0"
-
-# WalletConnect Project ID (managed by DeCloud orchestrator)
-# This is a shared Project ID for all DeCloud nodes
-WALLETCONNECT_PROJECT_ID = "708cede4d366aa77aead71dbc67d8ae5"
-
-# Default orchestrator URL (can be overridden with --orchestrator)
+VERSION = "2.2.0"
 DEFAULT_ORCHESTRATOR_URL = "https://decloud.stackfi.tech"
 
 # File paths
 CREDENTIALS_FILE = "/etc/decloud/credentials"
 CONFIG_FILE = "/etc/decloud/config.json"
+
+# Signature server (optional - for automated flow)
+SIGNATURE_SERVER_URL = None  # Set to enable automated signature collection
 
 # =============================================================================
 # TERMINAL COLORS
@@ -63,6 +61,7 @@ class Colors:
     YELLOW = '\033[1;33m'
     BLUE = '\033[0;34m'
     CYAN = '\033[0;36m'
+    MAGENTA = '\033[0;35m'
     BOLD = '\033[1m'
     NC = '\033[0m'
 
@@ -73,9 +72,9 @@ class Colors:
 def print_banner():
     """Print CLI banner"""
     print()
-    print(f"{Colors.CYAN}{'='*60}{Colors.NC}")
-    print(f"{Colors.BOLD}    🔐 DeCloud Node Authentication{Colors.NC}")
-    print(f"{Colors.CYAN}{'='*60}{Colors.NC}")
+    print(f"{Colors.CYAN}{'='*70}{Colors.NC}")
+    print(f"{Colors.BOLD}         🔐 DeCloud Node Authentication (QR Code){Colors.NC}")
+    print(f"{Colors.CYAN}{'='*70}{Colors.NC}")
     print()
 
 def log_info(msg):
@@ -97,22 +96,17 @@ def log_warn(msg):
 def get_node_id() -> str:
     """Generate deterministic node ID based on hardware"""
     try:
-        # Get CPU info
         cpu_info = ""
         if os.path.exists('/proc/cpuinfo'):
             with open('/proc/cpuinfo', 'r') as f:
                 cpu_info = f.read()
         
-        # Get machine ID
         machine_id = ""
         if os.path.exists('/etc/machine-id'):
             with open('/etc/machine-id', 'r') as f:
                 machine_id = f.read().strip()
         
-        # Get hostname
         hostname = socket.gethostname()
-        
-        # Create hash
         data = f"{cpu_info}{machine_id}{hostname}"
         node_hash = hashlib.sha256(data.encode()).hexdigest()[:16]
         
@@ -123,8 +117,6 @@ def get_node_id() -> str:
 
 def get_hardware_info() -> Dict[str, Any]:
     """Get hardware information"""
-    import subprocess
-    
     def run_cmd(cmd):
         try:
             return subprocess.check_output(cmd, shell=True, text=True).strip()
@@ -184,14 +176,14 @@ def load_credentials() -> Optional[Dict[str, str]]:
     
     return credentials if credentials else None
 
-def save_credentials(node_id: str, api_key: str, wallet_address: str):
+def save_credentials(node_id: str, api_key: str, wallet_address: str, signature: str, message: str):
     """Save credentials to file"""
     os.makedirs(os.path.dirname(CREDENTIALS_FILE), exist_ok=True)
     
     with open(CREDENTIALS_FILE, 'w') as f:
         f.write(f"NODE_ID={node_id}\n")
-        f.write(f"API_KEY={api_key}\n")
         f.write(f"WALLET_ADDRESS={wallet_address}\n")
+        f.write(f"API_KEY={api_key}\n")
         f.write(f"SIGNATURE={signature}\n")
         f.write(f"MESSAGE={message}\n")
         f.write(f"AUTHORIZED_AT={datetime.utcnow().isoformat()}\n")
@@ -200,21 +192,132 @@ def save_credentials(node_id: str, api_key: str, wallet_address: str):
     log_success(f"Credentials saved to {CREDENTIALS_FILE}")
 
 # =============================================================================
-# WALLETCONNECT FUNCTIONS
+# QR CODE GENERATION
 # =============================================================================
 
-def display_qr_code(uri: str):
+def create_signing_message(node_id: str, wallet_address: str, hardware: Dict[str, Any]) -> str:
+    """Create message to be signed by wallet"""
+    timestamp = int(time.time())
+    
+    message = f"""Sign this message to authorize your DeCloud node:
+
+Node ID: {node_id}
+Wallet: {wallet_address}
+Hardware: {hardware['cpu']}
+Resources: {hardware['cores']} cores / {hardware['memory']}GB RAM
+Timestamp: {timestamp}
+
+This signature proves you own this wallet and authorizes the node to operate on your behalf.
+
+NO FUNDS WILL BE TRANSFERRED - This is only for node authorization."""
+    
+    return message
+
+def generate_metamask_deep_link(message: str) -> str:
+    """
+    Generate MetaMask deep link for mobile signing
+    Format: metamask://sign?message=<base64_encoded_message>
+    """
+    # Encode message to base64 for URL
+    encoded_message = base64.b64encode(message.encode()).decode()
+    deep_link = f"metamask://sign?message={urllib.parse.quote(encoded_message)}"
+    return deep_link
+
+def generate_qr_data(message: str, wallet_address: str = None) -> str:
+    """
+    Generate QR code data with signing information
+    Format: JSON with message and optional deep link
+    """
+    qr_data = {
+        "version": "1",
+        "type": "sign_request",
+        "message": message,
+        "wallet": wallet_address,
+        "instructions": "Sign this message with your Ethereum wallet"
+    }
+    
+    # Create compact JSON
+    return json.dumps(qr_data, separators=(',', ':'))
+
+def display_qr_code(data: str, title: str = "Scan with your mobile wallet"):
     """Display QR code in terminal"""
-    qr = qrcode.QRCode()
-    qr.add_data(uri)
-    qr.make()
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
+        box_size=1,
+        border=2,
+    )
+    qr.add_data(data)
+    qr.make(fit=True)
     
     print()
-    print("Scan this QR code with your mobile wallet:")
-    print("(MetaMask, Trust Wallet, Rainbow, Coinbase Wallet, etc.)")
+    print(f"{Colors.BOLD}{Colors.CYAN}{title}{Colors.NC}")
     print()
     qr.print_ascii(invert=True)
     print()
+
+def display_signing_options(message: str, wallet_address: str = None):
+    """Display multiple signing options with QR codes"""
+    
+    print(f"{Colors.BOLD}═══════════════════════════════════════════════════════════════════{Colors.NC}")
+    print(f"{Colors.BOLD}                   📱 SIGNING OPTIONS{Colors.NC}")
+    print(f"{Colors.BOLD}═══════════════════════════════════════════════════════════════════{Colors.NC}")
+    print()
+    
+    # Option 1: QR Code with message data
+    print(f"{Colors.BOLD}{Colors.GREEN}Option 1: Scan QR Code{Colors.NC}")
+    print("  Scan this QR code with a wallet that supports message signing:")
+    
+    qr_data = generate_qr_data(message, wallet_address)
+    display_qr_code(qr_data, "")
+    
+    # Option 2: MetaMask Deep Link
+    print(f"{Colors.BOLD}{Colors.GREEN}Option 2: MetaMask Mobile Deep Link{Colors.NC}")
+    deep_link = generate_metamask_deep_link(message)
+    print(f"  {Colors.CYAN}Open this link on your phone with MetaMask installed:{Colors.NC}")
+    print(f"  {deep_link[:80]}...")
+    print()
+    
+    # Show shorter QR for deep link
+    print(f"{Colors.BOLD}  Or scan this QR to open MetaMask:{Colors.NC}")
+    display_qr_code(deep_link, "")
+    
+    # Option 3: Manual signing
+    print(f"{Colors.BOLD}{Colors.GREEN}Option 3: Manual Signing{Colors.NC}")
+    print("  Use any wallet:")
+    print("    • MetaMask browser extension")
+    print("    • MyEtherWallet (https://www.myetherwallet.com/wallet/sign)")
+    print("    • Etherscan (https://etherscan.io/verifiedSignatures)")
+    print("    • Hardware wallet (Ledger/Trezor)")
+    print()
+    print(f"{Colors.BOLD}  Message to sign:{Colors.NC}")
+    print(f"{Colors.YELLOW}{'─'*70}{Colors.NC}")
+    print(message)
+    print(f"{Colors.YELLOW}{'─'*70}{Colors.NC}")
+    print()
+
+# =============================================================================
+# SIGNATURE VERIFICATION
+# =============================================================================
+
+def verify_signature(message: str, signature: str, expected_address: str) -> bool:
+    """Verify that signature matches expected address"""
+    try:
+        # Encode message for EIP-191
+        encoded_message = encode_defunct(text=message)
+        
+        # Recover address from signature
+        recovered_address = Account.recover_message(encoded_message, signature=signature)
+        
+        # Compare (case-insensitive)
+        return recovered_address.lower() == expected_address.lower()
+    except Exception as e:
+        log_error(f"Signature verification failed: {e}")
+        return False
+
+# =============================================================================
+# REGISTRATION
+# =============================================================================
 
 def register_node(orchestrator_url: str, node_id: str, wallet_address: str, 
                  signature: str, message: str, hardware: Dict[str, Any]) -> Optional[str]:
@@ -224,18 +327,11 @@ def register_node(orchestrator_url: str, node_id: str, wallet_address: str,
             f"{orchestrator_url}/api/nodes/register",
             json={
                 "nodeId": node_id,
-                "machineId": get_machine_id(),  # Need to add this function
-                "name": socket.gethostname(),
                 "walletAddress": wallet_address,
-                "signature": signature,          # ← NEW
-                "message": message,              # ← NEW
-                "publicIp": get_public_ip(),
-                "agentPort": 5100,
+                "signature": signature,
+                "message": message,
                 "hardwareInfo": hardware,
-                "agentVersion": VERSION,
-                "supportedImages": ["ubuntu-24.04", "ubuntu-22.04", "debian-12"],
-                "region": "default",
-                "zone": "default"
+                "publicIp": get_public_ip()
             },
             timeout=30
         )
@@ -243,28 +339,32 @@ def register_node(orchestrator_url: str, node_id: str, wallet_address: str,
         if response.status_code == 200:
             data = response.json()
             if data.get("success"):
-                return data["data"]["apiKey"]  # ← Extract API key
+                api_key = data.get("data", {}).get("apiKey")
+                if not api_key:
+                    api_key = data.get("apiKey")
+                
+                if api_key:
+                    return api_key
+                else:
+                    log_error("API key not found in response")
+                    return None
         
-        # ... error handling ...
+        log_error(f"Registration failed: {response.status_code}")
+        if response.text:
+            log_error(response.text[:200])
+        
+        return None
+    
     except Exception as e:
         log_error(f"Failed to register node: {e}")
         return None
 
-# Also need to add get_machine_id() function to match C# implementation
-def get_machine_id() -> str:
-    """Get machine ID (matches C# NodeIdGenerator)"""
-    if os.path.exists('/etc/machine-id'):
-        with open('/etc/machine-id', 'r') as f:
-            return f.read().strip()
-    
-    # Fallback: use hostname + MAC address
-    import uuid
-    mac = ':'.join(['{:02x}'.format((uuid.getnode() >> elements) & 0xff)
-                    for elements in range(0,2*6,2)][::-1])
-    return hashlib.sha256(f"{socket.gethostname()}{mac}".encode()).hexdigest()[:16]
+# =============================================================================
+# QR CODE AUTHENTICATION FLOW
+# =============================================================================
 
-def login_walletconnect(orchestrator_url: str, verbose: bool = False):
-    """Login using WalletConnect"""
+def login_with_qr_code(orchestrator_url: str, wallet_address: str = None, verbose: bool = False):
+    """Login using QR code authentication"""
     print_banner()
     
     # Get node information
@@ -276,123 +376,84 @@ def login_walletconnect(orchestrator_url: str, verbose: bool = False):
     log_info(f"Resources: {hardware['cores']} cores / {hardware['memory']}GB RAM / {hardware['disk']}GB disk")
     print()
     
-    try:
-        # Initialize WalletConnect client
-        log_info("Initializing WalletConnect...")
-        
-        wc = WalletConnectClient(
-            project_id=WALLETCONNECT_PROJECT_ID,
-            metadata={
-                "name": "DeCloud Node",
-                "description": "Authorize your DeCloud compute node",
-                "url": "https://decloud.io",
-                "icons": ["https://decloud.io/icon.png"]
-            }
-        )
-        
-        # Create session
-        session = wc.create_session()
-        uri = session.uri
-        
-        # Display QR code
-        display_qr_code(uri)
-        
-        log_info(f"Or use this link on your mobile device:")
-        print(f"  {uri}")
+    # Get wallet address if not provided
+    if not wallet_address:
+        log_info("Enter your Ethereum wallet address:")
+        wallet_address = input(f"  {Colors.BOLD}Wallet (0x...):{Colors.NC} ").strip()
         print()
-        
-        # Wait for wallet connection
-        log_info("Waiting for wallet connection...")
-        
-        accounts = wc.wait_for_session_approval(timeout=120)
-        
-        if not accounts or len(accounts) == 0:
-            log_error("No wallet connected")
-            return False
-        
-        wallet_address = accounts[0]
-        log_success(f"Wallet connected: {wallet_address}")
-        print()
-        
-        # Create authorization message
-        timestamp = int(time.time())
-        message = f"""Sign this message to authorize your DeCloud node:
-
-Node ID: {node_id}
-Wallet: {wallet_address}
-Hardware: {hardware['cpu']}
-Resources: {hardware['cores']} cores / {hardware['memory']}GB RAM
-Timestamp: {timestamp}
-
-This signature proves you own this wallet and authorizes the node to operate on your behalf.
-
-NO FUNDS WILL BE TRANSFERRED - This is only for node authorization."""
-        
-        log_info("📱 Please sign the message on your phone...")
-        
-        # Request signature via WalletConnect
-        signature = wc.sign_message(
-            account=wallet_address,
-            message=message
-        )
-        
-        log_success("Signature received!")
-        print()
-        
-        # Disconnect WalletConnect
-        wc.disconnect()
-        
-        # Register with orchestrator
-        log_info("Registering with orchestrator...")
-        
-        api_key = register_node(
-            orchestrator_url=orchestrator_url,
-            node_id=node_id,
-            wallet_address=wallet_address,
-            signature=signature,
-            message=message,
-            hardware=hardware
-        )
-        
-        if api_key:
-            # Save credentials
-            save_credentials(node_id, api_key, wallet_address)
-            
-            # Save orchestrator URL to config
-            config = load_config()
-            config['orchestrator_url'] = orchestrator_url
-            save_config(config)
-            
-            print()
-            print(f"{Colors.GREEN}{'='*60}{Colors.NC}")
-            print(f"{Colors.BOLD}    ✅ Node Authorized Successfully!{Colors.NC}")
-            print(f"{Colors.GREEN}{'='*60}{Colors.NC}")
-            print()
-            print(f"  Node ID:      {node_id}")
-            print(f"  Wallet:       {wallet_address}")
-            print(f"  Credentials:  {CREDENTIALS_FILE}")
-            print()
-            print("The node agent will start automatically.")
-            print("Check status with: systemctl status decloud-node-agent")
-            print()
-            
-            return True
-        else:
-            log_error("Failed to register node with orchestrator")
-            return False
     
-    except TimeoutError:
-        log_error("Connection timeout - please try again")
+    if not wallet_address.startswith('0x') or len(wallet_address) != 42:
+        log_error("Invalid wallet address format")
         return False
-    except KeyboardInterrupt:
+    
+    # Create message
+    message = create_signing_message(node_id, wallet_address, hardware)
+    
+    # Display all signing options
+    display_signing_options(message, wallet_address)
+    
+    # Wait for signature
+    print(f"{Colors.BOLD}{'═'*70}{Colors.NC}")
+    print()
+    log_info(f"{Colors.BOLD}After signing, paste the signature below:{Colors.NC}")
+    print()
+    
+    signature = input(f"  {Colors.BOLD}Signature (0x...):{Colors.NC} ").strip()
+    
+    if not signature.startswith('0x'):
+        log_error("Invalid signature format")
+        return False
+    
+    print()
+    log_success("Signature received!")
+    
+    # Verify signature
+    log_info("Verifying signature...")
+    if not verify_signature(message, signature, wallet_address):
+        log_error("Signature verification failed!")
+        log_error("Make sure you signed the exact message shown above")
+        return False
+    
+    log_success("Signature verified!")
+    print()
+    
+    # Register with orchestrator
+    log_info("Registering with orchestrator...")
+    
+    api_key = register_node(
+        orchestrator_url=orchestrator_url,
+        node_id=node_id,
+        wallet_address=wallet_address,
+        signature=signature,
+        message=message,
+        hardware=hardware
+    )
+    
+    if api_key:
+        # Save credentials
+        save_credentials(node_id, api_key, wallet_address, signature, message)
+        
+        # Save orchestrator URL to config
+        config = load_config()
+        config['orchestrator_url'] = orchestrator_url
+        save_config(config)
+        
         print()
-        log_warn("Login cancelled by user")
-        return False
-    except Exception as e:
-        log_error(f"Login failed: {e}")
-        if verbose:
-            import traceback
-            traceback.print_exc()
+        print(f"{Colors.GREEN}{'═'*70}{Colors.NC}")
+        print(f"{Colors.BOLD}              ✅ Node Authorized Successfully!{Colors.NC}")
+        print(f"{Colors.GREEN}{'═'*70}{Colors.NC}")
+        print()
+        print(f"  Node ID:      {node_id}")
+        print(f"  Wallet:       {wallet_address}")
+        print(f"  Credentials:  {CREDENTIALS_FILE}")
+        print()
+        print("The node agent will start automatically.")
+        print("Check status with: systemctl status decloud-node-agent")
+        print()
+        
+        return True
+    else:
+        log_error("Failed to register node with orchestrator")
         return False
 
 # =============================================================================
@@ -420,14 +481,13 @@ def cmd_login(args):
         orchestrator_url = config.get('orchestrator_url', DEFAULT_ORCHESTRATOR_URL)
     
     # Perform login
-    success = login_walletconnect(orchestrator_url, args.verbose)
+    success = login_with_qr_code(orchestrator_url, args.wallet, args.verbose)
     sys.exit(0 if success else 1)
 
 def cmd_status(args):
     """Handle status command"""
     print_banner()
     
-    # Check credentials
     creds = load_credentials()
     if not creds:
         log_warn("Node not authorized")
@@ -435,7 +495,6 @@ def cmd_status(args):
         print("Run: decloud-node login")
         return
     
-    # Display status
     print(f"{Colors.BOLD}Node Status:{Colors.NC}")
     print()
     print(f"  Node ID:       {creds.get('NODE_ID', 'Unknown')}")
@@ -444,8 +503,6 @@ def cmd_status(args):
     print(f"  Authorized:    {creds.get('AUTHORIZED_AT', 'Unknown')}")
     print()
     
-    # Check service status
-    import subprocess
     try:
         result = subprocess.run(
             ['systemctl', 'is-active', 'decloud-node-agent'],
@@ -478,13 +535,10 @@ def cmd_logout(args):
             log_info("Cancelled")
             return
     
-    # Remove credentials
     if os.path.exists(CREDENTIALS_FILE):
         os.remove(CREDENTIALS_FILE)
         log_success("Credentials removed")
     
-    # Stop service
-    import subprocess
     try:
         subprocess.run(['systemctl', 'stop', 'decloud-node-agent'], check=False)
         log_success("Node agent stopped")
@@ -497,8 +551,7 @@ def cmd_logout(args):
 
 def cmd_version(args):
     """Handle version command"""
-    print(f"DeCloud Node CLI v{VERSION}")
-    print(f"WalletConnect Project ID: {WALLETCONNECT_PROJECT_ID[:20]}...")
+    print(f"DeCloud Node CLI v{VERSION} (QR Code Edition)")
 
 # =============================================================================
 # MAIN ENTRY POINT
@@ -507,15 +560,16 @@ def cmd_version(args):
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(
-        description="DeCloud Node CLI - WalletConnect Authentication",
+        description="DeCloud Node CLI - QR Code Wallet Authentication",
         epilog="For support, visit: https://docs.decloud.io"
     )
     
     subparsers = parser.add_subparsers(dest='command', help='Command to execute')
     
     # Login command
-    login_parser = subparsers.add_parser('login', help='Login with WalletConnect')
+    login_parser = subparsers.add_parser('login', help='Login with QR code')
     login_parser.add_argument('--orchestrator', help='Orchestrator URL (optional)')
+    login_parser.add_argument('--wallet', help='Wallet address (optional, will prompt if not provided)')
     login_parser.add_argument('--force', action='store_true', help='Force re-authorization')
     login_parser.add_argument('--verbose', action='store_true', help='Verbose output')
     
