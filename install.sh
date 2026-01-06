@@ -681,7 +681,6 @@ install_python_dependencies() {
     return 0
 }
 
-<<<<<<< HEAD
 install_walletconnect_cli() {
     log_step "Installing DeCloud authentication CLI..."
     
@@ -789,8 +788,6 @@ run_node_authentication() {
     fi
 }
 
-=======
->>>>>>> parent of 2a7b5da (no message)
 # ============================================================
 # SSH CA Setup
 # ============================================================
