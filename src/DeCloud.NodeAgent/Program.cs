@@ -112,7 +112,7 @@ builder.Services.AddSingleton<IEphemeralSshKeyService, EphemeralSshKeyService>()
 // HTTP Clients
 // =====================================================
 builder.Services.AddHttpClient<IImageManager, ImageManager>();
-builder.Services.AddHttpClient<IOrchestratorClient, OrchestratorClient>()
+builder.Services.AddHttpClient<OrchestratorClient>()
     .ConfigureHttpClient(client =>
     {
         client.Timeout = TimeSpan.FromMinutes(5);
