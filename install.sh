@@ -657,7 +657,8 @@ install_python_dependencies() {
     if [ "$USE_BREAK_PACKAGES" = true ]; then
         log_info "Installing packages system-wide..."
         # Use environment variable to bypass PEP 668 AND force system-wide installation
-        if PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install $PACKAGES 2>/dev/null; then
+        # Use --ignore-installed to avoid conflicts with system packages like typing-extensions
+        if PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --ignore-installed $PACKAGES 2>/dev/null; then
             INSTALL_SUCCESS=true
             log_info "✓ Installed system-wide (PEP 668 bypass)"
         fi
@@ -683,7 +684,7 @@ install_python_dependencies() {
     # Method 4: Try with --break-system-packages flag
     if [ "$INSTALL_SUCCESS" = false ]; then
         log_info "Trying with --break-system-packages flag..."
-        if PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install $PACKAGES --quiet 2>/dev/null; then
+        if PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --ignore-installed $PACKAGES --quiet 2>/dev/null; then
             INSTALL_SUCCESS=true
             log_info "✓ Installed with PIP_BREAK_SYSTEM_PACKAGES"
         fi
@@ -693,7 +694,7 @@ install_python_dependencies() {
     if [ "$INSTALL_SUCCESS" = false ]; then
         log_info "Trying hybrid apt + pip installation..."
         apt-get install -y python3-requests python3-pil > /dev/null 2>&1 || true
-        if PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install web3 eth-account qrcode --quiet 2>/dev/null; then
+        if PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --ignore-installed web3 eth-account qrcode --quiet 2>/dev/null; then
             INSTALL_SUCCESS=true
             log_info "✓ Installed via apt + pip (system-wide)"
         elif python3 -m pip install --user web3 eth-account qrcode --quiet 2>/dev/null; then
@@ -751,10 +752,10 @@ install_python_dependencies() {
         log_error "Failed to install Python dependencies"
         echo ""
         log_info "Manual installation required. For Ubuntu 24.04+ use:"
-        log_info "  sudo PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install web3 eth-account requests qrcode pillow"
+        log_info "  sudo PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --ignore-installed web3 eth-account requests qrcode pillow"
         echo ""
         log_info "Or use the --break-system-packages flag:"
-        log_info "  python3 -m pip install --break-system-packages web3 eth-account requests qrcode pillow"
+        log_info "  python3 -m pip install --break-system-packages --ignore-installed web3 eth-account requests qrcode pillow"
         echo ""
         log_info "For older Ubuntu/Debian use:"
         log_info "  python3 -m pip install --user web3 eth-account requests qrcode pillow"
