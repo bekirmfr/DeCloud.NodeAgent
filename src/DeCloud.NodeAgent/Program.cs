@@ -5,6 +5,7 @@ using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.NodeAgent.Services;
 using Microsoft.Extensions.Options;
+using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -111,7 +112,11 @@ builder.Services.AddSingleton<IEphemeralSshKeyService, EphemeralSshKeyService>()
 // HTTP Clients
 // =====================================================
 builder.Services.AddHttpClient<IImageManager, ImageManager>();
-builder.Services.AddHttpClient<OrchestratorClient>();
+builder.Services.AddHttpClient<IOrchestratorClient, OrchestratorClient>()
+    .ConfigureHttpClient(client =>
+    {
+        client.Timeout = TimeSpan.FromMinutes(5);
+    });
 builder.Services.AddSingleton<IOrchestratorClient>(sp =>
     sp.GetRequiredService<OrchestratorClient>());
 
@@ -145,7 +150,12 @@ builder.Services.AddHttpClient("VmProxy", client =>
 // =====================================================
 // API
 // =====================================================
-builder.Services.AddControllers();
+builder.Services.AddControllers()
+    .AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+        options.JsonSerializerOptions.PropertyNameCaseInsensitive = true;
+    });
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
