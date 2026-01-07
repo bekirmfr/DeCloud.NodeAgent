@@ -6,6 +6,7 @@ using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.NodeAgent.Services;
 using Microsoft.Extensions.Options;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -28,6 +29,28 @@ builder.Services.Configure<AuditLogOptions>(
     builder.Configuration.GetSection("AuditLog"));
 
 // =====================================================
+// HTTP Clients
+// =====================================================
+builder.Services.ConfigureHttpJsonOptions(options =>
+{
+    options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+    options.SerializerOptions.PropertyNameCaseInsensitive = true;
+    options.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
+});
+
+builder.Services.AddHttpClient<IImageManager, ImageManager>();
+builder.Services.AddHttpClient<OrchestratorClient>()
+    .ConfigureHttpClient(client =>
+    {
+        client.Timeout = TimeSpan.FromMinutes(5);
+    });
+// HttpClient for VM proxy (used by InternalProxyController)
+builder.Services.AddHttpClient("VmProxy", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(30);
+});
+
+// =====================================================
 // Core Services
 // =====================================================
 builder.Services.AddSingleton<INodeMetadataService, NodeMetadataService>();
@@ -36,6 +59,8 @@ builder.Services.AddSingleton<INatRuleManager, NatRuleManager>();
 builder.Services.AddSingleton<IResourceDiscoveryService, ResourceDiscoveryService>();
 builder.Services.AddSingleton<ICpuBenchmarkService, CpuBenchmarkService>();
 builder.Services.AddSingleton<IImageManager, ImageManager>();
+builder.Services.AddSingleton<IOrchestratorClient>(sp =>
+    sp.GetRequiredService<OrchestratorClient>());
 
 // =====================================================
 // VM Repository with Encryption Support
@@ -109,18 +134,6 @@ builder.Services.AddSingleton<ICloudInitCleaner, CloudInitCleaner>();
 builder.Services.AddSingleton<IEphemeralSshKeyService, EphemeralSshKeyService>();
 
 // =====================================================
-// HTTP Clients
-// =====================================================
-builder.Services.AddHttpClient<IImageManager, ImageManager>();
-builder.Services.AddHttpClient<OrchestratorClient>()
-    .ConfigureHttpClient(client =>
-    {
-        client.Timeout = TimeSpan.FromMinutes(5);
-    });
-builder.Services.AddSingleton<IOrchestratorClient>(sp =>
-    sp.GetRequiredService<OrchestratorClient>());
-
-// =====================================================
 // Background Services
 // =====================================================
 builder.Services.AddHostedService<HeartbeatService>();
@@ -140,12 +153,6 @@ builder.Services.AddSingleton<IPortSecurityService, PortSecurityService>();
 
 // Security audit logging
 builder.Services.AddSingleton<IAuditService, AuditService>();
-
-// HttpClient for VM proxy (used by InternalProxyController)
-builder.Services.AddHttpClient("VmProxy", client =>
-{
-    client.Timeout = TimeSpan.FromSeconds(30);
-});
 
 // =====================================================
 // API
