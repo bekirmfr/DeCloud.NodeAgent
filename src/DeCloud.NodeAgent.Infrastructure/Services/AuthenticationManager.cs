@@ -143,6 +143,10 @@ public class AuthenticationManager : BackgroundService
                 return AuthState.CredentialsInvalid;
             }
         }
+        else
+        {
+            return AuthState.NotAuthenticated;
+        }
 
         var isAuthorized = await VerifyNodeAuthorizationAsync(
                     credentials["NODE_ID"],

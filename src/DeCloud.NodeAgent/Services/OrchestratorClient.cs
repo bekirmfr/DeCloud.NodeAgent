@@ -187,8 +187,9 @@ public class OrchestratorClient : IOrchestratorClient
                 }
 
                 _logger.LogWarning(
-                    result.Error,
-                    attempt);
+                    "Registration attempt {Attempt} failed: {Error}",
+                    attempt,
+                    result.Error);
             }
             catch (Exception ex)
             {
