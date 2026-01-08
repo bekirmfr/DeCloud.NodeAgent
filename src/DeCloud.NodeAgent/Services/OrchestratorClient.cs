@@ -102,16 +102,17 @@ public class OrchestratorClient : IOrchestratorClient
             _httpClient.DefaultRequestHeaders.Authorization =
                 new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _apiKey);
 
-            _logger.LogInformation("✓ API key loaded from credentials");
+            _logger.LogInformation("✓ API key loaded from {File}", credentialsFile);
         }
     }
 
-    private async Task SaveApiKeyAsync(string apiKey, CancellationToken ct)
+    private async Task SaveCredentialsAsync(CancellationToken ct)
     {
         const string credentialsFile = "/etc/decloud/credentials";
 
         // Append API key to existing credentials
-        await File.AppendAllTextAsync(credentialsFile, $"API_KEY={apiKey}\n", ct);
+        await File.AppendAllTextAsync(credentialsFile, $"API_KEY={_apiKey}\n", ct);
+        await File.AppendAllTextAsync(credentialsFile, $"NODE_ID={_nodeId}\n", ct);
 
         _logger.LogInformation("✓ API key saved to {File}", credentialsFile);
     }
@@ -313,14 +314,15 @@ public class OrchestratorClient : IOrchestratorClient
                             _logger.LogError("Registration response missing API key");
                             throw new ArgumentException("API key is null or empty");
                         }
-                        await SaveApiKeyAsync(_apiKey, ct);
-
-                        // Set Authorization header
-                        _httpClient.DefaultRequestHeaders.Authorization =
-                            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _apiKey);
-
-                        _logger.LogInformation("✓ API key received and configured");
                     }
+
+                    await SaveCredentialsAsync(ct);
+
+                    // Set Authorization header
+                    _httpClient.DefaultRequestHeaders.Authorization =
+                        new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _apiKey);
+
+                    _logger.LogInformation("✓ Node ID and API key received and configured");
 
                     // Handle orchestrator WireGuard public key
                     if (data.TryGetProperty("orchestratorWireGuardPublicKey", out var pubKeyProp) &&
@@ -338,7 +340,7 @@ public class OrchestratorClient : IOrchestratorClient
                         "✓ Node registered successfully: {NodeId} | Wallet: {Wallet}",
                         _nodeId, _walletAddress);
 
-                    RegistrationResult.Success(_nodeId, _apiKey);
+                    return RegistrationResult.Success(_nodeId, _apiKey);
                 }
             }
 
