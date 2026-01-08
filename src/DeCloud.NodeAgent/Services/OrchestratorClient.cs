@@ -96,7 +96,7 @@ public class OrchestratorClient : IOrchestratorClient
                 _apiKey = line.Split('=')[1];
         }
 
-        if (!string.IsNullOrEmpty(_apiKey))
+        if (!string.IsNullOrWhiteSpace(_apiKey))
         {
             // Set Authorization header
             _httpClient.DefaultRequestHeaders.Authorization =
@@ -299,7 +299,7 @@ public class OrchestratorClient : IOrchestratorClient
                     if (json.RootElement.TryGetProperty("nodeId", out var nodeIdProp))
                     {
                         _nodeId = nodeIdProp.GetString();
-                        if(string.IsNullOrEmpty(_nodeId))
+                        if(string.IsNullOrWhiteSpace(_nodeId))
                         {
                             _logger.LogError("Registration response missing Node ID");
                             throw new ArgumentException("Node ID is null or empty");
@@ -309,7 +309,7 @@ public class OrchestratorClient : IOrchestratorClient
                     if (json.RootElement.TryGetProperty("apiKey", out var apiKeyProp))
                     {
                         _apiKey = apiKeyProp.GetString();
-                        if (string.IsNullOrEmpty(_apiKey))
+                        if (string.IsNullOrWhiteSpace(_apiKey))
                         {
                             _logger.LogError("Registration response missing API key");
                             throw new ArgumentException("API key is null or empty");
