@@ -1160,7 +1160,7 @@ install_relay_nat_support() {
     local file_source="$INSTALL_DIR/DeCloud.NodeAgent/decloud-relay-nat"
     local file_dest="/usr/local/bin/decloud-relay-nat"
     
-    if [ ! -f "file_source" ]; then
+    if [ ! -f "$file_source" ]; then
         log_error "Relay NAT manager script not found at $file_source"
         log_error "Repository may be incomplete"
         exit 1
