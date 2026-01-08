@@ -222,7 +222,10 @@ public class OrchestratorClient : IOrchestratorClient
         try
         {
             var json = await File.ReadAllTextAsync(PendingAuthFile, ct);
-            var auth = JsonSerializer.Deserialize<PendingAuth>(json);
+            var auth = JsonSerializer.Deserialize<PendingAuth>(json, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
 
             if (auth == null ||
                 string.IsNullOrWhiteSpace(auth.WalletAddress) ||
