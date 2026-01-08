@@ -314,7 +314,7 @@ public class OrchestratorClient : IOrchestratorClient
 
                 if (json.RootElement.TryGetProperty("data", out var data))
                 {
-                    if (!json.RootElement.TryGetProperty("nodeId", out var nodeIdProp))
+                    if (!json.RootElement.TryGetProperty("NodeId", out var nodeIdProp))
                     {
                         _logger.LogError("Registration response missing Node ID");
                         throw new ArgumentException("Node ID not found in response");
@@ -327,7 +327,7 @@ public class OrchestratorClient : IOrchestratorClient
                         throw new ArgumentException("Node ID is null or empty");
                     }
 
-                    if (!json.RootElement.TryGetProperty("apiKey", out var apiKeyProp))
+                    if (!json.RootElement.TryGetProperty("ApiKey", out var apiKeyProp))
                     {
                         _logger.LogError("Registration response missing api key");
                         throw new ArgumentException("Api key not found in response");
