@@ -151,10 +151,10 @@ public class AuthenticationManager : BackgroundService
         if (isAuthorized) {
             return AuthState.Registered;
         }
-
+        var authFileExists = File.Exists(CredentialsFile);
+        _logger.LogInformation("Auth file exists: {AuthFileExists}, Is Authorized: {IsAuthorized}", authFileExists, isAuthorized);
         // Check if pending authentication exists
-        if (File.Exists(PendingAuthFile) 
-            && !isAuthorized)
+        if (authFileExists && !isAuthorized)
         {
             return AuthState.PendingRegistration;
         }

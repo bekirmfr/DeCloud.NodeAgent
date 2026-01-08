@@ -48,10 +48,10 @@ SIGNING_PAGE_URL = "https://decloud.stackfi.tech/sign.html"
 # SIGNING_PAGE_URL = "http://localhost:8000/sign.html"
 
 # File paths
-CONFIG_DIR = "/etc/decloud")
+CONFIG_DIR = os.path.expanduser("~/.config/decloud")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
-PENDING_AUTH_FILE = os.path.join(CONFIG_DIR, "pending-auth")
-CREDENTIALS_FILE = os.path.join(CONFIG_DIR, "credentials")
+PENDING_AUTH_FILE = "/etc/decloud/pending-auth"
+CREDENTIALS_FILE = "/etc/decloud/credentials"
 
 # =============================================================================
 # TERMINAL COLORS
