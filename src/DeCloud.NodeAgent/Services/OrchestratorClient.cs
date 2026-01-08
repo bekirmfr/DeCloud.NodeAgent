@@ -312,6 +312,8 @@ public class OrchestratorClient : IOrchestratorClient
                 var content = await response.Content.ReadAsStringAsync(ct);
                 var json = JsonDocument.Parse(content);
 
+                _logger.LogDebug("Received registration response: {Json}", json.RootElement.GetString());
+
                 if (json.RootElement.TryGetProperty("data", out var data))
                 {
                     if (!json.RootElement.TryGetProperty("NodeId", out var nodeIdProp))
