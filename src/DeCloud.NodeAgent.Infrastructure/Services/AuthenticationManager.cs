@@ -131,28 +131,6 @@ public class AuthenticationManager : BackgroundService
 
     private async Task<AuthState> DetermineAuthStateAsync(CancellationToken ct)
     {
-        var credentials = new Dictionary<string, string>();
-
-        // Check if credentials exist and are valid
-        if (File.Exists(CredentialsFile))
-        {
-            credentials = await LoadCredentialsAsync(ct);
-
-            if (!await ValidateCredentialsAsync(credentials, ct))
-            {
-                return AuthState.CredentialsInvalid;
-            }
-
-            var isAuthorized = await VerifyNodeAuthorizationAsync(
-                    credentials["NODE_ID"],
-                    credentials["API_KEY"], ct);
-
-            if (isAuthorized)
-            {
-                return AuthState.Registered;
-            }
-        }
-
         var authFileExists = File.Exists(PendingAuthFile);
 
         _logger.LogInformation("Auth file exists: {AuthFileExists}", authFileExists);
@@ -161,6 +139,28 @@ public class AuthenticationManager : BackgroundService
         if (authFileExists)
         {
             return AuthState.PendingRegistration;
+        }
+
+        var credentials = new Dictionary<string, string>();
+
+        // Check if credentials exist and are valid
+        if (File.Exists(CredentialsFile))
+        {
+            credentials = await LoadCredentialsAsync(ct);
+
+            if (await ValidateCredentialsAsync(credentials, ct))
+            {
+                var isAuthorized = await VerifyNodeAuthorizationAsync(
+                    credentials["NODE_ID"],
+                    credentials["API_KEY"], ct);
+
+                if (isAuthorized)
+                {
+                    return AuthState.Registered;
+                }
+            }
+
+            return AuthState.CredentialsInvalid;
         }
 
         return AuthState.NotAuthenticated;
