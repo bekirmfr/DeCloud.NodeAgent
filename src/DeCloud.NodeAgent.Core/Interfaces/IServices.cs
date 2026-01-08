@@ -199,6 +199,47 @@ public interface INatRuleManager
     Task<List<string>> GetExistingRulesAsync(CancellationToken ct = default);
 }
 
+/// <summary>
+/// Thread-safe authentication state tracking
+/// </summary>
+public interface IAuthenticationStateService
+{
+    /// <summary>
+    /// Current authentication state
+    /// </summary>
+    AuthenticationState CurrentState { get; }
+
+    /// <summary>
+    /// Simple registered check
+    /// </summary>
+    bool IsRegistered { get; }
+
+    /// <summary>
+    /// Resource discovery completion check
+    /// </summary>
+    bool IsDiscoveryComplete { get; }
+
+    /// <summary>
+    /// Update authentication state (called by AuthenticationManager)
+    /// </summary>
+    void UpdateState(AuthenticationState newState);
+
+    /// <summary>
+    /// Wait until registered or cancelled
+    /// </summary>
+    Task WaitForRegistrationAsync(CancellationToken ct);
+}
+
+public enum AuthenticationState
+{
+    Initializing,
+    WaitingForDiscovery,
+    NotAuthenticated,
+    PendingRegistration,
+    Registered,
+    CredentialsInvalid
+}
+
 public class PendingCommand
 {
     public string CommandId { get; set; } = string.Empty;

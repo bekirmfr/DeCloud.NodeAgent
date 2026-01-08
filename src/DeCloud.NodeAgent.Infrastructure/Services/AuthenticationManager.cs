@@ -6,6 +6,7 @@ public class AuthenticationManager : BackgroundService
 {
     private readonly IResourceDiscoveryService _resourceDiscovery;
     private readonly IOrchestratorClient _orchestratorClient;
+    private readonly IAuthenticationStateService _authState;
     private readonly ILogger<AuthenticationManager> _logger;
 
     // File paths
@@ -28,10 +29,12 @@ public class AuthenticationManager : BackgroundService
     public AuthenticationManager(
         IResourceDiscoveryService resourceDiscovery,
         IOrchestratorClient orchestratorClient,
+        IAuthenticationStateService authState,
         ILogger<AuthenticationManager> logger)
     {
         _resourceDiscovery = resourceDiscovery;
         _orchestratorClient = orchestratorClient;
+        _authState = authState;
         _logger = logger;
     }
 
@@ -48,6 +51,16 @@ public class AuthenticationManager : BackgroundService
             while (!ct.IsCancellationRequested)
             {
                 var state = await DetermineAuthStateAsync(ct);
+
+                // Update shared state
+                _authState.UpdateState(state switch
+                {
+                    AuthState.NotAuthenticated => AuthenticationState.NotAuthenticated,
+                    AuthState.PendingRegistration => AuthenticationState.PendingRegistration,
+                    AuthState.Registered => AuthenticationState.Registered,
+                    AuthState.CredentialsInvalid => AuthenticationState.CredentialsInvalid,
+                    _ => AuthenticationState.Initializing
+                });
 
                 switch (state)
                 {
@@ -123,7 +136,10 @@ public class AuthenticationManager : BackgroundService
         {
             var credentials = await LoadCredentialsAsync(ct);
 
-            if (await ValidateCredentialsAsync(credentials, ct))
+            if (await ValidateCredentialsAsync(credentials, ct)
+                && await VerifyNodeAuthorizationAsync(
+                    credentials["NODE_ID"], 
+                    credentials["API_KEY"], ct))
             {
                 return AuthState.Registered;
             }
@@ -246,10 +262,54 @@ public class AuthenticationManager : BackgroundService
             return false;
         }
 
-        // Optional: Ping orchestrator to verify API key is valid
-        // (Can add later if needed)
-
         return true;
+    }
+
+    /// <summary>
+    /// Verify node authorization by calling the orchestrator's GET /api/nodes/{nodeId} endpoint.
+    /// Returns true if the node receives a 200 OK response, indicating valid credentials.
+    /// </summary>
+    private async Task<bool> VerifyNodeAuthorizationAsync(string nodeId, string apiKey, CancellationToken ct)
+    {
+        try
+        {
+            using var httpClient = new HttpClient
+            {
+                Timeout = TimeSpan.FromSeconds(10)
+            };
+
+            // Get orchestrator base URL from OrchestratorClient configuration
+            var baseUrl = _orchestratorClient.GetType()
+                .GetField("_httpClient", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                ?.GetValue(_orchestratorClient) as HttpClient;
+
+            var requestUrl = baseUrl?.BaseAddress != null
+                ? $"{baseUrl.BaseAddress.ToString().TrimEnd('/')}/api/nodes/{nodeId}"
+                : $"http://localhost:5000/api/nodes/{nodeId}";
+
+            var request = new HttpRequestMessage(HttpMethod.Get, requestUrl);
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
+
+            var response = await httpClient.SendAsync(request, ct);
+
+            if (response.StatusCode == System.Net.HttpStatusCode.OK)
+            {
+                _logger.LogInformation("✓ Node authorization verified with orchestrator");
+                return true;
+            }
+
+            _logger.LogWarning(
+                "Node authorization failed: {StatusCode} - {Reason}",
+                (int)response.StatusCode,
+                response.ReasonPhrase);
+
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to verify node authorization with orchestrator");
+            return false;
+        }
     }
 
     private bool _hasLoggedAuthWarning = false;
