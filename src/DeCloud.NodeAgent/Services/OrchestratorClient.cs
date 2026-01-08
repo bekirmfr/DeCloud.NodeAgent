@@ -180,6 +180,9 @@ public class OrchestratorClient : IOrchestratorClient
                     // Delete pending auth on success
                     File.Delete(PendingAuthFile);
 
+                    _nodeId = result.NodeId;
+                    _apiKey = result.ApiKey;
+
                     _logger.LogInformation(
                         "✓ Registration successful: {NodeId}",
                         _nodeId);
