@@ -229,7 +229,7 @@ public class OrchestratorClient : IOrchestratorClient
                 string.IsNullOrWhiteSpace(auth.Signature) ||
                 string.IsNullOrWhiteSpace(auth.Message))
             {
-                _logger.LogError("Invalid pending auth format");
+                _logger.LogError("Invalid pending auth format: {FileJson}", json);
                 return null;
             }
 
