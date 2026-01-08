@@ -79,7 +79,6 @@ public class HeartbeatService : BackgroundService
             if (state == AuthenticationState.CredentialsInvalid)
             {
                 _logger.LogWarning("Cannot start heartbeat - credentials invalid");
-                return;
             }
 
             await Task.Delay(TimeSpan.FromSeconds(10), ct);
