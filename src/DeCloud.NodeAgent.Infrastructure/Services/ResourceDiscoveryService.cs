@@ -6,12 +6,24 @@ using Microsoft.Extensions.Logging;
 
 namespace DeCloud.NodeAgent.Infrastructure.Services;
 
+/// <summary>
+/// Resource discovery service with caching support
+/// Initial discovery is expensive (15-30s due to CPU benchmark)
+/// Subsequent calls use cached data
+/// </summary>
 public class ResourceDiscoveryService : IResourceDiscoveryService
 {
     private readonly ICommandExecutor _executor;
     private readonly ILogger<ResourceDiscoveryService> _logger;
     private readonly ICpuBenchmarkService _benchmarkService;
+    private readonly string _nodeId;
     private readonly bool _isWindows;
+
+    // Caching fields
+    private HardwareInventory? _cachedInventory;
+    private bool _discoveryComplete;
+    private readonly SemaphoreSlim _discoverySemaphore = new(1, 1);
+    private DateTime _lastDiscoveryTime = DateTime.MinValue;
 
     public ResourceDiscoveryService(
         ICommandExecutor executor,
@@ -22,44 +34,80 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         _logger = logger;
         _benchmarkService = benchmarkService;
         _isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        _nodeId = GetOrCreateNodeId();
     }
 
+    /// <summary>
+    /// Check if initial discovery has completed
+    /// </summary>
+    public bool IsDiscoveryComplete() => _discoveryComplete;
+
+    /// <summary>
+    /// Get cached hardware inventory
+    /// Returns null if discovery hasn't completed yet
+    /// </summary>
+    public Task<HardwareInventory?> GetCachedInventoryAsync(CancellationToken ct = default)
+    {
+        return Task.FromResult(_cachedInventory);
+    }
+
+    /// <summary>
+    /// Perform full hardware discovery with CPU benchmark
+    /// This operation takes 15-30 seconds and caches the result
+    /// </summary>
     public async Task<HardwareInventory> DiscoverAllAsync(CancellationToken ct = default)
     {
-        _logger.LogInformation("Starting full resource discovery (Platform: {Platform})", 
-            _isWindows ? "Windows" : "Linux");
-
-        var cpu = await GetCpuInfoAsync(ct);
-        var memory = await GetMemoryInfoAsync(ct);
-        var storage = await GetStorageInfoAsync(ct);
-        var gpus = await GetGpuInfoAsync(ct);
-        var supportsGpu = gpus.Any();
-        var network = await GetNetworkInfoAsync(ct);
-
-        var resources = new HardwareInventory
+        // Prevent concurrent discoveries
+        await _discoverySemaphore.WaitAsync(ct);
+        try
         {
-            Cpu = cpu,
-            Memory = memory,
-            Storage = storage,
-            SupportsGpu = supportsGpu,
-            Gpus = gpus,
-            Network = network,
-            CollectedAt = DateTime.UtcNow
-        };
+            _logger.LogInformation("Starting full resource discovery (Platform: {Platform})",
+                _isWindows ? "Windows" : "Linux");
 
-        _logger.LogInformation(
-            "Discovery complete: {Cores} cores, {Memory}GB RAM, {Gpus} GPUs",
-            resources.Cpu.LogicalCores,
-            resources.Memory.TotalBytes / 1024 / 1024 / 1024,
-            resources.Gpus.Count);
+            var cpu = await GetCpuInfoAsync(ct);
+            var memory = await GetMemoryInfoAsync(ct);
+            var storage = await GetStorageInfoAsync(ct);
+            var gpus = await GetGpuInfoAsync(ct);
+            var supportsGpu = gpus.Any();
+            var network = await GetNetworkInfoAsync(ct);
 
-        return resources;
+            var inventory = new HardwareInventory
+            {
+                NodeId = _nodeId,
+                Cpu = cpu,
+                Memory = memory,
+                Storage = storage,
+                SupportsGpu = supportsGpu,
+                Gpus = gpus,
+                Network = network,
+                CollectedAt = DateTime.UtcNow
+            };
+
+            // Update cache
+            _cachedInventory = inventory;
+            _discoveryComplete = true;
+            _lastDiscoveryTime = DateTime.UtcNow;
+
+            _logger.LogInformation(
+                "✓ Discovery complete: {Cores} cores, {Memory}GB RAM, {Storage}GB disk, {Gpus} GPUs, Benchmark: {Score}",
+                inventory.Cpu.LogicalCores,
+                inventory.Memory.TotalBytes / 1024 / 1024 / 1024,
+                inventory.Storage.Sum(s => s.TotalBytes) / 1024 / 1024 / 1024,
+                inventory.Gpus.Count,
+                inventory.Cpu.BenchmarkScore);
+
+            return inventory;
+        }
+        finally
+        {
+            _discoverySemaphore.Release();
+        }
     }
 
     public async Task<CpuInfo> GetCpuInfoAsync(CancellationToken ct = default)
     {
-        return _isWindows 
-            ? await GetCpuInfoWindowsAsync(ct) 
+        return _isWindows
+            ? await GetCpuInfoWindowsAsync(ct)
             : await GetCpuInfoLinuxAsync(ct);
     }
 
@@ -69,8 +117,8 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
         try
         {
-            var result = await _executor.ExecuteAsync("powershell", 
-                "-NoProfile -Command \"Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed, VirtualizationFirmwareEnabled | ConvertTo-Json\"", 
+            var result = await _executor.ExecuteAsync("powershell",
+                "-NoProfile -Command \"Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed, VirtualizationFirmwareEnabled | ConvertTo-Json\"",
                 ct);
 
             if (result.Success && !string.IsNullOrWhiteSpace(result.StandardOutput))
@@ -93,7 +141,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             var usageResult = await _executor.ExecuteAsync("powershell",
                 "-NoProfile -Command \"(Get-CimInstance Win32_Processor).LoadPercentage\"",
                 ct);
-            
+
             if (usageResult.Success && double.TryParse(usageResult.StandardOutput.Trim(), out var usage))
             {
                 info.UsagePercent = usage;
@@ -108,6 +156,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
         info.AvailableVCpus = Math.Max(1, info.LogicalCores);
 
+        // Run CPU benchmark (expensive operation)
         try
         {
             _logger.LogInformation("Running CPU benchmark for node performance evaluation...");
@@ -141,7 +190,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                 if (line.StartsWith("model name"))
                     info.Model = line.Split(':').LastOrDefault()?.Trim() ?? "";
                 else if (line.StartsWith("cpu MHz") && info.FrequencyMhz == 0)
-                    double.TryParse(line.Split(':').LastOrDefault()?.Trim(), out var mhz);
+                    double.TryParse(line.Split(':').LastOrDefault()?.Trim(), out info.FrequencyMhz);
                 else if (line.StartsWith("flags"))
                 {
                     info.Flags = line.Split(':').LastOrDefault()?.Trim().Split(' ').ToList() ?? new();
@@ -171,10 +220,8 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                 }
                 else if (line.StartsWith("Socket(s):"))
                 {
-                    // Also parse socket count for accurate physical core calculation
                     if (int.TryParse(line.Split(':').LastOrDefault()?.Trim(), out var sockets))
                     {
-                        // Physical cores = cores per socket × socket count
                         if (info.PhysicalCores > 0)
                         {
                             info.PhysicalCores *= sockets;
@@ -189,6 +236,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         if (info.PhysicalCores == 0) info.PhysicalCores = info.LogicalCores;
         info.AvailableVCpus = info.LogicalCores;
 
+        // Run CPU benchmark (expensive operation)
         try
         {
             _logger.LogInformation("Running CPU benchmark for node performance evaluation...");
@@ -212,14 +260,14 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
     public async Task<MemoryInfo> GetMemoryInfoAsync(CancellationToken ct = default)
     {
-        return _isWindows 
-            ? await GetMemoryInfoWindowsAsync(ct) 
+        return _isWindows
+            ? await GetMemoryInfoWindowsAsync(ct)
             : await GetMemoryInfoLinuxAsync(ct);
     }
 
     private async Task<MemoryInfo> GetMemoryInfoWindowsAsync(CancellationToken ct)
     {
-        var info = new MemoryInfo { ReservedBytes = 2L * 1024 * 1024 * 1024 };
+        var info = new MemoryInfo();
 
         try
         {
@@ -229,11 +277,9 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
             if (result.Success && !string.IsNullOrWhiteSpace(result.StandardOutput))
             {
-                var totalKb = long.TryParse(ExtractJsonValue(result.StandardOutput, "TotalVisibleMemorySize"), out var t) ? t : 0;
-                var freeKb = long.TryParse(ExtractJsonValue(result.StandardOutput, "FreePhysicalMemory"), out var f) ? f : 0;
-                
-                info.TotalBytes = totalKb * 1024;
-                info.AvailableBytes = freeKb * 1024;
+                var json = result.StandardOutput.Trim();
+                info.TotalBytes = ParseMemoryValue(ExtractJsonValue(json, "TotalVisibleMemorySize") ?? "0 KB");
+                info.AvailableBytes = ParseMemoryValue(ExtractJsonValue(json, "FreePhysicalMemory") ?? "0 KB");
                 info.UsedBytes = info.TotalBytes - info.AvailableBytes;
             }
         }
@@ -242,35 +288,46 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             _logger.LogWarning(ex, "Failed to get Windows memory info");
         }
 
+        // Reserve 1GB for host OS
+        info.ReservedBytes = 1024L * 1024 * 1024;
+
         return info;
     }
 
     private async Task<MemoryInfo> GetMemoryInfoLinuxAsync(CancellationToken ct)
     {
-        var info = new MemoryInfo { ReservedBytes = 2L * 1024 * 1024 * 1024 };
+        var info = new MemoryInfo();
 
         var result = await _executor.ExecuteAsync("cat", "/proc/meminfo", ct);
         if (result.Success)
         {
             foreach (var line in result.StandardOutput.Split('\n'))
             {
-                var parts = line.Split(':', StringSplitOptions.TrimEntries);
-                if (parts.Length < 2) continue;
-
-                var value = ParseMemoryValue(parts[1]);
-                if (parts[0] == "MemTotal") info.TotalBytes = value;
-                else if (parts[0] == "MemAvailable") info.AvailableBytes = value;
+                if (line.StartsWith("MemTotal:"))
+                {
+                    var value = line.Split(':')[1].Trim();
+                    info.TotalBytes = ParseMemoryValue(value);
+                }
+                else if (line.StartsWith("MemAvailable:"))
+                {
+                    var value = line.Split(':')[1].Trim();
+                    info.AvailableBytes = ParseMemoryValue(value);
+                }
             }
+
             info.UsedBytes = info.TotalBytes - info.AvailableBytes;
         }
+
+        // Reserve 1GB for host OS
+        info.ReservedBytes = 1024L * 1024 * 1024;
 
         return info;
     }
 
     public async Task<List<StorageInfo>> GetStorageInfoAsync(CancellationToken ct = default)
     {
-        return _isWindows 
-            ? await GetStorageInfoWindowsAsync(ct) 
+        return _isWindows
+            ? await GetStorageInfoWindowsAsync(ct)
             : await GetStorageInfoLinuxAsync(ct);
     }
 
@@ -281,31 +338,28 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         try
         {
             var result = await _executor.ExecuteAsync("powershell",
-                "-NoProfile -Command \"Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | Select-Object DeviceID, Size, FreeSpace, FileSystem | ConvertTo-Json\"",
+                "-NoProfile -Command \"Get-PSDrive -PSProvider FileSystem | Where-Object {$_.Used -ne $null} | Select-Object Name, @{n='TotalBytes';e={$_.Used + $_.Free}}, @{n='UsedBytes';e={$_.Used}}, @{n='FreeBytes';e={$_.Free}} | ConvertTo-Json\"",
                 ct);
 
             if (result.Success && !string.IsNullOrWhiteSpace(result.StandardOutput))
             {
                 var json = result.StandardOutput.Trim();
-                var items = json.TrimStart().StartsWith("[") ? SplitJsonArray(json) : new List<string> { json };
-                
-                foreach (var item in items)
-                {
-                    var deviceId = ExtractJsonValue(item, "DeviceID");
-                    if (string.IsNullOrEmpty(deviceId)) continue;
+                var drives = json.StartsWith("[") ? SplitJsonArray(json) : new List<string> { json };
 
-                    var size = long.TryParse(ExtractJsonValue(item, "Size"), out var s) ? s : 0;
-                    var free = long.TryParse(ExtractJsonValue(item, "FreeSpace"), out var f) ? f : 0;
+                foreach (var drive in drives)
+                {
+                    var name = ExtractJsonValue(drive, "Name");
+                    if (string.IsNullOrWhiteSpace(name)) continue;
 
                     storageList.Add(new StorageInfo
                     {
-                        DevicePath = deviceId,
-                        MountPoint = deviceId + "\\",
-                        FileSystem = ExtractJsonValue(item, "FileSystem") ?? "NTFS",
-                        TotalBytes = size,
-                        AvailableBytes = free,
-                        UsedBytes = size - free,
-                        Type = StorageType.SSD
+                        DevicePath = $"{name}:",
+                        MountPoint = $"{name}:\\",
+                        FileSystem = "NTFS",
+                        Type = StorageType.HDD,
+                        TotalBytes = long.TryParse(ExtractJsonValue(drive, "TotalBytes"), out var total) ? total : 0,
+                        UsedBytes = long.TryParse(ExtractJsonValue(drive, "UsedBytes"), out var used) ? used : 0,
+                        AvailableBytes = long.TryParse(ExtractJsonValue(drive, "FreeBytes"), out var free) ? free : 0
                     });
                 }
             }
@@ -322,23 +376,24 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     {
         var storageList = new List<StorageInfo>();
 
-        var dfResult = await _executor.ExecuteAsync("df", "-B1 --output=source,target,fstype,size,used,avail", ct);
-        if (dfResult.Success)
+        var result = await _executor.ExecuteAsync("df", "-B1 -T -x tmpfs -x devtmpfs", ct);
+        if (result.Success)
         {
-            foreach (var line in dfResult.StandardOutput.Split('\n').Skip(1))
+            var lines = result.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            foreach (var line in lines.Skip(1))
             {
                 var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length < 6 || !parts[0].StartsWith("/dev/")) continue;
+                if (parts.Length < 7) continue;
 
                 storageList.Add(new StorageInfo
                 {
                     DevicePath = parts[0],
-                    MountPoint = parts[1],
-                    FileSystem = parts[2],
-                    TotalBytes = long.TryParse(parts[3], out var total) ? total : 0,
-                    UsedBytes = long.TryParse(parts[4], out var used) ? used : 0,
-                    AvailableBytes = long.TryParse(parts[5], out var avail) ? avail : 0,
-                    Type = parts[0].Contains("nvme") ? StorageType.NVMe : StorageType.SSD
+                    FileSystem = parts[1],
+                    Type = DetermineStorageType(parts[0]),
+                    TotalBytes = long.TryParse(parts[2], out var total) ? total : 0,
+                    UsedBytes = long.TryParse(parts[3], out var used) ? used : 0,
+                    AvailableBytes = long.TryParse(parts[4], out var avail) ? avail : 0,
+                    MountPoint = parts[6]
                 });
             }
         }
@@ -348,156 +403,178 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
     public async Task<List<GpuInfo>> GetGpuInfoAsync(CancellationToken ct = default)
     {
-        var gpus = new List<GpuInfo>();
+        return _isWindows
+            ? await GetGpuInfoWindowsAsync(ct)
+            : await GetGpuInfoLinuxAsync(ct);
+    }
 
-        // Quick check: does nvidia-smi exist?
-        if (!File.Exists("/usr/bin/nvidia-smi") &&
-            !File.Exists("/usr/local/bin/nvidia-smi"))
-        {
-            _logger.LogDebug("nvidia-smi not found - no GPU detected");
-            return gpus; // Return empty list immediately
-        }
+    private async Task<List<GpuInfo>> GetGpuInfoWindowsAsync(CancellationToken ct)
+    {
+        var gpuList = new List<GpuInfo>();
 
         try
         {
-            // Try nvidia-smi first (works on both Windows and Linux)
-            var nvidiaSmi = await _executor.ExecuteAsync("nvidia-smi",
-            "--query-gpu=name,pci.bus_id,memory.total,memory.used,driver_version,utilization.gpu,utilization.memory,temperature.gpu --format=csv,noheader,nounits",
-            ct);
+            var result = await _executor.ExecuteAsync("powershell",
+                "-NoProfile -Command \"Get-CimInstance Win32_VideoController | Select-Object Name, AdapterRAM, DriverVersion | ConvertTo-Json\"",
+                ct);
 
-            if (!nvidiaSmi.Success)
+            if (result.Success && !string.IsNullOrWhiteSpace(result.StandardOutput))
             {
-                _logger.LogDebug("No NVIDIA GPUs detected");
-                return gpus;
-            }
+                var json = result.StandardOutput.Trim();
+                var gpus = json.StartsWith("[") ? SplitJsonArray(json) : new List<string> { json };
 
-            if (nvidiaSmi.Success && !string.IsNullOrWhiteSpace(nvidiaSmi.StandardOutput))
-            {
-                foreach (var line in nvidiaSmi.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                foreach (var gpu in gpus)
                 {
-                    var parts = line.Split(',').Select(p => p.Trim()).ToArray();
-                    if (parts.Length < 8) continue;
-
-                    gpus.Add(new GpuInfo
+                    gpuList.Add(new GpuInfo
                     {
-                        Vendor = "NVIDIA",
-                        Model = parts[0],
-                        PciAddress = parts[1],
-                        MemoryBytes = long.TryParse(parts[2], out var mem) ? mem * 1024 * 1024 : 0,
-                        MemoryUsedBytes = long.TryParse(parts[3], out var used) ? used * 1024 * 1024 : 0,
-                        DriverVersion = parts[4],
-                        GpuUsagePercent = double.TryParse(parts[5], out var gpuUsage) ? gpuUsage : 0,
-                        MemoryUsagePercent = double.TryParse(parts[6], out var memUsage) ? memUsage : 0,
-                        TemperatureCelsius = int.TryParse(parts[7], out var temp) ? temp : null,
-                        IsAvailableForPassthrough = !_isWindows
+                        Model = ExtractJsonValue(gpu, "Name") ?? "Unknown GPU",
+                        MemoryBytes = long.TryParse(ExtractJsonValue(gpu, "AdapterRAM"), out var mem) ? mem : 0,
+                        DriverVersion = ExtractJsonValue(gpu, "DriverVersion") ?? "Unknown"
                     });
                 }
             }
-
-            // Fallback for non-NVIDIA or if nvidia-smi failed
-            if (gpus.Count == 0 && _isWindows)
-            {
-                var wmicResult = await _executor.ExecuteAsync("powershell",
-                    "-NoProfile -Command \"Get-CimInstance Win32_VideoController | Select-Object Name, AdapterRAM, DriverVersion | ConvertTo-Json\"",
-                    ct);
-
-                if (wmicResult.Success && !string.IsNullOrWhiteSpace(wmicResult.StandardOutput))
-                {
-                    var name = ExtractJsonValue(wmicResult.StandardOutput, "Name") ?? "Unknown GPU";
-                    var vendor = name.Contains("NVIDIA") ? "NVIDIA" : name.Contains("AMD") ? "AMD" : "Intel";
-
-                    gpus.Add(new GpuInfo
-                    {
-                        Vendor = vendor,
-                        Model = name,
-                        DriverVersion = ExtractJsonValue(wmicResult.StandardOutput, "DriverVersion") ?? "",
-                        MemoryBytes = long.TryParse(ExtractJsonValue(wmicResult.StandardOutput, "AdapterRAM"), out var ram) ? ram : 0
-                    });
-                }
-            }
-
-            return gpus;
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "GPU detection failed (this is normal if no GPU installed)");
-            return gpus;
+            _logger.LogWarning(ex, "Failed to get Windows GPU info");
         }
+
+        return gpuList;
+    }
+
+    private async Task<List<GpuInfo>> GetGpuInfoLinuxAsync(CancellationToken ct)
+    {
+        var gpuList = new List<GpuInfo>();
+
+        // Try nvidia-smi first
+        var nvidiaResult = await _executor.ExecuteAsync("nvidia-smi",
+            "--query-gpu=name,memory.total,driver_version --format=csv,noheader",
+            ct);
+
+        if (nvidiaResult.Success && !string.IsNullOrWhiteSpace(nvidiaResult.StandardOutput))
+        {
+            var lines = nvidiaResult.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            foreach (var line in lines)
+            {
+                var parts = line.Split(',');
+                if (parts.Length < 3) continue;
+
+                gpuList.Add(new GpuInfo
+                {
+                    Model = parts[0].Trim(),
+                    MemoryBytes = ParseMemoryValue(parts[1].Trim()),
+                    DriverVersion = parts[2].Trim()
+                });
+            }
+        }
+
+        // Fallback to lspci
+        if (gpuList.Count == 0)
+        {
+            var lspciResult = await _executor.ExecuteAsync("lspci", "", ct);
+            if (lspciResult.Success)
+            {
+                var lines = lspciResult.StandardOutput.Split('\n');
+                foreach (var line in lines)
+                {
+                    if (line.Contains("VGA compatible controller") || line.Contains("3D controller"))
+                    {
+                        var parts = line.Split(':');
+                        if (parts.Length > 2)
+                        {
+                            gpuList.Add(new GpuInfo
+                            {
+                                Model = parts[2].Trim(),
+                                MemoryBytes = 0,
+                                DriverVersion = "Unknown"
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        return gpuList;
     }
 
     public async Task<NetworkInfo> GetNetworkInfoAsync(CancellationToken ct = default)
     {
+        return _isWindows
+            ? await GetNetworkInfoWindowsAsync(ct)
+            : await GetNetworkInfoLinuxAsync(ct);
+    }
+
+    private async Task<NetworkInfo> GetNetworkInfoWindowsAsync(CancellationToken ct)
+    {
         var info = new NetworkInfo { Interfaces = new List<NetworkInterface>() };
 
-        // Get public IP (works on both platforms)
         try
         {
-            var cmd = _isWindows ? "curl.exe" : "curl";
-            var publicIpResult = await _executor.ExecuteAsync(cmd, "-s --max-time 5 https://api.ipify.org", ct);
-            if (publicIpResult.Success)
-                info.PublicIp = publicIpResult.StandardOutput.Trim();
-        }
-        catch { /* Optional */ }
-
-        if (_isWindows)
-        {
-            var ipResult = await _executor.ExecuteAsync("powershell",
-                "-NoProfile -Command \"(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notlike '*Loopback*' -and $_.PrefixOrigin -ne 'WellKnown' } | Select-Object -First 1).IPAddress\"",
+            var result = await _executor.ExecuteAsync("powershell",
+                "-NoProfile -Command \"Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -notlike '*Loopback*'} | Select-Object InterfaceAlias, IPAddress | ConvertTo-Json\"",
                 ct);
-            if (ipResult.Success)
-                info.PrivateIp = ipResult.StandardOutput.Trim();
 
-            var ifResult = await _executor.ExecuteAsync("powershell",
-                "-NoProfile -Command \"Get-NetAdapter | Where-Object Status -eq 'Up' | Select-Object -First 1 Name, MacAddress, LinkSpeed | ConvertTo-Json\"",
-                ct);
-            if (ifResult.Success && !string.IsNullOrWhiteSpace(ifResult.StandardOutput))
+            if (result.Success && !string.IsNullOrWhiteSpace(result.StandardOutput))
             {
-                info.Interfaces.Add(new NetworkInterface
+                var json = result.StandardOutput.Trim();
+                var interfaces = json.StartsWith("[") ? SplitJsonArray(json) : new List<string> { json };
+
+                foreach (var iface in interfaces)
                 {
-                    Name = ExtractJsonValue(ifResult.StandardOutput, "Name") ?? "Ethernet",
-                    MacAddress = ExtractJsonValue(ifResult.StandardOutput, "MacAddress") ?? "",
-                    IpAddress = info.PrivateIp,
-                    IsUp = true
-                });
+                    info.Interfaces.Add(new NetworkInterface
+                    {
+                        Name = ExtractJsonValue(iface, "InterfaceAlias") ?? "Unknown",
+                        PrivateIp = ExtractJsonValue(iface, "IPAddress") ?? "Unknown"
+                    });
+                }
             }
         }
-        else
+        catch (Exception ex)
         {
-            var ipResult = await _executor.ExecuteAsync("hostname", "-I", ct);
-            if (ipResult.Success)
-                info.PrivateIp = ipResult.StandardOutput.Trim().Split(' ').FirstOrDefault() ?? "";
+            _logger.LogWarning(ex, "Failed to get Windows network info");
         }
 
-        // ✅ NEW: Determine NAT type by comparing public and private IPs
-        if (!string.IsNullOrEmpty(info.PublicIp) && !string.IsNullOrEmpty(info.PrivateIp))
-        {
-            // Check if public IP matches any of the private IPs (for multi-interface systems)
-            var privateIps = info.PrivateIp.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        return info;
+    }
 
-            if (privateIps.Contains(info.PublicIp))
+    private async Task<NetworkInfo> GetNetworkInfoLinuxAsync(CancellationToken ct)
+    {
+        var info = new NetworkInfo { Interfaces = new List<NetworkInterface>() };
+
+        var result = await _executor.ExecuteAsync("ip", "-4 addr show", ct);
+        if (result.Success)
+        {
+            string? currentInterface = null;
+            foreach (var line in result.StandardOutput.Split('\n'))
             {
-                // Public IP matches one of the private IPs = direct connection, no NAT
-                info.NatType = NatType.None;
-                _logger.LogInformation(
-                    "✓ NAT detection: Public IP {PublicIp} matches private IP - NatType.None (direct internet connection)",
-                    info.PublicIp);
-            }
-            else
-            {
-                // Public IP differs from all private IPs = behind NAT
-                // For now, mark as Unknown (could be enhanced with STUN for specific NAT type)
-                info.NatType = NatType.Unknown;
-                _logger.LogInformation(
-                    "⚠ NAT detection: Public IP {PublicIp} != Private IP {PrivateIp} - behind NAT/CGNAT (NatType.Unknown)",
-                    info.PublicIp, info.PrivateIp);
+                if (line.Contains(':') && !line.StartsWith(' '))
+                {
+                    var parts = line.Split(':', StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length >= 2)
+                    {
+                        currentInterface = parts[1].Trim().Split(' ')[0];
+                    }
+                }
+                else if (line.Trim().StartsWith("inet ") && currentInterface != null && currentInterface != "lo")
+                {
+                    var ipPart = line.Trim().Split(' ')[1].Split('/')[0];
+                    info.Interfaces.Add(new NetworkInterface
+                    {
+                        Name = currentInterface,
+                        PrivateIp = ipPart
+                    });
+                }
             }
         }
-        else
+
+        if (info.Interfaces.Count > 0)
         {
-            info.NatType = NatType.Unknown;
-            _logger.LogWarning(
-                "⚠ NAT detection: Could not determine NAT type (PublicIP: {PublicIp}, PrivateIP: {PrivateIp})",
-                info.PublicIp ?? "null",
+            info.PrimaryInterface = info.Interfaces[0].Name;
+            info.PrivateIp = info.Interfaces[0].PrivateIp;
+
+            _logger.LogInformation(
+                "Network: Primary={Primary}, IP={Ip}",
+                info.PrimaryInterface ?? "null",
                 info.PrivateIp ?? "null");
         }
 
@@ -526,6 +603,15 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         };
     }
 
+    // Helper methods
+
+    private static StorageType DetermineStorageType(string devicePath)
+    {
+        if (devicePath.Contains("nvme")) return StorageType.NVMe;
+        if (devicePath.Contains("sd")) return StorageType.SSD;
+        return StorageType.HDD;
+    }
+
     private static long ParseMemoryValue(string value)
     {
         var parts = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -536,8 +622,35 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             "kb" => num * 1024,
             "mb" => num * 1024 * 1024,
             "gb" => num * 1024 * 1024 * 1024,
+            "mib" => num * 1024 * 1024,
+            "gib" => num * 1024 * 1024 * 1024,
             _ => num * 1024
         };
+    }
+
+    private string GetOrCreateNodeId()
+    {
+        var configDir = _isWindows
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "decloud")
+            : "/etc/decloud";
+        var idPath = Path.Combine(configDir, "node-id");
+
+        if (File.Exists(idPath))
+            return File.ReadAllText(idPath).Trim();
+
+        var nodeId = $"node-{Environment.MachineName.ToLower()}-{Guid.NewGuid().ToString("N")[..8]}";
+
+        try
+        {
+            Directory.CreateDirectory(configDir);
+            File.WriteAllText(idPath, nodeId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not persist node ID");
+        }
+
+        return nodeId;
     }
 
     private static string? ExtractJsonValue(string json, string key)
@@ -552,13 +665,13 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         var items = new List<string>();
         var depth = 0;
         var start = -1;
-        
+
         for (var i = 0; i < json.Length; i++)
         {
             if (json[i] == '{') { if (depth++ == 0) start = i; }
             else if (json[i] == '}') { if (--depth == 0 && start >= 0) { items.Add(json.Substring(start, i - start + 1)); start = -1; } }
         }
-        
+
         return items;
     }
 }
