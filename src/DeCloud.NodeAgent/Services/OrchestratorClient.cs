@@ -125,9 +125,11 @@ public class OrchestratorClient : IOrchestratorClient
 
         File.Create(credentialsFile).Dispose();
 
-        // Append API key to existing credentials
-        await File.AppendAllTextAsync(credentialsFile, $"API_KEY={_apiKey}\n", ct);
-        await File.AppendAllTextAsync(credentialsFile, $"NODE_ID={_nodeId}\n", ct);
+        var content = $@"NODE_ID={_nodeId}
+WALLET_ADDRESS={_walletAddress}
+API_KEY={_apiKey}
+REGISTERED_AT={DateTime.UtcNow:O}";
+        await File.WriteAllTextAsync(credentialsFile, content, ct);
 
         _logger.LogInformation("✓ API key saved to {File}", credentialsFile);
     }
