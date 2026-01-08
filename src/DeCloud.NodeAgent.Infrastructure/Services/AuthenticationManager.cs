@@ -142,23 +142,23 @@ public class AuthenticationManager : BackgroundService
             {
                 return AuthState.CredentialsInvalid;
             }
-        }
-        else
-        {
-            return AuthState.NotAuthenticated;
-        }
 
-        var isAuthorized = await VerifyNodeAuthorizationAsync(
+            var isAuthorized = await VerifyNodeAuthorizationAsync(
                     credentials["NODE_ID"],
                     credentials["API_KEY"], ct);
 
-        if (isAuthorized) {
-            return AuthState.Registered;
+            if (isAuthorized)
+            {
+                return AuthState.Registered;
+            }
         }
-        var authFileExists = File.Exists(CredentialsFile);
-        _logger.LogInformation("Auth file exists: {AuthFileExists}, Is Authorized: {IsAuthorized}", authFileExists, isAuthorized);
+
+        var authFileExists = File.Exists(PendingAuthFile);
+
+        _logger.LogInformation("Auth file exists: {AuthFileExists}, Is Authorized: {IsAuthorized}", authFileExists);
+
         // Check if pending authentication exists
-        if (authFileExists && !isAuthorized)
+        if (authFileExists)
         {
             return AuthState.PendingRegistration;
         }
