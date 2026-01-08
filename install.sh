@@ -1157,7 +1157,7 @@ install_relay_nat_support() {
     echo "→ Installing relay NAT manager..."
 
     # The relay NAT manager is in the repository we just cloned
-    local file_source="$INSTALL_DIR/DeCloud.NodeAgent/cli/decloud-relay-nat"
+    local file_source="$INSTALL_DIR/DeCloud.NodeAgent/decloud-relay-nat"
     local file_dest="/usr/local/bin/decloud-relay-nat"
     
     if [ ! -f "file_source" ]; then
