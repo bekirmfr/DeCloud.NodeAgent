@@ -132,7 +132,7 @@ def load_credentials() -> Optional[Dict[str, str]]:
 # SIGNING URL GENERATION
 # =============================================================================
 
-def create_signing_message(machine_id: str, wallet_address: str, hardware: Dict[str, Any]) -> str:
+def create_signing_message(machine_id: str, wallet_address: str) -> str:
     """Create message to be signed (NO node_id needed!)"""
     timestamp = int(time.time())
     hostname = socket.gethostname()
@@ -154,7 +154,7 @@ def generate_signing_url(message: str, wallet_address: str) -> str:
     """
     Generate URL to signing page with parameters
     
-    Format: https://decloud.stackfi.tech/sign.html?message=base64&wallet=0x...&hardware=Intel
+    Format: https://decloud.stackfi.tech/sign.html?message=base64&wallet=0x...
     """
     # Encode message to base64 for URL
     message_b64 = base64.b64encode(message.encode()).decode()
@@ -283,7 +283,7 @@ def login_with_web_signing(orchestrator_url: str, wallet_address: str = None, ve
     print(f"Machine ID: {machine_id}")
     
     # Create message
-    message = create_signing_message(machine_id, wallet_address, hardware)
+    message = create_signing_message(machine_id, wallet_address)
     
     # Generate signing URL
     signing_url = generate_signing_url(message, wallet_address)
