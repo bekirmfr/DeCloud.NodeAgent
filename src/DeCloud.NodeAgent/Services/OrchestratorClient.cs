@@ -80,7 +80,7 @@ public class OrchestratorClient : IOrchestratorClient
 
         if (!File.Exists(credentialsFile))
         {
-            _logger.LogInformation("No credentials file found - node not registered");
+            _logger.LogWarning("No credentials file found - node not registered");
             return;
         }
 
@@ -96,6 +96,14 @@ public class OrchestratorClient : IOrchestratorClient
                 _apiKey = line.Split('=')[1];
         }
 
+
+        if(string.IsNullOrWhiteSpace(_nodeId) ||
+           string.IsNullOrWhiteSpace(_apiKey))
+        {
+            _logger.LogWarning("Incomplete credentials in file - node not registered");
+            return;
+        }
+
         if (!string.IsNullOrWhiteSpace(_apiKey))
         {
             // Set Authorization header
@@ -109,6 +117,13 @@ public class OrchestratorClient : IOrchestratorClient
     private async Task SaveCredentialsAsync(CancellationToken ct)
     {
         const string credentialsFile = "/etc/decloud/credentials";
+
+        // first delete if old file exists
+        if (File.Exists(credentialsFile)) {
+            File.Delete(credentialsFile);
+        }
+
+        File.Create(credentialsFile).Dispose();
 
         // Append API key to existing credentials
         await File.AppendAllTextAsync(credentialsFile, $"API_KEY={_apiKey}\n", ct);
@@ -299,24 +314,30 @@ public class OrchestratorClient : IOrchestratorClient
 
                 if (json.RootElement.TryGetProperty("data", out var data))
                 {
-                    if (json.RootElement.TryGetProperty("nodeId", out var nodeIdProp))
+                    if (!json.RootElement.TryGetProperty("nodeId", out var nodeIdProp))
                     {
-                        _nodeId = nodeIdProp.GetString();
-                        if(string.IsNullOrWhiteSpace(_nodeId))
-                        {
-                            _logger.LogError("Registration response missing Node ID");
-                            throw new ArgumentException("Node ID is null or empty");
-                        }
+                        _logger.LogError("Registration response missing Node ID");
+                        throw new ArgumentException("Node ID not found in response");
                     }
 
-                    if (json.RootElement.TryGetProperty("apiKey", out var apiKeyProp))
+                    _nodeId = nodeIdProp.GetString();
+                    if (string.IsNullOrWhiteSpace(_nodeId))
                     {
-                        _apiKey = apiKeyProp.GetString();
-                        if (string.IsNullOrWhiteSpace(_apiKey))
-                        {
-                            _logger.LogError("Registration response missing API key");
-                            throw new ArgumentException("API key is null or empty");
-                        }
+                        _logger.LogError("Registration response missing Node ID");
+                        throw new ArgumentException("Node ID is null or empty");
+                    }
+
+                    if (!json.RootElement.TryGetProperty("apiKey", out var apiKeyProp))
+                    {
+                        _logger.LogError("Registration response missing api key");
+                        throw new ArgumentException("Api key not found in response");
+                    }
+
+                    _apiKey = apiKeyProp.GetString();
+                    if (string.IsNullOrWhiteSpace(_apiKey))
+                    {
+                        _logger.LogError("Registration response missing API key");
+                        throw new ArgumentException("API key is null or empty");
                     }
 
                     await SaveCredentialsAsync(ct);
@@ -325,7 +346,7 @@ public class OrchestratorClient : IOrchestratorClient
                     _httpClient.DefaultRequestHeaders.Authorization =
                         new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _apiKey);
 
-                    _logger.LogInformation("✓ Node ID and API key received and configured");
+                    _logger.LogInformation($"✓ Node ID ({_nodeId}) and API key ({_apiKey}) received and configured");
 
                     // Handle orchestrator WireGuard public key
                     if (data.TryGetProperty("orchestratorWireGuardPublicKey", out var pubKeyProp) &&
