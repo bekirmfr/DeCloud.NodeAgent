@@ -155,7 +155,7 @@ public class AuthenticationManager : BackgroundService
 
         var authFileExists = File.Exists(PendingAuthFile);
 
-        _logger.LogInformation("Auth file exists: {AuthFileExists}, Is Authorized: {IsAuthorized}", authFileExists);
+        _logger.LogInformation("Auth file exists: {AuthFileExists}", authFileExists);
 
         // Check if pending authentication exists
         if (authFileExists)
