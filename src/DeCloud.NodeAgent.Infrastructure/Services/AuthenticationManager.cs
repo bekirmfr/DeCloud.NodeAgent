@@ -1,6 +1,7 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using System.Text.Json;
 
 public class AuthenticationManager : BackgroundService
@@ -24,6 +25,16 @@ public class AuthenticationManager : BackgroundService
         PendingRegistration,
         Registered,
         CredentialsInvalid
+    }
+
+    public AuthenticationManager(
+        IResourceDiscoveryService resourceDiscovery,
+        IOrchestratorClient orchestratorClient,
+        ILogger<AuthenticationManager> logger)
+    {
+        _resourceDiscovery = resourceDiscovery;
+        _orchestratorClient = orchestratorClient;
+        _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
