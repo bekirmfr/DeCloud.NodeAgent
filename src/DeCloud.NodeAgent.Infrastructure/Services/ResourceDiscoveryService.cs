@@ -11,7 +11,6 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     private readonly ICommandExecutor _executor;
     private readonly ILogger<ResourceDiscoveryService> _logger;
     private readonly ICpuBenchmarkService _benchmarkService;
-    private readonly string _nodeId;
     private readonly bool _isWindows;
 
     public ResourceDiscoveryService(
@@ -23,7 +22,6 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         _logger = logger;
         _benchmarkService = benchmarkService;
         _isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
-        _nodeId = GetOrCreateNodeId();
     }
 
     public async Task<HardwareInventory> DiscoverAllAsync(CancellationToken ct = default)
@@ -40,7 +38,6 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
         var resources = new HardwareInventory
         {
-            NodeId = _nodeId,
             Cpu = cpu,
             Memory = memory,
             Storage = storage,
@@ -541,31 +538,6 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             "gb" => num * 1024 * 1024 * 1024,
             _ => num * 1024
         };
-    }
-
-    private string GetOrCreateNodeId()
-    {
-        var configDir = _isWindows 
-            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "decloud")
-            : "/etc/decloud";
-        var idPath = Path.Combine(configDir, "node-id");
-
-        if (File.Exists(idPath))
-            return File.ReadAllText(idPath).Trim();
-
-        var nodeId = $"node-{Environment.MachineName.ToLower()}-{Guid.NewGuid().ToString("N")[..8]}";
-        
-        try
-        {
-            Directory.CreateDirectory(configDir);
-            File.WriteAllText(idPath, nodeId);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Could not persist node ID");
-        }
-        
-        return nodeId;
     }
 
     private static string? ExtractJsonValue(string json, string key)

@@ -3,6 +3,28 @@
 namespace DeCloud.NodeAgent.Core.Interfaces;
 
 /// <summary>
+/// Handles node registration with the orchestrator
+/// </summary>
+public interface INodeRegistrationService
+{
+    Task<RegistrationResult> RegisterAsync(CancellationToken ct = default);
+}
+
+public class RegistrationResult
+{
+    public bool IsSuccess { get; init; }
+    public string? NodeId { get; init; }
+    public string? ApiKey { get; init; }
+    public string? Error { get; init; }
+
+    public static RegistrationResult Success(string nodeId, string apiKey) =>
+        new() { IsSuccess = true, NodeId = nodeId, ApiKey = apiKey };
+
+    public static RegistrationResult Failure(string error) =>
+        new() { IsSuccess = false, Error = error };
+}
+
+/// <summary>
 /// Discovers and monitors local hardware resources
 /// </summary>
 public interface IResourceDiscoveryService
@@ -153,12 +175,14 @@ public interface IOrchestratorClient
 
     string? WalletAddress { get; }
 
-    Task<bool> RegisterNodeAsync(NodeRegistration registration, CancellationToken ct = default);
+    Task<RegistrationResult> RegisterWithPendingAuthAsync(CancellationToken ct = default);
+    Task<RegistrationResult> RegisterNodeAsync(NodeRegistration registration, CancellationToken ct = default);
     Task<bool> SendHeartbeatAsync(Heartbeat heartbeat, CancellationToken ct = default);
 
     Task<List<PendingCommand>> GetPendingCommandsAsync(CancellationToken ct = default);
     Task<bool> AcknowledgeCommandAsync(string commandId, bool success, string? errorMessage, CancellationToken ct = default);
     Heartbeat? GetLastHeartbeat();
+    Task ReloadCredentialsAsync(CancellationToken ct = default);
 }
 
 /// <summary>

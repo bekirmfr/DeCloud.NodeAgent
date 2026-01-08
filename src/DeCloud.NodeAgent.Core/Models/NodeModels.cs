@@ -108,11 +108,6 @@ public class VmSummary
 public class NodeRegistration
 {
     /// <summary>
-    /// Deterministic node ID (calculated from MachineId + WalletAddress)
-    /// </summary>
-    public required string NodeId { get; set; }
-
-    /// <summary>
     /// Machine fingerprint for validation
     /// </summary>
     public required string MachineId { get; set; }

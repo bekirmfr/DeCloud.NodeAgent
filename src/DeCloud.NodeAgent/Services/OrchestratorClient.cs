@@ -6,7 +6,7 @@ using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 using System.Net;
-using System.Net.Http.Json;
+using System.Reflection;
 using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Services;
@@ -17,12 +17,16 @@ public class OrchestratorClientOptions
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(30);
     public string? WalletAddress { get; set; }
     public int AgentPort { get; set; } = 5050;
+    public string PendingAuthFile { get; set; } = "/etc/decloud/pending-auth";
 }
 
 public class OrchestratorClient : IOrchestratorClient
 {
+    private const string PendingAuthFile = "/etc/decloud/pending-auth";
     private readonly HttpClient _httpClient;
     private readonly ILogger<OrchestratorClient> _logger;
+    private readonly IResourceDiscoveryService _resourceDiscovery;
+    private readonly INodeMetadataService _nodeMetadata;
     private readonly OrchestratorClientOptions _options;
 
     private string? _nodeId;
@@ -41,11 +45,15 @@ public class OrchestratorClient : IOrchestratorClient
     public OrchestratorClient(
         HttpClient httpClient,
         IOptions<OrchestratorClientOptions> options,
+        IResourceDiscoveryService resourceDiscovery,
+        INodeMetadataService nodeMetadata,
         ILogger<OrchestratorClient> logger)
     {
         _httpClient = httpClient;
         _logger = logger;
         _options = options.Value;
+        _resourceDiscovery = resourceDiscovery;
+        _nodeMetadata = nodeMetadata;
         _walletAddress = _options.WalletAddress;
 
         _httpClient.BaseAddress = new Uri(_options.BaseUrl.TrimEnd('/'));
@@ -55,6 +63,14 @@ public class OrchestratorClient : IOrchestratorClient
 
         _logger.LogInformation("OrchestratorClient initialized with wallet: {Wallet}",
             _walletAddress);
+    }
+
+    /// <summary>
+    /// Check if pending authentication exists
+    /// </summary>
+    public bool HasPendingAuth()
+    {
+        return File.Exists(PendingAuthFile);
     }
 
     private async Task LoadCredentialsAsync()
@@ -100,10 +116,163 @@ public class OrchestratorClient : IOrchestratorClient
     }
 
     /// <summary>
+    /// Register node using pending authentication with retry logic
+    /// Combines auth loading, registration, and credential saving
+    /// </summary>
+    public async Task<RegistrationResult> RegisterWithPendingAuthAsync(CancellationToken ct = default)
+    {
+        const int MaxRetries = 5;
+
+        // Load pending auth
+        var pendingAuth = await LoadPendingAuthAsync(ct);
+        if (pendingAuth == null)
+        {
+            return RegistrationResult.Failure("No pending authentication found");
+        }
+
+        // Validate not expired (10 minutes)
+        if (IsPendingAuthExpired(pendingAuth))
+        {
+            File.Delete(PendingAuthFile);
+            return RegistrationResult.Failure("Authentication expired");
+        }
+
+        // Get hardware inventory
+        var inventory = await _resourceDiscovery.DiscoverAllAsync(ct);
+        if (inventory == null)
+        {
+            return RegistrationResult.Failure("Hardware inventory not ready");
+        }
+
+        // Build registration request
+        var registration = new NodeRegistration
+        {
+            MachineId = _nodeMetadata.MachineId,
+            Name = _nodeMetadata.Name,
+            WalletAddress = pendingAuth.WalletAddress,
+            Signature = pendingAuth.Signature,
+            Message = pendingAuth.Message,
+            PublicIp = _nodeMetadata.PublicIp ?? "127.0.0.1",
+            AgentPort = 5100,
+            HardwareInventory = inventory,
+            AgentVersion = GetAgentVersion(),
+            SupportedImages = GetSupportedImages(),
+            Region = _nodeMetadata.Region,
+            Zone = _nodeMetadata.Zone,
+            RegisteredAt = DateTime.UtcNow
+        };
+
+        // Register with retry logic
+        for (int attempt = 1; attempt <= MaxRetries; attempt++)
+        {
+            try
+            {
+                _logger.LogInformation(
+                    "Registration attempt {Attempt}/{Max}...",
+                    attempt, MaxRetries);
+
+                var result = await RegisterNodeAsync(registration, ct);
+
+                if (result.IsSuccess)
+                {
+                    // Delete pending auth on success
+                    File.Delete(PendingAuthFile);
+
+                    _logger.LogInformation(
+                        "✓ Registration successful: {NodeId}",
+                        _nodeId);
+
+                    return result;
+                }
+
+                _logger.LogWarning(
+                    result.Error,
+                    attempt);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Registration attempt {Attempt} error",
+                    attempt);
+            }
+
+            // Exponential backoff
+            if (attempt < MaxRetries)
+            {
+                var delay = TimeSpan.FromSeconds(10 * attempt);
+                await Task.Delay(delay, ct);
+            }
+        }
+
+        return RegistrationResult.Failure("Max retries exceeded");
+    }
+
+    /// <summary>
+    /// Load pending authentication data
+    /// </summary>
+    private async Task<PendingAuth?> LoadPendingAuthAsync(CancellationToken ct)
+    {
+        if (!File.Exists(PendingAuthFile))
+        {
+            return null;
+        }
+
+        try
+        {
+            var json = await File.ReadAllTextAsync(PendingAuthFile, ct);
+            var auth = JsonSerializer.Deserialize<PendingAuth>(json);
+
+            if (auth == null ||
+                string.IsNullOrWhiteSpace(auth.WalletAddress) ||
+                string.IsNullOrWhiteSpace(auth.Signature) ||
+                string.IsNullOrWhiteSpace(auth.Message))
+            {
+                _logger.LogError("Invalid pending auth format");
+                return null;
+            }
+
+            return auth;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load pending auth");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Check if pending auth is expired (> 10 minutes old)
+    /// </summary>
+    private bool IsPendingAuthExpired(PendingAuth auth)
+    {
+        var age = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - auth.Timestamp;
+        return age > 600;
+    }
+
+    /// <summary>
+    /// Reload credentials from file (call after registration completes)
+    /// </summary>
+    public async Task ReloadCredentialsAsync(CancellationToken ct = default)
+    {
+        await LoadCredentialsAsync();
+    }
+
+    /// <summary>
+    /// Get agent version from assembly
+    /// </summary>
+    private string GetAgentVersion()
+    {
+        return Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion ?? "unknown";
+    }
+
+    /// <summary>
     /// Register the node with the orchestrator.
     /// No token returned - future requests authenticated via wallet signature!
     /// </summary>
-    public async Task<bool> RegisterNodeAsync(NodeRegistration request, CancellationToken ct = default)
+    public async Task<RegistrationResult> RegisterNodeAsync(NodeRegistration request, CancellationToken ct = default)
     {
         try
         {
@@ -121,7 +290,32 @@ public class OrchestratorClient : IOrchestratorClient
 
                 if (json.RootElement.TryGetProperty("data", out var data))
                 {
-                    _nodeId = data.GetProperty("nodeId").GetString();
+                    if (json.RootElement.TryGetProperty("nodeId", out var nodeIdProp))
+                    {
+                        _nodeId = nodeIdProp.GetString();
+                        if(string.IsNullOrEmpty(_nodeId))
+                        {
+                            _logger.LogError("Registration response missing Node ID");
+                            throw new ArgumentException("Node ID is null or empty");
+                        }
+                    }
+
+                    if (json.RootElement.TryGetProperty("apiKey", out var apiKeyProp))
+                    {
+                        _apiKey = apiKeyProp.GetString();
+                        if (string.IsNullOrEmpty(_apiKey))
+                        {
+                            _logger.LogError("Registration response missing API key");
+                            throw new ArgumentException("API key is null or empty");
+                        }
+                        await SaveApiKeyAsync(_apiKey, ct);
+
+                        // Set Authorization header
+                        _httpClient.DefaultRequestHeaders.Authorization =
+                            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _apiKey);
+
+                        _logger.LogInformation("✓ API key received and configured");
+                    }
 
                     // Handle orchestrator WireGuard public key
                     if (data.TryGetProperty("orchestratorWireGuardPublicKey", out var pubKeyProp) &&
@@ -135,37 +329,22 @@ public class OrchestratorClient : IOrchestratorClient
                         }
                     }
 
-                    if (json.RootElement.TryGetProperty("apiKey", out var apiKeyProp))
-                    {
-                        _apiKey = apiKeyProp.GetString();
-                        await SaveApiKeyAsync(_apiKey, ct);
-
-                        // Set Authorization header
-                        _httpClient.DefaultRequestHeaders.Authorization =
-                            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _apiKey);
-
-                        _logger.LogInformation("✓ API key received and configured");
-                    }
-
                     _logger.LogInformation(
                         "✓ Node registered successfully: {NodeId} | Wallet: {Wallet}",
                         _nodeId, _walletAddress);
 
-                    _logger.LogInformation(
-                        "✓ Wallet-based authentication enabled - no tokens, no expiration!");
-
-                    return true;
+                    RegistrationResult.Success(_nodeId, _apiKey);
                 }
             }
 
             var errorContent = await response.Content.ReadAsStringAsync(ct);
             _logger.LogError("Registration failed: {Status} - {Content}", response.StatusCode, errorContent);
-            return false;
+            return RegistrationResult.Failure($"Registration failed: {response.StatusCode} - {errorContent}");
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to register node");
-            return false;
+            return RegistrationResult.Failure($"Failed to register node: {ex.Message}");
         }
     }
 
@@ -536,10 +715,30 @@ public class OrchestratorClient : IOrchestratorClient
     }
 
     /// <summary>
+    /// Get supported VM images
+    /// </summary>
+    private List<string> GetSupportedImages()
+    {
+        return new List<string>
+        {
+            "ubuntu-22.04",
+            "ubuntu-24.04",
+            "debian-12"
+        };
+    }
+
+    /// <summary>
     /// Get the last heartbeat object (for accessing CGNAT info, etc.)
     /// </summary>
     public Heartbeat? GetLastHeartbeat()
     {
         return _lastHeartbeat;
     }
+    public record PendingAuth(
+    string WalletAddress,
+    string Signature,
+    string Message,
+    long Timestamp,
+    string? MachineId = null
+);
 }

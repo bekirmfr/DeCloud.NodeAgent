@@ -3,9 +3,7 @@
 
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
-using DeCloud.Shared;
 using Microsoft.Extensions.Options;
-using System.Reflection;
 
 namespace DeCloud.NodeAgent.Services;
 
@@ -33,194 +31,40 @@ public class HeartbeatService : BackgroundService
         _logger = logger;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    protected override async Task ExecuteAsync(CancellationToken ct)
     {
         _logger.LogInformation("Heartbeat service starting with interval {Interval}s",
             _options.Interval.TotalSeconds);
 
         // Initial delay to let other services start
-        await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+        await Task.Delay(TimeSpan.FromSeconds(10), ct);
 
-        // Check if registered (has API key in credentials)
-        if (!await IsNodeRegisteredAsync())
-        {
-            _logger.LogWarning("Node not registered - waiting for CLI authentication");
-            _logger.LogWarning("Run: sudo decloud-node login");
-
-            // Wait for registration
-            while (!await IsNodeRegisteredAsync() && !stoppingToken.IsCancellationRequested)
+        // Wait for node to be registered
+        while (!_orchestratorClient.IsRegistered && !ct.IsCancellationRequested)
             {
-                await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
+                _logger.LogInformation("Waiting for node registration...");
+                await Task.Delay(TimeSpan.FromSeconds(10), ct);
             }
-        }
 
         _currentStatus = NodeStatus.Online;
+        _logger.LogInformation("✓ Node registered, starting heartbeats");
 
-        while (!stoppingToken.IsCancellationRequested)
+        // Send heartbeats
+        while (!ct.IsCancellationRequested)
         {
             try
             {
-                await SendHeartbeatAsync(stoppingToken);
+                await SendHeartbeatAsync(ct);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to send heartbeat");
             }
 
-            await Task.Delay(_options.Interval, stoppingToken);
+            await Task.Delay(_options.Interval, ct);
         }
 
         _logger.LogInformation("Heartbeat service stopping");
-    }
-
-    private async Task<bool> IsNodeRegisteredAsync()
-    {
-        const string credentialsFile = "/etc/decloud/credentials";
-
-        if (!File.Exists(credentialsFile))
-            return false;
-
-        var lines = await File.ReadAllLinesAsync(credentialsFile);
-        return lines.Any(l => l.StartsWith("API_KEY="));
-    }
-
-    // Generates deterministic node ID before registration
-
-    private async Task RegisterWithOrchestratorAsync(CancellationToken ct)
-    {
-        var maxRetries = 5;
-        var retryDelay = TimeSpan.FromSeconds(10);
-
-        for (var i = 0; i < maxRetries; i++)
-        {
-            try
-            {
-                _logger.LogInformation("Registration attempt {Attempt}/{Max}", i + 1, maxRetries);
-
-                // =====================================================
-                // STEP 1: Get Machine ID
-                // =====================================================
-                string machineId;
-                try
-                {
-                    machineId = NodeIdGenerator.GetMachineId();
-                    _logger.LogInformation("Machine ID: {MachineId}", machineId);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to get machine ID");
-                    throw;
-                }
-
-                // =====================================================
-                // STEP 2: Get Wallet Address
-                // =====================================================
-                var walletAddress = _orchestratorClient.WalletAddress;
-
-                // Validate wallet address
-                if (string.IsNullOrWhiteSpace(walletAddress) ||
-                    walletAddress == "0x0000000000000000000000000000000000000000")
-                {
-                    _logger.LogError(
-                        "❌ CRITICAL: No valid wallet address configured! " +
-                        "Set 'Orchestrator:WalletAddress' in appsettings.json or NODE_WALLET_ADDRESS environment variable.");
-
-                    throw new InvalidOperationException("No valid wallet address configured");
-                }
-
-                _logger.LogInformation("Wallet address: {Wallet}", walletAddress);
-
-                // =====================================================
-                // STEP 3: Generate Deterministic Node ID
-                // =====================================================
-                string nodeId;
-                try
-                {
-                    nodeId = NodeIdGenerator.GenerateNodeId(machineId, walletAddress);
-                    _logger.LogInformation("✓ Generated deterministic node ID: {NodeId}", nodeId);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to generate node ID");
-                    throw;
-                }
-
-                // =====================================================
-                // Load signature and message from credentials (if exists)
-                // =====================================================
-                string? signature = null;
-                string? message = null;
-
-                const string credentialsFile = "/etc/decloud/credentials";
-                if (File.Exists(credentialsFile))
-                {
-                    var lines = await File.ReadAllLinesAsync(credentialsFile, ct);
-                    signature = lines.FirstOrDefault(l => l.StartsWith("SIGNATURE="))?.Split('=', 2)[1];
-                    message = lines.FirstOrDefault(l => l.StartsWith("MESSAGE="))?.Split('=', 2)[1];
-                }
-
-                // =====================================================
-                // STEP 4: Build Registration Request
-                // =====================================================
-                var resources = await _resourceDiscovery.DiscoverAllAsync(ct);
-                var publicIp = await GetPublicIpAsync(ct);
-
-                var registration = new NodeRegistration
-                {
-                    NodeId = nodeId,           // ← Deterministic node ID
-                    MachineId = machineId,     // ← For validation
-                    Name = Environment.MachineName,
-                    WalletAddress = walletAddress,
-                    PublicIp = publicIp ?? "127.0.0.1",
-                    AgentPort = 5100,
-                    HardwareInventory = resources,
-                    AgentVersion = Assembly.GetExecutingAssembly()
-                        .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
-                        ?.InformationalVersion ?? "2.0.0",
-                    SupportedImages = new List<string>
-                    {
-                        "ubuntu-24.04", "ubuntu-22.04", "ubuntu-20.04",
-                        "debian-12", "debian-11",
-                        "fedora-40", "fedora-39",
-                        "alpine-3.19", "alpine-3.18"
-                    },
-                    // TO-DO: Implement region and zone discovery
-                    Region = "default",
-                    Zone = "default",
-                    Signature = signature,
-                    Message = message
-                };
-
-                // =====================================================
-                // STEP 5: Register with Orchestrator
-                // =====================================================
-                var success = await _orchestratorClient.RegisterNodeAsync(registration, ct);
-
-                if (success)
-                {
-                    _logger.LogInformation(
-                        "✓ Successfully registered with orchestrator\n" +
-                        "  Node ID: {NodeId}\n" +
-                        "  Machine: {MachineId}\n" +
-                        "  Wallet:  {Wallet}",
-                        nodeId, machineId, walletAddress);
-                    return;
-                }
-
-                _logger.LogWarning("Registration attempt {Attempt} failed", i + 1);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Registration attempt {Attempt} failed", i + 1);
-            }
-
-            if (i < maxRetries - 1)
-            {
-                await Task.Delay(retryDelay, ct);
-            }
-        }
-
-        _logger.LogError("Failed to register with orchestrator after {Retries} attempts", maxRetries);
     }
 
     // HeartbeatService.cs - Updated snippet showing proper VmSummary population
@@ -407,19 +251,6 @@ public class HeartbeatService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error applying quota to VM {VmId}", vm.VmId);
-        }
-    }
-
-    private async Task<string> GetPublicIpAsync(CancellationToken ct)
-    {
-        try
-        {
-            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-            return (await client.GetStringAsync("https://api.ipify.org", ct)).Trim();
-        }
-        catch
-        {
-            return "127.0.0.1";
         }
     }
 }

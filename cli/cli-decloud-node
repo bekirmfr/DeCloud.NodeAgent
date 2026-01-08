@@ -15,13 +15,10 @@ import sys
 import os
 import time
 import json
-import hashlib
 import socket
 import subprocess
 import base64
 import urllib.parse
-import uuid
-from datetime import datetime
 from typing import Optional, Dict, Any
 import argparse
 
@@ -51,8 +48,10 @@ SIGNING_PAGE_URL = "https://decloud.stackfi.tech/sign.html"
 # SIGNING_PAGE_URL = "http://localhost:8000/sign.html"
 
 # File paths
-CREDENTIALS_FILE = "/etc/decloud/credentials"
-CONFIG_FILE = "/etc/decloud/config.json"
+CONFIG_DIR = os.path.expanduser("~/.config/decloud")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+PENDING_AUTH_FILE = os.path.join(CONFIG_DIR, "pending-auth")
+CREDENTIALS_FILE = os.path.join(CONFIG_DIR, "credentials")
 
 # =============================================================================
 # TERMINAL COLORS
@@ -111,52 +110,9 @@ def get_machine_id() -> str:
         log_error(f"Failed to get machine ID: {e}")
         sys.exit(1)
 
-def get_hardware_info() -> Dict[str, Any]:
-    """Get hardware information"""
-    def run_cmd(cmd):
-        try:
-            return subprocess.check_output(cmd, shell=True, text=True).strip()
-        except:
-            return "Unknown"
-    
-    cpu_model = run_cmd("lscpu | grep 'Model name' | cut -d':' -f2 | xargs")
-    cpu_cores = run_cmd("nproc")
-    memory_gb = run_cmd("free -g | awk '/^Mem:/{print $2}'")
-    disk_gb = run_cmd("df -BG / | awk 'NR==2{print $2}' | tr -d 'G'")
-    
-    return {
-        "cpu": cpu_model or "Unknown CPU",
-        "cores": int(cpu_cores) if cpu_cores.isdigit() else 0,
-        "memory": int(memory_gb) if memory_gb.isdigit() else 0,
-        "disk": int(disk_gb) if disk_gb.isdigit() else 0,
-        "hostname": socket.gethostname()
-    }
-
-def get_public_ip() -> str:
-    """Get public IP address"""
-    try:
-        response = requests.get('https://api.ipify.org', timeout=5)
-        return response.text.strip()
-    except:
-        return "Unknown"
-
 # =============================================================================
 # CONFIGURATION MANAGEMENT
 # =============================================================================
-
-def load_config() -> Dict[str, Any]:
-    """Load configuration from file"""
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
-    return {}
-
-def save_config(config: Dict[str, Any]):
-    """Save configuration to file"""
-    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config, f, indent=2)
-    os.chmod(CONFIG_FILE, 0o600)
 
 def load_credentials() -> Optional[Dict[str, str]]:
     """Load saved credentials"""
@@ -172,21 +128,6 @@ def load_credentials() -> Optional[Dict[str, str]]:
     
     return credentials if credentials else None
 
-def save_credentials(node_id: str, api_key: str, wallet_address: str, signature: str, message: str):
-    """Save credentials to file"""
-    os.makedirs(os.path.dirname(CREDENTIALS_FILE), exist_ok=True)
-    
-    with open(CREDENTIALS_FILE, 'w') as f:
-        f.write(f"NODE_ID={node_id}\n")
-        f.write(f"WALLET_ADDRESS={wallet_address}\n")
-        f.write(f"API_KEY={api_key}\n")
-        f.write(f"SIGNATURE={signature}\n")
-        f.write(f"MESSAGE={message}\n")
-        f.write(f"AUTHORIZED_AT={datetime.utcnow().isoformat()}\n")
-    
-    os.chmod(CREDENTIALS_FILE, 0o600)
-    log_success(f"Credentials saved to {CREDENTIALS_FILE}")
-
 # =============================================================================
 # SIGNING URL GENERATION
 # =============================================================================
@@ -194,13 +135,13 @@ def save_credentials(node_id: str, api_key: str, wallet_address: str, signature:
 def create_signing_message(machine_id: str, wallet_address: str, hardware: Dict[str, Any]) -> str:
     """Create message to be signed (NO node_id needed!)"""
     timestamp = int(time.time())
+    hostname = socket.gethostname()
     
     message = f"""Sign this message to authorize your DeCloud node:
 
 Machine ID: {machine_id}
 Wallet: {wallet_address}
-Hardware: {hardware['cpu']}
-Resources: {hardware['cores']} cores / {hardware['memory']}GB RAM
+Hostname: {hostname}
 Timestamp: {timestamp}
 
 This signature proves you own this wallet and authorizes the node to operate on your behalf.
@@ -209,7 +150,7 @@ NO FUNDS WILL BE TRANSFERRED - This is only for node authorization."""
     
     return message
 
-def generate_signing_url(message: str, wallet_address: str, hardware: Dict[str, Any]) -> str:
+def generate_signing_url(message: str, wallet_address: str) -> str:
     """
     Generate URL to signing page with parameters
     
@@ -221,8 +162,7 @@ def generate_signing_url(message: str, wallet_address: str, hardware: Dict[str, 
     # Build URL parameters
     params = {
         'message': message_b64,
-        'wallet': wallet_address,
-        'hardware': hardware['cpu'][:50]  # Truncate hardware name
+        'wallet': wallet_address
     }
     
     # Create full URL
@@ -259,14 +199,11 @@ def display_signing_instructions(signing_url: str, message: str, wallet_address:
     display_qr_code(signing_url, "Scan with ANY QR scanner or camera app:")
     
     print(f"{Colors.BOLD}How it works:{Colors.NC}")
-    print("  1. Scan QR code above with your phone's camera or QR scanner")
+    print("  1. Scan QR code with your phone's camera")
     print("  2. Opens signing page in your browser")
-    print("  3. Click 'Connect Wallet & Sign'")
-    print("  4. Choose your wallet (MetaMask, Trust, Rainbow, etc.)")
-    print("  5. Approve the connection")
-    print("  6. Sign the message")
-    print("  7. Copy the signature from the page")
-    print("  8. Paste it below")
+    print("  3. Connect your wallet and sign the message")
+    print("  4. Copy the signature")
+    print("  5. Paste it below")
     print()
     
     print(f"{Colors.CYAN}Or open this URL manually:{Colors.NC}")
@@ -306,71 +243,15 @@ def verify_signature(message: str, signature: str, expected_address: str) -> boo
         log_error(f"Signature verification failed: {e}")
         return False
 
-# =============================================================================
-# REGISTRATION
-# =============================================================================
-
-def register_node(orchestrator_url: str, machine_id: str, wallet_address: str, 
-                 signature: str, message: str, hardware: Dict[str, Any]) -> Optional[str]:
-    """Register node with orchestrator and get API key"""
-    try:
-        # Build proper HardwareInventory structure
-        hardware_inventory = {
-            "cpuCores": hardware.get('cores', 0),
-            "memoryBytes": hardware.get('memory', 0) * 1024 * 1024 * 1024,  # GB to bytes
-            "diskBytes": hardware.get('disk', 0) * 1024 * 1024 * 1024,  # GB to bytes
-            "cpuModel": hardware.get('cpu', 'Unknown'),
-            "architecture": "x86_64"
-        }
-        
-        # Build complete registration request
-        registration_request = {
-            "machineId": machine_id,
-            "name": hardware.get('hostname', socket.gethostname()),
-            "walletAddress": wallet_address,
-            "publicIp": get_public_ip(),
-            "agentPort": 5100,
-            "hardwareInventory": hardware_inventory,
-            "agentVersion": "2.3.0-cli",
-            "supportedImages": ["ubuntu-22.04", "ubuntu-24.04", "debian-12"],
-            "region": "default",
-            "zone": "default",
-            "signature": signature,
-            "message": message,
-            "registeredAt": datetime.utcnow().isoformat() + "Z"
-        }
-        
-        response = requests.post(
-            f"{orchestrator_url}/api/nodes/register",
-            json=registration_request,
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("success"):
-                response_data = data.get("data", {})
-        
-                # Validate required fields
-                if not response_data.get("nodeId"):
-                    log_error("Node ID not found in response")
-                    return None
-        
-                if not response_data.get("apiKey"):
-                    log_error("API key not found in response")
-                    return None
-        
-                return response_data
-        
-        log_error(f"Registration failed: {response.status_code}")
-        if response.text:
-            log_error(response.text[:200])
-        
-        return None
+def save_pending_auth(auth_data: Dict[str, Any]):
+    """Save pending authentication for node agent to process"""
+    os.makedirs(os.path.dirname(PENDING_AUTH_FILE), exist_ok=True)
     
-    except Exception as e:
-        log_error(f"Failed to register node: {e}")
-        return None
+    with open(PENDING_AUTH_FILE, 'w') as f:
+        json.dump(auth_data, f, indent=2)
+    
+    os.chmod(PENDING_AUTH_FILE, 0o600)
+    log_success(f"Authentication saved to {PENDING_AUTH_FILE}")
 
 # =============================================================================
 # WEB-BASED AUTHENTICATION FLOW
@@ -380,6 +261,12 @@ def login_with_web_signing(orchestrator_url: str, wallet_address: str = None, ve
     """Login using web-based WalletConnect signing"""
     print_banner()
     
+    # Check if already authenticated
+    if os.path.exists(PENDING_AUTH_FILE) and not args.force:
+        log_warn("Pending authentication already exists")
+        print("Use --force to overwrite")
+        return
+
     # Get machine_id
     machine_id = get_machine_id()
     
@@ -393,17 +280,13 @@ def login_with_web_signing(orchestrator_url: str, wallet_address: str = None, ve
         log_error("Invalid wallet address format")
         return False
 
-    # Get hardware info
-    hardware = get_hardware_info()
-    
     print(f"Machine ID: {machine_id}")
-    print(f"Hardware: {hardware['cpu']}")
     
-    # Create message WITHOUT node_id
+    # Create message
     message = create_signing_message(machine_id, wallet_address, hardware)
     
     # Generate signing URL
-    signing_url = generate_signing_url(message, wallet_address, hardware)
+    signing_url = generate_signing_url(message, wallet_address)
     
     # Display instructions with QR code
     display_signing_instructions(signing_url, message, wallet_address)
@@ -429,48 +312,28 @@ def login_with_web_signing(orchestrator_url: str, wallet_address: str = None, ve
         return False
     
     log_success("Signature verified!")
-    print()
-    
-    # Register with orchestrator
-    log_info("Registering with orchestrator...")
-    
-    response = register_node(
-        orchestrator_url=orchestrator_url,
-        machine_id=machine_id,
-        wallet_address=wallet_address,
-        signature=signature,
-        message=message,
-        hardware=hardware
-    )
 
-    if response:
-        node_id = response.get('nodeId')
-        api_key = response.get('apiKey')
+    # Save pending authentication
+    auth_data = {
+        "walletAddress": wallet_address,
+        "signature": signature,
+        "message": message,
+        "timestamp": int(time.time()),
+        "machineId": machine_id
+    }
     
-        save_credentials(node_id, api_key, wallet_address, signature, message)
-        
-        # Save orchestrator URL to config
-        config = load_config()
-        config['orchestrator_url'] = orchestrator_url
-        save_config(config)
-        
-        print()
-        print(f"{Colors.GREEN}{'═'*70}{Colors.NC}")
-        print(f"{Colors.BOLD}              ✅ Node Authorized Successfully!{Colors.NC}")
-        print(f"{Colors.GREEN}{'═'*70}{Colors.NC}")
-        print()
-        print(f"  Node ID:      {node_id}")
-        print(f"  Wallet:       {wallet_address}")
-        print(f"  Credentials:  {CREDENTIALS_FILE}")
-        print()
-        print("The node agent will start automatically.")
-        print("Check status with: systemctl status decloud-node-agent")
-        print()
-        
-        return True
-    else:
-        log_error("Failed to register node with orchestrator")
-        return False
+    save_pending_auth(auth_data)
+
+    print()
+    print(f"{Colors.GREEN}{'═'*70}{Colors.NC}")
+    print(f"{Colors.BOLD}              ✅ Authentication Saved!{Colors.NC}")
+    print(f"{Colors.GREEN}{'═'*70}{Colors.NC}")
+    print()
+    print("Node agent will complete registration automatically.")
+    print()
+    print("Check status:")
+    print("  sudo journalctl -u decloud-node-agent -f")
+    print()
 
 # =============================================================================
 # COMMAND HANDLERS

@@ -136,6 +136,7 @@ builder.Services.AddSingleton<IEphemeralSshKeyService, EphemeralSshKeyService>()
 // =====================================================
 // Background Services
 // =====================================================
+builder.Services.AddHostedService<AuthenticationManager>();
 builder.Services.AddHostedService<HeartbeatService>();
 builder.Services.AddHostedService<WireGuardConfigManager>();
 builder.Services.AddHostedService<CommandProcessorService>();
