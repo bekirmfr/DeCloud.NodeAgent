@@ -82,7 +82,8 @@ public class RelayNatCallbackController : ControllerBase
         // =====================================================
         try
         {
-            await _natRuleManager.RemoveAllRelayNatRulesAsync(HttpContext.RequestAborted);
+            // await _natRuleManager.RemoveAllRelayNatRulesAsync(HttpContext.RequestAborted);
+            // Already handled by decloud-relay-nat add 
 
             _logger.LogInformation(
                 "Configuring NAT rule: UDP/51820 → {VmIp}:51820",

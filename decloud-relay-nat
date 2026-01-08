@@ -1,0 +1,324 @@
+#!/bin/bash
+#
+# DeCloud Relay NAT Manager
+# Version: 1.0.0
+# 
+# Manages iptables NAT and FORWARD rules for DeCloud relay VMs
+# Ensures proper traffic forwarding from CGNAT nodes to relay VMs
+#
+
+set -e
+
+LOG_FILE="/var/log/decloud-nat.log"
+mkdir -p "$(dirname "$LOG_FILE")"
+
+# Logging function
+log() { 
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+# =====================================================
+# Function: Clean Old Relay NAT Rules
+# =====================================================
+clean_old_rules() {
+    log "Cleaning old relay NAT rules..."
+    
+    # Remove NAT PREROUTING rules for port 51820
+    while iptables -t nat -C PREROUTING -p udp --dport 51820 -j DNAT 2>/dev/null; do
+        log "  Removing old PREROUTING rule"
+        iptables -t nat -D PREROUTING -p udp --dport 51820 -j DNAT 2>/dev/null || true
+    done
+    
+    # Remove NAT POSTROUTING rules for relay VMs
+    local old_postrouting=$(iptables -t nat -L POSTROUTING -n --line-numbers | grep "51820.*192.168.122" | awk '{print $1}' | sort -rn)
+    for line in $old_postrouting; do
+        log "  Removing old POSTROUTING rule (line $line)"
+        iptables -t nat -D POSTROUTING "$line" 2>/dev/null || true
+    done
+    
+    # Remove FORWARD rules for port 51820 on 192.168.122.*
+    local old_forward=$(iptables -L FORWARD -n --line-numbers | grep "dpt:51820" | grep "192.168.122" | awk '{print $1}' | sort -rn)
+    for line in $old_forward; do
+        log "  Removing old FORWARD rule (line $line)"
+        iptables -D FORWARD "$line" 2>/dev/null || true
+    done
+    
+    # Clear connection tracking for port 51820
+    log "  Clearing connection tracking for port 51820"
+    conntrack -D -p udp --dport 51820 2>/dev/null || true
+    
+    log "✓ Cleanup complete"
+}
+
+# =====================================================
+# Function: Add NAT Rules for Relay VM
+# =====================================================
+add_rules() {
+    local vm_ip="$1"
+    local iface="${2:-eth0}"
+    
+    if [ -z "$vm_ip" ]; then
+        log "ERROR: VM IP is required"
+        return 1
+    fi
+    
+    # Validate IP format
+    if ! echo "$vm_ip" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; then
+        log "ERROR: Invalid IP format: $vm_ip"
+        return 1
+    fi
+    
+    log "Adding NAT rules for relay VM: $vm_ip via $iface"
+    
+    # =====================================================
+    # STEP 1: PREROUTING - DNAT incoming packets
+    # =====================================================
+    if ! iptables -t nat -C PREROUTING -i "$iface" -p udp --dport 51820 -j DNAT --to-destination "$vm_ip:51820" 2>/dev/null; then
+        iptables -t nat -A PREROUTING -i "$iface" -p udp --dport 51820 -j DNAT --to-destination "$vm_ip:51820"
+        log "  ✓ PREROUTING: $iface:51820 → $vm_ip:51820"
+    else
+        log "  • PREROUTING rule already exists"
+    fi
+    
+    # =====================================================
+    # STEP 2: POSTROUTING - MASQUERADE for return packets
+    # =====================================================
+    if ! iptables -t nat -C POSTROUTING -o virbr0 -p udp -d "$vm_ip" --dport 51820 -j MASQUERADE 2>/dev/null; then
+        iptables -t nat -A POSTROUTING -o virbr0 -p udp -d "$vm_ip" --dport 51820 -j MASQUERADE
+        log "  ✓ POSTROUTING: MASQUERADE for $vm_ip via virbr0"
+    else
+        log "  • POSTROUTING rule already exists"
+    fi
+    
+    # =====================================================
+    # STEP 3: FORWARD - Accept packets (at position 1)
+    # =====================================================
+    # Remove existing rule first to avoid duplicates
+    iptables -D FORWARD -p udp -d "$vm_ip" --dport 51820 -j ACCEPT 2>/dev/null || true
+    # Insert at position 1 (top of chain) to ensure priority
+    iptables -I FORWARD 1 -p udp -d "$vm_ip" --dport 51820 -j ACCEPT
+    log "  ✓ FORWARD: ACCEPT UDP/$vm_ip:51820 (position 1)"
+    
+    # =====================================================
+    # STEP 4: Enable IP forwarding
+    # =====================================================
+    if [ "$(cat /proc/sys/net/ipv4/ip_forward)" != "1" ]; then
+        sysctl -w net.ipv4.ip_forward=1 >/dev/null
+        log "  ✓ Enabled IP forwarding (kernel)"
+        
+        # Make persistent
+        if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf 2>/dev/null; then
+            echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+            log "  ✓ Enabled IP forwarding (persistent)"
+        fi
+    else
+        log "  • IP forwarding already enabled"
+    fi
+    
+    log "✓ NAT configured successfully for $vm_ip"
+}
+
+# =====================================================
+# Function: Remove NAT Rules for Specific VM
+# =====================================================
+remove_rules() {
+    local vm_ip="$1"
+    
+    if [ -z "$vm_ip" ]; then
+        log "ERROR: VM IP is required"
+        return 1
+    fi
+    
+    log "Removing NAT rules for relay VM: $vm_ip"
+    
+    # Remove PREROUTING
+    iptables -t nat -D PREROUTING -p udp --dport 51820 -j DNAT --to-destination "$vm_ip:51820" 2>/dev/null || \
+        log "  • PREROUTING rule not found"
+    
+    # Remove POSTROUTING
+    iptables -t nat -D POSTROUTING -o virbr0 -p udp -d "$vm_ip" --dport 51820 -j MASQUERADE 2>/dev/null || \
+        log "  • POSTROUTING rule not found"
+    
+    # Remove FORWARD
+    iptables -D FORWARD -p udp -d "$vm_ip" --dport 51820 -j ACCEPT 2>/dev/null || \
+        log "  • FORWARD rule not found"
+    
+    # Clear connection tracking
+    conntrack -D -p udp --dport 51820 2>/dev/null || true
+    
+    log "✓ NAT rules removed for $vm_ip"
+}
+
+# =====================================================
+# Function: Save IPTables Rules
+# =====================================================
+save_rules() {
+    log "Saving iptables rules..."
+    
+    if command -v netfilter-persistent >/dev/null 2>&1; then
+        netfilter-persistent save 2>/dev/null
+        log "  ✓ Saved via netfilter-persistent"
+    elif [ -d /etc/iptables ]; then
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null
+        log "  ✓ Saved to /etc/iptables/rules.v4"
+    else
+        log "  ⚠ No save mechanism found - rules may not persist across reboots"
+    fi
+}
+
+# =====================================================
+# Function: Show Current NAT Rules
+# =====================================================
+show_rules() {
+    echo ""
+    echo "═══════════════════════════════════════════════════════════"
+    echo "  DeCloud Relay NAT Rules"
+    echo "═══════════════════════════════════════════════════════════"
+    echo ""
+    
+    echo "NAT PREROUTING (DNAT):"
+    iptables -t nat -L PREROUTING -n -v | grep -E "51820|Chain" || echo "  No rules found"
+    echo ""
+    
+    echo "NAT POSTROUTING (MASQUERADE):"
+    iptables -t nat -L POSTROUTING -n -v | grep -E "51820.*192.168.122|Chain" | head -5 || echo "  No rules found"
+    echo ""
+    
+    echo "FORWARD Chain (first 8 rules):"
+    iptables -L FORWARD -n -v | head -10 || echo "  No rules found"
+    echo ""
+    
+    echo "Active Connections (port 51820):"
+    if command -v conntrack >/dev/null 2>&1; then
+        conntrack -L 2>/dev/null | grep 51820 | head -5 || echo "  No active connections"
+    else
+        echo "  conntrack not installed"
+    fi
+    echo ""
+}
+
+# =====================================================
+# Function: Test Connectivity to Relay VM
+# =====================================================
+test_connectivity() {
+    local vm_ip="$1"
+    
+    if [ -z "$vm_ip" ]; then
+        echo "ERROR: VM IP required for testing"
+        return 1
+    fi
+    
+    echo ""
+    echo "═══════════════════════════════════════════════════════════"
+    echo "  Testing Relay VM: $vm_ip"
+    echo "═══════════════════════════════════════════════════════════"
+    echo ""
+    
+    # Test 1: Ping
+    echo -n "Ping test: "
+    if ping -c 1 -W 2 "$vm_ip" >/dev/null 2>&1; then
+        echo "✓ Reachable"
+    else
+        echo "✗ Not reachable"
+    fi
+    
+    # Test 2: Relay API
+    echo -n "Relay API (port 8080): "
+    if curl -s -m 2 "http://$vm_ip:8080/health" >/dev/null 2>&1; then
+        echo "✓ Accessible"
+    else
+        echo "✗ Not accessible"
+    fi
+    
+    # Test 3: NAT rule exists
+    echo -n "NAT rule configured: "
+    if iptables -t nat -C PREROUTING -p udp --dport 51820 -j DNAT --to-destination "$vm_ip:51820" 2>/dev/null; then
+        echo "✓ Yes"
+    else
+        echo "✗ No"
+    fi
+    
+    # Test 4: FORWARD rule exists
+    echo -n "FORWARD rule configured: "
+    if iptables -C FORWARD -p udp -d "$vm_ip" --dport 51820 -j ACCEPT 2>/dev/null; then
+        echo "✓ Yes"
+    else
+        echo "✗ No"
+    fi
+    
+    echo ""
+}
+
+# =====================================================
+# Main Command Handler
+# =====================================================
+case "${1:-}" in
+    add)
+        if [ -z "${2:-}" ]; then
+            echo "Usage: $0 add <relay-vm-ip> [public-interface]"
+            echo ""
+            echo "Example:"
+            echo "  $0 add 192.168.122.164 eth0"
+            exit 1
+        fi
+        clean_old_rules
+        add_rules "$2" "${3:-eth0}"
+        save_rules
+        show_rules
+        ;;
+    
+    remove)
+        if [ -z "${2:-}" ]; then
+            echo "Usage: $0 remove <relay-vm-ip>"
+            exit 1
+        fi
+        remove_rules "$2"
+        save_rules
+        ;;
+    
+    clean)
+        clean_old_rules
+        save_rules
+        ;;
+    
+    show|status)
+        show_rules
+        ;;
+    
+    test)
+        if [ -z "${2:-}" ]; then
+            echo "Usage: $0 test <relay-vm-ip>"
+            exit 1
+        fi
+        test_connectivity "$2"
+        ;;
+    
+    save)
+        save_rules
+        ;;
+    
+    *)
+        echo "DeCloud Relay NAT Manager v1.0.0"
+        echo ""
+        echo "Usage: $0 <command> [arguments]"
+        echo ""
+        echo "Commands:"
+        echo "  add <ip> [iface]    Add NAT rules for relay VM (default iface: eth0)"
+        echo "  remove <ip>         Remove NAT rules for specific relay VM"
+        echo "  clean               Clean all relay NAT rules"
+        echo "  show                Show current relay NAT rules"
+        echo "  test <ip>           Test connectivity to relay VM"
+        echo "  save                Save current iptables rules"
+        echo ""
+        echo "Examples:"
+        echo "  $0 add 192.168.122.164 eth0"
+        echo "  $0 remove 192.168.122.164"
+        echo "  $0 clean"
+        echo "  $0 show"
+        echo "  $0 test 192.168.122.164"
+        echo ""
+        echo "Logs: $LOG_FILE"
+        echo ""
+        exit 1
+        ;;
+esac

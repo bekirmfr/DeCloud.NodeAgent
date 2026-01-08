@@ -190,11 +190,46 @@ public interface IOrchestratorClient
 /// </summary>
 public interface INatRuleManager
 {
-    Task<bool> AddPortForwardingAsync(string vmIp, int port, string protocol = "udp", CancellationToken ct = default);
-    Task<bool> RemovePortForwardingAsync(string vmIp, int port, string protocol = "udp", CancellationToken ct = default);
-    Task<bool> RuleExistsAsync(string vmIp, int port, string protocol = "udp", CancellationToken ct = default);
+    /// <summary>
+    /// Adds port forwarding NAT rule for a VM
+    /// </summary>
+    Task<bool> AddPortForwardingAsync(
+        string vmIp,
+        int port,
+        string protocol = "udp",
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Removes port forwarding NAT rule for a VM
+    /// </summary>
+    Task<bool> RemovePortForwardingAsync(
+        string vmIp,
+        int port,
+        string protocol = "udp",
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Checks if NAT rule exists for a VM
+    /// </summary>
+    Task<bool> RuleExistsAsync(
+        string vmIp,
+        int port,
+        string protocol = "udp",
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Saves iptables rules persistently
+    /// </summary>
     Task<bool> SaveRulesAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Removes all relay NAT rules (cleanup)
+    /// </summary>
     Task<bool> RemoveAllRelayNatRulesAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Gets list of existing NAT rules
+    /// </summary>
     Task<List<string>> GetExistingRulesAsync(CancellationToken ct = default);
 }
 

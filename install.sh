@@ -1140,6 +1140,45 @@ configure_firewall() {
     log_success "Firewall configured"
 }
 
+install_relay_nat_support() {
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Installing Relay NAT Support"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    
+    # Install conntrack if not present
+    if ! command -v conntrack &> /dev/null; then
+        echo "→ Installing conntrack-tools..."
+        apt-get install -y conntrack > /dev/null 2>&1 || {
+            echo "⚠ Warning: Could not install conntrack (optional)"
+        }
+    fi
+    
+    # Copy relay NAT manager script from file
+    echo "→ Installing relay NAT manager..."
+
+    # The relay NAT manager is in the repository we just cloned
+    local file_source="$INSTALL_DIR/DeCloud.NodeAgent/cli/decloud-relay-nat"
+    local file_dest="/usr/local/bin/decloud-relay-nat"
+    
+    if [ ! -f "file_source" ]; then
+        log_error "Relay NAT manager script not found at $file_source"
+        log_error "Repository may be incomplete"
+        exit 1
+    fi
+    
+    # Copy relay NAT manager script to /usr/local/bin
+    cp "$file_source" "$file_dest"
+    chmod +x "$file_dest"
+    
+    mkdir -p /var/log
+    
+    # Clean any existing old rules from previous installs
+    echo "→ Cleaning old relay rules..."
+    /usr/local/bin/decloud-relay-nat clean 2>/dev/null || true
+    
+    echo "✓ Relay NAT support installed"
+}
+
 create_helper_scripts() {
     log_step "Creating helper scripts..."
     
@@ -1296,6 +1335,9 @@ print_summary() {
     echo ""
     echo "  ─────────────────────────────────────────────────────────────"
     echo ""
+    echo ""
+    echo "  Relay NAT Manager: sudo decloud-relay-nat {add|clean|show}"
+    echo ""
 }
 
 print_summary_unauthenticated() {
@@ -1369,6 +1411,7 @@ main() {
     
     # Install CLI from downloaded repo
     install_walletconnect_cli
+    install_relay_nat_support
 
     build_node_agent
     create_configuration
