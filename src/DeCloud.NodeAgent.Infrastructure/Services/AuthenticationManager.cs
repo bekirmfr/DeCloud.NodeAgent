@@ -1,8 +1,6 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
-using System.Text.Json;
 
 public class AuthenticationManager : BackgroundService
 {
@@ -106,7 +104,7 @@ public class AuthenticationManager : BackgroundService
         try
         {
             // Check if ResourceDiscoveryService has completed initial discovery
-            var inventory = await _resourceDiscovery.GetCachedInventoryAsync(ct);
+            var inventory = await _resourceDiscovery.GetInventoryCachedAsync(ct);
 
             return inventory != null &&
                    inventory.Cpu.BenchmarkScore > 0 &&

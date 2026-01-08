@@ -18,6 +18,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     private bool _discoveryComplete;
     private readonly SemaphoreSlim _discoverySemaphore = new(1, 1);
     private DateTime _lastDiscoveryTime = DateTime.MinValue;
+    private static readonly TimeSpan DiscoveryCacheDuration = TimeSpan.FromMinutes(10);
 
     public ResourceDiscoveryService(
         ICommandExecutor executor,
@@ -39,9 +40,15 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     /// Get cached hardware inventory
     /// Returns null if discovery hasn't completed yet
     /// </summary>
-    public Task<HardwareInventory?> GetCachedInventoryAsync(CancellationToken ct = default)
+    public async Task<HardwareInventory?> GetInventoryCachedAsync(CancellationToken ct = default)
     {
-        return Task.FromResult(_cachedInventory);
+        if(_cachedInventory == null || DateTime.UtcNow - _lastDiscoveryTime > DiscoveryCacheDuration)
+        {
+            _logger.LogInformation("Cached inventory is stale or not available");
+            await DiscoverAllAsync(ct);
+        }
+
+        return _cachedInventory;
     }
 
     /// <summary>
