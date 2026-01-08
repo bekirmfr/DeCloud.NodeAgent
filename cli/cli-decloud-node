@@ -257,12 +257,12 @@ def save_pending_auth(auth_data: Dict[str, Any]):
 # WEB-BASED AUTHENTICATION FLOW
 # =============================================================================
 
-def login_with_web_signing(orchestrator_url: str, wallet_address: str = None, verbose: bool = False):
+def login_with_web_signing(orchestrator_url: str, wallet_address: str = None, force: bool = False, verbose: bool = False):
     """Login using web-based WalletConnect signing"""
     print_banner()
     
     # Check if already authenticated
-    if os.path.exists(PENDING_AUTH_FILE) and not args.force:
+    if os.path.exists(PENDING_AUTH_FILE) and not force:
         log_warn("Pending authentication already exists")
         print("Use --force to overwrite")
         return
@@ -357,7 +357,7 @@ def cmd_login(args):
     orchestrator_url = args.orchestrator
     
     # Perform login
-    success = login_with_web_signing(orchestrator_url, args.wallet)
+    success = login_with_web_signing(orchestrator_url, args.wallet, args.force)
     sys.exit(0 if success else 1)
 
 def cmd_status(args):
