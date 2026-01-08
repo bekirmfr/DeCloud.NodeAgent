@@ -131,26 +131,30 @@ public class AuthenticationManager : BackgroundService
 
     private async Task<AuthState> DetermineAuthStateAsync(CancellationToken ct)
     {
+        var credentials = new Dictionary<string, string>();
+
         // Check if credentials exist and are valid
         if (File.Exists(CredentialsFile))
         {
-            var credentials = await LoadCredentialsAsync(ct);
+            credentials = await LoadCredentialsAsync(ct);
 
-            if (await ValidateCredentialsAsync(credentials, ct)
-                && await VerifyNodeAuthorizationAsync(
-                    credentials["NODE_ID"], 
-                    credentials["API_KEY"], ct))
-            {
-                return AuthState.Registered;
-            }
-            else
+            if (!await ValidateCredentialsAsync(credentials, ct))
             {
                 return AuthState.CredentialsInvalid;
             }
         }
 
+        var isAuthorized = await VerifyNodeAuthorizationAsync(
+                    credentials["NODE_ID"],
+                    credentials["API_KEY"], ct);
+
+        if (isAuthorized) {
+            return AuthState.Registered;
+        }
+
         // Check if pending authentication exists
-        if (File.Exists(PendingAuthFile))
+        if (File.Exists(PendingAuthFile) 
+            && !isAuthorized)
         {
             return AuthState.PendingRegistration;
         }
