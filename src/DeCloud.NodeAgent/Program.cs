@@ -61,6 +61,7 @@ builder.Services.AddSingleton<ICpuBenchmarkService, CpuBenchmarkService>();
 builder.Services.AddSingleton<IImageManager, ImageManager>();
 builder.Services.AddSingleton<IOrchestratorClient>(sp =>
     sp.GetRequiredService<OrchestratorClient>());
+builder.Services.AddSingleton<IAuthenticationStateService, AuthenticationStateService>();
 
 // =====================================================
 // VM Repository with Encryption Support
