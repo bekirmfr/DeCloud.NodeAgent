@@ -355,9 +355,6 @@ def cmd_login(args):
     
     # Get orchestrator URL
     orchestrator_url = args.orchestrator
-    if not orchestrator_url:
-        config = load_config()
-        orchestrator_url = config.get('orchestrator_url', DEFAULT_ORCHESTRATOR_URL)
     
     # Perform login
     success = login_with_web_signing(orchestrator_url, args.wallet)
