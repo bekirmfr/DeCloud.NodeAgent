@@ -172,7 +172,6 @@ public class WireGuardPeer
 public interface IOrchestratorClient
 {
     string? NodeId { get; }
-    bool IsRegistered { get; }
 
     string? WalletAddress { get; }
 

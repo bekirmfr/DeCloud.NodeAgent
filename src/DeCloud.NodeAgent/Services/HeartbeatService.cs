@@ -69,7 +69,7 @@ public class HeartbeatService : BackgroundService
 
     private async Task WaitForAuthenticationAsync(CancellationToken ct)
     {
-        _logger.LogInformation("Waiting for resource discovery to complete...");
+        _logger.LogInformation("Waiting for resource authentication to complete...");
 
         while (!_authState.IsRegistered && !ct.IsCancellationRequested)
         {

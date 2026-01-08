@@ -26,6 +26,7 @@ public class OrchestratorClient : IOrchestratorClient
     private readonly HttpClient _httpClient;
     private readonly ILogger<OrchestratorClient> _logger;
     private readonly IResourceDiscoveryService _resourceDiscovery;
+    private readonly IAuthenticationStateService _authState;
     private readonly INodeMetadataService _nodeMetadata;
     private readonly OrchestratorClientOptions _options;
 
@@ -39,13 +40,13 @@ public class OrchestratorClient : IOrchestratorClient
     private readonly ConcurrentQueue<PendingCommand> _pendingCommands = new();
 
     public string? NodeId => _nodeId;
-    public bool IsRegistered => !string.IsNullOrEmpty(_nodeId);
     public string? WalletAddress => _walletAddress;
 
     public OrchestratorClient(
         HttpClient httpClient,
         IOptions<OrchestratorClientOptions> options,
         IResourceDiscoveryService resourceDiscovery,
+        IAuthenticationStateService authenticationStateService,
         INodeMetadataService nodeMetadata,
         ILogger<OrchestratorClient> logger)
     {
@@ -55,7 +56,7 @@ public class OrchestratorClient : IOrchestratorClient
         _resourceDiscovery = resourceDiscovery;
         _nodeMetadata = nodeMetadata;
         _walletAddress = _options.WalletAddress;
-
+        _authState= authenticationStateService;
         _httpClient.BaseAddress = new Uri(_options.BaseUrl.TrimEnd('/'));
         _httpClient.Timeout = _options.Timeout;
 
@@ -397,7 +398,7 @@ public class OrchestratorClient : IOrchestratorClient
     /// </summary>
     public async Task<bool> SendHeartbeatAsync(Heartbeat heartbeat, CancellationToken ct = default)
     {
-        if (!IsRegistered)
+        if (!_authState.IsRegistered)
         {
             _logger.LogWarning("Cannot send heartbeat - node not registered");
             return false;
@@ -642,7 +643,7 @@ public class OrchestratorClient : IOrchestratorClient
     /// </summary>
     public async Task<bool> ReportVmStateChangeAsync(string vmId, VmState newState, CancellationToken ct = default)
     {
-        if (!IsRegistered)
+        if (!_authState.IsRegistered)
         {
             _logger.LogWarning("Cannot report VM state - node not registered");
             return false;
@@ -670,7 +671,7 @@ public class OrchestratorClient : IOrchestratorClient
         string? errorMessage,
         CancellationToken ct = default)
     {
-        if (!IsRegistered)
+        if (!_authState.IsRegistered)
         {
             _logger.LogWarning("Cannot acknowledge command - node not registered");
             return false;
