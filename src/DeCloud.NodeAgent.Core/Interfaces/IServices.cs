@@ -181,7 +181,7 @@ public interface IOrchestratorClient
 
     Task<List<PendingCommand>> GetPendingCommandsAsync(CancellationToken ct = default);
     Task<bool> AcknowledgeCommandAsync(string commandId, bool success, string? errorMessage, CancellationToken ct = default);
-    Heartbeat? GetLastHeartbeat();
+    HeartbeatDto? GetLastHeartbeat();
     Task ReloadCredentialsAsync(CancellationToken ct = default);
 }
 

@@ -13,11 +13,18 @@ public class Heartbeat
     public CgnatNodeInfo? CgnatInfo { get; set; }
 }
 
+public class HeartbeatDto
+{
+    public Heartbeat? Heartbeat { get; set; }
+    public HttpResponseMessage? Response { get; set; }
+}
+
 public class HeartbeatResponseData
 {
-    public bool acknowledged { get; set; }
-    public List<object>? pendingCommands { get; set; }
-    public CgnatInfoDto? cgnatInfo { get; set; }
+    public bool Acknowledged { get; set; }
+    public List<object>? PendingCommands { get; set; }
+    public CgnatInfoDto? CgnatInfo { get; set; }
+    public DateTime? ServerTime { get; set; }
 }
 
 public class CgnatInfoDto

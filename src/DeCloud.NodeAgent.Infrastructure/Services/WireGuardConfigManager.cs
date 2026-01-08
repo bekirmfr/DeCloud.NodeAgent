@@ -1,11 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using DeCloud.NodeAgent.Core.Interfaces;
-using DeCloud.NodeAgent.Core.Models;
+﻿using DeCloud.NodeAgent.Core.Interfaces;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -146,7 +139,7 @@ public class WireGuardConfigManager : BackgroundService
     {
         var heartbeat = _orchestratorClient.GetLastHeartbeat();
 
-        if (heartbeat?.CgnatInfo != null)
+        if (heartbeat?.Heartbeat?.CgnatInfo != null)
         {
             // ========================================
             // CGNAT Node → Need relay tunnel
@@ -155,9 +148,9 @@ public class WireGuardConfigManager : BackgroundService
             {
                 InterfaceName = "wg-relay",
                 Role = WireGuardRole.CgnatClient,
-                Configuration = heartbeat.CgnatInfo.WireGuardConfig ?? string.Empty,
-                TunnelIp = heartbeat.CgnatInfo.TunnelIp,
-                RelayNodeId = heartbeat.CgnatInfo.AssignedRelayNodeId
+                Configuration = heartbeat.Heartbeat.CgnatInfo.WireGuardConfig ?? string.Empty,
+                TunnelIp = heartbeat.Heartbeat.CgnatInfo.TunnelIp,
+                RelayNodeId = heartbeat.Heartbeat.CgnatInfo.AssignedRelayNodeId
             };
         }
 

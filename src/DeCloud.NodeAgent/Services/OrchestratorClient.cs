@@ -34,7 +34,7 @@ public class OrchestratorClient : IOrchestratorClient
     private string? _apiKey;
     private string? _orchestratorPublicKey;
     private string? _walletAddress;
-    private Heartbeat? _lastHeartbeat = null;
+    private HeartbeatDto? _lastHeartbeat = null;
 
     // Queue for pending commands received from heartbeat responses
     private readonly ConcurrentQueue<PendingCommand> _pendingCommands = new();
@@ -445,7 +445,15 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             // ✅ API key is already in DefaultRequestHeaders.Authorization
 
             var payload = BuildHeartbeatPayload(heartbeat);
+
+            _lastHeartbeat = new HeartbeatDto
+            {
+                Heartbeat = heartbeat
+            };
+
             var response = await _httpClient.PostAsJsonAsync(requestPath, payload, ct);
+
+            _lastHeartbeat.Response = response;
 
             if (!response.IsSuccessStatusCode)
             {
@@ -626,9 +634,9 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                     "Received relay assignment: Relay {RelayId}, Tunnel IP {TunnelIp}",
                     relayId, tunnelIp);
 
-                if (_lastHeartbeat != null)
+                if (_lastHeartbeat != null && _lastHeartbeat.Heartbeat != null)
                 {
-                    _lastHeartbeat.CgnatInfo = new CgnatNodeInfo
+                    _lastHeartbeat.Heartbeat.CgnatInfo = new CgnatNodeInfo
                     {
                         AssignedRelayNodeId = relayId,
                         TunnelIp = tunnelIp,
@@ -641,13 +649,11 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                     _logger.LogInformation("✓ Stored CGNAT info in heartbeat");
                 }
             }
-            else if (_lastHeartbeat != null && _lastHeartbeat.CgnatInfo != null)
+            else if (_lastHeartbeat != null && _lastHeartbeat.Heartbeat != null && _lastHeartbeat.Heartbeat.CgnatInfo != null)
             {
                 _logger.LogInformation("Clearing previous CGNAT info - node no longer behind NAT");
-                _lastHeartbeat.CgnatInfo = null;
+                _lastHeartbeat.Heartbeat.CgnatInfo = null;
             }
-
-            _lastHeartbeat = _lastHeartbeat;
         }
         catch (Exception ex)
         {
@@ -765,7 +771,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
     /// <summary>
     /// Get the last heartbeat object (for accessing CGNAT info, etc.)
     /// </summary>
-    public Heartbeat? GetLastHeartbeat()
+    public HeartbeatDto? GetLastHeartbeat()
     {
         return _lastHeartbeat;
     }
