@@ -1152,6 +1152,14 @@ install_relay_nat_support() {
             echo "⚠ Warning: Could not install conntrack (optional)"
         }
     fi
+
+    # Install netfilter-persistent if not present
+    if ! command -v netfilter-persistent &> /dev/null; then
+        echo "→ Installing netfilter-persistent..."
+        apt-get install -y netfilter-persistent > /dev/null 2>&1 || {
+            echo "⚠ Warning: Could not install netfilter-persistent (optional)"
+        }
+    fi
     
     # Copy relay NAT manager script from file
     echo "→ Installing relay NAT manager..."
