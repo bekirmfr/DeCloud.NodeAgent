@@ -222,12 +222,14 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             var dashboardCss = await LoadExternalTemplateAsync("dashboard.css", ct);
             var dashboardJs = await LoadExternalTemplateAsync("dashboard.js", ct);
             var relayApi = await LoadExternalTemplateAsync("relay-api.py", ct);
+            var relayHttpProxyContent = await LoadExternalTemplateAsync("relay-http-proxy.py", ct);
 
             // Replace placeholders with properly indented content
             var result = ReplaceWithIndentation(template, "__DASHBOARD_HTML__", dashboardHtml);
             result = ReplaceWithIndentation(result, "__DASHBOARD_CSS__", dashboardCss);
             result = ReplaceWithIndentation(result, "__DASHBOARD_JS__", dashboardJs);
             result = ReplaceWithIndentation(result, "__RELAY_API__", relayApi);
+            result = ReplaceWithIndentation(result, "__RELAY_HTTP_PROXY__", relayHttpProxyContent);
 
             _logger.LogInformation(
                 "✓ Injected external templates: " +
