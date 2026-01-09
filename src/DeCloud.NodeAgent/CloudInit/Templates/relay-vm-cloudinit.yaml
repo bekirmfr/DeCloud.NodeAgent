@@ -250,20 +250,12 @@ runcmd:
   - sysctl -p
   
   # Configure firewall (UFW) for relay functionality  
-  - ufw default deny incoming
-  - ufw default allow outgoing
-  - ufw default allow routed  # CRITICAL: Allow forwarded traffic
-  - ufw allow 22/tcp comment "SSH"
-  - ufw allow 51820/udp comment "WireGuard"
-  - ufw allow 80/tcp comment "HTTP Proxy"
-  - ufw allow 8080/tcp comment "Relay API"
-  
-  # Allow forwarding on WireGuard interface (must be before enable)
-  - ufw route allow in on wg-relay-server
-  - ufw route allow out on wg-relay-server
-  
-  # Enable UFW
-  - ufw --force enable
+  # Disable UFW to avoid chain order conflicts with WireGuard
+  # Note: WireGuard PostUp/PreDown rules handle packet filtering
+  # Host-level firewall provides primary security
+  - ufw disable || true
+  - systemctl stop ufw || true
+  - systemctl disable ufw || true
   
   # Enable and start QEMU guest agent
   - systemctl enable qemu-guest-agent
