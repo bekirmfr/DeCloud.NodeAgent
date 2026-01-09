@@ -118,6 +118,7 @@ public class HeartbeatService : BackgroundService
             {
                 try
                 {
+                    var actualState = vm.State; //Fetvh actual virsh state using CommandExecutor
                     // Get current usage metrics if VM is running
                     var usage = vm.State == VmState.Running
                         ? await _vmManager.GetVmUsageAsync(vm.VmId, ct)

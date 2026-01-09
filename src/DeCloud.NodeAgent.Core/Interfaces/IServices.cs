@@ -54,7 +54,7 @@ public interface IVmManager
     Task<VmInstance?> GetVmAsync(string vmId, CancellationToken ct = default);
     Task<List<VmInstance>> GetAllVmsAsync(CancellationToken ct = default);
     Task<VmResourceUsage> GetVmUsageAsync(string vmId, CancellationToken ct = default);
-    
+    Task ReconcileWithLibvirtAsync(CancellationToken ct = default);
     Task<bool> VmExistsAsync(string vmId, CancellationToken ct = default);
     Task<string?> GetVmIpAddressAsync(string vmId, CancellationToken ct = default);
     /// <summary>

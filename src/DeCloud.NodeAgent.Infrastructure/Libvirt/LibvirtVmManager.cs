@@ -240,7 +240,6 @@ public class LibvirtVmManager : IVmManager
 
             var vmDir = Path.Combine(_options.VmStoragePath, vmId);
             string? ownerId = null;
-            string? leaseId = null;
             string? vmName = null;
 
             var metadataPath = Path.Combine(vmDir, "metadata.json");
@@ -325,7 +324,7 @@ public class LibvirtVmManager : IVmManager
         _logger.LogDebug("Next VNC port set to {Port}", _nextVncPort);
     }
 
-    private async Task<VmState> GetVmStateFromLibvirtAsync(string vmId, CancellationToken ct)
+    public async Task<VmState> GetVmStateFromLibvirtAsync(string vmId, CancellationToken ct)
     {
         var result = await _executor.ExecuteAsync("virsh", $"domstate {vmId}", ct);
         if (!result.Success) return VmState.Stopped;

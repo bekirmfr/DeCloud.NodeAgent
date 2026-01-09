@@ -1,6 +1,7 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.AspNetCore.Mvc;
+using Nethereum.Contracts.QueryHandlers.MultiCall;
 
 namespace DeCloud.NodeAgent.Controllers;
 
@@ -53,6 +54,23 @@ public class VmsController : ControllerBase
             return BadRequest(result);
         
         return CreatedAtAction(nameof(Get), new { vmId = result.VmId }, result);
+    }
+
+    [HttpPost]
+    public async Task<ActionResult<VmOperationResult>> Sync(CancellationToken ct)
+    {
+        _logger.LogInformation("API: Syncing all vms");
+        try
+        {
+            await _vmManager.ReconcileWithLibvirtAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "API: Error during VM sync");
+            return BadRequest("Failed to sync virtual machines");
+        }            
+
+        return Ok("");
     }
 
     /// <summary>
