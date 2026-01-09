@@ -23,29 +23,44 @@ log() {
 clean_old_rules() {
     log "Cleaning old relay NAT rules..."
     
-    # Remove NAT PREROUTING rules for port 51820
-    while iptables -t nat -C PREROUTING -p udp --dport 51820 -j DNAT 2>/dev/null; do
-        log "  Removing old PREROUTING rule"
-        iptables -t nat -D PREROUTING -p udp --dport 51820 -j DNAT 2>/dev/null || true
-    done
+    # Remove NAT PREROUTING rules for port 51820 (using line numbers)
+    # This works regardless of interface specification or destination
+    local old_prerouting=$(iptables -t nat -L PREROUTING -n --line-numbers | grep "dpt:51820" | grep "DNAT" | awk '{print $1}' | sort -rn)
+    if [ -n "$old_prerouting" ]; then
+        for line in $old_prerouting; do
+            log "  Removing old PREROUTING rule (line $line)"
+            iptables -t nat -D PREROUTING "$line" 2>/dev/null || true
+        done
+    else
+        log "  No old PREROUTING rules found"
+    fi
     
     # Remove NAT POSTROUTING rules for relay VMs
     local old_postrouting=$(iptables -t nat -L POSTROUTING -n --line-numbers | grep "51820.*192.168.122" | awk '{print $1}' | sort -rn)
-    for line in $old_postrouting; do
-        log "  Removing old POSTROUTING rule (line $line)"
-        iptables -t nat -D POSTROUTING "$line" 2>/dev/null || true
-    done
+    if [ -n "$old_postrouting" ]; then
+        for line in $old_postrouting; do
+            log "  Removing old POSTROUTING rule (line $line)"
+            iptables -t nat -D POSTROUTING "$line" 2>/dev/null || true
+        done
+    else
+        log "  No old POSTROUTING rules found"
+    fi
     
     # Remove FORWARD rules for port 51820 on 192.168.122.*
     local old_forward=$(iptables -L FORWARD -n --line-numbers | grep "dpt:51820" | grep "192.168.122" | awk '{print $1}' | sort -rn)
-    for line in $old_forward; do
-        log "  Removing old FORWARD rule (line $line)"
-        iptables -D FORWARD "$line" 2>/dev/null || true
-    done
+    if [ -n "$old_forward" ]; then
+        for line in $old_forward; do
+            log "  Removing old FORWARD rule (line $line)"
+            iptables -D FORWARD "$line" 2>/dev/null || true
+        done
+    else
+        log "  No old FORWARD rules found"
+    fi
     
     # Clear connection tracking for port 51820
     log "  Clearing connection tracking for port 51820"
     conntrack -D -p udp --dport 51820 2>/dev/null || true
+    conntrack -D -p udp --sport 51820 2>/dev/null || true
     
     log "✓ Cleanup complete"
 }
