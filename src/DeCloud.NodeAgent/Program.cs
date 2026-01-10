@@ -142,6 +142,7 @@ builder.Services.AddHostedService<HeartbeatService>();
 builder.Services.AddHostedService<WireGuardConfigManager>();
 builder.Services.AddHostedService<CommandProcessorService>();
 builder.Services.AddHostedService<DatabaseMaintenanceService>();
+builder.Services.AddHostedService<VmHealthService>();
 
 // Initialize VM Manager on startup to load VMs from database
 builder.Services.AddHostedService<VmManagerInitializationService>();

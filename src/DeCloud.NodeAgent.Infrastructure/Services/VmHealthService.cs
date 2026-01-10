@@ -3,7 +3,6 @@ using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using static AuthenticationManager;
 
 namespace DeCloud.NodeAgent.Infrastructure.Services
 {
