@@ -79,6 +79,16 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
             foreach (var vm in relayVms)
             {
                 var natRules = await _natRuleManager.GetExistingRulesAsync();
+                var vmIp = await _vmManager.GetVmIpAddressAsync(vm.VmId);
+
+                if (vmIp == null)
+                {
+                    _logger.LogWarning(
+                        "Relay VM {VmId} has no IP address assigned yet - skipping NAT check",
+                        vm.VmId);
+
+                    continue;
+                }
 
                 if (natRules.Count > 0)
                 {
@@ -86,7 +96,7 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                         "Relay VM {VmId} at {Ip} missing NAT rules - reconfiguring",
                         vm.VmId, vm.Spec.IpAddress);
 
-                    await _natRuleManager.AddPortForwardingAsync(vm.Spec.IpAddress, 51820, "udp");
+                    await _natRuleManager.AddPortForwardingAsync(vmIp, 51820, "udp");
                 }
             }
         }
