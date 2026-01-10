@@ -98,23 +98,6 @@ public class RelayNatCallbackController : ControllerBase
 
             if (success)
             {
-                _logger.LogInformation("Saving NAT rules persistently...");
-
-                var saveResult = await _commandExecutor.ExecuteAsync(
-                    "netfilter-persistent",
-                    "save");
-
-                if (saveResult.Success)
-                {
-                    _logger.LogInformation("✓ NAT rules saved persistently");
-                }
-                else
-                {
-                    _logger.LogWarning(
-                        "⚠️ Failed to save NAT rules persistently: {Error}",
-                        saveResult.StandardError);
-                }
-
                 _logger.LogInformation(
                     "✓ Relay VM {VmId} NAT configured successfully via callback: " +
                     "Public UDP/51820 → {VmIp}:51820",
