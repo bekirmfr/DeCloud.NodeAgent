@@ -71,7 +71,6 @@ public class VmInstance
     // Runtime info
     public int? Pid { get; set; }  // QEMU process ID
     public int? VncPort { get; set; }
-    public string? SpicePort { get; set; }
 
     // Resource usage
     public VmResourceUsage CurrentUsage { get; set; } = new();
@@ -97,6 +96,7 @@ public enum VmState
     Stopping,
     Stopped,
     Failed,
+    NotFound,
     Deleted,
     Migrating
 }

@@ -47,6 +47,7 @@ public interface IVmManager
     Task<VmOperationResult> CreateVmAsync(VmSpec spec, string? password = null, CancellationToken ct = default);
     Task<VmOperationResult> StartVmAsync(string vmId, CancellationToken ct = default);
     Task<VmOperationResult> StopVmAsync(string vmId, bool force = false, CancellationToken ct = default);
+    Task<VmOperationResult> RestartVmAsync(string vmId, bool force = false, CancellationToken ct = default);
     Task<VmOperationResult> DeleteVmAsync(string vmId, CancellationToken ct = default);
     Task<VmOperationResult> PauseVmAsync(string vmId, CancellationToken ct = default);
     Task<VmOperationResult> ResumeVmAsync(string vmId, CancellationToken ct = default);
@@ -54,7 +55,7 @@ public interface IVmManager
     Task<VmInstance?> GetVmAsync(string vmId, CancellationToken ct = default);
     Task<List<VmInstance>> GetAllVmsAsync(CancellationToken ct = default);
     Task<VmResourceUsage> GetVmUsageAsync(string vmId, CancellationToken ct = default);
-    Task ReconcileWithLibvirtAsync(CancellationToken ct = default);
+    Task ReconcileAllWithLibvirtAsync(CancellationToken ct = default);
     Task<bool> VmExistsAsync(string vmId, CancellationToken ct = default);
     Task<string?> GetVmIpAddressAsync(string vmId, CancellationToken ct = default);
     /// <summary>

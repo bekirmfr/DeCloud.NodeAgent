@@ -196,6 +196,30 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
+  # Systemd service for NAT callback (runs on every boot)
+  - path: /etc/systemd/system/decloud-relay-nat-callback.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=DeCloud Relay NAT Configuration Callback
+      After=network-online.target
+      Wants=network-online.target
+      
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/notify-nat-ready.sh
+      RemainAfterExit=yes
+      StandardOutput=journal
+      StandardError=journal
+      
+      # Retry if node agent isn't ready
+      Restart=on-failure
+      RestartSec=10s
+      StartLimitBurst=5
+      
+      [Install]
+      WantedBy=multi-user.target
+
   # Dashboard static files (loaded from external templates)
   - path: /opt/decloud-relay/static/dashboard.html
     permissions: '0644'
@@ -236,6 +260,7 @@ write_files:
         "wireguard_endpoint": "__PUBLIC_IP__:51820",
         "wireguard_public_key": "__WIREGUARD_PUBLIC_KEY__",
         "orchestrator_public_key": "__ORCHESTRATOR_PUBLIC_KEY__",
+        "relay_http_proxy": "__RELAY_HTTP_PROXY__",
         "created_at": "__TIMESTAMP__",
         "version": "3.0"
       }
@@ -330,6 +355,14 @@ runcmd:
     
   - chmod +x /usr/local/bin/notify-orchestrator.sh
   - /usr/local/bin/notify-orchestrator.sh &
+
+  # Create callback script for NAT callback
+  - chmod +x /usr/local/bin/notify-nat-ready.sh
+  
+  # Enable systemd service instead of running directly
+  - systemctl daemon-reload
+  - systemctl enable decloud-relay-nat-callback.service
+  - systemctl start decloud-relay-nat-callback.service
 
   # Notify node agent that relay VM is ready for NAT configuration
   - |

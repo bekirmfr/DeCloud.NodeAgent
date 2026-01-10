@@ -1,7 +1,5 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
-using DeCloud.NodeAgent.Infrastructure.Network;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Logging;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -16,13 +14,16 @@ namespace DeCloud.NodeAgent.Controllers;
 public class RelayNatCallbackController : ControllerBase
 {
     private readonly INatRuleManager _natRuleManager;
+    private readonly ICommandExecutor _commandExecutor;
     private readonly ILogger<RelayNatCallbackController> _logger;
 
     public RelayNatCallbackController(
         INatRuleManager natRuleManager,
+        ICommandExecutor commandExecutor,
         ILogger<RelayNatCallbackController> logger)
     {
         _natRuleManager = natRuleManager;
+        _commandExecutor = commandExecutor;
         _logger = logger;
     }
 
@@ -97,6 +98,23 @@ public class RelayNatCallbackController : ControllerBase
 
             if (success)
             {
+                _logger.LogInformation("Saving NAT rules persistently...");
+
+                var saveResult = await _commandExecutor.ExecuteAsync(
+                    "netfilter-persistent",
+                    "save");
+
+                if (saveResult.Success)
+                {
+                    _logger.LogInformation("✓ NAT rules saved persistently");
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "⚠️ Failed to save NAT rules persistently: {Error}",
+                        saveResult.StandardError);
+                }
+
                 _logger.LogInformation(
                     "✓ Relay VM {VmId} NAT configured successfully via callback: " +
                     "Public UDP/51820 → {VmIp}:51820",

@@ -113,7 +113,7 @@ public class LibvirtVmManager : IVmManager
             // =====================================================
             if (_options.ReconcileOnStartup)
             {
-                await ReconcileWithLibvirtAsync(ct);
+                await ReconcileAllWithLibvirtAsync(ct);
             }
 
             // =====================================================
@@ -130,7 +130,7 @@ public class LibvirtVmManager : IVmManager
         }
     }
 
-    public async Task ReconcileWithLibvirtAsync(CancellationToken ct = default)
+    public async Task ReconcileAllWithLibvirtAsync(CancellationToken ct = default)
     {
         _logger.LogInformation("Reconciling VM state with libvirt...");
 
@@ -154,6 +154,8 @@ public class LibvirtVmManager : IVmManager
             // Update state for VMs we know about
             foreach (var vmId in libvirtVmIds)
             {
+                var isDirty = false;
+
                 var actualState = await GetVmStateFromLibvirtAsync(vmId, ct);
 
                 if (_vms.ContainsKey(vmId))
@@ -165,8 +167,7 @@ public class LibvirtVmManager : IVmManager
                             vmId, vm.State, actualState);
                         vm.State = actualState;
 
-                        // Persist state change
-                        await _repository.SaveVmAsync(vm);
+                        isDirty = true;
                     }
                 }
                 else
@@ -177,13 +178,16 @@ public class LibvirtVmManager : IVmManager
                     {
                         _vms[vmId] = vmInstance;
 
-                        // NEW: Save recovered VM to database
-                        await _repository.SaveVmAsync(vmInstance);
-
                         _logger.LogWarning("Recovered orphaned VM {VmId} from libvirt (state: {State})",
                             vmId, vmInstance.State);
+
+                        isDirty = true;
                     }
                 }
+
+                // Save recovered VM to database
+                if (isDirty)
+                    await _repository.SaveVmAsync(_vms[vmId]);
             }
 
             // Check for VMs in our tracking that no longer exist in libvirt
@@ -196,7 +200,7 @@ public class LibvirtVmManager : IVmManager
                     _logger.LogWarning("VM {VmId} missing from libvirt - marking as failed", vmId);
                     vm.State = VmState.Failed;
 
-                    // NEW: Update database
+                    // Update database
                     await _repository.UpdateVmStateAsync(vmId, VmState.Failed);
                 }
             }
@@ -499,6 +503,26 @@ public class LibvirtVmManager : IVmManager
             // Update database with all paths
             await _repository.SaveVmAsync(instance);
 
+            var autostartResult = await _executor.ExecuteAsync("virsh", $"autostart {spec.Id}", ct);
+
+            if (autostartResult.Success)
+            {
+                _logger.LogInformation(
+                    "✓ VM {VmId} configured for auto-start on host boot",
+                    spec.Id);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "⚠ Failed to enable auto-start for VM {VmId}: {Error}",
+                    spec.Id, autostartResult.StandardError);
+                // Non-fatal - continue with VM creation
+            }
+
+            _logger.LogInformation(
+                "✓ VM {VmId} configured for auto-start on host boot",
+                spec.Id);
+
             // =====================================================
             // STEP 7: Start the VM
             // =====================================================
@@ -682,6 +706,27 @@ public class LibvirtVmManager : IVmManager
 
         _logger.LogError("Failed to stop VM {VmId}: {Error}", vmId, result.StandardError);
         return VmOperationResult.Fail(vmId, result.StandardError, "STOP_FAILED");
+    }
+
+    public async Task<VmOperationResult> RestartVmAsync(string vmId, bool force = false, CancellationToken ct = default)
+    {
+        if (!_initialized) await InitializeAsync(ct);
+        _logger.LogInformation("Restarting VM {VmId} (force={Force})", vmId, force);
+        var command = force ? "reset" : "reboot";
+        var result = await _executor.ExecuteAsync("virsh", $"{command} {vmId}", ct);
+        if (result.Success)
+        {
+            if (_vms.TryGetValue(vmId, out var instance))
+            {
+                instance.State = VmState.Starting;
+                instance.StartedAt = DateTime.UtcNow;
+                // Persist state change
+                await _repository.UpdateVmStateAsync(vmId, VmState.Starting);
+            }
+            return VmOperationResult.Ok(vmId, VmState.Running);
+        }
+        _logger.LogError("Failed to restart VM {VmId}: {Error}", vmId, result.StandardError);
+        return VmOperationResult.Fail(vmId, result.StandardError, "RESTART_FAILED");
     }
 
     public async Task<VmOperationResult> DeleteVmAsync(string vmId, CancellationToken ct = default)

@@ -62,7 +62,7 @@ public class VmsController : ControllerBase
         _logger.LogInformation("API: Syncing all vms");
         try
         {
-            await _vmManager.ReconcileWithLibvirtAsync(ct);
+            await _vmManager.ReconcileAllWithLibvirtAsync(ct);
         }
         catch (Exception ex)
         {
