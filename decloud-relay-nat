@@ -176,6 +176,40 @@ save_rules() {
 }
 
 # =====================================================
+# Function: Chec NAT Rules for Specific VM
+# =====================================================
+check_nat_for_vm() {
+    local VM_IP="$1"
+    
+    if [ -z "$VM_IP" ]; then
+        log "ERROR: VM IP not provided"
+        exit 1
+    fi
+    
+    log "Checking NAT rules for VM: $VM_IP"
+    
+    # Check PREROUTING
+    local prerouting=$(iptables -t nat -L PREROUTING -n | grep "DNAT.*$VM_IP:51820")
+    
+    # Check POSTROUTING
+    local postrouting=$(iptables -t nat -L POSTROUTING -n | grep "MASQUERADE.*$VM_IP")
+    
+    # Check FORWARD
+    local forward=$(iptables -L FORWARD -n | grep "ACCEPT.*$VM_IP.*dpt:51820")
+    
+    if [ -n "$prerouting" ] && [ -n "$postrouting" ] && [ -n "$forward" ]; then
+        log "✓ NAT rules complete for $VM_IP"
+        exit 0
+    else
+        log "✗ NAT rules incomplete for $VM_IP"
+        [ -z "$prerouting" ] && log "  Missing: PREROUTING rule"
+        [ -z "$postrouting" ] && log "  Missing: POSTROUTING rule"
+        [ -z "$forward" ] && log "  Missing: FORWARD rule"
+        exit 1
+    fi
+}
+
+# =====================================================
 # Function: Show Current NAT Rules
 # =====================================================
 show_rules() {
@@ -292,6 +326,14 @@ case "${1:-}" in
     
     show|status)
         show_rules
+        ;;
+
+    check)
+        if [ -z "${2:-}" ]; then
+            echo "Usage: $0 check <relay-vm-ip>"
+            exit 1
+        fi
+        check_nat_for_vm "$2"
         ;;
     
     test)

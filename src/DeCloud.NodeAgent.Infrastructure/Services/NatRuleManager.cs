@@ -306,6 +306,45 @@ public class NatRuleManager : INatRuleManager
         }
     }
 
+    public async Task<bool> HasRulesForVmAsync(string vmIp)
+    {
+        try
+        {
+            // Run the show command to check existing rules
+            var result = await _executor.ExecuteAsync(
+                "/usr/local/bin/decloud-relay-nat",
+                $"check {vmIp}");
+
+            if (!result.Success)
+            {
+                _logger.LogDebug("NAT check failed for {VmIp}, assuming rules missing", vmIp);
+                return false;
+            }
+
+            // Parse output to verify all three required rules exist
+            var output = result.StandardOutput;
+            bool hasPreroutingRule = output.Contains($"DNAT") && output.Contains($"{vmIp}:51820");
+            bool hasPostroutingRule = output.Contains($"MASQUERADE") && output.Contains(vmIp);
+            bool hasForwardRule = output.Contains($"ACCEPT") && output.Contains($"{vmIp}") && output.Contains("51820");
+
+            var allRulesPresent = hasPreroutingRule && hasPostroutingRule && hasForwardRule;
+
+            if (!allRulesPresent)
+            {
+                _logger.LogWarning(
+                    "Incomplete NAT rules for {VmIp}: PREROUTING={PreRouting}, POSTROUTING={PostRouting}, FORWARD={Forward}",
+                    vmIp, hasPreroutingRule, hasPostroutingRule, hasForwardRule);
+            }
+
+            return allRulesPresent;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error checking NAT rules for {VmIp}", vmIp);
+            return false;
+        }
+    }
+
     /// <summary>
     /// Detects the public network interface
     /// </summary>
