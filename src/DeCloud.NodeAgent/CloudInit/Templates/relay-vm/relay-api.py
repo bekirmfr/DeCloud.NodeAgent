@@ -90,43 +90,110 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
         self.serve_static_file('/static/dashboard.html')
     
     def serve_static_file(self, path):
-        """Serve static file with template variable replacement"""
+        """Serve static file with intelligent caching"""
         # Extract filename from path
         if path.startswith('/static/'):
             filename = path[8:]  # Remove '/static/'
         else:
             filename = os.path.basename(path)
-        
+    
         file_path = os.path.join(STATIC_DIR, filename)
-        
+    
         try:
             # Check if file exists
             if not os.path.exists(file_path):
                 self.send_error_response(404, 'File Not Found', f'File {filename} not found')
                 return
-            
+        
+            # Get file stats for caching
+            stat_info = os.stat(file_path)
+            mtime = stat_info.st_mtime
+            size = stat_info.st_size
+        
+            # Generate ETag
+            etag = f'"{int(mtime)}-{size}"'
+            last_modified = self.format_timestamp(mtime)
+        
+            # Check conditional requests
+            if_none_match = self.headers.get('If-None-Match')
+            if_modified_since = self.headers.get('If-Modified-Since')
+        
+            if if_none_match == etag or if_modified_since == last_modified:
+                # Return 304 Not Modified
+                self.send_response(304)
+                self.send_header('ETag', etag)
+                self.send_header('Last-Modified', last_modified)
+                self.send_header('Cache-Control', self.get_cache_control(filename))
+                self.end_headers()
+                return
+        
             # Read file content
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-            
-            # Replace template variables
-            content = self.replace_template_variables(content)
-            
+        
+            # Replace template variables (only for HTML)
+            if filename.endswith('.html'):
+                content = self.replace_template_variables(content)
+        
             # Determine content type
             content_type = self.get_content_type(filename)
-            
-            # Send response
+        
+            # Determine cache control based on file type
+            cache_control = self.get_cache_control(filename)
+        
+            # Send response with caching headers
             self.send_response(200)
             self.send_header('Content-Type', content_type)
             self.send_header('Content-Length', len(content.encode('utf-8')))
-            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.send_header('Cache-Control', cache_control)
+            self.send_header('ETag', etag)
+            self.send_header('Last-Modified', last_modified)
             self.send_header('X-Content-Type-Options', 'nosniff')
+        
+            # Add CORS headers if needed
+            self.send_header('Access-Control-Allow-Origin', '*')
+        
             self.end_headers()
             self.wfile.write(content.encode('utf-8'))
-            
+        
         except Exception as e:
             logger.error(f"Error serving file {file_path}: {e}")
             self.send_error_response(500, 'Error Reading File', str(e))
+
+    def get_cache_control(self, filename):
+        """Get appropriate Cache-Control header based on file type"""
+        # Determine file extension
+        ext = os.path.splitext(filename)[1].lower()
+    
+        # Cache policies by file type
+        cache_policies = {
+            # HTML files: short cache, must revalidate
+            '.html': 'public, max-age=300, must-revalidate',  # 5 minutes
+        
+            # CSS and JS: medium cache with revalidation
+            '.css': 'public, max-age=86400, must-revalidate',  # 1 day
+            '.js': 'public, max-age=86400, must-revalidate',   # 1 day
+        
+            # Images: long cache
+            '.png': 'public, max-age=2592000, immutable',  # 30 days
+            '.jpg': 'public, max-age=2592000, immutable',
+            '.jpeg': 'public, max-age=2592000, immutable',
+            '.gif': 'public, max-age=2592000, immutable',
+            '.svg': 'public, max-age=2592000, immutable',
+            '.ico': 'public, max-age=2592000, immutable',
+        
+            # Fonts: long cache
+            '.woff': 'public, max-age=2592000, immutable',
+            '.woff2': 'public, max-age=2592000, immutable',
+            '.ttf': 'public, max-age=2592000, immutable',
+        }
+    
+        return cache_policies.get(ext, 'public, max-age=3600, must-revalidate')
+
+    def format_timestamp(self, timestamp):
+        """Format Unix timestamp to HTTP date format"""
+        from email.utils import formatdate
+        return formatdate(timestamp, usegmt=True)
     
     def replace_template_variables(self, content):
         """Replace template variables in content"""
@@ -164,33 +231,39 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
     # ==================== API Endpoints ====================
     
     def serve_wireguard_status(self):
-        """Get WireGuard interface status"""
+        """Serve WireGuard status with short cache"""
         try:
-            # Execute wg show dump
-            result = subprocess.run(
-                ['wg', 'show', WIREGUARD_INTERFACE, 'dump'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            
-            if result.returncode != 0:
-                self.send_json_response({
-                    'error': 'WireGuard command failed',
-                    'interface': WIREGUARD_INTERFACE,
-                    'peers': []
-                }, status_code=500)
+            data = get_wireguard_status()
+        
+            # Generate ETag from data hash
+            import hashlib
+            data_str = json.dumps(data, sort_keys=True)
+            etag = f'"{hashlib.md5(data_str.encode()).hexdigest()[:16]}"'
+        
+            # Check If-None-Match
+            if_none_match = self.headers.get('If-None-Match')
+            if if_none_match == etag:
+                self.send_response(304)
+                self.send_header('ETag', etag)
+                self.send_header('Cache-Control', 'private, max-age=10, must-revalidate')
+                self.end_headers()
                 return
-            
-            # Parse WireGuard dump output
-            status = self.parse_wireguard_dump(result.stdout)
-            self.send_json_response(status)
-            
-        except subprocess.TimeoutExpired:
-            self.send_error_response(504, 'Command Timeout', 'WireGuard command timed out')
+        
+            # Send full response
+            json_data = json.dumps(data, indent=2)
+        
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', len(json_data.encode('utf-8')))
+            self.send_header('Cache-Control', 'private, max-age=10, must-revalidate')
+            self.send_header('ETag', etag)
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.end_headers()
+            self.wfile.write(json_data.encode('utf-8'))
+        
         except Exception as e:
-            logger.error(f"WireGuard status error: {e}", exc_info=True)
-            self.send_error_response(500, 'WireGuard Error', str(e))
+            logger.error(f"Error getting WireGuard status: {e}")
+            self.send_error_response(500, 'Internal Error', str(e))
     
     def parse_wireguard_dump(self, dump_output):
         """Parse WireGuard dump output into structured data"""

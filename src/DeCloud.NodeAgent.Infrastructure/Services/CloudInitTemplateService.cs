@@ -1,5 +1,4 @@
-﻿using System.Text;
-using DeCloud.NodeAgent.Core.Interfaces;
+﻿using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Logging;
 using System.Text.RegularExpressions;
@@ -149,10 +148,22 @@ public class CloudInitTemplateService : ICloudInitTemplateService
                 $"No cloud-init template found for VM type {vmType}");
         }
 
-        // For relay VMs, inject external templates (dashboard and API)
-        if (vmType == VmType.Relay)
+        switch(vmType)
         {
-            template = await InjectRelayExternalTemplatesAsync(template, ct);
+            case VmType.General:
+                template = await InjectGeneralExternalTemplatesAsync(template, ct);
+                break;
+            case VmType.Dht:
+                break;
+            case VmType.Inference:
+                // Future VM types can have their own external templates if needed
+                break;
+            case VmType.Relay:
+                template = await InjectRelayExternalTemplatesAsync(template, ct);
+                break;
+            default:
+
+                break;
         }
 
         // Build template variables
@@ -207,6 +218,41 @@ public class CloudInitTemplateService : ICloudInitTemplateService
     }
 
     /// <summary>
+    /// Load and inject external template files for general VMs with proper YAML indentation
+    /// </summary>
+    private async Task<string> InjectGeneralExternalTemplatesAsync(
+        string template,
+        CancellationToken ct)
+    {
+        _logger.LogInformation("Loading external general VM templates...");
+
+        try
+        {
+            // Load external template files
+            var indexHtml = await LoadExternalTemplateAsync("index.html", "general-vm", ct);
+            var generalApi = await LoadExternalTemplateAsync("general-api.py", "general-vm", ct);
+
+            // Replace placeholders with properly indented content
+            var result = ReplaceWithIndentation(template, "__INDEX_HTML__", indexHtml);
+            result = ReplaceWithIndentation(result, "__WELCOME_SERVER_PY__", generalApi);
+
+            _logger.LogInformation(
+                "✓ Injected external templates: " +
+                "HTML ({HtmlSize} chars), API ({ApiSize} chars)",
+                indexHtml.Length, generalApi.Length);
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load external general VM templates");
+            throw new InvalidOperationException(
+                "Failed to load general VM templates. Ensure all template files exist in " +
+                $"{Path.Combine(_templateBasePath, "relay-vm")}/", ex);
+        }
+    }
+
+    /// <summary>
     /// Load and inject external template files for relay VMs with proper YAML indentation
     /// </summary>
     private async Task<string> InjectRelayExternalTemplatesAsync(
@@ -218,12 +264,12 @@ public class CloudInitTemplateService : ICloudInitTemplateService
         try
         {
             // Load external template files
-            var dashboardHtml = await LoadExternalTemplateAsync("dashboard.html", ct);
-            var dashboardCss = await LoadExternalTemplateAsync("dashboard.css", ct);
-            var dashboardJs = await LoadExternalTemplateAsync("dashboard.js", ct);
-            var relayApi = await LoadExternalTemplateAsync("relay-api.py", ct);
-            var relayHttpProxyContent = await LoadExternalTemplateAsync("relay-http-proxy.py", ct);
-            var notifyNatReady = await LoadExternalTemplateAsync("notify-nat-ready.sh", ct);
+            var dashboardHtml = await LoadExternalTemplateAsync("dashboard.html", "relay-vm", ct);
+            var dashboardCss = await LoadExternalTemplateAsync("dashboard.css", "relay-vm", ct);
+            var dashboardJs = await LoadExternalTemplateAsync("dashboard.js", "relay-vm", ct);
+            var relayApi = await LoadExternalTemplateAsync("relay-api.py", "relay-vm", ct);
+            var relayHttpProxyContent = await LoadExternalTemplateAsync("relay-http-proxy.py", "relay-vm", ct);
+            var notifyNatReady = await LoadExternalTemplateAsync("notify-nat-ready.sh", "relay-vm", ct);
 
             // Replace placeholders with properly indented content
             var result = ReplaceWithIndentation(template, "__DASHBOARD_HTML__", dashboardHtml);
@@ -282,6 +328,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
     /// </summary>
     private async Task<string> LoadExternalTemplateAsync(
         string filename,
+        string dirName,
         CancellationToken ct)
     {
         await _cacheLock.WaitAsync(ct);
@@ -295,7 +342,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             }
 
             // Load from disk
-            var templatePath = Path.Combine(_templateBasePath, "relay-vm", filename);
+            var templatePath = Path.Combine(_templateBasePath, dirName, filename);
 
             _logger.LogDebug("Loading external template: {Path}", templatePath);
 
