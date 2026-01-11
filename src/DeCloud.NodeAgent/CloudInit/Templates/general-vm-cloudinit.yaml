@@ -74,6 +74,7 @@ write_files:
       [Service]
       ExecStart=/usr/local/bin/welcome-server.py
       Restart=always
+      WorkingDirectory=/var/www
       StandardOutput=journal
       StandardError=journal
       

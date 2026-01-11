@@ -24,6 +24,74 @@ WIREGUARD_INTERFACE = "wg-relay-server"
 STATIC_DIR = "/opt/decloud-relay/static"
 LISTEN_PORT = 8080
 
+# ==================== Helper Functions ====================
+
+def get_wireguard_status():
+    """Get WireGuard interface status"""
+    try:
+        # Run wg show dump
+        result = subprocess.run(
+            ['wg', 'show', WIREGUARD_INTERFACE, 'dump'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        if result.returncode != 0:
+            logger.error(f"wg show failed: {result.stderr}")
+            return {
+                'interface': WIREGUARD_INTERFACE,
+                'relay_id': RELAY_ID,
+                'region': RELAY_REGION,
+                'peer_count': 0,
+                'max_capacity': RELAY_CAPACITY,
+                'available_slots': RELAY_CAPACITY,
+                'peers': []
+            }
+        
+        # Parse dump output
+        lines = result.stdout.strip().split('\n')
+        peers = []
+        
+        # Skip interface line (first line) and parse peers
+        for line in lines[1:]:
+            if not line.strip():
+                continue
+                
+            fields = line.split('\t')
+            if len(fields) >= 7:
+                peers.append({
+                    'public_key': fields[0][:16] + '...' if len(fields[0]) > 16 else fields[0],
+                    'endpoint': fields[2] if fields[2] != '(none)' else None,
+                    'allowed_ips': fields[3],
+                    'latest_handshake': int(fields[4]) if fields[4] and fields[4] != '0' else 0,
+                    'rx_bytes': int(fields[5]) if fields[5] else 0,
+                    'tx_bytes': int(fields[6]) if fields[6] else 0
+                })
+        
+        return {
+            'interface': WIREGUARD_INTERFACE,
+            'relay_id': RELAY_ID,
+            'region': RELAY_REGION,
+            'peer_count': len(peers),
+            'max_capacity': RELAY_CAPACITY,
+            'available_slots': max(0, RELAY_CAPACITY - len(peers)),
+            'peers': peers
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting WireGuard status: {e}", exc_info=True)
+        return {
+            'interface': WIREGUARD_INTERFACE,
+            'relay_id': RELAY_ID,
+            'region': RELAY_REGION,
+            'peer_count': 0,
+            'max_capacity': RELAY_CAPACITY,
+            'available_slots': RELAY_CAPACITY,
+            'peers': [],
+            'error': str(e)
+        }
+
 # ==================== Logging ====================
 logging.basicConfig(
     level=logging.INFO,
