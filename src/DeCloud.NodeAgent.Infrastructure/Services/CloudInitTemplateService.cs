@@ -223,7 +223,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             var dashboardJs = await LoadExternalTemplateAsync("dashboard.js", ct);
             var relayApi = await LoadExternalTemplateAsync("relay-api.py", ct);
             var relayHttpProxyContent = await LoadExternalTemplateAsync("relay-http-proxy.py", ct);
-            var relayNatReady = await LoadExternalTemplateAsync("relay-nat-ready.sh", ct);
+            var notifyNatReady = await LoadExternalTemplateAsync("notify-nat-ready.sh", ct);
 
             // Replace placeholders with properly indented content
             var result = ReplaceWithIndentation(template, "__DASHBOARD_HTML__", dashboardHtml);
@@ -231,7 +231,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             result = ReplaceWithIndentation(result, "__DASHBOARD_JS__", dashboardJs);
             result = ReplaceWithIndentation(result, "__RELAY_API__", relayApi);
             result = ReplaceWithIndentation(result, "__RELAY_HTTP_PROXY__", relayHttpProxyContent);
-            result = ReplaceWithIndentation(result, "__RELAY_NAT_READY__", relayNatReady);
+            result = ReplaceWithIndentation(result, "__NOTIFY_NAT_READY__", notifyNatReady);
 
             _logger.LogInformation(
                 "✓ Injected external templates: " +
