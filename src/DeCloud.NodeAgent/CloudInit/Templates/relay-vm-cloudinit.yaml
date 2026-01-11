@@ -1,7 +1,7 @@
 #cloud-config
 # DeCloud Relay VM Cloud-Init Configuration
 # This VM serves as a WireGuard relay for CGNAT nodes
-# Version: 3.0 (with comprehensive debug dashboard)
+# Version: 3.1 (FIXED - Proper NAT callback idempotency)
 
 hostname: __VM_NAME__
 manage_etc_hosts: true
@@ -196,29 +196,40 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
-  # Systemd service for NAT callback (runs on every boot)
+  # FIXED: Systemd service for NAT callback with proper idempotency
   - path: /etc/systemd/system/decloud-relay-nat-callback.service
     permissions: '0644'
     content: |
       [Unit]
       Description=DeCloud Relay NAT Configuration Callback
-      After=network-online.target
+      After=network-online.target cloud-final.service
       Wants=network-online.target
       
       [Service]
       Type=oneshot
+      # FIXED: Check if already completed before running
+      ExecStartPre=/bin/bash -c 'if [ -f /var/lib/decloud/nat-callback-complete ]; then echo "NAT callback already completed"; exit 0; fi'
       ExecStart=/usr/local/bin/notify-nat-ready.sh
+      # FIXED: Create marker file on success
+      ExecStartPost=/bin/bash -c 'mkdir -p /var/lib/decloud && touch /var/lib/decloud/nat-callback-complete'
       RemainAfterExit=yes
       StandardOutput=journal
       StandardError=journal
       
-      # Retry if node agent isn't ready
+      # FIXED: Reduced retry attempts and added timeout
       Restart=on-failure
-      RestartSec=10s
-      StartLimitBurst=5
+      RestartSec=5s
+      StartLimitBurst=3
+      TimeoutStartSec=30s
       
       [Install]
       WantedBy=multi-user.target
+
+  # FIXED: NAT callback script (injected as complete file, not placeholder)
+  - path: /usr/local/bin/notify-nat-ready.sh
+    permissions: '0755'
+    content: |
+      __NOTIFY_NAT_READY__
 
   # Dashboard static files (loaded from external templates)
   - path: /opt/decloud-relay/static/dashboard.html
@@ -262,7 +273,7 @@ write_files:
         "orchestrator_public_key": "__ORCHESTRATOR_PUBLIC_KEY__",
         "relay_http_proxy": "__RELAY_HTTP_PROXY__",
         "created_at": "__TIMESTAMP__",
-        "version": "3.0"
+        "version": "3.1"
       }
 
 # =====================================================
@@ -356,107 +367,13 @@ runcmd:
   - chmod +x /usr/local/bin/notify-orchestrator.sh
   - /usr/local/bin/notify-orchestrator.sh &
 
-  # Create callback script for NAT callback
-  - chmod +x /usr/local/bin/notify-nat-ready.sh
-  
-  # Enable systemd service instead of running directly
+  # Start NAT callback service via systemd
   - systemctl daemon-reload
   - systemctl enable decloud-relay-nat-callback.service
   - systemctl start decloud-relay-nat-callback.service
-
-  # Notify node agent that relay VM is ready for NAT configuration
-  - |
-    cat > /usr/local/bin/notify-nat-ready.sh <<'EOF'
-    #!/bin/bash
-    
-    # Dynamically detect the gateway IP (host from VM perspective)
-    # Method 1: Default route (most reliable)
-    GATEWAY_IP=$(ip route | grep default | awk '{print $3}' | head -1)
-
-    # Method 2: Parse route to external IP
-    if [ -z "$GATEWAY_IP" ]; then
-      GATEWAY_IP=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'via \K[\d.]+' | head -1)
-    fi
-
-    # Method 3: Fallback to common libvirt gateway
-    if [ -z "$GATEWAY_IP" ]; then
-      echo "⚠ Using fallback gateway 192.168.122.1"
-      GATEWAY_IP="192.168.122.1"
-    fi
-    
-    NODE_AGENT_URL="http://${GATEWAY_IP}:5100"
-    VM_ID="__VM_ID__"
-    
-    echo "Detected gateway IP: $GATEWAY_IP"
-    echo "Node agent URL: $NODE_AGENT_URL"
-    
-    # Wait for network to be fully up and obtain IP using dynamic interface detection
-    echo "Waiting for IP address..."
-    for i in {1..30}; do
-      # Dynamically detect the default route interface (works for eth0, enp1s0, ens3, etc.)
-      DEFAULT_INTERFACE=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'dev \K\S+' | head -1)
-      
-      if [ -n "$DEFAULT_INTERFACE" ]; then
-        VM_IP=$(ip -4 addr show "$DEFAULT_INTERFACE" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
-        
-        if [ -n "$VM_IP" ]; then
-          echo "✓ Obtained IP address: $VM_IP on interface $DEFAULT_INTERFACE"
-          break
-        fi
-      fi
-      sleep 2
-    done
-    
-    if [ -z "$VM_IP" ]; then
-      echo "❌ Failed to obtain IP address after 60 seconds"
-      exit 1
-    fi
-    
-    # Use host machine ID for authentication (passed from node agent)
-    MACHINE_ID="__HOST_MACHINE_ID__"
-
-    echo "Using machine ID for authentication: ${MACHINE_ID:0:8}..."
-    
-    # Compute callback token using HMAC-SHA256
-    MESSAGE="${VM_ID}:${VM_IP}"
-    TOKEN=$(echo -n "$MESSAGE" | openssl dgst -sha256 -hmac "$MACHINE_ID" -binary | base64)
-    
-    echo "Notifying node agent at $NODE_AGENT_URL..."
-    
-    # Call node agent NAT callback endpoint
-    RESPONSE=$(curl -X POST "$NODE_AGENT_URL/api/relay/nat-ready" \
-      -H "Content-Type: application/json" \
-      -H "X-Relay-Token: $TOKEN" \
-      -d "{
-        \"vmId\": \"$VM_ID\",
-        \"vmIp\": \"$VM_IP\"
-      }" \
-      --max-time 10 \
-      --retry 3 \
-      --retry-delay 5 \
-      -w "\nHTTP_CODE:%{http_code}" \
-      2>&1)
-    
-    HTTP_CODE=$(echo "$RESPONSE" | grep -oP 'HTTP_CODE:\K\d+')
-    
-    if [ "$HTTP_CODE" = "200" ]; then
-      echo "✓ Successfully notified node agent - NAT rule configured!"
-      echo "✓ CGNAT nodes can now connect to this relay"
-      logger -t decloud-relay "NAT rule configured successfully for $VM_IP via gateway $GATEWAY_IP"
-    else
-      echo "⚠ Failed to notify node agent (HTTP $HTTP_CODE)"
-      echo "Response: $RESPONSE"
-      logger -t decloud-relay "Failed to configure NAT rule - manual intervention required"
-    fi
-    EOF
-    
-  - chmod +x /usr/local/bin/notify-nat-ready.sh
   
-  # Run notification script in background (non-blocking)
-  - /usr/local/bin/notify-nat-ready.sh >> /var/log/decloud-nat-callback.log 2>&1 &
-  
-  # Log the callback attempt
-  - 'echo "NAT callback notification scheduled at $(date)" >> /var/log/decloud-relay-bootstrap.log'
+  # Log that NAT callback was initiated
+  - 'echo "NAT callback service started at $(date)" >> /var/log/decloud-relay-bootstrap.log'
   
   # Verify orchestrator peer is configured
   - wg show wg-relay-server | grep -A 5 "__ORCHESTRATOR_PUBLIC_KEY__" || echo "WARNING - Orchestrator peer not found!"
@@ -492,7 +409,7 @@ runcmd:
   - mkdir -p /etc/decloud
   
   # Log completion
-  - 'echo "DeCloud relay VM bootstrap complete at $(date)" > /var/log/decloud-relay-bootstrap.log'
+  - 'echo "DeCloud relay VM bootstrap complete at $(date)" >> /var/log/decloud-relay-bootstrap.log'
   - 'echo "Relay ID: __VM_ID__" >> /var/log/decloud-relay-bootstrap.log'
   - 'echo "Region: __RELAY_REGION__" >> /var/log/decloud-relay-bootstrap.log'
   - 'echo "WireGuard Public Key: __WIREGUARD_PUBLIC_KEY__" >> /var/log/decloud-relay-bootstrap.log'

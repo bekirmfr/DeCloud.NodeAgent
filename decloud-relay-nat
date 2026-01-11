@@ -11,11 +11,22 @@ set -e
 
 LOG_FILE="/var/log/decloud-nat.log"
 mkdir -p "$(dirname "$LOG_FILE")"
+MARKER_FILE="/var/lib/decloud/nat-callback-complete"
 
 # Logging function
 log() { 
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
 }
+
+# =====================================================
+# Check if callback already completed successfully
+# =====================================================
+if [ -f "$MARKER_FILE" ]; then
+    log "NAT callback already completed successfully - skipping"
+    log "Marker file exists: $MARKER_FILE"
+    log "Delete this file to force re-run: rm $MARKER_FILE"
+    exit 0
+fi
 
 # =====================================================
 # Function: Clean Old Relay NAT Rules

@@ -224,7 +224,7 @@ public interface INatRuleManager
     /// <param name="vmIp">The IP address of the virtual machine to check for associated rules. Cannot be null or empty.</param>
     /// <returns>A task that represents the asynchronous operation. The task result contains <see langword="true"/> if one or
     /// more rules exist for the specified virtual machine; otherwise, <see langword="false"/>.</returns>
-    Task<bool> HasRulesForVmAsync(string vmIp);
+    Task<bool> HasRulesForVmAsync(string vmIp, CancellationToken ct = default);
 
     /// <summary>
     /// Saves iptables rules persistently

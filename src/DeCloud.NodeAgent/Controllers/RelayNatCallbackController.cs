@@ -79,7 +79,47 @@ public class RelayNatCallbackController : ControllerBase
             notification.VmId);
 
         // =====================================================
-        // STEP 3: Configure NAT port forwarding
+        // STEP 3: CHECK IF NAT RULES ALREADY EXIST (IDEMPOTENCY)
+        // =====================================================
+        try
+        {
+            var rulesExist = await _natRuleManager.RuleExistsAsync(
+                notification.VmIp,
+                51820,
+                "udp",
+                HttpContext.RequestAborted);
+
+            if (rulesExist)
+            {
+                _logger.LogInformation(
+                    "✓ NAT rules already configured for relay VM {VmId} at {VmIp} - skipping reconfiguration",
+                    notification.VmId, notification.VmIp);
+
+                return Ok(new
+                {
+                    success = true,
+                    message = "NAT rules already configured (idempotent)",
+                    vmId = notification.VmId,
+                    vmIp = notification.VmIp,
+                    natRule = $"UDP/51820 → {notification.VmIp}:51820",
+                    alreadyConfigured = true
+                });
+            }
+
+            _logger.LogInformation(
+                "NAT rules not found for {VmIp} - configuring now",
+                notification.VmIp);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Error checking existing NAT rules for {VmIp} - will attempt configuration anyway",
+                notification.VmIp);
+            // Continue with configuration attempt
+        }
+
+        // =====================================================
+        // STEP 4: Configure NAT port forwarding
         // =====================================================
         try
         {

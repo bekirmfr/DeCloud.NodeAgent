@@ -306,14 +306,15 @@ public class NatRuleManager : INatRuleManager
         }
     }
 
-    public async Task<bool> HasRulesForVmAsync(string vmIp)
+    public async Task<bool> HasRulesForVmAsync(string vmIp, CancellationToken ct = default)
     {
         try
         {
             // Run the show command to check existing rules
             var result = await _executor.ExecuteAsync(
                 "/usr/local/bin/decloud-relay-nat",
-                $"check {vmIp}");
+                $"check {vmIp}",
+                ct);
 
             if (!result.Success)
             {
