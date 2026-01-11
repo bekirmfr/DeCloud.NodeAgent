@@ -1,6 +1,5 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
-using DeCloud.NodeAgent.Infrastructure.Persistence;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -8,20 +7,17 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
 {
     public class VmHealthService : BackgroundService
     {
-        private readonly VmRepository _repository;
         private readonly IVmManager _vmManager;
         private readonly INatRuleManager _natRuleManager;
         private readonly ILogger<VmHealthService> _logger;
 
         private static readonly TimeSpan HealthCheckInterval = TimeSpan.FromMinutes(1);
         public VmHealthService(
-            VmRepository repository,
             IVmManager vmManager,
             INatRuleManager natRuleManager,
             ILogger<VmHealthService> logger
             )
         {
-            _repository = repository;
             _vmManager = vmManager;
             _natRuleManager = natRuleManager;  
             _logger = logger;
@@ -72,7 +68,7 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
             }
         }
 
-        public async Task CheckRelayVmNatRulesAsync()
+        public async Task CheckRelayVmNatRulesAsync(CancellationToken ct = default)
         {
             var relayVms = await _vmManager.GetAllVmsAsync();
 
@@ -89,7 +85,10 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                 }
 
                 // Check if NAT rules exist for THIS specific VM IP
-                var hasNatRules = await _natRuleManager.HasRulesForVmAsync(vmIp);
+                var hasNatRules = await _natRuleManager.RuleExistsAsync(vmIp,
+                    51820,
+                    "udp",
+                    ct);
 
                 if (!hasNatRules)
                 {
