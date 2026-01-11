@@ -69,6 +69,9 @@ WIREGUARD_PORT=51820
 WIREGUARD_HUB_IP="10.10.0.1"
 SKIP_WIREGUARD=false
 
+# Git Sync
+SKIP_DOWNLOAD=false
+
 # SSH CA
 SSH_CA_KEY_PATH="/etc/decloud/ssh_ca"
 SSH_CA_PUB_PATH="/etc/decloud/ssh_ca.pub"
@@ -112,6 +115,10 @@ parse_args() {
             --wg-port)
                 WIREGUARD_PORT="$2"
                 shift 2
+                ;;
+            --skip-download)
+                SKIP_DOWNLOAD=true
+                shift
                 ;;
             --skip-wireguard)
                 SKIP_WIREGUARD=true
@@ -158,6 +165,7 @@ Network (all ports are configurable!):
 
 Other:
   --skip-libvirt         Skip libvirt installation (testing only)
+  --skip-download        Skip git auto-update setup
   --help                 Show this help message
 
 PORT REQUIREMENTS:
@@ -917,6 +925,10 @@ create_directories() {
 }
 
 download_node_agent() {
+    if [ "$SKIP_DOWNLOAD" = true ]; then
+        log_warn "Skipping Node Agent download (--skip-download)"
+        return
+    fi
     log_step "Downloading Node Agent..."
     
     # Stop service if running (update mode)
@@ -1135,8 +1147,6 @@ configure_firewall() {
         fi
     fi
 
-
-    
     log_success "Firewall configured"
 }
 
