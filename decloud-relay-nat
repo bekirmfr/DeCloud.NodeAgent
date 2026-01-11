@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # DeCloud Relay NAT Manager
-# Version: 1.0.0
+# Version: 1.0.1
 # 
 # Manages iptables NAT and FORWARD rules for DeCloud relay VMs
 # Ensures proper traffic forwarding from CGNAT nodes to relay VMs
@@ -176,31 +176,60 @@ save_rules() {
 }
 
 # =====================================================
-# Function: Chec NAT Rules for Specific VM
+# Function: Check NAT Rules for Specific VM
 # =====================================================
 check_nat_for_vm() {
     local VM_IP="$1"
     
     if [ -z "$VM_IP" ]; then
-        log "ERROR: VM IP not provided"
+        echo "ERROR: VM IP not provided" >&2
+        log "ERROR: VM IP not provided for NAT check"
         exit 1
     fi
     
     log "Checking NAT rules for VM: $VM_IP"
     
-    # Check PREROUTING
+    # Check PREROUTING (DNAT rule)
     local prerouting=$(iptables -t nat -L PREROUTING -n | grep "DNAT.*$VM_IP:51820")
     
-    # Check POSTROUTING
+    # Check POSTROUTING (MASQUERADE rule)
     local postrouting=$(iptables -t nat -L POSTROUTING -n | grep "MASQUERADE.*$VM_IP")
     
-    # Check FORWARD
+    # Check FORWARD (ACCEPT rule)
     local forward=$(iptables -L FORWARD -n | grep "ACCEPT.*$VM_IP.*dpt:51820")
     
+    # Output to stdout for C# parser (CRITICAL!)
+    # Format must match C# parsing logic in HasRulesForVmAsync
+    echo "=== NAT Rules Check for $VM_IP ==="
+    
+    if [ -n "$prerouting" ]; then
+        echo "PREROUTING: DNAT to $VM_IP:51820 - FOUND"
+        echo "$prerouting"
+    else
+        echo "PREROUTING: DNAT to $VM_IP:51820 - MISSING"
+    fi
+    
+    if [ -n "$postrouting" ]; then
+        echo "POSTROUTING: MASQUERADE for $VM_IP - FOUND"
+        echo "$postrouting"
+    else
+        echo "POSTROUTING: MASQUERADE for $VM_IP - MISSING"
+    fi
+    
+    if [ -n "$forward" ]; then
+        echo "FORWARD: ACCEPT UDP/$VM_IP:51820 - FOUND"
+        echo "$forward"
+    else
+        echo "FORWARD: ACCEPT UDP/$VM_IP:51820 - MISSING"
+    fi
+    
+    # Summary result
     if [ -n "$prerouting" ] && [ -n "$postrouting" ] && [ -n "$forward" ]; then
+        echo "STATUS: COMPLETE - All NAT rules present for $VM_IP"
         log "✓ NAT rules complete for $VM_IP"
         exit 0
     else
+        echo "STATUS: INCOMPLETE - Missing NAT rules for $VM_IP"
         log "✗ NAT rules incomplete for $VM_IP"
         [ -z "$prerouting" ] && log "  Missing: PREROUTING rule"
         [ -z "$postrouting" ] && log "  Missing: POSTROUTING rule"
@@ -349,7 +378,7 @@ case "${1:-}" in
         ;;
     
     *)
-        echo "DeCloud Relay NAT Manager v1.0.0"
+        echo "DeCloud Relay NAT Manager v1.0.1"
         echo ""
         echo "Usage: $0 <command> [arguments]"
         echo ""
@@ -358,11 +387,13 @@ case "${1:-}" in
         echo "  remove <ip>         Remove NAT rules for specific relay VM"
         echo "  clean               Clean all relay NAT rules"
         echo "  show                Show current relay NAT rules"
+        echo "  check <ip>          Check NAT rules for specific VM IP"
         echo "  test <ip>           Test connectivity to relay VM"
         echo "  save                Save current iptables rules"
         echo ""
         echo "Examples:"
         echo "  $0 add 192.168.122.164 eth0"
+        echo "  $0 check 192.168.122.164"
         echo "  $0 remove 192.168.122.164"
         echo "  $0 clean"
         echo "  $0 show"
