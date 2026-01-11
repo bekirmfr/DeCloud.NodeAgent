@@ -1,4 +1,4 @@
-﻿#cloud-config
+#cloud-config
 # DeCloud Relay VM Cloud-Init Configuration
 # This VM serves as a WireGuard relay for CGNAT nodes
 # Version: 3.0 (with comprehensive debug dashboard)
