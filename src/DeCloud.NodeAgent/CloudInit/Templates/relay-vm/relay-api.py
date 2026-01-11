@@ -478,27 +478,27 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             logger.error(f"Add peer error: {e}", exc_info=True)
             self.send_error_response(500, 'Internal Error', str(e))
     
-    # ==================== Response Helpers ====================
+# ==================== Response Helpers ====================
     
-    def send_json_response(self, data, status_code=200):
-        """Send JSON response"""
-        json_data = json.dumps(data, indent=2)
+def send_json_response(self, data, status_code=200):
+    """Send JSON response"""
+    json_data = json.dumps(data, indent=2)
         
-        self.send_response(status_code)
-        self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.send_header('Content-Length', len(json_data.encode('utf-8')))
-        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-        self.send_header('X-Content-Type-Options', 'nosniff')
-        self.end_headers()
-        self.wfile.write(json_data.encode('utf-8'))
+    self.send_response(status_code)
+    self.send_header('Content-Type', 'application/json; charset=utf-8')
+    self.send_header('Content-Length', len(json_data.encode('utf-8')))
+    self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+    self.send_header('X-Content-Type-Options', 'nosniff')
+    self.end_headers()
+    self.wfile.write(json_data.encode('utf-8'))
     
-    def send_error_response(self, status_code, error_type, message):
-        """Send error response"""
-        self.send_json_response({
-            'error': error_type,
-            'message': message,
-            'status': status_code
-        }, status_code=status_code)
+def send_error_response(self, status_code, error_type, message):
+    """Send error response"""
+    self.send_json_response({
+        'error': error_type,
+        'message': message,
+        'status': status_code
+    }, status_code=status_code)
 
 
 # ==================== Server Startup ====================
