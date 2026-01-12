@@ -61,6 +61,10 @@ DATA_DIR="/var/lib/decloud/vms"
 LOG_DIR="/var/log/decloud"
 REPO_URL="https://github.com/bekirmfr/DeCloud.NodeAgent.git"
 
+# Logging
+INSTALL_LOG="$LOG_DIR/install.log"
+ENABLE_LOGGING=true  # Can be overridden by --no-log
+
 # Ports (configurable - work with your existing infrastructure)
 AGENT_PORT=5100
 WIREGUARD_PORT=51820
@@ -88,6 +92,10 @@ UPDATE_MODE=false
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case $1 in
+            --no-log)
+                ENABLE_LOGGING=false
+                shift
+                ;;
             --orchestrator)
                 ORCHESTRATOR_URL="$2"
                 shift 2
@@ -139,6 +147,33 @@ parse_args() {
                 ;;
         esac
     done
+}
+
+# ============================================================
+# Initialize Logging
+# ============================================================
+init_logging() {
+    if [ "$ENABLE_LOGGING" = false ]; then
+        return 0
+    fi
+    
+    # Create log directory
+    mkdir -p "$LOG_DIR"
+    touch "$INSTALL_LOG"
+    chmod 644 "$INSTALL_LOG"
+    
+    # Redirect all output to both terminal and log file
+    exec 1> >(tee -a "$INSTALL_LOG")
+    exec 2>&1
+    
+    echo "==================================================================="
+    echo "DeCloud Node Agent Installation"
+    echo "Started: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "Version: $VERSION"
+    echo "Command: $0 $@"
+    echo "Log: $INSTALL_LOG"
+    echo "==================================================================="
+    echo ""
 }
 
 show_help() {
@@ -466,23 +501,72 @@ install_base_dependencies() {
 install_dotnet() {
     log_step "Installing .NET 8 SDK..."
     
+    # Check if already installed
     if command -v dotnet &> /dev/null; then
         DOTNET_VERSION=$(dotnet --version 2>/dev/null | head -1)
         if [[ "$DOTNET_VERSION" == 8.* ]]; then
             log_success ".NET 8 already installed: $DOTNET_VERSION"
-            return
+            return 0
+        else
+            log_warn ".NET $DOTNET_VERSION found, but need version 8.x"
+            log_info "Proceeding with .NET 8 installation..."
         fi
     fi
     
     # Add Microsoft repository
-    wget -q https://packages.microsoft.com/config/$OS/$OS_VERSION/packages-microsoft-prod.deb -O /tmp/packages-microsoft-prod.deb
-    dpkg -i /tmp/packages-microsoft-prod.deb > /dev/null 2>&1
-    rm /tmp/packages-microsoft-prod.deb
+    local ubuntu_version=$(lsb_release -rs)
+    log_info "Adding Microsoft package repository..."
     
-    apt-get update -qq
-    apt-get install -y -qq dotnet-sdk-8.0 > /dev/null 2>&1
+    if ! wget -q https://packages.microsoft.com/config/$OS/$OS_VERSION/packages-microsoft-prod.deb \
+            -O /tmp/packages-microsoft-prod.deb 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
+        log_error "Failed to download Microsoft repository package"
+        log_error "Check network connectivity and logs: $LOG_DIR/install.log"
+        return 1
+    fi
     
-    log_success ".NET 8 SDK installed"
+    if ! dpkg -i /tmp/packages-microsoft-prod.deb 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
+        log_error "Failed to add Microsoft repository"
+        log_error "Check logs: $LOG_DIR/install.log"
+        rm -f /tmp/packages-microsoft-prod.deb
+        return 1
+    fi
+    
+    rm -f /tmp/packages-microsoft-prod.deb
+    log_info "Microsoft repository added"
+    
+    # Update package cache
+    log_info "Updating package cache..."
+    if ! apt-get update -qq 2>&1 | grep -qi "err:"; then
+        log_info "Package cache updated"
+    fi
+    
+    # Install .NET SDK
+    log_info "Installing .NET 8 SDK (this may take a few minutes)..."
+    
+    if ! apt-get install -y dotnet-sdk-8.0 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
+        log_error "Failed to install .NET 8 SDK"
+        log_error "Check logs: $LOG_DIR/install.log"
+        log_error "Try manually: sudo apt-get install -y dotnet-sdk-8.0"
+        return 1
+    fi
+    
+    # Verify installation
+    if ! command -v dotnet &> /dev/null; then
+        log_error "dotnet command not found after installation"
+        log_error "Installation may have failed"
+        return 1
+    fi
+    
+    # Verify version
+    DOTNET_VERSION=$(dotnet --version 2>/dev/null | head -1)
+    if [[ ! "$DOTNET_VERSION" == 8.* ]]; then
+        log_error "Wrong .NET version installed: $DOTNET_VERSION (expected 8.x)"
+        return 1
+    fi
+    
+    log_success ".NET 8 SDK installed: $DOTNET_VERSION"
+    
+    return 0
 }
 
 install_libvirt() {
@@ -490,45 +574,159 @@ install_libvirt() {
     
     if [ "$SKIP_LIBVIRT" = true ]; then
         log_warn "Skipping libvirt installation (--skip-libvirt)"
-        return
+        return 0
+    fi
+    
+    # Check if already installed
+    if command -v virsh &> /dev/null && systemctl is-active --quiet libvirtd; then
+        local virsh_version=$(virsh --version)
+        log_success "libvirt already installed and running (version $virsh_version)"
+        return 0
     fi
     
     PACKAGES="qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virtinst"
     PACKAGES="$PACKAGES cloud-image-utils genisoimage qemu-utils"
     PACKAGES="$PACKAGES libguestfs-tools openssh-client"
-    PACKAGES="$PACKAGES sysbench"  # ← ADD THIS LINE for CPU benchmarking
+    PACKAGES="$PACKAGES sysbench"
     
-    apt-get install -y -qq $PACKAGES > /dev/null 2>&1
+    log_info "Installing virtualization packages..."
+    log_info "This may take several minutes..."
+    
+    # Update package cache first
+    if ! apt-get update -qq 2>&1 | grep -qi "err:"; then
+        log_info "Package cache updated"
+    fi
+    
+    # Install packages with visible errors
+    if ! apt-get install -y $PACKAGES 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
+        log_error "Failed to install libvirt packages"
+        log_error "Check logs: $LOG_DIR/install.log"
+        log_error "Try manually: sudo apt-get install -y qemu-kvm libvirt-daemon-system"
+        return 1
+    fi
     
     # Load nbd module
     modprobe nbd max_part=8 2>/dev/null || true
     echo "nbd" >> /etc/modules-load.d/decloud.conf 2>/dev/null || true
     
-    # Enable libvirtd
+    # Enable and start libvirtd
     systemctl enable libvirtd --quiet 2>/dev/null || true
     systemctl start libvirtd 2>/dev/null || true
     
+    # Give libvirtd a moment to start
+    sleep 2
+    
+    # Verify libvirtd is running
+    if ! systemctl is-active --quiet libvirtd; then
+        log_error "libvirtd failed to start"
+        log_error "Check: sudo systemctl status libvirtd"
+        log_error "Logs: sudo journalctl -u libvirtd -n 50"
+        return 1
+    fi
+    
     # Setup default network
     if ! virsh net-info default &>/dev/null; then
-        virsh net-define /usr/share/libvirt/networks/default.xml 2>/dev/null || true
+        if [ -f /usr/share/libvirt/networks/default.xml ]; then
+            virsh net-define /usr/share/libvirt/networks/default.xml 2>/dev/null || true
+        fi
     fi
     virsh net-autostart default 2>/dev/null || true
     virsh net-start default 2>/dev/null || true
     
+    # Verify virsh command works
+    if ! command -v virsh &> /dev/null; then
+        log_error "virsh command not found after installation"
+        return 1
+    fi
+    
     log_success "libvirt installed and configured"
+    log_info "libvirtd status: $(systemctl is-active libvirtd)"
+    
+    return 0
 }
 
 install_wireguard() {
     if [ "$SKIP_WIREGUARD" = true ]; then
         log_warn "Skipping WireGuard installation (--skip-wireguard)"
-        return
+        return 0
     fi
     
     log_step "Installing WireGuard..."
     
-    apt-get install -y -qq wireguard wireguard-tools > /dev/null 2>&1
+    # Check if already installed
+    if command -v wg &> /dev/null; then
+        local wg_version=$(wg --version 2>&1 | head -n1)
+        log_success "WireGuard already installed: $wg_version"
+        return 0
+    fi
     
-    log_success "WireGuard installed"
+    # Determine OS version for optimization
+    local os_version=$(lsb_release -rs)
+    local os_version_major=$(echo "$os_version" | cut -d'.' -f1)
+    
+    log_info "Detected Ubuntu $os_version"
+    
+    # Update package cache (CRITICAL - prevents 404 errors)
+    log_info "Updating package cache..."
+    if ! apt-get update -qq 2>&1 | grep -qi "err:"; then
+        log_info "Package cache updated successfully"
+    else
+        log_warn "Package cache update had warnings"
+    fi
+    
+    # Ubuntu 24.04+ has WireGuard built into kernel
+    if [ "$os_version_major" -ge 24 ]; then
+        log_info "Ubuntu 24.04+ detected - installing userspace tools only"
+        
+        if ! apt-get install -y wireguard-tools 2>&1 | tee -a "$LOG_DIR/install.log"; then
+            log_error "Failed to install WireGuard tools"
+            log_error "Check logs: $LOG_DIR/install.log"
+            log_error "Try manually: sudo apt-get install -y wireguard-tools"
+            return 1
+        fi
+    else
+        # Ubuntu < 24.04 needs kernel headers and full package
+        log_info "Ubuntu $os_version - installing full WireGuard with DKMS"
+        
+        # Install kernel headers first
+        local kernel_version=$(uname -r)
+        log_info "Installing kernel headers for $kernel_version..."
+        
+        if apt-get install -y linux-headers-${kernel_version} 2>&1 | tee -a "$LOG_DIR/install.log"; then
+            log_info "Kernel headers installed"
+        else
+            log_warn "Kernel headers installation had issues (might still work)"
+        fi
+        
+        # Install WireGuard
+        if ! apt-get install -y wireguard wireguard-tools 2>&1 | tee -a "$LOG_DIR/install.log"; then
+            log_error "Failed to install WireGuard"
+            log_error "Check logs: $LOG_DIR/install.log"
+            log_error "Try manually: sudo apt-get install -y wireguard wireguard-tools"
+            return 1
+        fi
+    fi
+    
+    # Verify installation
+    if ! command -v wg &> /dev/null; then
+        log_error "WireGuard command not found after installation"
+        log_error "Installation may have failed silently"
+        return 1
+    fi
+    
+    # Check kernel module
+    if modinfo wireguard &> /dev/null 2>&1; then
+        log_info "WireGuard kernel module available"
+    elif [ "$os_version_major" -ge 24 ]; then
+        log_info "WireGuard module built into kernel (Ubuntu 24.04+)"
+    else
+        log_warn "WireGuard kernel module not detected (might still work)"
+    fi
+    
+    local wg_version=$(wg --version 2>&1 | head -n1)
+    log_success "WireGuard installed: $wg_version"
+    
+    return 0
 }
 
 configure_wireguard_keys() {
@@ -1392,6 +1590,9 @@ main() {
     
     parse_args "$@"
     
+    # Initialize logging
+    init_logging
+
     # CRITICAL: Validate required parameters FIRST
     check_required_params
     
