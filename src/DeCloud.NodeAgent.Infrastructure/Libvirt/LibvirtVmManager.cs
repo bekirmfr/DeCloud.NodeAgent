@@ -1353,18 +1353,18 @@ public class LibvirtVmManager : IVmManager
         // This ensures VMs get CPU time proportional to their tier pricing
         var pointsPerVCpu = spec.QualityTier switch
         {
-            0 => 8,  // Guaranteed
-            1 => 4,  // Standard
-            2 => 2,  // Balanced
+            0 => 4,  // Guaranteed
+            1 => 2.7,  // Standard
+            2 => 1.6,  // Balanced
             3 => 1,  // Burstable
             _ => 4   // Default to Standard
         };
 
-        spec.ComputePointCost = spec.VirtualCpuCores * pointsPerVCpu;
+        spec.ComputePointCost = (int)(spec.VirtualCpuCores * pointsPerVCpu);
         var cpuShares = spec.ComputePointCost * 1000;
 
         // Cap at libvirt maximum
-        cpuShares = Math.Min(10000, cpuShares);
+        cpuShares = Math.Min(262144, cpuShares);
 
         // Ensure shares is at least 1 burstable tier equivalent
         cpuShares = Math.Max(1000, cpuShares);
