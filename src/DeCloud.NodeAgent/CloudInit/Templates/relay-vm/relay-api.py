@@ -24,74 +24,6 @@ WIREGUARD_INTERFACE = "wg-relay-server"
 STATIC_DIR = "/opt/decloud-relay/static"
 LISTEN_PORT = 8080
 
-# ==================== Helper Functions ====================
-
-def get_wireguard_status():
-    """Get WireGuard interface status"""
-    try:
-        # Run wg show dump
-        result = subprocess.run(
-            ['wg', 'show', WIREGUARD_INTERFACE, 'dump'],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        
-        if result.returncode != 0:
-            logger.error(f"wg show failed: {result.stderr}")
-            return {
-                'interface': WIREGUARD_INTERFACE,
-                'relay_id': RELAY_ID,
-                'region': RELAY_REGION,
-                'peer_count': 0,
-                'max_capacity': RELAY_CAPACITY,
-                'available_slots': RELAY_CAPACITY,
-                'peers': []
-            }
-        
-        # Parse dump output
-        lines = result.stdout.strip().split('\n')
-        peers = []
-        
-        # Skip interface line (first line) and parse peers
-        for line in lines[1:]:
-            if not line.strip():
-                continue
-                
-            fields = line.split('\t')
-            if len(fields) >= 7:
-                peers.append({
-                    'public_key': fields[0][:16] + '...' if len(fields[0]) > 16 else fields[0],
-                    'endpoint': fields[2] if fields[2] != '(none)' else None,
-                    'allowed_ips': fields[3],
-                    'latest_handshake': int(fields[4]) if fields[4] and fields[4] != '0' else 0,
-                    'rx_bytes': int(fields[5]) if fields[5] else 0,
-                    'tx_bytes': int(fields[6]) if fields[6] else 0
-                })
-        
-        return {
-            'interface': WIREGUARD_INTERFACE,
-            'relay_id': RELAY_ID,
-            'region': RELAY_REGION,
-            'peer_count': len(peers),
-            'max_capacity': RELAY_CAPACITY,
-            'available_slots': max(0, RELAY_CAPACITY - len(peers)),
-            'peers': peers
-        }
-        
-    except Exception as e:
-        logger.error(f"Error getting WireGuard status: {e}", exc_info=True)
-        return {
-            'interface': WIREGUARD_INTERFACE,
-            'relay_id': RELAY_ID,
-            'region': RELAY_REGION,
-            'peer_count': 0,
-            'max_capacity': RELAY_CAPACITY,
-            'available_slots': RELAY_CAPACITY,
-            'peers': [],
-            'error': str(e)
-        }
-
 # ==================== Logging ====================
 logging.basicConfig(
     level=logging.INFO,
@@ -333,47 +265,6 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             logger.error(f"Error getting WireGuard status: {e}")
             self.send_error_response(500, 'Internal Error', str(e))
     
-    def parse_wireguard_dump(self, dump_output):
-        """Parse WireGuard dump output into structured data"""
-        lines = dump_output.strip().split('\n')
-        
-        if len(lines) < 1:
-            return {
-                'interface': WIREGUARD_INTERFACE,
-                'relay_id': RELAY_ID,
-                'peer_count': 0,
-                'max_capacity': RELAY_CAPACITY,
-                'available_slots': RELAY_CAPACITY,
-                'peers': []
-            }
-        
-        peers = []
-        
-        # Skip interface line (first line) and parse peers
-        for line in lines[1:]:
-            fields = line.split('\t')
-            if len(fields) >= 7:
-                # Fields: public_key, preshared_key, endpoint, allowed_ips, 
-                #         latest_handshake, rx_bytes, tx_bytes
-                peers.append({
-                    'public_key': fields[0][:16] + '...' if len(fields[0]) > 16 else fields[0],
-                    'endpoint': fields[2] if fields[2] != '(none)' else None,
-                    'allowed_ips': fields[3],
-                    'latest_handshake': int(fields[4]) if fields[4] else 0,
-                    'rx_bytes': int(fields[5]) if fields[5] else 0,
-                    'tx_bytes': int(fields[6]) if fields[6] else 0
-                })
-        
-        return {
-            'interface': WIREGUARD_INTERFACE,
-            'relay_id': RELAY_ID,
-            'region': RELAY_REGION,
-            'peer_count': len(peers),
-            'max_capacity': RELAY_CAPACITY,
-            'available_slots': max(0, RELAY_CAPACITY - len(peers)),
-            'peers': peers
-        }
-    
     def serve_system_status(self):
         """Get system resource status"""
         try:
@@ -546,27 +437,136 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             logger.error(f"Add peer error: {e}", exc_info=True)
             self.send_error_response(500, 'Internal Error', str(e))
     
-        # ==================== Response Helpers ====================
-    
-        def send_json_response(self, data, status_code=200):
-            """Send JSON response"""
-            json_data = json.dumps(data, indent=2)
+    # ==================== Helper Functions ====================
+
+    def parse_wireguard_dump(self, dump_output):
+        """Parse WireGuard dump output into structured data"""
+        lines = dump_output.strip().split('\n')
         
-            self.send_response(status_code)
-            self.send_header('Content-Type', 'application/json; charset=utf-8')
-            self.send_header('Content-Length', len(json_data.encode('utf-8')))
-            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-            self.send_header('X-Content-Type-Options', 'nosniff')
-            self.end_headers()
-            self.wfile.write(json_data.encode('utf-8'))
+        if len(lines) < 1:
+            return {
+                'interface': WIREGUARD_INTERFACE,
+                'relay_id': RELAY_ID,
+                'peer_count': 0,
+                'max_capacity': RELAY_CAPACITY,
+                'available_slots': RELAY_CAPACITY,
+                'peers': []
+            }
+        
+        peers = []
+        
+        # Skip interface line (first line) and parse peers
+        for line in lines[1:]:
+            fields = line.split('\t')
+            if len(fields) >= 7:
+                # Fields: public_key, preshared_key, endpoint, allowed_ips, 
+                #         latest_handshake, rx_bytes, tx_bytes
+                peers.append({
+                    'public_key': fields[0][:16] + '...' if len(fields[0]) > 16 else fields[0],
+                    'endpoint': fields[2] if fields[2] != '(none)' else None,
+                    'allowed_ips': fields[3],
+                    'latest_handshake': int(fields[4]) if fields[4] else 0,
+                    'rx_bytes': int(fields[5]) if fields[5] else 0,
+                    'tx_bytes': int(fields[6]) if fields[6] else 0
+                })
+        
+        return {
+            'interface': WIREGUARD_INTERFACE,
+            'relay_id': RELAY_ID,
+            'region': RELAY_REGION,
+            'peer_count': len(peers),
+            'max_capacity': RELAY_CAPACITY,
+            'available_slots': max(0, RELAY_CAPACITY - len(peers)),
+            'peers': peers
+        }
+
+    def get_wireguard_status():
+        """Get WireGuard interface status"""
+        try:
+            # Run wg show dump
+            result = subprocess.run(
+                ['wg', 'show', WIREGUARD_INTERFACE, 'dump'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+        
+            if result.returncode != 0:
+                logger.error(f"wg show failed: {result.stderr}")
+                return {
+                    'interface': WIREGUARD_INTERFACE,
+                    'relay_id': RELAY_ID,
+                    'region': RELAY_REGION,
+                    'peer_count': 0,
+                    'max_capacity': RELAY_CAPACITY,
+                    'available_slots': RELAY_CAPACITY,
+                    'peers': []
+                }
+        
+            # Parse dump output
+            lines = result.stdout.strip().split('\n')
+            peers = []
+        
+            # Skip interface line (first line) and parse peers
+            for line in lines[1:]:
+                if not line.strip():
+                    continue
+                
+                fields = line.split('\t')
+                if len(fields) >= 7:
+                    peers.append({
+                        'public_key': fields[0][:16] + '...' if len(fields[0]) > 16 else fields[0],
+                        'endpoint': fields[2] if fields[2] != '(none)' else None,
+                        'allowed_ips': fields[3],
+                        'latest_handshake': int(fields[4]) if fields[4] and fields[4] != '0' else 0,
+                        'rx_bytes': int(fields[5]) if fields[5] else 0,
+                        'tx_bytes': int(fields[6]) if fields[6] else 0
+                    })
+        
+            return {
+                'interface': WIREGUARD_INTERFACE,
+                'relay_id': RELAY_ID,
+                'region': RELAY_REGION,
+                'peer_count': len(peers),
+                'max_capacity': RELAY_CAPACITY,
+                'available_slots': max(0, RELAY_CAPACITY - len(peers)),
+                'peers': peers
+            }
+        
+        except Exception as e:
+            logger.error(f"Error getting WireGuard status: {e}", exc_info=True)
+            return {
+                'interface': WIREGUARD_INTERFACE,
+                'relay_id': RELAY_ID,
+                'region': RELAY_REGION,
+                'peer_count': 0,
+                'max_capacity': RELAY_CAPACITY,
+                'available_slots': RELAY_CAPACITY,
+                'peers': [],
+                'error': str(e)
+            }
     
-        def send_error_response(self, status_code, error_type, message):
-            """Send error response"""
-            self.send_json_response({
-                'error': error_type,
-                'message': message,
-                'status': status_code
-            }, status_code=status_code)
+    # ==================== Response Helpers ====================
+    
+    def send_json_response(self, data, status_code=200):
+        """Send JSON response"""
+        json_data = json.dumps(data, indent=2)
+        
+        self.send_response(status_code)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', len(json_data.encode('utf-8')))
+        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.end_headers()
+        self.wfile.write(json_data.encode('utf-8'))
+    
+    def send_error_response(self, status_code, error_type, message):
+        """Send error response"""
+        self.send_json_response({
+            'error': error_type,
+            'message': message,
+            'status': status_code
+        }, status_code=status_code)
 
 # ==================== Server Startup ====================
 def main():
