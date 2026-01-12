@@ -207,11 +207,7 @@ def display_signing_instructions(signing_url: str, message: str, wallet_address:
     print()
     
     print(f"{Colors.CYAN}Or open this URL manually:{Colors.NC}")
-    print(f"  {signing_url[:80]}")
-    if len(signing_url) > 80:
-        print(f"  {signing_url[80:160]}")
-        if len(signing_url) > 160:
-            print(f"  {signing_url[160:]}")
+    print(f"  {signing_url}")
     print()
     
     print(f"{Colors.BOLD}═══════════════════════════════════════════════════════════════════{Colors.NC}")

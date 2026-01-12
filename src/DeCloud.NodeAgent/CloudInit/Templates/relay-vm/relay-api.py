@@ -233,7 +233,7 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
     def serve_wireguard_status(self):
         """Serve WireGuard status with short cache"""
         try:
-            data = get_wireguard_status()
+            data = self.get_wireguard_status()
         
             # Generate ETag from data hash
             import hashlib
