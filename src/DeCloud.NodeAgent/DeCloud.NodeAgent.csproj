@@ -13,12 +13,12 @@
   </ItemGroup>
 
 	<ItemGroup>
-	    <!-- Include all cloud-init templates in build output -->
-	    <None Update="CloudInit\Templates\**\*">
-		    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		<!-- Include all cloud-init templates in build output -->
+		<None Update="CloudInit\Templates\**\*">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-	    </None>
-    </ItemGroup>
+		</None>
+	</ItemGroup>
 
 	<ItemGroup>
 		<None Include="../../cli/**/*" Link="cli/%(RecursiveDir)%(Filename)%(Extension)" />
@@ -34,10 +34,6 @@
 
 	<ItemGroup>
 		<Compile Include="../Shared/**/*.cs" Link="Shared/%(RecursiveDir)%(Filename)%(Extension)" />
-	</ItemGroup>
-
-	<ItemGroup>
-	  <Compile Include="CloudInit\Templates\general-vm\index.html" />
 	</ItemGroup>
 
 </Project>
