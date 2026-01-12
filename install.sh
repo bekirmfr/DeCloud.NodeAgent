@@ -1179,7 +1179,7 @@ build_node_agent() {
     
     # Build (capture and show errors)
     log_info "Building project..."
-    BUILD_OUTPUT=$(dotnet build --configuration Release 2>&1)
+    dotnet build --configuration Release 2>&1 | tee /tmp/dotnet-build.log
     BUILD_EXIT=$?
     
     if [ $BUILD_EXIT -ne 0 ]; then
