@@ -480,7 +480,7 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             'peers': peers
         }
 
-    def get_wireguard_status():
+    def get_wireguard_status(self):
         """Get WireGuard interface status"""
         try:
             # Run wg show dump
