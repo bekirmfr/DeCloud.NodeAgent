@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+src/DeCloud.NodeAgent/CloudInit/
+
+# Build outputs
+src/DeCloud.NodeAgent/bin/
+*.min.js
+*.bundle.js
+
+# Generated files
+*.map
+
+# IDE
+.vs/
+.vscode/
+
+# Logs
+*.log
+npm-debug.log*
+
+# System files
+.DS_Store
+Thumbs.db
