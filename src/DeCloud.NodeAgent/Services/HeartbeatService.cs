@@ -252,14 +252,14 @@ public class HeartbeatService : BackgroundService
             // Get node performance from resource discovery
             // =====================================================
             var inventory = _nodeMetadata.Inventory;
-            var nodePointsPerCore = inventory!.Cpu.BenchmarkScore / Scheduling;
+            var nodePointsPerCore = inventory!.Cpu.BenchmarkScore / 1000;
 
             if (nodePointsPerCore <= 0)
             {
                 _logger.LogWarning(
                     "Invalid node performance ({Perf}), defaulting to 1.0x baseline",
                     nodePointsPerCore);
-                nodePointsPerCore = 1.0;
+                nodePointsPerCore = 1;
             }
 
             // =====================================================
