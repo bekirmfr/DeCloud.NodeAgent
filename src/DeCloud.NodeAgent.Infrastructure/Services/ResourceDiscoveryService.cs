@@ -18,7 +18,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     private bool _discoveryComplete;
     private readonly SemaphoreSlim _discoverySemaphore = new(1, 1);
     private DateTime _lastDiscoveryTime = DateTime.MinValue;
-    private static readonly TimeSpan DiscoveryCacheDuration = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan DiscoveryCacheDuration = TimeSpan.FromHours(1);
 
     public ResourceDiscoveryService(
         ICommandExecutor executor,

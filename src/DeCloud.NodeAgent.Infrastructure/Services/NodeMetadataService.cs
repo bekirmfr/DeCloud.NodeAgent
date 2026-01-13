@@ -1,6 +1,7 @@
-﻿using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.Logging;
+﻿using DeCloud.NodeAgent.Core.Models;
 using DeCloud.Shared;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 
 public interface INodeMetadataService
 {
@@ -12,9 +13,11 @@ public interface INodeMetadataService
     string WalletAddress { get; }
     string Region { get; }
     string Zone { get; }
+    HardwareInventory? Inventory { get; }
 
     Task InitializeAsync(CancellationToken ct = default);
     void UpdatePublicIp(string publicIp);
+    void UpdateInventory(HardwareInventory inventory);
 }
 
 public class NodeMetadataService : INodeMetadataService
@@ -30,6 +33,7 @@ public class NodeMetadataService : INodeMetadataService
     public string WalletAddress { get; private set; } = string.Empty;
     public string Region { get; private set; } = string.Empty;
     public string Zone { get; private set; } = string.Empty;
+    public HardwareInventory? Inventory { get; private set; } = null;
 
     public NodeMetadataService(IConfiguration configuration, ILogger<NodeMetadataService> logger)
     {
@@ -85,5 +89,10 @@ public class NodeMetadataService : INodeMetadataService
             _logger.LogWarning(ex, "Failed to discover public IP");
             return null;
         }
+    }
+
+    public void UpdateInventory(HardwareInventory inventory)
+    {
+        Inventory = inventory;
     }
 }

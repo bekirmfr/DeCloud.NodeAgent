@@ -203,7 +203,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                     _logger.LogInformation(
                         "✓ Registration successful: {NodeId}",
                         _nodeId);
-
+                    _nodeMetadata.UpdateInventory(inventory);
                     return result;
                 }
 

@@ -13,7 +13,7 @@ public class HeartbeatService : BackgroundService
     private readonly IVmManager _vmManager;
     private readonly IOrchestratorClient _orchestratorClient;
     private readonly IAuthenticationStateService _authState;
-
+    private readonly INodeMetadataService _nodeMetadata;
     private readonly HeartbeatOptions _options;
     private readonly ILogger<HeartbeatService> _logger;
     private Heartbeat? _lastHeartbeat = null;
@@ -24,6 +24,7 @@ public class HeartbeatService : BackgroundService
         IVmManager vmManager,
         IOrchestratorClient orchestratorClient,
         IAuthenticationStateService authState,
+        INodeMetadataService nodeMetadata,
         IOptions<HeartbeatOptions> options,
         ILogger<HeartbeatService> logger)
     {
@@ -31,6 +32,7 @@ public class HeartbeatService : BackgroundService
         _vmManager = vmManager;
         _orchestratorClient = orchestratorClient;
         _authState = authState;
+        _nodeMetadata = nodeMetadata;
         _options = options.Value;
         _logger = logger;
     }
@@ -231,21 +233,65 @@ public class HeartbeatService : BackgroundService
     }
 
     /// <summary>
-    /// Apply quota cap to a Burstable VM
+    /// Apply quota cap to a Burstable VM based on node performance
+    /// Formula: quota = 1 / (points_per_core × overcommit)
     /// </summary>
     private async Task ApplyBurstableQuotaAsync(VmInstance vm, CancellationToken ct)
     {
         try
         {
-            _logger.LogInformation(
-                "VM {VmId} ({Name}) is ready - applying Burstable tier quota cap (uptime: {Uptime}s)",
-                vm.VmId, vm.Name,
-                vm.StartedAt.HasValue ? (DateTime.UtcNow - vm.StartedAt.Value).TotalSeconds : 0);
+            var uptime = vm.StartedAt.HasValue
+                ? (DateTime.UtcNow - vm.StartedAt.Value).TotalSeconds
+                : 0;
 
-            // Calculate quota: 50% per vCPU
-            var quotaPerVCpu = 50000; // 50ms per 100ms period = 50%
+            _logger.LogInformation(
+                "VM {VmId} ({Name}) is ready - calculating Burstable tier quota (uptime: {Uptime:F0}s)",
+                vm.VmId, vm.Name, uptime);
+
+            // =====================================================
+            // Get node performance from resource discovery
+            // =====================================================
+            var inventory = _nodeMetadata.Inventory;
+            var nodePointsPerCore = inventory!.Cpu.BenchmarkScore / Scheduling;
+
+            if (nodePointsPerCore <= 0)
+            {
+                _logger.LogWarning(
+                    "Invalid node performance ({Perf}), defaulting to 1.0x baseline",
+                    nodePointsPerCore);
+                nodePointsPerCore = 1.0;
+            }
+
+            // =====================================================
+            // Calculate dynamic quota based on node performance
+            // =====================================================
+            // Formula: quota_percentage = 1 / (points_per_core × overcommit)
+            // Example: MSI (6.73) with 4x overcommit = 3.71% per vCPU
+            var burstableOvercommit = 4.0;
+            var quotaPercentage = 1.0 / (nodePointsPerCore * burstableOvercommit);
+
+            // Convert to libvirt microseconds (per 100ms period)
+            var quotaPerVCpu = (int)(100000 * quotaPercentage);
+
+            // Optional: Apply minimum floor to prevent too-slow VMs
+            // Uncomment to enforce 10% minimum per vCPU
+            // quotaPerVCpu = Math.Max(quotaPerVCpu, 10000);
+
             var totalQuota = vm.Spec.VirtualCpuCores * quotaPerVCpu;
 
+            _logger.LogInformation(
+                "VM {VmId}: Calculated quota - {Percentage:F2}% per vCPU ({Quota}µs) " +
+                "[Node: {PointsPerCore:F2}x, Overcommit: {Over}x, vCPUs: {VCpus}]",
+                vm.VmId,
+                quotaPercentage * 100,
+                quotaPerVCpu,
+                nodePointsPerCore,
+                burstableOvercommit,
+                vm.Spec.VirtualCpuCores);
+
+            // =====================================================
+            // Apply quota via virsh schedinfo
+            // =====================================================
             var success = await _vmManager.ApplyQuotaCapAsync(
                 vm,
                 totalQuota,
@@ -255,8 +301,13 @@ public class HeartbeatService : BackgroundService
             if (success)
             {
                 _logger.LogInformation(
-                    "✓ Applied {Percent}% CPU quota to Burstable VM {VmId} ({VCpus} vCPUs)",
-                    50, vm.VmId, vm.Spec.VirtualCpuCores);
+                    "✓ Applied {Percentage:F2}% CPU quota to Burstable VM {VmId} " +
+                    "({VCpus} vCPUs × {QuotaPerVCpu}µs = {Total}µs total)",
+                    quotaPercentage * 100,
+                    vm.VmId,
+                    vm.Spec.VirtualCpuCores,
+                    quotaPerVCpu,
+                    totalQuota);
             }
             else
             {
