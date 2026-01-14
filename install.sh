@@ -47,6 +47,7 @@ log_step() { echo -e "${CYAN}[STEP]${NC} $1"; }
 
 # Required
 ORCHESTRATOR_URL=""
+PUBLIC_IP=""
 
 # Node Identity
 NODE_WALLET=""  # MANDATORY - must be provided
@@ -455,19 +456,17 @@ check_network() {
     fi
     
     # RELAY ARCHITECTURE: Detect if node is behind CGNAT
-    local public_ip=""
     local private_ip=""
     
-    public_ip=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || echo "")
     private_ip=$(hostname -I | awk '{print $1}')
     
-    if [ -n "$public_ip" ]; then
-        log_info "Public IP: $public_ip"
+    if [ -n "$PUBLIC_IP" ]; then
+        log_info "Public IP: $PUBLIC_IP"
         log_info "Private IP: $private_ip"
         
         # Check if behind NAT/CGNAT
-        if [[ "$public_ip" != "$private_ip" ]]; then
-            if [[ "$public_ip" =~ ^100\. ]] || \
+        if [[ "$PUBLIC_IP" != "$private_ip" ]]; then
+            if [[ "$PUBLIC_IP" =~ ^100\. ]] || \
                [[ "$private_ip" =~ ^10\. ]] || \
                [[ "$private_ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] || \
                [[ "$private_ip" =~ ^192\.168\. ]]; then
@@ -1522,19 +1521,17 @@ start_service() {
 # Summary
 # ============================================================
 print_summary() {
+
     echo ""
     echo "╔══════════════════════════════════════════════════════════════╗"
     echo "║       ✅ DeCloud Node Agent Installed Successfully!          ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo ""
-    
-    public_ip=$(curl -s https://api.ipify.org || echo "unknown")
-    
     echo "  Installation Summary:"
     echo "  ─────────────────────────────────────────────────────────────"
     echo "    Node Agent:    Installed & Running"
     echo "    Status:        Awaiting Authentication"
-    echo "    Public IP:     ${public_ip}"
+    echo "    Public IP:     ${PUBLIC_IP}"
     echo ""
     echo "  ─────────────────────────────────────────────────────────────"
     echo "  Next Steps:"
@@ -1553,28 +1550,6 @@ print_summary() {
     echo ""
     echo ""
     echo "  Relay NAT Manager: sudo decloud-relay-nat {add|clean|show}"
-    echo ""
-}
-
-print_summary_unauthenticated() {
-    echo ""
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║                 Installation Complete!                       ║"
-    echo "║              (Authentication Required)                       ║"
-    echo "╚══════════════════════════════════════════════════════════════╝"
-    echo ""
-    echo "  ⚠  Node agent installed but NOT authenticated"
-    echo ""
-    echo "  To complete setup, run:"
-    echo "    sudo cli-decloud-node login"
-    echo ""
-    echo "  This will:"
-    echo "    1. Display a QR code"
-    echo "    2. You scan it with your mobile wallet"
-    echo "    3. Sign the message on your phone"
-    echo "    4. Node gets authorized automatically"
-    echo ""
-    echo "  After authentication, the node agent will start automatically."
     echo ""
 }
 
@@ -1640,16 +1615,6 @@ main() {
     
     # Start service (only if authenticated)
     start_service
-
-    # Authenticate node before starting
-    # if ! run_node_authentication; then
-    #     log_warn "Node agent installed but not authenticated"
-    #     log_warn "The service will not start until you authenticate"
-    #     log_warn "Run: sudo cli-decloud-node login"
-    #     echo ""
-    #     print_summary_unauthenticated
-    #     exit 0
-    # fi
     
     # Done
     print_summary
