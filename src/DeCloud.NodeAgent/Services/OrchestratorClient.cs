@@ -566,6 +566,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 diskBytes = v.DiskBytes,
                 startedAt = v.StartedAt.ToString("O")
             }),
+            schedulingConfigVersion = heartbeat.SchedulingConfigVersion,
             cgnatInfo = heartbeat.CgnatInfo != null ? new
             {
                 assignedRelayNodeId = heartbeat.CgnatInfo.AssignedRelayNodeId,
