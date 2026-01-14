@@ -3,6 +3,7 @@
 
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Infrastructure.Persistence;
 using Microsoft.Extensions.Options;
 
 namespace DeCloud.NodeAgent.Services;
@@ -11,6 +12,7 @@ public class HeartbeatService : BackgroundService
 {
     private readonly IResourceDiscoveryService _resourceDiscovery;
     private readonly IVmManager _vmManager;
+    private readonly VmRepository _repository;
     private readonly IOrchestratorClient _orchestratorClient;
     private readonly IAuthenticationStateService _authState;
     private readonly INodeMetadataService _nodeMetadata;
@@ -22,6 +24,7 @@ public class HeartbeatService : BackgroundService
     public HeartbeatService(
         IResourceDiscoveryService resourceDiscovery,
         IVmManager vmManager,
+        VmRepository repository,
         IOrchestratorClient orchestratorClient,
         IAuthenticationStateService authState,
         INodeMetadataService nodeMetadata,
@@ -30,6 +33,7 @@ public class HeartbeatService : BackgroundService
     {
         _resourceDiscovery = resourceDiscovery;
         _vmManager = vmManager;
+        _repository = repository;
         _orchestratorClient = orchestratorClient;
         _authState = authState;
         _nodeMetadata = nodeMetadata;
@@ -103,7 +107,7 @@ public class HeartbeatService : BackgroundService
             // =====================================================
             // Apply quota to Burstable VMs after boot
             // =====================================================
-            foreach (var vm in activeVms)
+            foreach (var vm in activeVms.Where(v => v.Spec.QualityTier == 3))
             {
                 if (ShouldApplyQuota(vm))
                 {
@@ -136,6 +140,15 @@ public class HeartbeatService : BackgroundService
                         isIpAssigned = !string.IsNullOrEmpty(vmIpAddress);
                         ipAddress = vmIpAddress;
                         var vncPort = vm.VncPort;
+
+                        if (isIpAssigned && vm.Spec.IpAddress != ipAddress)
+                        {
+                            vm.Spec.IpAddress = ipAddress!;
+                            await _repository.SaveVmAsync(vm);
+                            _logger.LogInformation(
+                                "Updated VM {VmId} IP address: {IpAddress}",
+                                vm.VmId, ipAddress);
+                        }
                     }
 
                     vmSummaries.Add(new VmSummary

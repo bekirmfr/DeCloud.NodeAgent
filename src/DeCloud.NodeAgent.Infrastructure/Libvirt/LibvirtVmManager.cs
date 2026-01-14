@@ -555,10 +555,12 @@ public class LibvirtVmManager : IVmManager
                             {
                                 vm.Spec.IpAddress = ip;
                                 await _repository.SaveVmAsync(vm);
-                                _logger.LogInformation("VM {VmId} obtained IP: {Ip}", spec.Id, ip);
 
                                 // Add VM host key to jump user's known_hosts for seamless SSH
                                 await AddVmHostKeyToJumpUserAsync(ip, spec.Id, ct);
+
+                                await _repository.UpdateVmIpAsync(spec.Id, ip);
+                                _logger.LogInformation("VM {VmId} obtained IP: {Ip}", spec.Id, ip);
                             }
                         }
                     }
@@ -1411,12 +1413,12 @@ public class LibvirtVmManager : IVmManager
                 // quota = (ComputePointCost / TotalPoints) × period × 1000
                 // For safety, cap at points × 12,500 microseconds (12.5% per point)
                 // var quotaMicroseconds = spec.VCpus * 50000; // 12.5ms per point per 100ms
-                // var periodMicroseconds = 100000; // 100ms period (standard)
+                // var periodMicroseconds = 100000; // 100ms period (stsandard)
 
                 cpuTune = $@"
                 <cputune>
                   <shares>{cpuShares}</shares>
-                  <!-- Quota applied after 90s via monitoring service -->
+                  <!-- Quota applied after 120s via monitoring service -->
                 </cputune>";
                 break;
 
