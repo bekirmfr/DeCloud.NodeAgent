@@ -1544,7 +1544,9 @@ public class LibvirtVmManager : IVmManager
             // Mark quota as applied in VM metadata
             if (_vms.TryGetValue(vmId, out var instance))
             {
-                instance.QuotaAppliedAt = DateTime.UtcNow;
+                instance.Spec.VcpuQuotaMicroseconds = quotaMicroseconds;
+                instance.Spec.VcpuPeriodMicroseconds = periodMicroseconds;
+                instance.Spec.VcpuQuotaAppliedAt = DateTime.UtcNow;
                 await _repository.SaveVmAsync(instance);
             }
 

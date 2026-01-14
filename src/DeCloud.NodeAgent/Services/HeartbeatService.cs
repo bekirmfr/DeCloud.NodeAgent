@@ -105,9 +105,9 @@ public class HeartbeatService : BackgroundService
                 .ToList();
 
             // =====================================================
-            // Apply quota to Burstable VMs after boot
+            // Apply quota to Burstable non-relay type VMs after boot
             // =====================================================
-            foreach (var vm in activeVms.Where(v => v.Spec.QualityTier == 3))
+            foreach (var vm in activeVms.Where(v => v.Spec.QualityTier == 3 && v.Spec.VmType == VmType.General))
             {
                 if (ShouldApplyQuota(vm))
                 {
@@ -228,7 +228,7 @@ public class HeartbeatService : BackgroundService
             return false;
 
         // Already applied?
-        if (vm.QuotaAppliedAt.HasValue)
+        if (vm.Spec.VcpuQuotaAppliedAt.HasValue)
             return false;
 
         // VM must have an IP (indicates guest agent is working)
@@ -266,6 +266,19 @@ public class HeartbeatService : BackgroundService
             // Get node performance from resource discovery
             // =====================================================
             var inventory = _nodeMetadata.Inventory;
+
+            if (inventory == null || inventory.Cpu?.BenchmarkScore <= 0)
+            {
+                _logger.LogWarning("Vm ID {VmId} Inventory not available. Triggering resource discovery...", vm.VmId);
+
+                _ = Task.Run(async () => {
+                    var inv = await _resourceDiscovery.DiscoverAllAsync(CancellationToken.None);
+                    _nodeMetadata.UpdateInventory(inv);
+                }, ct);
+
+                return; // Trigger resource discovery and skip quota application for now. Retry on next heartbeat.
+            }
+
             var nodePointsPerCore = inventory!.Cpu.BenchmarkScore / _nodeMetadata.SchedulingConfig.BaselineBenchmark;
 
             if (nodePointsPerCore <= 0)

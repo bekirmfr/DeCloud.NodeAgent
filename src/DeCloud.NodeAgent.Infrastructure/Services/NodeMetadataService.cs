@@ -1,4 +1,5 @@
-﻿using DeCloud.NodeAgent.Core.Models;
+﻿using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Models;
 using DeCloud.Shared;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -33,6 +34,7 @@ public interface INodeMetadataService
 public class NodeMetadataService : INodeMetadataService
 {
     private readonly IConfiguration _configuration;
+    private readonly IResourceDiscoveryService _resourceDiscovery;
     private readonly ILogger<NodeMetadataService> _logger;
 
     public string OrchestratorUrl { get; private set; } = string.Empty;
@@ -89,6 +91,11 @@ public class NodeMetadataService : INodeMetadataService
             MaxPerformanceMultiplier = 20.0,
             UpdatedAt = DateTime.UtcNow
         };
+
+        _ = Task.Run(async () => {
+            var inv = await _resourceDiscovery.DiscoverAllAsync(CancellationToken.None);
+            UpdateInventory(inv);
+        }, ct);
 
         _logger.LogInformation(
             "✓ Node metadata initialized: ID={NodeId}, Name={Name}, IP={PublicIp}",

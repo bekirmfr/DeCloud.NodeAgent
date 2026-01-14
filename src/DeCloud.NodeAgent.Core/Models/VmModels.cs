@@ -12,6 +12,13 @@ public class VmSpec
 
     // Resource allocation
     public int VirtualCpuCores { get; set; } = 1;
+
+    public int VcpuQuotaMicroseconds { get; set; } = -1;
+    public int VcpuPeriodMicroseconds { get; set; } = -1;
+    /// <summary>
+    /// Timestamp when CPU quota was applied (for Burstable tier)
+    /// </summary>
+    public DateTime? VcpuQuotaAppliedAt { get; set; } = null;
     public long MemoryBytes { get; set; } = 1024 * 1024 * 1024; // 1GB default
     public long DiskBytes { get; set; } = 10L * 1024 * 1024 * 1024; // 10GB default
 
@@ -62,11 +69,6 @@ public class VmInstance
     public VmState State { get; set; }
     public VmSpec Spec { get; set; } = new();
     public string? NetworkInterface { get; set; }  // e.g., "vnet0"
-
-    /// <summary>
-    /// Timestamp when CPU quota was applied (for Burstable tier)
-    /// </summary>
-    public DateTime? QuotaAppliedAt { get; set; }
 
     // Runtime info
     public int? Pid { get; set; }  // QEMU process ID
