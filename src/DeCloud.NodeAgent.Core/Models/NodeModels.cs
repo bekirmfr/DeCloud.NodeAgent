@@ -10,6 +10,7 @@ public class Heartbeat
     public NodeStatus Status { get; set; }
     public ResourceSnapshot Resources { get; set; } = new();
     public List<VmSummary> ActiveVms { get; set; } = new();
+    public int SchedulingConfigVersion { get; set; } = 0;
     public CgnatNodeInfo? CgnatInfo { get; set; }
 }
 

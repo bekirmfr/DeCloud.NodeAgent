@@ -1,4 +1,5 @@
 ﻿using DeCloud.NodeAgent.Core.Models;
+using Orchestrator.Models;
 
 namespace DeCloud.NodeAgent.Core.Interfaces;
 
@@ -15,10 +16,11 @@ public class RegistrationResult
     public bool IsSuccess { get; init; }
     public string? NodeId { get; init; }
     public string? ApiKey { get; init; }
+    public SchedulingConfig? SchedulingConfig { get; init; }
     public string? Error { get; init; }
 
-    public static RegistrationResult Success(string nodeId, string apiKey) =>
-        new() { IsSuccess = true, NodeId = nodeId, ApiKey = apiKey };
+    public static RegistrationResult Success(string nodeId, string apiKey, SchedulingConfig? config) =>
+        new() { IsSuccess = true, NodeId = nodeId, ApiKey = apiKey, SchedulingConfig = config};
 
     public static RegistrationResult Failure(string error) =>
         new() { IsSuccess = false, Error = error };

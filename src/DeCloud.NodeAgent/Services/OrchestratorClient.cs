@@ -4,6 +4,7 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Options;
+using Orchestrator.Models;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Reflection;
@@ -368,7 +369,36 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                         "✓ Node registered successfully: {NodeId} | Wallet: {Wallet}",
                         _nodeId, _walletAddress);
 
-                    return RegistrationResult.Success(_nodeId, _apiKey);
+                    SchedulingConfig? schedulingConfig = null;
+
+                    if (!data.TryGetProperty("schedulingConfig", out var schedulingConfigProp))
+                    {
+                        _logger.LogError("Registration response missing scheduling configuration");
+                        //throw new ArgumentException("Scheduling configuration not found in response");
+                    }
+                    else
+                    {
+                        // Deserialize the schedulingConfig JSON element to SchedulingConfig object
+                        schedulingConfig = JsonSerializer.Deserialize<SchedulingConfig>(
+                            schedulingConfigProp.GetRawText(),
+                            new JsonSerializerOptions
+                            {
+                                PropertyNameCaseInsensitive = true
+                            });
+
+                        if (schedulingConfig == null)
+                        {
+                            _logger.LogError("Failed to deserialize scheduling configuration");
+                            //throw new ArgumentException("Scheduling configuration is null");
+                        }
+                        else
+                        {
+                            await _nodeMetadata.UpdateSchedulingConfigAsync(schedulingConfig);
+                            _logger.LogInformation($"✓ Scheduling configuration version {schedulingConfig.Version} received and configured");
+                        }
+                    }
+
+                    return RegistrationResult.Success(_nodeId, _apiKey, schedulingConfig);
                 }
             }
 
@@ -553,7 +583,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
     /// <summary>
     /// Process heartbeat response including pending commands and CGNAT info
     /// </summary>
-    private Task ProcessHeartbeatResponseAsync(string content, CancellationToken ct)
+    private async Task ProcessHeartbeatResponseAsync(string content, CancellationToken ct)
     {
         _logger.LogDebug("Processing heartbeat response");
         try
@@ -563,7 +593,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             if (!json.RootElement.TryGetProperty("data", out var data))
             {
                 _logger.LogWarning("Heartbeat response missing 'data' property");
-                return Task.CompletedTask;
+                throw new ArgumentException("Heartbeat response missing 'data' property");
             }
 
             // Process Pending Commands
@@ -609,11 +639,22 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                         IssuedAt = DateTime.UtcNow
                     });
                 }
+            }
 
-                if (commands.GetArrayLength() > 0)
+            // Process Scheduling Config Update
+            if (data.TryGetProperty("schedulingConfig", out var schedulingConfigProg))
+            {
+                var schedulingConfig = JsonSerializer.Deserialize<SchedulingConfig>(
+                    schedulingConfigProg.GetRawText(),
+                    new JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true
+                    });
+                if (schedulingConfig != null)
                 {
-                    _logger.LogInformation("Enqueued {Count} command(s) for processing",
-                        commands.GetArrayLength());
+                    _logger.LogInformation("Received updated scheduling configuration version {Version}",
+                        schedulingConfig.Version);
+                    await _nodeMetadata.UpdateSchedulingConfigAsync(schedulingConfig);
                 }
             }
 
@@ -631,7 +672,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                     : "";
 
                 _logger.LogInformation(
-                    "Received relay assignment: Relay {RelayId}, Tunnel IP {TunnelIp}",
+                    "Received relay data: Relay {RelayId}, Tunnel IP {TunnelIp}",
                     relayId, tunnelIp);
 
                 if (_lastHeartbeat != null && _lastHeartbeat.Heartbeat != null)
@@ -657,10 +698,8 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to process heartbeat response");
+            _logger.LogError(ex, "Failed to process heartbeat response");
         }
-
-        return Task.CompletedTask;
     }
 
     /// <summary>

@@ -174,7 +174,8 @@ public class HeartbeatService : BackgroundService
                 Timestamp = DateTime.UtcNow,
                 Status = _currentStatus,
                 Resources = snapshot,
-                ActiveVms = vmSummaries  // Now includes VncPort, MacAddress, EncryptedPassword
+                ActiveVms = vmSummaries,  // Now includes VncPort, MacAddress, EncryptedPassword
+                SchedulingConfigVersion = _nodeMetadata.GetSchedulingConfigVersion(),
             };
 
             // Send heartbeat - OrchestratorClient will transform to API format
@@ -221,12 +222,12 @@ public class HeartbeatService : BackgroundService
         if (string.IsNullOrEmpty(vm.Spec.IpAddress))
             return false;
 
-        // VM must be running for at least 60 seconds
+        // VM must be running for at least 120 seconds
         if (!vm.StartedAt.HasValue)
             return false;
 
         var uptime = DateTime.UtcNow - vm.StartedAt.Value;
-        if (uptime < TimeSpan.FromSeconds(60))
+        if (uptime < TimeSpan.FromSeconds(120))
             return false;
 
         return true;
@@ -252,7 +253,7 @@ public class HeartbeatService : BackgroundService
             // Get node performance from resource discovery
             // =====================================================
             var inventory = _nodeMetadata.Inventory;
-            var nodePointsPerCore = inventory!.Cpu.BenchmarkScore / 1000;
+            var nodePointsPerCore = inventory!.Cpu.BenchmarkScore / _nodeMetadata.SchedulingConfig.BaselineBenchmark;
 
             if (nodePointsPerCore <= 0)
             {
@@ -267,8 +268,10 @@ public class HeartbeatService : BackgroundService
             // =====================================================
             // Formula: quota_percentage = 1 / (points_per_core × overcommit)
             // Example: MSI (6.73) with 4x overcommit = 3.71% per vCPU
-            var burstableOvercommit = 4.0;
-            var quotaPercentage = 1.0 / (nodePointsPerCore * burstableOvercommit);
+
+            var baselineOvercommit = _nodeMetadata.SchedulingConfig.BaselineOvercommitRatio;
+
+            var quotaPercentage = 1.0 / (nodePointsPerCore * baselineOvercommit);
 
             // Convert to libvirt microseconds (per 100ms period)
             var quotaPerVCpu = (int)(100000 * quotaPercentage);
@@ -280,13 +283,13 @@ public class HeartbeatService : BackgroundService
             var totalQuota = vm.Spec.VirtualCpuCores * quotaPerVCpu;
 
             _logger.LogInformation(
-                "VM {VmId}: Calculated quota - {Percentage:F2}% per vCPU ({Quota}µs) " +
-                "[Node: {PointsPerCore:F2}x, Overcommit: {Over}x, vCPUs: {VCpus}]",
+                "VM {VmId}: Calculated quota - {Percentage:F2}% per vCPU ({Quota} µs) " +
+                "[Node Score: {PointsPerCore:F2}x, Overcommit: {Overcommit:F1}x, vCPUs: {VCpus}]",
                 vm.VmId,
                 quotaPercentage * 100,
                 quotaPerVCpu,
                 nodePointsPerCore,
-                burstableOvercommit,
+                baselineOvercommit,
                 vm.Spec.VirtualCpuCores);
 
             // =====================================================
