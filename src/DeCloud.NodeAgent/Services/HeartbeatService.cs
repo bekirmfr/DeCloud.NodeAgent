@@ -14,7 +14,7 @@ public class HeartbeatService : BackgroundService
     private readonly IVmManager _vmManager;
     private readonly VmRepository _repository;
     private readonly IOrchestratorClient _orchestratorClient;
-    private readonly IAuthenticationStateService _authState;
+    private readonly INodeStateService _nodeState;
     private readonly INodeMetadataService _nodeMetadata;
     private readonly HeartbeatOptions _options;
     private readonly ILogger<HeartbeatService> _logger;
@@ -26,7 +26,7 @@ public class HeartbeatService : BackgroundService
         IVmManager vmManager,
         VmRepository repository,
         IOrchestratorClient orchestratorClient,
-        IAuthenticationStateService authState,
+        INodeStateService nodeState,
         INodeMetadataService nodeMetadata,
         IOptions<HeartbeatOptions> options,
         ILogger<HeartbeatService> logger)
@@ -35,7 +35,7 @@ public class HeartbeatService : BackgroundService
         _vmManager = vmManager;
         _repository = repository;
         _orchestratorClient = orchestratorClient;
-        _authState = authState;
+        _nodeState = nodeState;
         _nodeMetadata = nodeMetadata;
         _options = options.Value;
         _logger = logger;
@@ -50,7 +50,7 @@ public class HeartbeatService : BackgroundService
         await Task.Delay(TimeSpan.FromSeconds(10), ct);
 
         // Wait for node to be registered
-        await WaitForAuthenticationAsync(ct);
+        await _nodeState.WaitForAuthenticationAsync();
 
         _currentStatus = NodeStatus.Online;
         _logger.LogInformation("✓ Node registered, starting heartbeats");
@@ -71,24 +71,6 @@ public class HeartbeatService : BackgroundService
         }
 
         _logger.LogInformation("Heartbeat service stopping");
-    }
-
-    private async Task WaitForAuthenticationAsync(CancellationToken ct)
-    {
-        _logger.LogInformation("Waiting for resource authentication to complete...");
-
-        while (!_authState.IsRegistered && !ct.IsCancellationRequested)
-        {
-            var state = _authState.CurrentState;
-            _logger.LogInformation("Waiting for registration, current state: {State}", state);
-
-            if (state == AuthenticationState.CredentialsInvalid)
-            {
-                _logger.LogWarning("Cannot start heartbeat - credentials invalid");
-            }
-
-            await Task.Delay(TimeSpan.FromSeconds(10), ct);
-        }
     }
 
     private async Task SendHeartbeatAsync(CancellationToken ct)

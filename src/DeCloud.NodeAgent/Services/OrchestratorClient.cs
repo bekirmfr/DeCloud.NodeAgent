@@ -21,13 +21,13 @@ public class OrchestratorClientOptions
     public string PendingAuthFile { get; set; } = "/etc/decloud/pending-auth";
 }
 
-public class OrchestratorClient : IOrchestratorClient
+public partial class OrchestratorClient : IOrchestratorClient
 {
     private const string PendingAuthFile = "/etc/decloud/pending-auth";
     private readonly HttpClient _httpClient;
     private readonly ILogger<OrchestratorClient> _logger;
     private readonly IResourceDiscoveryService _resourceDiscovery;
-    private readonly IAuthenticationStateService _authState;
+    private readonly INodeStateService _nodeState;
     private readonly INodeMetadataService _nodeMetadata;
     private readonly OrchestratorClientOptions _options;
 
@@ -47,7 +47,7 @@ public class OrchestratorClient : IOrchestratorClient
         HttpClient httpClient,
         IOptions<OrchestratorClientOptions> options,
         IResourceDiscoveryService resourceDiscovery,
-        IAuthenticationStateService authenticationStateService,
+        INodeStateService nodeState,
         INodeMetadataService nodeMetadata,
         ILogger<OrchestratorClient> logger)
     {
@@ -57,7 +57,7 @@ public class OrchestratorClient : IOrchestratorClient
         _resourceDiscovery = resourceDiscovery;
         _nodeMetadata = nodeMetadata;
         _walletAddress = _options.WalletAddress;
-        _authState= authenticationStateService;
+        _nodeState= nodeState;
         _httpClient.BaseAddress = new Uri(_options.BaseUrl.TrimEnd('/'));
         _httpClient.Timeout = _options.Timeout;
 
@@ -333,7 +333,6 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                     }
 
                     _nodeId = registrationResponse.NodeId ?? throw new ArgumentNullException(nameof(registrationResponse.NodeId));
-
                     _apiKey = registrationResponse.ApiKey ?? throw new ArgumentNullException(nameof(registrationResponse.ApiKey));
 
                     await SaveCredentialsAsync(ct);
@@ -345,7 +344,6 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                     _logger.LogInformation($"✓ Node ID ({_nodeId}) and API key ({_apiKey}) received and authorization header is configured");
 
                     _orchestratorPublicKey = registrationResponse.OrchestratorWireGuardPublicKey ?? throw new ArgumentNullException(nameof(registrationResponse.OrchestratorWireGuardPublicKey));
-
                     await SaveOrchestratorPublicKeyAsync(_orchestratorPublicKey, ct);
 
                     var performanceEval = registrationResponse.PerformanceEvaluation ?? throw new ArgumentNullException(nameof(registrationResponse.PerformanceEvaluation));
@@ -424,7 +422,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
     /// </summary>
     public async Task<bool> SendHeartbeatAsync(Heartbeat heartbeat, CancellationToken ct = default)
     {
-        if (!_authState.IsRegistered)
+        if (!_nodeState.IsRegistered)
         {
             _logger.LogWarning("Cannot send heartbeat - node not registered");
             return false;
@@ -685,7 +683,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
     /// </summary>
     public async Task<bool> ReportVmStateChangeAsync(string vmId, VmState newState, CancellationToken ct = default)
     {
-        if (!_authState.IsRegistered)
+        if (!_nodeState.IsRegistered)
         {
             _logger.LogWarning("Cannot report VM state - node not registered");
             return false;
@@ -713,7 +711,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         string? errorMessage,
         CancellationToken ct = default)
     {
-        if (!_authState.IsRegistered)
+        if (!_nodeState.IsRegistered)
         {
             _logger.LogWarning("Cannot acknowledge command - node not registered");
             return false;

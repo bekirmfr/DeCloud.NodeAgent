@@ -1,8 +1,7 @@
-﻿using DeCloud.NodeAgent.Infrastructure.Persistence;
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Hosting;
 
-namespace DeCloud.NodeAgent.Infrastructure.Services
+namespace DeCloud.NodeAgent.Infrastructure.Persistence
 {
     public class DatabaseMaintenanceService : BackgroundService
     {

@@ -1,12 +1,15 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+
+namespace DeCloud.NodeAgent.Infrastructure.Services.Auth;
 
 public class AuthenticationManager : BackgroundService
 {
     private readonly IResourceDiscoveryService _resourceDiscovery;
     private readonly IOrchestratorClient _orchestratorClient;
-    private readonly IAuthenticationStateService _authState;
+    private readonly INodeStateService _nodeState;
     private readonly ILogger<AuthenticationManager> _logger;
 
     // File paths
@@ -17,24 +20,15 @@ public class AuthenticationManager : BackgroundService
     private static readonly TimeSpan DiscoveryCheckInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan AuthCheckInterval = TimeSpan.FromSeconds(10);
 
-    public enum AuthState
-    {
-        WaitingForDiscovery,
-        NotAuthenticated,
-        PendingRegistration,
-        Registered,
-        CredentialsInvalid
-    }
-
     public AuthenticationManager(
         IResourceDiscoveryService resourceDiscovery,
         IOrchestratorClient orchestratorClient,
-        IAuthenticationStateService authState,
+        INodeStateService state,
         ILogger<AuthenticationManager> logger)
     {
         _resourceDiscovery = resourceDiscovery;
         _orchestratorClient = orchestratorClient;
-        _authState = authState;
+        _nodeState = state;
         _logger = logger;
     }
 
@@ -53,30 +47,23 @@ public class AuthenticationManager : BackgroundService
                 var state = await DetermineAuthStateAsync(ct);
 
                 // Update shared state
-                _authState.UpdateState(state switch
-                {
-                    AuthState.NotAuthenticated => AuthenticationState.NotAuthenticated,
-                    AuthState.PendingRegistration => AuthenticationState.PendingRegistration,
-                    AuthState.Registered => AuthenticationState.Registered,
-                    AuthState.CredentialsInvalid => AuthenticationState.CredentialsInvalid,
-                    _ => AuthenticationState.Initializing
-                });
+                _nodeState.SetAuthState(state);
 
                 switch (state)
                 {
-                    case AuthState.NotAuthenticated:
+                    case AuthenticationState.NotAuthenticated:
                         await HandleNotAuthenticatedAsync(ct);
                         break;
 
-                    case AuthState.PendingRegistration:
+                    case AuthenticationState.PendingRegistration:
                         await HandlePendingRegistrationAsync(ct);
                         break;
 
-                    case AuthState.Registered:
+                    case AuthenticationState.Registered:
                         _logger.LogInformation("✓ Node authenticated and registered");
                         return; // Exit - normal operation can proceed
 
-                    case AuthState.CredentialsInvalid:
+                    case AuthenticationState.CredentialsInvalid:
                         await HandleInvalidCredentialsAsync(ct);
                         break;
                 }
@@ -129,7 +116,7 @@ public class AuthenticationManager : BackgroundService
         }
     }
 
-    private async Task<AuthState> DetermineAuthStateAsync(CancellationToken ct)
+    private async Task<AuthenticationState> DetermineAuthStateAsync(CancellationToken ct)
     {
         var authFileExists = File.Exists(PendingAuthFile);
 
@@ -138,7 +125,7 @@ public class AuthenticationManager : BackgroundService
         // Check if pending authentication exists
         if (authFileExists)
         {
-            return AuthState.PendingRegistration;
+            return AuthenticationState.PendingRegistration;
         }
 
         var credentials = new Dictionary<string, string>();
@@ -156,14 +143,14 @@ public class AuthenticationManager : BackgroundService
 
                 if (isAuthorized)
                 {
-                    return AuthState.Registered;
+                    return AuthenticationState.Registered;
                 }
             }
 
-            return AuthState.CredentialsInvalid;
+            return AuthenticationState.CredentialsInvalid;
         }
 
-        return AuthState.NotAuthenticated;
+        return AuthenticationState.NotAuthenticated;
     }
 
     private async Task HandleNotAuthenticatedAsync(CancellationToken ct)

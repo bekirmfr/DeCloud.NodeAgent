@@ -3,6 +3,7 @@ using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using DeCloud.NodeAgent.Infrastructure.Network;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
+using DeCloud.NodeAgent.Infrastructure.Services.Auth;
 using DeCloud.NodeAgent.Services;
 using Microsoft.Extensions.Options;
 using System.Text.Json;
@@ -54,6 +55,7 @@ builder.Services.AddHttpClient("VmProxy", client =>
 // Core Services
 // =====================================================
 builder.Services.AddSingleton<INodeMetadataService, NodeMetadataService>();
+builder.Services.AddSingleton<INodeStateService, NodeStateService>();
 builder.Services.AddSingleton<ICommandExecutor, CommandExecutor>();
 builder.Services.AddSingleton<INatRuleManager, NatRuleManager>();
 builder.Services.AddSingleton<IResourceDiscoveryService, ResourceDiscoveryService>();
@@ -61,7 +63,6 @@ builder.Services.AddSingleton<ICpuBenchmarkService, CpuBenchmarkService>();
 builder.Services.AddSingleton<IImageManager, ImageManager>();
 builder.Services.AddSingleton<IOrchestratorClient>(sp =>
     sp.GetRequiredService<OrchestratorClient>());
-builder.Services.AddSingleton<IAuthenticationStateService, AuthenticationStateService>();
 
 // =====================================================
 // VM Repository with Encryption Support

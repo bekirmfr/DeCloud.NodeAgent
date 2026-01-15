@@ -1,5 +1,6 @@
 ﻿using DeCloud.NodeAgent.Core.Models;
 using Orchestrator.Models;
+using System.Net.NetworkInformation;
 
 namespace DeCloud.NodeAgent.Core.Interfaces;
 
@@ -186,6 +187,183 @@ public interface IOrchestratorClient
     Task<bool> AcknowledgeCommandAsync(string commandId, bool success, string? errorMessage, CancellationToken ct = default);
     HeartbeatDto? GetLastHeartbeat();
     Task ReloadCredentialsAsync(CancellationToken ct = default);
+    /// <summary>
+    /// Get node summary information from orchestrator.
+    /// Endpoint: GET /api/nodes/me
+    /// </summary>
+    /// <remarks>
+    /// Returns node status, region, public IP, registration date, and agent version.
+    /// Useful for verifying orchestrator's view of this node matches local state.
+    /// </remarks>
+    Task<NodeSummaryResponse?> GetNodeSummaryAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Get current scheduling configuration from orchestrator.
+    /// Endpoint: GET /api/nodes/me/config
+    /// </summary>
+    /// <remarks>
+    /// Returns the authoritative scheduling config including:
+    /// - Baseline benchmark score
+    /// - Overcommit ratios per tier
+    /// - Tier configurations
+    /// Use this for on-demand config refresh outside heartbeat cycle.
+    /// </remarks>
+    Task<SchedulingConfig?> GetSchedulingConfigAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Get node performance evaluation and tier eligibility.
+    /// Endpoint: GET /api/nodes/me/performance
+    /// </summary>
+    /// <remarks>
+    /// Returns orchestrator's evaluation of this node including:
+    /// - Benchmark scores (raw and capped)
+    /// - Points per core calculation
+    /// - Eligible tiers and their capabilities
+    /// - Highest eligible tier
+    /// </remarks>
+    Task<NodePerformanceEvaluation?> GetPerformanceEvaluationAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Get node capacity and current allocation status.
+    /// Endpoint: GET /api/nodes/me/capacity
+    /// </summary>
+    /// <remarks>
+    /// Returns detailed capacity information including:
+    /// - Physical resources (cores, memory, storage)
+    /// - Total compute points available
+    /// - Current allocations and availability
+    /// - Per-VM breakdown
+    /// </remarks>
+    Task<NodeCapacityResponse?> GetCapacityAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Request orchestrator to re-evaluate node performance.
+    /// Endpoint: POST /api/nodes/me/evaluate
+    /// </summary>
+    /// <remarks>
+    /// Triggers a fresh performance evaluation on the orchestrator.
+    /// Use after hardware changes or benchmark updates.
+    /// Returns the new evaluation result.
+    /// </remarks>
+    Task<NodePerformanceEvaluation?> RequestPerformanceEvaluationAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Synchronize all node state from orchestrator.
+    /// Calls multiple /api/nodes/me endpoints to refresh local state.
+    /// </summary>
+    /// <remarks>
+    /// This is a convenience method that fetches:
+    /// 1. Scheduling configuration
+    /// 2. Performance evaluation
+    /// 3. Node summary
+    /// 
+    /// Use on startup or after extended disconnection to ensure
+    /// local state matches orchestrator's authoritative view.
+    /// </remarks>
+    Task<NodeSyncResult> SyncWithOrchestratorAsync(CancellationToken ct = default);
+}
+
+/// <summary>
+/// Response from GET /api/nodes/me
+/// </summary>
+public class NodeSummaryResponse
+{
+    public string NodeId { get; set; } = string.Empty;
+    public NodeStatus Status { get; set; }
+    public string? Region { get; set; }
+    public string? PublicIp { get; set; }
+    public DateTime RegisteredAt { get; set; }
+    public DateTime LastHeartbeat { get; set; }
+    public string AgentVersion { get; set; } = string.Empty;
+    public int? SchedulingConfigVersion { get; set; }
+}
+
+/// <summary>
+/// Response from GET /api/nodes/me/capacity
+/// </summary>
+public class NodeCapacityResponse
+{
+    public string NodeId { get; set; } = string.Empty;
+
+    // Physical resources
+    public int PhysicalCores { get; set; }
+    public long PhysicalMemoryBytes { get; set; }
+    public long PhysicalStorageBytes { get; set; }
+
+    // Point-based capacity
+    public double PointsPerCore { get; set; }
+    public int TotalComputePoints { get; set; }
+    public int AllocatedComputePoints { get; set; }
+    public int AvailableComputePoints => TotalComputePoints - AllocatedComputePoints;
+    public double UtilizationPercent => TotalComputePoints > 0
+        ? (double)AllocatedComputePoints / TotalComputePoints * 100
+        : 0;
+
+    // Memory
+    public long AllocatedMemoryBytes { get; set; }
+    public long AvailableMemoryBytes { get; set; }
+
+    // Storage
+    public long AllocatedStorageBytes { get; set; }
+    public long AvailableStorageBytes { get; set; }
+
+    // VM information
+    public int ActiveVmCount { get; set; }
+    public List<VmAllocationSummary> VmBreakdown { get; set; } = new();
+}
+
+/// <summary>
+/// VM allocation summary within capacity response
+/// </summary>
+public class VmAllocationSummary
+{
+    public string VmId { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string Tier { get; set; } = string.Empty;
+    public int VCpus { get; set; }
+    public int Points { get; set; }
+    public long MemoryBytes { get; set; }
+    public VmStatus Status { get; set; }
+}
+
+public enum VmStatus
+{
+    Pending,        // 0 - Waiting to be scheduled
+    Scheduling,     // 1 - Finding a node
+    Provisioning,   // 2 - Being created on node
+    Running,        // 3 - Active and running
+    Stopping,       // 4 - Being stopped
+    Stopped,        // 5 - Stopped but resources reserved
+    Deleting,       // 6 - Deletion in progress, waiting for node confirmation
+    Migrating,      // 7 - Being moved to another node
+    Error,          // 8 - Something went wrong
+    Deleted         // 9 - Deletion confirmed, resources freed
+}
+
+/// <summary>
+/// Result of full node synchronization
+/// </summary>
+public class NodeSyncResult
+{
+    public bool Success { get; set; }
+    public string? Error { get; set; }
+
+    public bool ConfigSynced { get; set; }
+    public bool PerformanceSynced { get; set; }
+    public bool SummarySynced { get; set; }
+
+    public int? ConfigVersion { get; set; }
+    public QualityTier? HighestTier { get; set; }
+    public int? TotalComputePoints { get; set; }
+
+    public DateTime SyncedAt { get; set; } = DateTime.UtcNow;
+
+    public static NodeSyncResult Failed(string error) => new()
+    {
+        Success = false,
+        Error = error,
+        SyncedAt = DateTime.UtcNow
+    };
 }
 
 /// <summary>
@@ -242,47 +420,6 @@ public interface INatRuleManager
     /// Gets list of existing NAT rules
     /// </summary>
     Task<List<string>> GetExistingRulesAsync(CancellationToken ct = default);
-}
-
-/// <summary>
-/// Thread-safe authentication state tracking
-/// </summary>
-public interface IAuthenticationStateService
-{
-    /// <summary>
-    /// Current authentication state
-    /// </summary>
-    AuthenticationState CurrentState { get; }
-
-    /// <summary>
-    /// Simple registered check
-    /// </summary>
-    bool IsRegistered { get; }
-
-    /// <summary>
-    /// Resource discovery completion check
-    /// </summary>
-    bool IsDiscoveryComplete { get; }
-
-    /// <summary>
-    /// Update authentication state (called by AuthenticationManager)
-    /// </summary>
-    void UpdateState(AuthenticationState newState);
-
-    /// <summary>
-    /// Wait until registered or cancelled
-    /// </summary>
-    Task WaitForRegistrationAsync(CancellationToken ct);
-}
-
-public enum AuthenticationState
-{
-    Initializing,
-    WaitingForDiscovery,
-    NotAuthenticated,
-    PendingRegistration,
-    Registered,
-    CredentialsInvalid
 }
 
 public class PendingCommand
