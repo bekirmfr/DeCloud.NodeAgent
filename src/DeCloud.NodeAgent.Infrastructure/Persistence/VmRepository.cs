@@ -622,7 +622,7 @@ public class VmRepository : IDisposable
                     Id = reader.GetString(reader.GetOrdinal("VmId")),
                     Name = reader.GetString(reader.GetOrdinal("Name")),
                     OwnerId = GetNullableString(reader, "OwnerId"),
-                    QualityTier = reader.GetInt32(reader.GetOrdinal("QualityTier")),
+                    QualityTier = (QualityTier)reader.GetInt32(reader.GetOrdinal("QualityTier")),
                     ComputePointCost = reader.GetInt32(reader.GetOrdinal("ComputePointCost")),
                     VirtualCpuCores = reader.GetInt32(reader.GetOrdinal("VirtualCpuCores")),
                     MemoryBytes = reader.GetInt64(reader.GetOrdinal("MemoryBytes")),

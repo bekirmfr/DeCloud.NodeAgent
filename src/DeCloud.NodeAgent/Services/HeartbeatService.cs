@@ -107,7 +107,7 @@ public class HeartbeatService : BackgroundService
             // =====================================================
             // Apply quota to Burstable non-relay type VMs after boot
             // =====================================================
-            foreach (var vm in activeVms.Where(v => v.Spec.QualityTier == 3 && v.Spec.VmType == VmType.General))
+            foreach (var vm in activeVms.Where(v => v.Spec.QualityTier == QualityTier.Burstable && v.Spec.VmType == VmType.General))
             {
                 if (ShouldApplyQuota(vm))
                 {
@@ -158,7 +158,7 @@ public class HeartbeatService : BackgroundService
                         OwnerId = vm.Spec.OwnerId,
                         State = vm.State,
                         VirtualCpuCores = vm.Spec.VirtualCpuCores,
-                        QualityTier = vm.Spec.QualityTier,
+                        QualityTier = (int)vm.Spec.QualityTier,
                         ComputePointCost = vm.Spec.ComputePointCost,
                         MemoryBytes = vm.Spec.MemoryBytes,
                         DiskBytes = vm.Spec.DiskBytes,
@@ -220,7 +220,7 @@ public class HeartbeatService : BackgroundService
     private bool ShouldApplyQuota(VmInstance vm)
     {
         // Only apply to Burstable tier (QualityTier = 3)
-        if (vm.Spec.QualityTier != 3)
+        if (vm.Spec.QualityTier != QualityTier.Burstable)
             return false;
 
         // Only apply to running VMs
@@ -262,81 +262,68 @@ public class HeartbeatService : BackgroundService
                 "VM {VmId} ({Name}) is ready - calculating Burstable tier quota (uptime: {Uptime:F0}s)",
                 vm.VmId, vm.Name, uptime);
 
-            // =====================================================
-            // Get node performance from resource discovery
-            // =====================================================
-            var inventory = _nodeMetadata.Inventory;
-
-            if (inventory == null || inventory.Cpu?.BenchmarkScore <= 0)
+            var performanceEval = _nodeMetadata.PerformanceEvaluation;
+            if (performanceEval == null)
             {
-                _logger.LogWarning("Vm ID {VmId} Inventory not available. Triggering resource discovery...", vm.VmId);
-
-                _ = Task.Run(async () => {
-                    var inv = await _resourceDiscovery.DiscoverAllAsync(CancellationToken.None);
-                    _nodeMetadata.UpdateInventory(inv);
-                }, ct);
-
-                return; // Trigger resource discovery and skip quota application for now. Retry on next heartbeat.
-            }
-
-            var nodePointsPerCore = inventory!.Cpu.BenchmarkScore / _nodeMetadata.SchedulingConfig.BaselineBenchmark;
-
-            if (nodePointsPerCore <= 0)
-            {
-                _logger.LogWarning(
-                    "Invalid node performance ({Perf}), defaulting to 1.0x baseline",
-                    nodePointsPerCore);
-                nodePointsPerCore = 1;
+                _logger.LogWarning("VM {VmId}: Performance evaluation not available, skipping quota", vm.VmId);
+                return;
             }
 
             // =====================================================
-            // Calculate dynamic quota based on node performance
+            // Calculate quota based on point-fair share with 4x burst
             // =====================================================
-            // Formula: quota_percentage = 1 / (points_per_core × overcommit)
-            // Example: MSI (6.73) with 4x overcommit = 3.71% per vCPU
+            var vmPoints = (double)vm.Spec.ComputePointCost;
+            var totalNodePoints = (double)performanceEval.TotalComputePoints;
+            var physicalCores = performanceEval.PhysicalCores;
 
-            var baselineOvercommit = _nodeMetadata.SchedulingConfig.BaselineOvercommitRatio;
+            // Fair share percentage
+            var fairSharePercent = vmPoints / totalNodePoints;
 
-            var quotaPercentage = 1.0 / (nodePointsPerCore * baselineOvercommit);
+            // Fixed period (100ms standard)
+            const int periodMicroseconds = 100000;
 
-            // Convert to libvirt microseconds (per 100ms period)
-            var quotaPerVCpu = (int)(100000 * quotaPercentage);
+            // Physical capacity in µs (what 100% of node = in quota terms)
+            var physicalCapacity = physicalCores * periodMicroseconds;
 
-            // Optional: Apply minimum floor to prevent too-slow VMs
-            // Uncomment to enforce 10% minimum per vCPU
-            // quotaPerVCpu = Math.Max(quotaPerVCpu, 10000);
+            // Fair share quota
+            var fairShareQuota = (int)(physicalCapacity * fairSharePercent);
 
-            var totalQuota = vm.Spec.VirtualCpuCores * quotaPerVCpu;
+            // 4x burst (allows burst up to non-overcommitted fair share)
+            const double burstMultiplier = 4.0;
+            var burstQuota = (int)(fairShareQuota * burstMultiplier);
+
+            // Cap at 50% of physical node (no single Burstable VM dominates)
+            var maxNodeShareQuota = (int)(physicalCapacity * 0.5);
+
+            // Apply all caps
+            var finalQuota = Math.Min(burstQuota, Math.Min(physicalCapacity, maxNodeShareQuota));
+
+            // Safety floor (at least 1%)
+            finalQuota = Math.Max(finalQuota, periodMicroseconds / 100);
 
             _logger.LogInformation(
-                "VM {VmId}: Calculated quota - {Percentage:F2}% per vCPU ({Quota} µs) " +
-                "[Node Score: {PointsPerCore:F2}x, Overcommit: {Overcommit:F1}x, vCPUs: {VCpus}]",
+                "VM {VmId}: Quota calculation - Points={VmPts}/{TotalPts} ({FairShare:F2}%), " +
+                "Fair={Fair}µs, 4xBurst={Burst}µs, 50%Cap={Cap}µs, Final={Final}µs ({FinalCores:F2} cores)",
                 vm.VmId,
-                quotaPercentage * 100,
-                quotaPerVCpu,
-                nodePointsPerCore,
-                baselineOvercommit,
-                vm.Spec.VirtualCpuCores);
+                vmPoints, totalNodePoints, fairSharePercent * 100,
+                fairShareQuota, burstQuota, maxNodeShareQuota, finalQuota,
+                (double)finalQuota / periodMicroseconds);
 
             // =====================================================
             // Apply quota via virsh schedinfo
             // =====================================================
             var success = await _vmManager.ApplyQuotaCapAsync(
                 vm,
-                totalQuota,
-                periodMicroseconds: 100000,
+                finalQuota,
+                periodMicroseconds,
                 ct);
 
             if (success)
             {
                 _logger.LogInformation(
-                    "✓ Applied {Percentage:F2}% CPU quota to Burstable VM {VmId} " +
-                    "({VCpus} vCPUs × {QuotaPerVCpu}µs = {Total}µs total)",
-                    quotaPercentage * 100,
-                    vm.VmId,
-                    vm.Spec.VirtualCpuCores,
-                    quotaPerVCpu,
-                    totalQuota);
+                    "✓ Applied quota to Burstable VM {VmId}: {Final}µs/{Period}µs ({Percent:F2}% of node)",
+                    vm.VmId, finalQuota, periodMicroseconds,
+                    (double)finalQuota / physicalCapacity * 100);
             }
             else
             {

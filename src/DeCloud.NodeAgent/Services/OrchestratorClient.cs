@@ -319,31 +319,22 @@ REGISTERED_AT={DateTime.UtcNow:O}";
 
                 if (json.RootElement.TryGetProperty("data", out var data))
                 {
-                    if (!data.TryGetProperty("nodeId", out var nodeIdProp))
+                    var registrationResponse = JsonSerializer.Deserialize<NodeRegistrationResponse>(
+                            data.GetRawText(),
+                            new JsonSerializerOptions
+                            {
+                                PropertyNameCaseInsensitive = true
+                            });
+
+                    if (registrationResponse == null)
                     {
-                        _logger.LogError("Registration response missing Node ID");
-                        throw new ArgumentException("Node ID not found in response");
+                        _logger.LogError("Failed to deserialize node registration response");
+                        throw new ArgumentNullException(nameof(NodeRegistrationResponse));
                     }
 
-                    _nodeId = nodeIdProp.GetString();
-                    if (string.IsNullOrWhiteSpace(_nodeId))
-                    {
-                        _logger.LogError("Registration response missing Node ID");
-                        throw new ArgumentException("Node ID is null or empty");
-                    }
+                    _nodeId = registrationResponse.NodeId ?? throw new ArgumentNullException(nameof(registrationResponse.NodeId));
 
-                    if (!data.TryGetProperty("apiKey", out var apiKeyProp))
-                    {
-                        _logger.LogError("Registration response missing api key");
-                        throw new ArgumentException("Api key not found in response");
-                    }
-
-                    _apiKey = apiKeyProp.GetString();
-                    if (string.IsNullOrWhiteSpace(_apiKey))
-                    {
-                        _logger.LogError("Registration response missing API key");
-                        throw new ArgumentException("API key is null or empty");
-                    }
+                    _apiKey = registrationResponse.ApiKey ?? throw new ArgumentNullException(nameof(registrationResponse.ApiKey));
 
                     await SaveCredentialsAsync(ct);
 
@@ -351,54 +342,25 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                     _httpClient.DefaultRequestHeaders.Authorization =
                         new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _apiKey);
 
-                    _logger.LogInformation($"✓ Node ID ({_nodeId}) and API key ({_apiKey}) received and configured");
+                    _logger.LogInformation($"✓ Node ID ({_nodeId}) and API key ({_apiKey}) received and authorization header is configured");
 
-                    // Handle orchestrator WireGuard public key
-                    if (data.TryGetProperty("orchestratorWireGuardPublicKey", out var pubKeyProp) &&
-                        pubKeyProp.ValueKind == JsonValueKind.String)
-                    {
-                        _orchestratorPublicKey = pubKeyProp.GetString();
+                    _orchestratorPublicKey = registrationResponse.OrchestratorWireGuardPublicKey ?? throw new ArgumentNullException(nameof(registrationResponse.OrchestratorWireGuardPublicKey));
 
-                        if (!string.IsNullOrWhiteSpace(_orchestratorPublicKey))
-                        {
-                            await SaveOrchestratorPublicKeyAsync(_orchestratorPublicKey, ct);
-                        }
-                    }
+                    await SaveOrchestratorPublicKeyAsync(_orchestratorPublicKey, ct);
+
+                    var performanceEval = registrationResponse.PerformanceEvaluation ?? throw new ArgumentNullException(nameof(registrationResponse.PerformanceEvaluation));
+                    _nodeMetadata.UpdatePerformanceEvaluation(performanceEval);
+                    _logger.LogInformation($"✓ Performance evaluation received and updated with cpu benchmark score {performanceEval.BenchmarkScore}, total compute points {performanceEval.TotalComputePoints}");
+
+                    var schedulingConfig = registrationResponse.SchedulingConfig ?? throw new ArgumentNullException(nameof(registrationResponse.SchedulingConfig));
+                    _nodeMetadata.UpdateSchedulingConfig(schedulingConfig);
+                    _logger.LogInformation($"✓ Scheduling configuration version {schedulingConfig.Version} received and updated");
 
                     _logger.LogInformation(
                         "✓ Node registered successfully: {NodeId} | Wallet: {Wallet}",
                         _nodeId, _walletAddress);
 
-                    SchedulingConfig? schedulingConfig = null;
-
-                    if (!data.TryGetProperty("schedulingConfig", out var schedulingConfigProp))
-                    {
-                        _logger.LogError("Registration response missing scheduling configuration");
-                        //throw new ArgumentException("Scheduling configuration not found in response");
-                    }
-                    else
-                    {
-                        // Deserialize the schedulingConfig JSON element to SchedulingConfig object
-                        schedulingConfig = JsonSerializer.Deserialize<SchedulingConfig>(
-                            schedulingConfigProp.GetRawText(),
-                            new JsonSerializerOptions
-                            {
-                                PropertyNameCaseInsensitive = true
-                            });
-
-                        if (schedulingConfig == null)
-                        {
-                            _logger.LogError("Failed to deserialize scheduling configuration");
-                            //throw new ArgumentException("Scheduling configuration is null");
-                        }
-                        else
-                        {
-                            await _nodeMetadata.UpdateSchedulingConfigAsync(schedulingConfig);
-                            _logger.LogInformation($"✓ Scheduling configuration version {schedulingConfig.Version} received and configured");
-                        }
-                    }
-
-                    return RegistrationResult.Success(_nodeId, _apiKey, schedulingConfig);
+                    return RegistrationResult.Success(_nodeId, _apiKey);
                 }
             }
 
@@ -655,7 +617,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 {
                     _logger.LogInformation("Received updated scheduling configuration version {Version}",
                         schedulingConfig.Version);
-                    await _nodeMetadata.UpdateSchedulingConfigAsync(schedulingConfig);
+                    _nodeMetadata.UpdateSchedulingConfig(schedulingConfig);
                 }
             }
 

@@ -1353,14 +1353,13 @@ public class LibvirtVmManager : IVmManager
         // ========================================
         // Each compute point = 1000 shares (libvirt default unit)
         // This ensures VMs get CPU time proportional to their tier pricing
-        var pointsPerVCpu = spec.QualityTier switch
-        {
-            0 => 4,  // Guaranteed
-            1 => 2.7,  // Standard
-            2 => 1.6,  // Balanced
-            3 => 1,  // Burstable
-            _ => 4   // Default to Standard
-        };
+
+        // Formula: PointsPerVCpu = baselineOvercommit × (baselineOvercommit / tierOvercommit)
+
+        var config = _nodeMetadata.SchedulingConfig;
+
+        var pointsPerVCpu = config.BaselineOvercommitRatio *
+                           (config.BaselineOvercommitRatio / config.Tiers[spec.QualityTier].CpuOvercommitRatio);
 
         spec.ComputePointCost = (int)(spec.VirtualCpuCores * pointsPerVCpu);
         var cpuShares = spec.ComputePointCost * 1000;
@@ -1378,7 +1377,7 @@ public class LibvirtVmManager : IVmManager
 
         switch (spec.QualityTier)
         {
-            case 0: // Guaranteed - Dedicated cores with high shares
+            case QualityTier.Guaranteed: // Guaranteed - Dedicated cores with high shares
                     // For Guaranteed tier, we use high CPU shares
                     // TODO: Implement CPU pinning when core allocation tracking is added
                 cpuTune = $@"
@@ -1387,21 +1386,21 @@ public class LibvirtVmManager : IVmManager
                 </cputune>";
                 break;
 
-            case 1: // Standard - Balanced shares
+            case QualityTier.Standard: // Standard - Balanced shares
                 cpuTune = $@"
                 <cputune>
                   <shares>{cpuShares}</shares>
                 </cputune>";
                 break;
 
-            case 2: // Balanced - Medium shares
+            case QualityTier.Balanced: // Balanced - Medium shares
                 cpuTune = $@"
                 <cputune>
                   <shares>{cpuShares}</shares>
                 </cputune>";
                 break;
 
-            case 3: // Burstable - Low shares + Hard quota cap
+            case QualityTier.Burstable: // Burstable - Low shares + Hard quota cap
                     // Burstable tier: Low shares (1000 per vCPU) + Hard CPU quota
                     // Quota limits burst capacity even when node is idle
 

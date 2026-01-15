@@ -21,6 +21,8 @@ public interface INodeMetadataService
     /// Used for calculating CPU quotas and resource allocations
     /// Updated during registration and heartbeat
     /// </summary>
+    /// 
+    NodePerformanceEvaluation PerformanceEvaluation { get; }
     public SchedulingConfig SchedulingConfig { get; }
 
 
@@ -28,7 +30,8 @@ public interface INodeMetadataService
     void UpdatePublicIp(string publicIp);
     void UpdateInventory(HardwareInventory inventory);
     int GetSchedulingConfigVersion();
-    Task UpdateSchedulingConfigAsync(SchedulingConfig newConfig);
+    void UpdateSchedulingConfig(SchedulingConfig newConfig);
+    void UpdatePerformanceEvaluation(NodePerformanceEvaluation newEvaluation);
 }
 
 public class NodeMetadataService : INodeMetadataService
@@ -46,6 +49,7 @@ public class NodeMetadataService : INodeMetadataService
     public string Region { get; private set; } = string.Empty;
     public string Zone { get; private set; } = string.Empty;
     public HardwareInventory? Inventory { get; private set; } = null;
+    public NodePerformanceEvaluation? PerformanceEvaluation { get; private set; } = null;
     /// <summary>
     /// Current scheduling configuration received from Orchestrator
     /// Used for calculating CPU quotas and resource allocations
@@ -135,7 +139,7 @@ public class NodeMetadataService : INodeMetadataService
     /// Update scheduling configuration (thread-safe)
     /// Called during registration and heartbeat when Orchestrator sends new config
     /// </summary>
-    public async Task UpdateSchedulingConfigAsync(SchedulingConfig newConfig)
+    public void UpdateSchedulingConfig(SchedulingConfig newConfig)
     {
         if (newConfig == null)
         {
@@ -160,37 +164,29 @@ public class NodeMetadataService : INodeMetadataService
             return;
         }
 
-        await _configLock.WaitAsync();
-        try
+        // Only update if version is newer
+        if (newConfig.Version > SchedulingConfig.Version)
         {
-            // Only update if version is newer
-            if (newConfig.Version > SchedulingConfig.Version)
-            {
-                var oldVersion = SchedulingConfig.Version;
-                var oldBaseline = SchedulingConfig.BaselineBenchmark;
-                var oldOvercommit = SchedulingConfig.BaselineOvercommitRatio;
+            var oldVersion = SchedulingConfig.Version;
+            var oldBaseline = SchedulingConfig.BaselineBenchmark;
+            var oldOvercommit = SchedulingConfig.BaselineOvercommitRatio;
 
-                // Atomic replacement
-                SchedulingConfig = newConfig;
+            // Atomic replacement
+            SchedulingConfig = newConfig;
 
-                _logger?.LogWarning(
-                    "🔄 Scheduling config updated: v{OldVersion} → v{NewVersion}. " +
-                    "Baseline: {OldBaseline} → {NewBaseline}, " +
-                    "Overcommit: {OldOvercommit:F1} → {NewOvercommit:F1}",
-                    oldVersion, newConfig.Version,
-                    oldBaseline, newConfig.BaselineBenchmark,
-                    oldOvercommit, newConfig.BaselineOvercommitRatio);
-            }
-            else if (newConfig.Version < SchedulingConfig.Version)
-            {
-                _logger?.LogWarning(
-                    "Received older config v{NewVersion} (current: v{CurrentVersion}), ignoring",
-                    newConfig.Version, SchedulingConfig.Version);
-            }
+            _logger?.LogWarning(
+                "🔄 Scheduling config updated: v{OldVersion} → v{NewVersion}. " +
+                "Baseline: {OldBaseline} → {NewBaseline}, " +
+                "Overcommit: {OldOvercommit:F1} → {NewOvercommit:F1}",
+                oldVersion, newConfig.Version,
+                oldBaseline, newConfig.BaselineBenchmark,
+                oldOvercommit, newConfig.BaselineOvercommitRatio);
         }
-        finally
+        else if (newConfig.Version < SchedulingConfig.Version)
         {
-            _configLock.Release();
+            _logger?.LogWarning(
+                "Received older config v{NewVersion} (current: v{CurrentVersion}), ignoring",
+                newConfig.Version, SchedulingConfig.Version);
         }
     }
 
@@ -207,5 +203,10 @@ public class NodeMetadataService : INodeMetadataService
         var config = SchedulingConfig;
         return $"v{config.Version}: Baseline={config.BaselineBenchmark}, " +
                $"Overcommit={config.BaselineOvercommitRatio:F1}";
+    }
+
+    public void UpdatePerformanceEvaluation(NodePerformanceEvaluation newEvaluation)
+    {
+        PerformanceEvaluation = newEvaluation;
     }
 }

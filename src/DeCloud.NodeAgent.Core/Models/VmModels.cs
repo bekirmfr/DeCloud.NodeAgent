@@ -23,7 +23,7 @@ public class VmSpec
     public long DiskBytes { get; set; } = 10L * 1024 * 1024 * 1024; // 10GB default
 
     // Quality tier and point cost
-    public int QualityTier { get; set; } = 1;  // 0=Guaranteed, 1=Standard, 3=Balanced, 3=Burstable
+    public QualityTier QualityTier { get; set; } = QualityTier.Standard;  // 0=Guaranteed, 1=Standard, 3=Balanced, 3=Burstable
     public int ComputePointCost { get; set; } = 0; // Total points (vCPUs × pointsPerVCpu)
 
     // Image source
@@ -113,6 +113,49 @@ public enum VmType
     Relay,
     Dht,
     Inference
+}
+
+public enum QualityTier
+{
+    /// <summary>
+    /// Dedicated resources, guaranteed performance
+    /// Requires highest-performance nodes (4000+ benchmark)
+    /// </summary>
+    Guaranteed = 0,
+
+    /// <summary>
+    /// High performance for demanding applications
+    /// Requires high-end nodes (2500+ benchmark)
+    /// </summary>
+    Standard = 1,
+
+    /// <summary>
+    /// Balanced performance for production workloads
+    /// Requires mid-range nodes (1500+ benchmark)
+    /// </summary>
+    Balanced = 2,
+
+    /// <summary>
+    /// Best-effort, lowest cost
+    /// Minimum acceptable performance (1000+ benchmark)
+    /// </summary>
+    Burstable = 3
+}
+
+/// <summary>
+/// Capability information for a specific tier
+/// </summary>
+public class TierCapability
+{
+    public QualityTier Tier { get; set; }
+    public int MinimumBenchmark { get; set; }
+    public double RequiredPointsPerVCpu { get; set; }
+    public double NodePointsPerCore { get; set; }
+    public int MaxVCpusPerCore { get; set; }
+    public decimal PriceMultiplier { get; set; }
+    public string Description { get; set; } = string.Empty;
+    public bool IsEligible { get; set; }
+    public string? IneligibilityReason { get; set; }
 }
 
 public class VmResourceUsage

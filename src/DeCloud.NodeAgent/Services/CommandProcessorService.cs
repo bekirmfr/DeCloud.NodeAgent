@@ -193,7 +193,7 @@ public class CommandProcessorService : BackgroundService
                 OwnerId = ownerId,
                 VmType = (VmType)vmType,
                 VirtualCpuCores = virtualCpuCores,
-                QualityTier = qualityTier,
+                QualityTier = (QualityTier) qualityTier,
                 ComputePointCost = computePointCost,
                 MemoryBytes = memoryBytes,
                 DiskBytes = diskBytes,

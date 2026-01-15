@@ -1,4 +1,19 @@
+using Orchestrator.Models;
+
 namespace DeCloud.NodeAgent.Core.Models;
+
+public record NodeRegistrationResponse(
+    string NodeId,
+    NodePerformanceEvaluation PerformanceEvaluation,
+    string ApiKey,
+    SchedulingConfig SchedulingConfig,
+    /// <summary>
+    /// Orchestrator's WireGuard public key for relay configuration
+    /// Null if WireGuard is not enabled on orchestrator
+    /// </summary>
+    string OrchestratorWireGuardPublicKey,
+    TimeSpan HeartbeatInterval
+);
 
 /// <summary>
 /// Periodic heartbeat sent to orchestrator

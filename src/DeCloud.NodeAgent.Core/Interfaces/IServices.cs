@@ -19,8 +19,8 @@ public class RegistrationResult
     public SchedulingConfig? SchedulingConfig { get; init; }
     public string? Error { get; init; }
 
-    public static RegistrationResult Success(string nodeId, string apiKey, SchedulingConfig? config) =>
-        new() { IsSuccess = true, NodeId = nodeId, ApiKey = apiKey, SchedulingConfig = config};
+    public static RegistrationResult Success(string nodeId, string apiKey) =>
+        new() { IsSuccess = true, NodeId = nodeId, ApiKey = apiKey};
 
     public static RegistrationResult Failure(string error) =>
         new() { IsSuccess = false, Error = error };
