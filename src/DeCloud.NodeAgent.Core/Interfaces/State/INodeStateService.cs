@@ -24,7 +24,7 @@ public interface INodeStateService
     /// <summary>
     /// Current operational status (Online, Offline, Degraded, etc.)
     /// </summary>
-    NodeOperationalStatus Status { get; }
+    NodeStatus Status { get; }
 
     /// <summary>
     /// Quick health check - true if authenticated and connected
@@ -68,6 +68,10 @@ public interface INodeStateService
     /// Whether orchestrator is reachable (based on recent heartbeat/sync)
     /// </summary>
     bool IsOrchestratorReachable { get; }
+    /// <summary>
+    /// Gets a value indicating whether the device currently has access to the Internet.
+    /// </summary>
+    bool IsInternetReachable { get; }
 
     // ================================================================
     // TIMESTAMPS
@@ -101,8 +105,11 @@ public interface INodeStateService
     // METHODS - State Updates
     // ================================================================
 
-    void SetStatus(NodeOperationalStatus status);
+    void SetStatus(NodeStatus status);
     void SetAuthState(AuthenticationState state);
+    void SetDiscoveryComplete();
+    void SetInternetReachable(bool isReachable);
+    void SetOrchestratorReachable(bool isReachable);
     void RecordHeartbeat(bool success);
     void RecordSync(bool success);
 
@@ -120,6 +127,21 @@ public interface INodeStateService
     /// </summary>
     Task WaitForDiscoveryAsync(CancellationToken ct = default);
 
+    /// <summary>
+    /// Asynchronously waits until the service is online or the operation is canceled.
+    /// </summary>
+    /// <param name="ct">A cancellation token that can be used to cancel the wait operation.</param>
+    /// <returns>A task that represents the asynchronous wait operation. The task completes when the service is online or the
+    /// operation is canceled.</returns>
+    Task WaitForInternetAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Asynchronously waits until the orchestrator is ready to accept requests.
+    /// </summary>
+    /// <param name="ct">A cancellation token that can be used to cancel the wait operation.</param>
+    /// <returns>A task that represents the asynchronous wait operation.</returns>
+    Task WaitForOrchestratorAsync(CancellationToken ct = default);
+
     // ================================================================
     // SNAPSHOT
     // ================================================================
@@ -134,7 +156,7 @@ public interface INodeStateService
 // ENUMS
 // ================================================================
 
-public enum NodeOperationalStatus
+public enum NodeStatus
 {
     /// <summary>Node agent is starting up</summary>
     Initializing,
@@ -164,10 +186,11 @@ public enum NodeOperationalStatus
 /// </summary>
 public record NodeStateSnapshot
 {
-    public NodeOperationalStatus Status { get; init; }
+    public NodeStatus Status { get; init; }
     public AuthenticationState AuthState { get; init; }
     public bool IsHealthy { get; init; }
     public bool IsAuthenticated { get; init; }
+    public bool IsDiscoveryComplete { get; init; }
     public bool IsOrchestratorReachable { get; init; }
     public DateTime StartedAt { get; init; }
     public DateTime? LastHeartbeat { get; init; }

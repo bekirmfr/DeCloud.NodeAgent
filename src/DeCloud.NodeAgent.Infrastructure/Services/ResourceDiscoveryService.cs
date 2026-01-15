@@ -1,6 +1,7 @@
 ﻿using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Logging;
 
@@ -9,32 +10,29 @@ namespace DeCloud.NodeAgent.Infrastructure.Services;
 public class ResourceDiscoveryService : IResourceDiscoveryService
 {
     private readonly ICommandExecutor _executor;
+    private readonly INodeStateService _nodeState;
     private readonly ILogger<ResourceDiscoveryService> _logger;
     private readonly ICpuBenchmarkService _benchmarkService;
     private readonly bool _isWindows;
 
     // Caching fields
     private HardwareInventory? _cachedInventory;
-    private bool _discoveryComplete;
     private readonly SemaphoreSlim _discoverySemaphore = new(1, 1);
     private DateTime _lastDiscoveryTime = DateTime.MinValue;
     private static readonly TimeSpan DiscoveryCacheDuration = TimeSpan.FromHours(1);
 
     public ResourceDiscoveryService(
         ICommandExecutor executor,
+        INodeStateService nodeState,
         ILogger<ResourceDiscoveryService> logger,
         ICpuBenchmarkService benchmarkService)
     {
         _executor = executor;
+        _nodeState = nodeState;
         _logger = logger;
         _benchmarkService = benchmarkService;
         _isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
     }
-
-    /// <summary>
-    /// Check if initial discovery has completed
-    /// </summary>
-    public bool IsDiscoveryComplete() => _discoveryComplete;
 
     /// <summary>
     /// Get cached hardware inventory
@@ -84,7 +82,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
             // Update cache
             _cachedInventory = inventory;
-            _discoveryComplete = true;
+            _nodeState.SetDiscoveryComplete();
             _lastDiscoveryTime = DateTime.UtcNow;
 
             _logger.LogInformation(

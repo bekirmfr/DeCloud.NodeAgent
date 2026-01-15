@@ -1,14 +1,14 @@
 ﻿// =====================================================================
-// NodeStateService - Implementation
+// NodeStateService - Fixed Implementation
 // =====================================================================
 // File: src/DeCloud.NodeAgent.Infrastructure/Services/State/NodeStateService.cs
 //
-// Thread-safe singleton implementation.
-// Register as Singleton in DI container.
-// Includes authentication state (replaces AuthenticationStateService)
+// FIXES:
+// 1. IsDiscoveryComplete now tracks actual discovery, not auth state
+// 2. Added SetDiscoveryComplete() method for ResourceDiscoveryService to call
+// 3. WaitForDiscoveryAsync now works correctly
 // =====================================================================
 
-using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Logging;
@@ -28,8 +28,11 @@ public class NodeStateService : INodeStateService
     // STATE FIELDS
     // ================================================================
 
-    private NodeOperationalStatus _status = NodeOperationalStatus.Initializing;
+    private NodeStatus _status = NodeStatus.Initializing;
     private AuthenticationState _authState = AuthenticationState.NotAuthenticated;
+    private bool _isDiscoveryComplete;  // Explicit tracking
+    private bool _isOrchestratorReachable;  // Explicit tracking
+    private bool _isInternetReachable;  // (not exposed yet)
     private DateTime? _lastHeartbeat;
     private DateTime? _lastSync;
     private int _consecutiveFailures;
@@ -38,16 +41,15 @@ public class NodeStateService : INodeStateService
     // ASYNC WAITERS
     // ================================================================
 
-    private readonly TaskCompletionSource _registrationComplete = new();
-    private readonly TaskCompletionSource _discoveryComplete = new();
+    private TaskCompletionSource _registrationComplete = new();
+    private TaskCompletionSource _discoveryComplete = new();
+    private TaskCompletionSource _internetComplete = new();
+    private TaskCompletionSource _orchestratorComplete = new();
 
     // ================================================================
     // CONSTANTS
     // ================================================================
 
-    /// <summary>
-    /// Orchestrator considered unreachable if no successful contact in this period
-    /// </summary>
     private static readonly TimeSpan OrchestratorTimeout = TimeSpan.FromMinutes(2);
 
     // ================================================================
@@ -66,7 +68,7 @@ public class NodeStateService : INodeStateService
     // PROPERTIES - Operational Status
     // ================================================================
 
-    public NodeOperationalStatus Status
+    public NodeStatus Status
     {
         get { lock (_lock) return _status; }
     }
@@ -77,12 +79,17 @@ public class NodeStateService : INodeStateService
         {
             lock (_lock)
             {
-                return
-                    IsAuthenticated &&
-                    IsOrchestratorReachable &&
-                    IsOnline;
+                return IsInternetReachable &&
+                       IsOrchestratorReachable &&
+                       IsAuthenticated &&
+                       IsOnline;
             }
         }
+    }
+
+    public bool IsOnline
+    {
+        get { lock (_lock) return _status == NodeStatus.Online; }
     }
 
     // ================================================================
@@ -99,20 +106,17 @@ public class NodeStateService : INodeStateService
         get { lock (_lock) return _authState == AuthenticationState.Registered; }
     }
 
-    public bool IsOnline
-    {
-               get { lock (_lock) return _status == NodeOperationalStatus.Online; }
-    }
+    // ================================================================
+    // PROPERTIES - Discovery State (FIXED)
+    // ================================================================
 
+    /// <summary>
+    /// Whether hardware discovery has completed.
+    /// Set by ResourceDiscoveryService after initial scan.
+    /// </summary>
     public bool IsDiscoveryComplete
     {
-        get
-        {
-            lock (_lock)
-            {
-                return _authState > AuthenticationState.PendingRegistration;
-            }
-        }
+        get { lock (_lock) return _isDiscoveryComplete; }
     }
 
     // ================================================================
@@ -121,15 +125,12 @@ public class NodeStateService : INodeStateService
 
     public bool IsOrchestratorReachable
     {
-        get
-        {
-            lock (_lock)
-            {
-                var lastContact = GetLastSuccessfulContact();
-                if (lastContact == null) return false;
-                return (DateTime.UtcNow - lastContact.Value) < OrchestratorTimeout;
-            }
-        }
+        get { lock (_lock) return _isOrchestratorReachable; }
+    }
+
+    public bool IsInternetReachable
+    {
+        get { lock (_lock) return _isInternetReachable; }
     }
 
     // ================================================================
@@ -157,11 +158,13 @@ public class NodeStateService : INodeStateService
         get { lock (_lock) return _consecutiveFailures; }
     }
 
+
+
     // ================================================================
     // METHODS - State Updates
     // ================================================================
 
-    public void SetStatus(NodeOperationalStatus status)
+    public void SetStatus(NodeStatus status)
     {
         lock (_lock)
         {
@@ -186,21 +189,71 @@ public class NodeStateService : INodeStateService
                 var oldState = _authState;
                 _authState = state;
 
-                _logger.LogInformation(
-                    "Auth state changed: {OldState} → {NewState}",
-                    oldState, state);
+                // Reset TCS if moving back to unauthenticated state
+                if (state == AuthenticationState.NotAuthenticated)
+                {
+                    _registrationComplete = new TaskCompletionSource();
+                    _discoveryComplete = new TaskCompletionSource();
+                }
 
-                // Signal waiters
                 if (state == AuthenticationState.Registered)
                 {
                     _registrationComplete.TrySetResult();
                 }
+            }
+        }
+    }
 
-                if (state != AuthenticationState.NotAuthenticated &&
-                    state != AuthenticationState.WaitingForDiscovery)
+    /// <summary>
+    /// Signal that hardware discovery has completed.
+    /// Called by ResourceDiscoveryService after initial scan.
+    /// </summary>
+    public void SetDiscoveryComplete()
+    {
+        lock (_lock)
+        {
+            if (!_isDiscoveryComplete)
+            {
+                _isDiscoveryComplete = true;
+                _discoveryComplete.TrySetResult();
+
+                _logger.LogInformation("✓ Hardware discovery marked complete");
+            }
+        }
+    }
+
+    public void SetInternetReachable(bool reachable)
+    {
+        lock (_lock)
+        {
+            if (_isInternetReachable != reachable)
+            {
+                _isInternetReachable = reachable;
+                if (reachable)
                 {
-                    _discoveryComplete.TrySetResult();
+                    _internetComplete.TrySetResult();
                 }
+                _logger.LogInformation(
+                    "Internet reachability changed: {Status}",
+                    reachable ? "Reachable" : "Unreachable");
+            }
+        }
+    }
+
+    public void SetOrchestratorReachable(bool reachable)
+    {
+        lock (_lock)
+        {
+            if (_isOrchestratorReachable != reachable)
+            {
+                _isOrchestratorReachable = reachable;
+                if (reachable)
+                {
+                    _orchestratorComplete.TrySetResult();
+                }
+                _logger.LogInformation(
+                    "Orchestrator reachability changed: {Status}",
+                    reachable ? "Reachable" : "Unreachable");
             }
         }
     }
@@ -215,10 +268,10 @@ public class NodeStateService : INodeStateService
                 _consecutiveFailures = 0;
 
                 // Auto-transition to Online if healthy
-                if (_status == NodeOperationalStatus.Initializing ||
-                    _status == NodeOperationalStatus.Degraded)
+                if (_status == NodeStatus.Initializing ||
+                    _status == NodeStatus.Degraded)
                 {
-                    SetStatusInternal(NodeOperationalStatus.Online);
+                    SetStatusInternal(NodeStatus.Online);
                 }
             }
             else
@@ -230,9 +283,9 @@ public class NodeStateService : INodeStateService
                     _consecutiveFailures);
 
                 // Auto-transition to Degraded after multiple failures
-                if (_consecutiveFailures >= 3 && _status == NodeOperationalStatus.Online)
+                if (_consecutiveFailures >= 3 && _status == NodeStatus.Online)
                 {
-                    SetStatusInternal(NodeOperationalStatus.Degraded);
+                    SetStatusInternal(NodeStatus.Degraded);
                 }
             }
         }
@@ -278,6 +331,21 @@ public class NodeStateService : INodeStateService
         await _discoveryComplete.Task.WaitAsync(ct);
     }
 
+    public async Task WaitForInternetAsync(CancellationToken ct = default)
+    {
+        if (IsInternetReachable)
+            return;
+
+        await  _internetComplete.Task.WaitAsync(ct);
+    }
+
+    public async Task WaitForOrchestratorAsync(CancellationToken ct = default)
+    {
+        if (IsOrchestratorReachable)
+            return;
+        await _orchestratorComplete.Task.WaitAsync(ct);
+    }
+
     // ================================================================
     // SNAPSHOT
     // ================================================================
@@ -292,6 +360,7 @@ public class NodeStateService : INodeStateService
                 AuthState = _authState,
                 IsHealthy = IsHealthy,
                 IsAuthenticated = IsAuthenticated,
+                IsDiscoveryComplete = _isDiscoveryComplete,
                 IsOrchestratorReachable = IsOrchestratorReachable,
                 StartedAt = StartedAt,
                 LastHeartbeat = _lastHeartbeat,
@@ -318,10 +387,7 @@ public class NodeStateService : INodeStateService
         return _lastHeartbeat > _lastSync ? _lastHeartbeat : _lastSync;
     }
 
-    /// <summary>
-    /// Internal status change (already inside lock)
-    /// </summary>
-    private void SetStatusInternal(NodeOperationalStatus status)
+    private void SetStatusInternal(NodeStatus status)
     {
         if (_status != status)
         {

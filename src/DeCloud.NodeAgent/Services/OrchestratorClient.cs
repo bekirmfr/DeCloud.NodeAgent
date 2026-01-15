@@ -41,6 +41,16 @@ public partial class OrchestratorClient : IOrchestratorClient
     // Queue for pending commands received from heartbeat responses
     private readonly ConcurrentQueue<PendingCommand> _pendingCommands = new();
 
+    private static readonly TimeSpan OrchestratorTimeout = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan InternetCheckTimeout = TimeSpan.FromSeconds(10);
+    private static readonly string[] PublicIpServices = new[]
+    {
+        "https://api.ipify.org",
+        "https://icanhazip.com",
+        "https://ifconfig.me/ip"
+    };
+
+
     public string? NodeId => _nodeId;
     public string? WalletAddress => _walletAddress;
 
@@ -58,35 +68,38 @@ public partial class OrchestratorClient : IOrchestratorClient
         _resourceDiscovery = resourceDiscovery;
         _nodeMetadata = nodeMetadata;
         _walletAddress = _options.WalletAddress;
-        _nodeState= nodeState;
+        _nodeState = nodeState;
         _httpClient.BaseAddress = new Uri(_options.BaseUrl.TrimEnd('/'));
         _httpClient.Timeout = _options.Timeout;
-
-        _ = LoadCredentialsAsync();
 
         _logger.LogInformation("OrchestratorClient initialized with wallet: {Wallet}",
             _walletAddress);
     }
 
-    /// <summary>
-    /// Check if pending authentication exists
-    /// </summary>
-    public bool HasPendingAuth()
+    public async Task InitializeAsync(CancellationToken ct = default)
     {
-        return File.Exists(PendingAuthFile);
-    }
+        await LoadCredentialsAsync();
+        var isInternetReachable = await IsInternetReachableAsync(ct);
+        _nodeState.SetInternetReachable(isInternetReachable);
+        var isOrchestratorReachable = await IsOrchestratorReachableAsync(ct);
+        _nodeState.SetOrchestratorReachable(isOrchestratorReachable);
 
+        _logger.LogInformation("OrchestratorClient initialized with wallet: {Wallet} \n" +
+            "internet connection: {Internet}" +
+            "orchestrator connection: {Orchestrator}",
+            _walletAddress, isInternetReachable, isOrchestratorReachable);
+    }
     private async Task LoadCredentialsAsync()
     {
-        const string credentialsFile = "/etc/decloud/credentials";
+        const string credentialsFilePath = "/etc/decloud/credentials";
 
-        if (!File.Exists(credentialsFile))
+        if (!File.Exists(credentialsFilePath))
         {
             _logger.LogWarning("No credentials file found - node not registered");
             return;
         }
 
-        var lines = await File.ReadAllLinesAsync(credentialsFile);
+        var lines = await File.ReadAllLinesAsync(credentialsFilePath);
 
         foreach (var line in lines)
         {
@@ -99,7 +112,7 @@ public partial class OrchestratorClient : IOrchestratorClient
         }
 
 
-        if(string.IsNullOrWhiteSpace(_nodeId) ||
+        if (string.IsNullOrWhiteSpace(_nodeId) ||
            string.IsNullOrWhiteSpace(_apiKey))
         {
             _logger.LogWarning("Incomplete credentials in file - node not registered");
@@ -112,7 +125,7 @@ public partial class OrchestratorClient : IOrchestratorClient
             _httpClient.DefaultRequestHeaders.Authorization =
                 new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _apiKey);
 
-            _logger.LogInformation("✓ API key loaded from {File}", credentialsFile);
+            _logger.LogInformation("✓ API key loaded from {File}", credentialsFilePath);
         }
     }
 
@@ -121,7 +134,8 @@ public partial class OrchestratorClient : IOrchestratorClient
         const string credentialsFile = "/etc/decloud/credentials";
 
         // first delete if old file exists
-        if (File.Exists(credentialsFile)) {
+        if (File.Exists(credentialsFile))
+        {
             File.Delete(credentialsFile);
         }
 
@@ -159,11 +173,13 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         }
 
         // Get hardware inventory
-        var inventory = await _resourceDiscovery.DiscoverAllAsync(ct);
+        var inventory = await _resourceDiscovery.GetInventoryCachedAsync(ct);
         if (inventory == null)
         {
             return RegistrationResult.Failure("Hardware inventory not ready");
         }
+
+        _nodeMetadata.UpdateInventory(inventory);
 
         // Build registration request
         var registration = new NodeRegistration
@@ -205,7 +221,6 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                     _logger.LogInformation(
                         "✓ Registration successful: {NodeId}",
                         _nodeId);
-                    _nodeMetadata.UpdateInventory(inventory);
                     return result;
                 }
 
@@ -468,13 +483,27 @@ REGISTERED_AT={DateTime.UtcNow:O}";
 
             // Parse successful response
             var content = await response.Content.ReadAsStringAsync(ct);
+
+            _nodeState.SetInternetReachable(true);
+            _nodeState.SetOrchestratorReachable(true);
+
             await ProcessHeartbeatResponseAsync(content, ct);
 
             return true;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to send heartbeat");
+            var internetReachable = await IsInternetReachableAsync(ct);
+            _nodeState.SetInternetReachable(internetReachable);
+
+            var orchestaratorReachable =  await IsOrchestratorReachableAsync(ct);
+            _nodeState.SetOrchestratorReachable(orchestaratorReachable);
+
+            _logger.LogError(ex, $"Failed to send heartbeat" + 
+                "Internet reachable: {Internet}" +
+                "Orchestrator reachable: {Orchestrator}",
+                internetReachable, orchestaratorReachable);
+
             return false;
         }
     }
@@ -680,30 +709,6 @@ REGISTERED_AT={DateTime.UtcNow:O}";
     }
 
     /// <summary>
-    /// Report VM state change to orchestrator (via next heartbeat)
-    /// </summary>
-    public async Task<bool> ReportVmStateChangeAsync(string vmId, VmState newState, CancellationToken ct = default)
-    {
-        if (!_nodeState.IsAuthenticated)
-        {
-            _logger.LogWarning("Cannot report VM state - node not registered");
-            return false;
-        }
-
-        try
-        {
-            _logger.LogInformation("Reporting VM {VmId} state change to {State}", vmId, newState);
-            // The state will be reported in the next heartbeat via ActiveVms
-            return true;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to report VM state change");
-            return false;
-        }
-    }
-
-    /// <summary>
     /// Acknowledge command execution to orchestrator with wallet signature
     /// </summary>
     public async Task<bool> AcknowledgeCommandAsync(
@@ -777,10 +782,114 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         return _lastHeartbeat;
     }
     public record PendingAuth(
-    string WalletAddress,
-    string Signature,
-    string Message,
-    long Timestamp,
-    string? MachineId = null
-);
+        string WalletAddress,
+        string Signature,
+        string Message,
+        long Timestamp,
+        string? MachineId = null
+        );
+
+    // ================================================================
+    // METHODS - Internet Connectivity
+    // ================================================================
+
+    /// <summary>
+    /// Check if the orchestrator is reachable by calling the health endpoint
+    /// </summary>
+    public async Task<bool> IsOrchestratorReachableAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            var response = await _httpClient.GetAsync("/api/system/health", ct);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogDebug("Orchestrator health check successful");
+                return true;
+            }
+
+            _logger.LogWarning(
+                "Orchestrator health check failed with status: {Status}",
+                response.StatusCode);
+            return false;
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Cannot reach orchestrator at {BaseUrl}",
+                _options.BaseUrl);
+            return false;
+        }
+        catch (TaskCanceledException ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Orchestrator health check timed out after {Timeout}",
+                _options.Timeout);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "Unexpected error during orchestrator health check");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Check if the node has internet connectivity by querying public IP services.
+    /// Tries multiple services with failover for reliability.
+    /// </summary>
+    public async Task<bool> IsInternetReachableAsync(CancellationToken ct = default)
+    {
+        foreach (var service in PublicIpServices)
+        {
+            try
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(InternetCheckTimeout);
+
+                var response = await _httpClient.GetAsync(service, cts.Token);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    var ip = (await response.Content.ReadAsStringAsync(cts.Token)).Trim();
+
+                    if (!string.IsNullOrWhiteSpace(ip))
+                    {
+                        _logger.LogDebug(
+                            "Internet connectivity confirmed via {Service}, public IP: {Ip}",
+                            service, ip);
+                        return true;
+                    }
+                }
+            }
+            catch (HttpRequestException ex)
+            {
+                _logger.LogDebug(
+                    ex,
+                    "Failed to reach {Service}, trying next service",
+                    service);
+            }
+            catch (TaskCanceledException ex)
+            {
+                _logger.LogDebug(
+                    ex,
+                    "Timeout checking {Service}, trying next service",
+                    service);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Unexpected error checking {Service}",
+                    service);
+            }
+        }
+
+        _logger.LogWarning("No internet connectivity - all public IP services unreachable");
+        return false;
+    }
 }

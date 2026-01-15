@@ -20,7 +20,6 @@ public class HeartbeatService : BackgroundService
     private readonly HeartbeatOptions _options;
     private readonly ILogger<HeartbeatService> _logger;
     private Heartbeat? _lastHeartbeat = null;
-    private NodeStatus _currentStatus = NodeStatus.Offline;
 
     public HeartbeatService(
         IResourceDiscoveryService resourceDiscovery,
@@ -47,13 +46,9 @@ public class HeartbeatService : BackgroundService
         _logger.LogInformation("Heartbeat service starting with interval {Interval}s",
             _options.Interval.TotalSeconds);
 
-        // Initial delay to let other services start
-        await Task.Delay(TimeSpan.FromSeconds(10), ct);
-
         // Wait for node to be registered
-        await _nodeState.WaitForAuthenticationAsync();
+        await _nodeState.WaitForAuthenticationAsync(ct);
 
-        _currentStatus = NodeStatus.Online;
         _logger.LogInformation("✓ Node registered, starting heartbeats");
 
         // Send heartbeats
@@ -168,7 +163,7 @@ public class HeartbeatService : BackgroundService
             {
                 NodeId = (_orchestratorClient as OrchestratorClient)?.NodeId ?? Environment.MachineName,
                 Timestamp = DateTime.UtcNow,
-                Status = _currentStatus,
+                Status = _nodeState.Status,
                 Resources = snapshot,
                 ActiveVms = vmSummaries,  // Now includes VncPort, MacAddress, EncryptedPassword
                 SchedulingConfigVersion = _nodeMetadata.GetSchedulingConfigVersion(),

@@ -1,3 +1,4 @@
+using DeCloud.NodeAgent.Core.Interfaces.State;
 using Orchestrator.Models;
 
 namespace DeCloud.NodeAgent.Core.Models;
@@ -49,16 +50,6 @@ public class CgnatInfoDto
     public string tunnelIp { get; set; } = string.Empty;
     public string? wireGuardConfig { get; set; }
     public string publicEndpoint { get; set; } = string.Empty;
-}
-
-public enum NodeStatus
-{
-    Initializing,
-    Online,
-    Maintenance,   // Not accepting new VMs but running existing
-    Draining,      // Migrating VMs away, preparing for shutdown
-    Offline,
-    Degraded
 }
 
 public class NodeHealth

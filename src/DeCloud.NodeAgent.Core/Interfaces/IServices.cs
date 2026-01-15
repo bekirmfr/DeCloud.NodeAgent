@@ -1,4 +1,5 @@
-﻿using DeCloud.NodeAgent.Core.Models;
+﻿using DeCloud.NodeAgent.Core.Interfaces.State;
+using DeCloud.NodeAgent.Core.Models;
 using Orchestrator.Models;
 using System.Net.NetworkInformation;
 
@@ -175,6 +176,7 @@ public class WireGuardPeer
 /// </summary>
 public interface IOrchestratorClient
 {
+    Task InitializeAsync(CancellationToken ct = default);
     string? NodeId { get; }
 
     string? WalletAddress { get; }
@@ -261,6 +263,8 @@ public interface IOrchestratorClient
     /// local state matches orchestrator's authoritative view.
     /// </remarks>
     Task<NodeSyncResult> SyncWithOrchestratorAsync(CancellationToken ct = default);
+
+    Task<bool> IsOrchestratorReachableAsync(CancellationToken ct = default);
 }
 
 /// <summary>

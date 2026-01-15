@@ -14,7 +14,7 @@ public class AuthenticationManager : BackgroundService
     private readonly ILogger<AuthenticationManager> _logger;
 
     // File paths
-    private const string CredentialsFile = "/etc/decloud/credentials";
+    private const string CredentialsFilePath = "/etc/decloud/credentials";
     private const string PendingAuthFile = "/etc/decloud/pending-auth";
 
     // Polling intervals
@@ -90,30 +90,13 @@ public class AuthenticationManager : BackgroundService
 
         while (!ct.IsCancellationRequested)
         {
-            if (await IsResourceDiscoveryCompleteAsync(ct))
+            if (_nodeState.IsDiscoveryComplete)
             {
                 _logger.LogInformation("✓ Resource discovery complete");
                 return;
             }
 
             await Task.Delay(DiscoveryCheckInterval, ct);
-        }
-    }
-
-    private async Task<bool> IsResourceDiscoveryCompleteAsync(CancellationToken ct)
-    {
-        try
-        {
-            // Check if ResourceDiscoveryService has completed initial discovery
-            var inventory = await _resourceDiscovery.GetInventoryCachedAsync(ct);
-
-            return inventory != null &&
-                   inventory.Cpu.BenchmarkScore > 0 &&
-                   inventory.Memory.TotalBytes > 0;
-        }
-        catch
-        {
-            return false;
         }
     }
 
@@ -129,12 +112,10 @@ public class AuthenticationManager : BackgroundService
             return AuthenticationState.PendingRegistration;
         }
 
-        var credentials = new Dictionary<string, string>();
-
         // Check if credentials exist and are valid
-        if (File.Exists(CredentialsFile))
+        if (File.Exists(CredentialsFilePath))
         {
-            credentials = await LoadCredentialsAsync(ct);
+            var credentials = await LoadCredentialsAsync(ct);
 
             if (await ValidateCredentialsAsync(credentials, ct))
             {
@@ -188,6 +169,8 @@ public class AuthenticationManager : BackgroundService
             {
                 _logger.LogInformation("✓ Registration successful: {NodeId}", result.NodeId);
 
+                _nodeState.SetAuthState(AuthenticationState.Registered);
+
                 // Signal OrchestratorClient to reload credentials
                 await _orchestratorClient.ReloadCredentialsAsync(ct);
             }
@@ -226,7 +209,7 @@ public class AuthenticationManager : BackgroundService
     {
         var credentials = new Dictionary<string, string>();
 
-        var lines = await File.ReadAllLinesAsync(CredentialsFile, ct);
+        var lines = await File.ReadAllLinesAsync(CredentialsFilePath, ct);
         foreach (var line in lines)
         {
             if (line.Contains('='))
