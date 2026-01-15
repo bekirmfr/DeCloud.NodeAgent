@@ -98,8 +98,7 @@ public class NodeMetadataService : INodeMetadataService
 
         _ = Task.Run(async () => {
             var inv = await _resourceDiscovery.GetInventoryCachedAsync(CancellationToken.None);
-            if (inv != null) 
-                UpdateInventory(inv);
+            if (inv != null) UpdateInventory(inv);
         }, ct);
 
         _logger.LogInformation(
