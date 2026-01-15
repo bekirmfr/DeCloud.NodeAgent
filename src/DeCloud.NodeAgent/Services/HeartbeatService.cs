@@ -2,6 +2,7 @@
 // Sends detailed VM information with each heartbeat
 
 using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using Microsoft.Extensions.Options;

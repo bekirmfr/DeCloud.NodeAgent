@@ -9,7 +9,7 @@
 
 using DeCloud.NodeAgent.Core.Models;
 
-namespace DeCloud.NodeAgent.Core.Interfaces;
+namespace DeCloud.NodeAgent.Core.Interfaces.State;
 
 /// <summary>
 /// Global access to node runtime state.
@@ -49,12 +49,16 @@ public interface INodeStateService
     /// Whether node has completed registration with orchestrator
     /// Equivalent to AuthState == AuthenticationState.Registered
     /// </summary>
-    bool IsRegistered { get; }
 
     /// <summary>
     /// Whether resource discovery is complete
     /// </summary>
     bool IsDiscoveryComplete { get; }
+
+    /// <summary>
+    /// Whether the node is currently online and can accept workloads
+    /// </summary>
+    public bool IsOnline {  get; }
 
     // ================================================================
     // CONNECTION STATE
@@ -164,7 +168,6 @@ public record NodeStateSnapshot
     public AuthenticationState AuthState { get; init; }
     public bool IsHealthy { get; init; }
     public bool IsAuthenticated { get; init; }
-    public bool IsDiscoveryComplete { get; init; }
     public bool IsOrchestratorReachable { get; init; }
     public DateTime StartedAt { get; init; }
     public DateTime? LastHeartbeat { get; init; }

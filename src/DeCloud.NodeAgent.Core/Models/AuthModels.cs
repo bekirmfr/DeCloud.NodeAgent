@@ -2,10 +2,10 @@
 {
     public enum AuthenticationState
     {
-        WaitingForDiscovery,
         NotAuthenticated,
+        CredentialsInvalid,
+        WaitingForDiscovery,
         PendingRegistration,
-        Registered,
-        CredentialsInvalid
+        Registered
     }
 }

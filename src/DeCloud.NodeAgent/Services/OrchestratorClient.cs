@@ -2,6 +2,7 @@
 // Stateless authentication - no tokens, no expiration, no re-registration!
 
 using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Options;
 using Orchestrator.Models;
@@ -422,7 +423,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
     /// </summary>
     public async Task<bool> SendHeartbeatAsync(Heartbeat heartbeat, CancellationToken ct = default)
     {
-        if (!_nodeState.IsRegistered)
+        if (!_nodeState.IsAuthenticated)
         {
             _logger.LogWarning("Cannot send heartbeat - node not registered");
             return false;
@@ -683,7 +684,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
     /// </summary>
     public async Task<bool> ReportVmStateChangeAsync(string vmId, VmState newState, CancellationToken ct = default)
     {
-        if (!_nodeState.IsRegistered)
+        if (!_nodeState.IsAuthenticated)
         {
             _logger.LogWarning("Cannot report VM state - node not registered");
             return false;
@@ -711,7 +712,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         string? errorMessage,
         CancellationToken ct = default)
     {
-        if (!_nodeState.IsRegistered)
+        if (!_nodeState.IsAuthenticated)
         {
             _logger.LogWarning("Cannot acknowledge command - node not registered");
             return false;

@@ -1,4 +1,5 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using DeCloud.NodeAgent.Infrastructure.Network;
 using DeCloud.NodeAgent.Infrastructure.Persistence;

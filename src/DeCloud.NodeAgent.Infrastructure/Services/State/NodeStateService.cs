@@ -9,6 +9,7 @@
 // =====================================================================
 
 using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Logging;
 
@@ -78,7 +79,6 @@ public class NodeStateService : INodeStateService
             {
                 return
                     IsAuthenticated &&
-                    IsRegistered &&
                     IsOrchestratorReachable &&
                     IsOnline;
             }
@@ -96,12 +96,7 @@ public class NodeStateService : INodeStateService
 
     public bool IsAuthenticated
     {
-        get { lock (_lock) return _authState == AuthenticationState.PendingRegistration; }
-    }
-
-    public bool IsRegistered
-    {
-               get { lock (_lock) return _authState == AuthenticationState.Registered; }
+        get { lock (_lock) return _authState == AuthenticationState.Registered; }
     }
 
     public bool IsOnline
@@ -115,7 +110,7 @@ public class NodeStateService : INodeStateService
         {
             lock (_lock)
             {
-                return _authState == AuthenticationState.PendingRegistration;
+                return _authState > AuthenticationState.PendingRegistration;
             }
         }
     }
@@ -297,7 +292,6 @@ public class NodeStateService : INodeStateService
                 AuthState = _authState,
                 IsHealthy = IsHealthy,
                 IsAuthenticated = IsAuthenticated,
-                IsDiscoveryComplete = IsDiscoveryComplete,
                 IsOrchestratorReachable = IsOrchestratorReachable,
                 StartedAt = StartedAt,
                 LastHeartbeat = _lastHeartbeat,
