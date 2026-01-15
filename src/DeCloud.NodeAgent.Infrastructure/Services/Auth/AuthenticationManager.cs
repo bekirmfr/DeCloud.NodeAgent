@@ -86,6 +86,8 @@ public class AuthenticationManager : BackgroundService
 
     private async Task WaitForResourceDiscoveryAsync(CancellationToken ct)
     {
+        _resourceDiscovery.GetInventoryCachedAsync(ct);
+
         _logger.LogInformation("Waiting for resource discovery to complete...");
 
         while (!ct.IsCancellationRequested)

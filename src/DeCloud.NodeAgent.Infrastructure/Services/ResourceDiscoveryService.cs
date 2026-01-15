@@ -40,13 +40,22 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     /// </summary>
     public async Task<HardwareInventory?> GetInventoryCachedAsync(CancellationToken ct = default)
     {
-        if(_cachedInventory == null || DateTime.UtcNow - _lastDiscoveryTime > DiscoveryCacheDuration)
+        try
         {
-            _logger.LogInformation("Cached inventory is stale or not available");
-            await DiscoverAllAsync(ct);
-        }
+            if (_cachedInventory == null || DateTime.UtcNow - _lastDiscoveryTime > DiscoveryCacheDuration)
+            {
+                _logger.LogInformation("Cached inventory is stale or not available");
+                await DiscoverAllAsync(ct);
+            }
 
-        return _cachedInventory;
+            _nodeState.SetDiscoveryComplete();
+            return _cachedInventory;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Resource discovery failed");
+            return null;
+        }
     }
 
     /// <summary>
@@ -82,7 +91,6 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
             // Update cache
             _cachedInventory = inventory;
-            _nodeState.SetDiscoveryComplete();
             _lastDiscoveryTime = DateTime.UtcNow;
 
             _logger.LogInformation(
