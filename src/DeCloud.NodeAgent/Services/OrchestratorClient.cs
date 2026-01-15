@@ -857,7 +857,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 {
                     var ip = (await response.Content.ReadAsStringAsync(cts.Token)).Trim();
 
-                    if (!string.IsNullOrWhiteSpace(ip))
+                    if (!string.IsNullOrWhiteSpace(ip) && IsValidIp(ip))
                     {
                         _logger.LogDebug(
                             "Internet connectivity confirmed via {Service}, public IP: {Ip}",
@@ -891,5 +891,10 @@ REGISTERED_AT={DateTime.UtcNow:O}";
 
         _logger.LogWarning("No internet connectivity - all public IP services unreachable");
         return false;
+    }
+
+    private static bool IsValidIp(string ip)
+    {
+        return IPAddress.TryParse(ip, out _);
     }
 }

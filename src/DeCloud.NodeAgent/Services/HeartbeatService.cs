@@ -172,6 +172,8 @@ public class HeartbeatService : BackgroundService
             // Send heartbeat - OrchestratorClient will transform to API format
             var success = await _orchestratorClient.SendHeartbeatAsync(heartbeat, ct);
 
+            _nodeState.RecordHeartbeat(success);
+
             if (success)
             {
                 _lastHeartbeat = heartbeat;

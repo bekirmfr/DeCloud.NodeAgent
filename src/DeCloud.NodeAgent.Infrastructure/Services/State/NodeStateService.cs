@@ -273,6 +273,9 @@ public class NodeStateService : INodeStateService
                 {
                     SetStatusInternal(NodeStatus.Online);
                 }
+
+                SetInternetReachable(success);
+                SetOrchestratorReachable(success);
             }
             else
             {
