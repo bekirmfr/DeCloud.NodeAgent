@@ -1,5 +1,6 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using DeCloud.NodeAgent.Infrastructure.Services;
 using Microsoft.Extensions.Options;
 using System.Text.Json;
@@ -129,97 +130,77 @@ public class CommandProcessorService : BackgroundService
 
     private async Task<bool> HandleCreateVmAsync(string payload, CancellationToken ct)
     {
-        try
+        var root = JsonDocument.Parse(payload).RootElement;
+
+        string? vmId = GetStringProperty(root, "vmId", "VmId");
+        string name = GetStringProperty(root, "name", "Name") ?? $"vm-{vmId?[..8]}";
+        string ownerId = GetStringProperty(root, "ownerId", "OwnerId") ?? "unknown";
+        string? password = GetStringProperty(root, "password", "Password");
+        int vmType = GetIntProperty(root, "vmType", "VmType") ?? 0;
+        int qualityTier = GetIntProperty(root, "qualityTier", "QualityTier") ?? 3;
+        int virtualCpuCores = GetIntProperty(root, "virtualCpuCores", "VirtualCpuCores") ?? 1;
+        int computePointCost = GetIntProperty(root, "computePointCost", "ComputePointCost") ?? 0;
+        long memoryBytes = GetLongProperty(root, "memoryBytes", "MemoryBytes") ?? 1024;
+        long diskBytes = GetLongProperty(root, "diskBytes", "DiskBytes") ?? 10;
+        string? baseImageUrl = GetStringProperty(root, "baseImageUrl", "BaseImageUrl");
+        string? imageId = GetStringProperty(root, "imageId", "ImageId");
+        string? sshPublicKey = GetStringProperty(root, "sshPublicKey", "SshPublicKey");
+
+        Dictionary<string, string>? labels = null;
+        if (root.TryGetProperty("Labels", out var labelsElement) ||
+            root.TryGetProperty("labels", out labelsElement))
         {
-            _logger.LogInformation("Handling CreateVm command: {Payload}", payload);
-
-            using var doc = JsonDocument.Parse(payload);
-            var root = doc.RootElement;
-
-            var isRelayVm = GetIntProperty(root, "VmType", "vmType") == (int) VmType.Relay;
-
-            if (string.IsNullOrWhiteSpace(GetStringProperty(root, "VmId", "vmId")))
-            {
-                _logger.LogWarning("CreateVm command is missing vm ID");
-                return false;
-            }
-
-            if(!isRelayVm && string.IsNullOrWhiteSpace(GetStringProperty(root, "Password", "password")))
-            {
-                _logger.LogWarning("CreateVm command is missing Password");
-                return false;
-            }
-
-            if (!isRelayVm && string.IsNullOrWhiteSpace(GetStringProperty(root, "OwnerId", "ownerId")))
-            {
-                _logger.LogWarning("CreateVm command is missing OwnerId");
-                return false;
-            }
-
-            // Parse the new flat format from Orchestrator
-            var vmId = GetStringProperty(root, "VmId", "vmId")!;
-            var name = GetStringProperty(root, "Name", "name") ?? "Unknown";
-            var vmType = GetIntProperty(root, "VmType", "vmType") ?? (int) VmType.General;
-            string? ownerId = GetStringProperty(root, "OwnerId", "ownerId");
-            string password = GetStringProperty(root, "Password", "password")!;
-            // Try new flat format first, then fall back to nested Spec format
-            int virtualCpuCores = GetIntProperty(root, "virtualCpuCores", "VirtualCpuCores") ?? 1;;
-            int qualityTier = GetIntProperty(root, "qualityTier", "QualityTier") ?? 1;
-            var computePointCost = GetIntProperty(root, "computePointCost", "ComputePointCost") ?? 0;
-            long memoryBytes = GetLongProperty(root, "memoryBytes", "MemoryBytes") ?? 1024;
-            long diskBytes = GetLongProperty(root, "diskBytes", "DiskBytes") ?? 10;
-            string? baseImageUrl = GetStringProperty(root, "baseImageUrl", "BaseImageUrl");
-            string? imageId = GetStringProperty(root, "imageId", "ImageId");
-            string? sshPublicKey = GetStringProperty(root, "sshPublicKey", "SshPublicKey");
-            Dictionary<string, string>? labels = null;
-            if (root.TryGetProperty("Labels", out var labelsElement) ||
-                root.TryGetProperty("labels", out labelsElement))
-            {
-                labels = JsonSerializer.Deserialize<Dictionary<string, string>>(
-                    labelsElement.GetRawText());
-            }
-
-            // Resolve image URL if not provided directly
-            if (string.IsNullOrEmpty(baseImageUrl))
-            {
-                baseImageUrl = ImageUrls.GetValueOrDefault(imageId ?? "ubuntu-22.04", ImageUrls["ubuntu-22.04"]);
-                _logger.LogInformation("Resolved imageId '{ImageId}' to URL: {ImageUrl}", imageId, baseImageUrl);
-            }
-
-            var vmSpec = new VmSpec
-            {
-                Id = vmId,
-                Name = name,
-                OwnerId = ownerId,
-                VmType = (VmType)vmType,
-                VirtualCpuCores = virtualCpuCores,
-                QualityTier = (QualityTier) qualityTier,
-                ComputePointCost = computePointCost,
-                MemoryBytes = memoryBytes,
-                DiskBytes = diskBytes,
-                BaseImageUrl = baseImageUrl,
-                SshPublicKey = sshPublicKey,
-                Labels = labels
-            };
-
-            _logger.LogInformation("Creating {VmType} type VM {VmId}: {VCpus} vCPUs, {MemoryMB}MB RAM, {DiskGB}GB disk, image: {ImageUrl},  quality tier: {QualityTier}",
-                vmSpec.VmType.ToString(), vmId, virtualCpuCores, memoryBytes / 1024 / 1024, diskBytes / 1024 / 1024 / 1024, baseImageUrl,
-                qualityTier);
-
-            var result = await _vmManager.CreateVmAsync(vmSpec, password, ct);
-
-            if (result.Success)
-            {
-                _logger.LogInformation("{VmType} VM {VmId} created and started successfully", vmSpec.VmType.ToString(), vmId);
-                return true;
-            }
-
-            _logger.LogError("CreateVm failed: {Error}", result.ErrorMessage);
-            return false;
+            labels = JsonSerializer.Deserialize<Dictionary<string, string>>(
+                labelsElement.GetRawText());
         }
-        catch (Exception ex)
+
+        // Resolve image URL with architecture awareness
+        baseImageUrl = await ResolveImageUrlAsync(imageId, baseImageUrl, ct);
+
+        var vmSpec = new VmSpec
         {
-            _logger.LogError(ex, "Error handling CreateVm command");
+            Id = vmId,
+            Name = name,
+            OwnerId = ownerId,
+            VmType = (VmType)vmType,
+            VirtualCpuCores = virtualCpuCores,
+            QualityTier = (QualityTier)qualityTier,
+            ComputePointCost = computePointCost,
+            MemoryBytes = memoryBytes,
+            DiskBytes = diskBytes,
+            BaseImageUrl = baseImageUrl,
+            SshPublicKey = sshPublicKey,
+            Labels = labels
+        };
+
+        _logger.LogInformation(
+            "Creating {VmType} type VM {VmId}: {VCpus} vCPUs, {MemoryMB}MB RAM, " +
+            "{DiskGB}GB disk, image: {ImageUrl}, quality tier: {QualityTier}",
+            vmSpec.VmType.ToString(), vmId, virtualCpuCores,
+            memoryBytes / 1024 / 1024, diskBytes / 1024 / 1024 / 1024,
+            baseImageUrl, qualityTier);
+
+        var result = await _vmManager.CreateVmAsync(vmSpec, password, ct);
+
+        if (result.Success)
+        {
+            _logger.LogInformation(
+                "{VmType} VM {VmId} created and started successfully on {Architecture} host",
+                vmSpec.VmType.ToString(), vmId,
+                (await _resourceDiscovery.GetInventoryCachedAsync(ct))?.Cpu?.Architecture ?? "unknown");
+
+            // Notify orchestrator of successful creation
+            //await _orchestratorClient.NotifyVmStatusAsync(vmId, VmState.Running, ct);
+            return true;
+        }
+        else
+        {
+            _logger.LogError(
+                "{VmType} VM {VmId} creation failed: {Error}",
+                vmSpec.VmType.ToString(), vmId, result.ErrorMessage);
+
+            // Notify orchestrator of failure
+            //await _orchestratorClient.NotifyVmStatusAsync(vmId, VmState.Failed, ct);
             return false;
         }
     }
@@ -279,6 +260,58 @@ public class CommandProcessorService : BackgroundService
         var resources = await _resourceDiscovery.DiscoverAllAsync(ct);
         _logger.LogInformation("Benchmark complete");
         return true;
+    }
+
+    /// <summary>
+    /// Resolve base image URL with architecture awareness
+    /// </summary>
+    private async Task<string> ResolveImageUrlAsync(string? imageId, string? providedUrl, CancellationToken ct)
+    {
+        // If URL provided directly, use it (orchestrator override)
+        if (!string.IsNullOrEmpty(providedUrl))
+        {
+            _logger.LogInformation("Using provided image URL: {Url}", providedUrl);
+            return providedUrl;
+        }
+
+        // Get host architecture
+        var inventory = await _resourceDiscovery.GetInventoryCachedAsync(ct);
+        var hostArchitecture = inventory?.Cpu?.Architecture ?? "x86_64";
+
+        _logger.LogInformation("Resolving image for architecture: {Architecture}", hostArchitecture);
+
+        // Normalize architecture to archTag (amd64/arm64)
+        var archConfig = ArchitectureHelper.GetHostArchConfig(hostArchitecture);
+        var archTag = archConfig.ArchTag;
+
+        // Default to ubuntu-22.04 if no image specified
+        var imageIdToResolve = imageId ?? "ubuntu-22.04";
+
+        // Resolve from architecture-specific image map
+        var resolvedUrl = ArchitectureHelper.ResolveImageUrl(archTag, imageIdToResolve);
+
+        if (resolvedUrl == null)
+        {
+            _logger.LogWarning(
+                "Image {ImageId} not available for {Architecture}, falling back to default",
+                imageIdToResolve, archTag);
+
+            // Fallback to ubuntu-22.04 for the architecture
+            resolvedUrl = ArchitectureHelper.ResolveImageUrl(archTag, "ubuntu-22.04");
+        }
+
+        if (resolvedUrl == null)
+        {
+            throw new NotSupportedException(
+                $"No images available for architecture {hostArchitecture}. " +
+                $"Supported architectures: {string.Join(", ", ArchitectureHelper.SupportedArchitectures.Keys)}");
+        }
+
+        _logger.LogInformation(
+            "Resolved image '{ImageId}' for {Architecture} ({ArchTag}): {Url}",
+            imageIdToResolve, hostArchitecture, archTag, resolvedUrl);
+
+        return resolvedUrl;
     }
 
     // Helper methods to handle case-insensitive property names

@@ -18,6 +18,10 @@ public class HardwareInventory
 public class CpuInfo
 {
     public string Model { get; set; } = string.Empty;
+    /// <summary>
+    /// CPU Architecture: x86_64, aarch64, etc.
+    /// </summary>
+    public string Architecture { get; set; } = string.Empty;
     public int PhysicalCores { get; set; }
     public int LogicalCores { get; set; }
     public double FrequencyMhz { get; set; }

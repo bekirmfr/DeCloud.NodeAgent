@@ -116,9 +116,16 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             : await GetCpuInfoLinuxAsync(ct);
     }
 
+    /// <summary>
+    /// Enhanced Windows CPU detection with architecture
+    /// </summary>
     private async Task<CpuInfo> GetCpuInfoWindowsAsync(CancellationToken ct)
     {
         var info = new CpuInfo { Flags = new List<string>() };
+
+        // Detect architecture
+        info.Architecture = DetectArchitecture();
+        _logger.LogInformation("Detected CPU architecture: {Architecture}", info.Architecture);
 
         try
         {
@@ -182,9 +189,16 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         return info;
     }
 
+    /// <summary>
+    /// Enhanced Linux CPU detection with architecture
+    /// </summary>
     private async Task<CpuInfo> GetCpuInfoLinuxAsync(CancellationToken ct)
     {
         var info = new CpuInfo { Flags = new List<string>() };
+
+        // Detect architecture first
+        info.Architecture = DetectArchitecture();
+        _logger.LogInformation("Detected CPU architecture: {Architecture}", info.Architecture);
 
         var cpuinfoResult = await _executor.ExecuteAsync("cat", "/proc/cpuinfo", ct);
         if (cpuinfoResult.Success)
@@ -192,13 +206,27 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             foreach (var line in cpuinfoResult.StandardOutput.Split('\n'))
             {
                 if (line.StartsWith("model name"))
+                {
                     info.Model = line.Split(':').LastOrDefault()?.Trim() ?? "";
+                }
                 else if (line.StartsWith("cpu MHz") && info.FrequencyMhz == 0)
+                {
                     double.TryParse(line.Split(':').LastOrDefault()?.Trim(), out var mhz);
+                    info.FrequencyMhz = mhz;
+                }
                 else if (line.StartsWith("flags"))
                 {
                     info.Flags = line.Split(':').LastOrDefault()?.Trim().Split(' ').ToList() ?? new();
                     info.SupportsVirtualization = info.Flags.Contains("vmx") || info.Flags.Contains("svm");
+                }
+                // ARM-specific CPU info
+                else if (line.StartsWith("CPU implementer") || line.StartsWith("CPU architecture"))
+                {
+                    // ARM processors show model differently
+                    if (string.IsNullOrEmpty(info.Model))
+                    {
+                        info.Model = line.Split(':').LastOrDefault()?.Trim() ?? "";
+                    }
                 }
             }
         }
@@ -224,15 +252,18 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                 }
                 else if (line.StartsWith("Socket(s):"))
                 {
-                    // Also parse socket count for accurate physical core calculation
                     if (int.TryParse(line.Split(':').LastOrDefault()?.Trim(), out var sockets))
                     {
-                        // Physical cores = cores per socket × socket count
                         if (info.PhysicalCores > 0)
                         {
                             info.PhysicalCores *= sockets;
                         }
                     }
+                }
+                else if (line.StartsWith("Architecture:") && string.IsNullOrEmpty(info.Architecture))
+                {
+                    // Fallback if runtime detection failed
+                    info.Architecture = line.Split(':').LastOrDefault()?.Trim() ?? "unknown";
                 }
             }
         }
@@ -555,6 +586,25 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         }
 
         return info;
+    }
+
+    /// <summary>
+    /// Detect CPU architecture using platform APIs
+    /// Returns: x86_64, aarch64, arm64, etc.
+    /// </summary>
+    private string DetectArchitecture()
+    {
+        // Use .NET's built-in architecture detection
+        var runtimeArch = RuntimeInformation.ProcessArchitecture;
+
+        return runtimeArch switch
+        {
+            System.Runtime.InteropServices.Architecture.X64 => "x86_64",
+            System.Runtime.InteropServices.Architecture.Arm64 => "aarch64",
+            System.Runtime.InteropServices.Architecture.X86 => "i686",
+            System.Runtime.InteropServices.Architecture.Arm => "armv7l",
+            _ => "unknown"
+        };
     }
 
     public async Task<ResourceSnapshot> GetCurrentSnapshotAsync(CancellationToken ct = default)

@@ -644,6 +644,105 @@ install_libvirt() {
     return 0
 }
 
+# ============================================================
+# ARM64 QEMU/KVM Installation
+# ============================================================
+install_arm_virtualization() {
+    log_step "Installing ARM64 virtualization support..."
+    
+    ARCH=$(uname -m)
+    
+    if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+        log_info "Detected ARM64 architecture"
+        
+        # Install ARM64-specific QEMU and firmware
+        apt-get install -y \
+            qemu-system-arm \
+            qemu-efi-aarch64 \
+            qemu-efi \
+            ipxe-qemu \
+            || log_error "Failed to install ARM64 virtualization packages"
+        
+        log_success "ARM64 QEMU installed"
+        
+        # Verify AAVMF firmware for ARM64 VMs
+        if [ ! -f "/usr/share/AAVMF/AAVMF_CODE.fd" ]; then
+            log_warn "AAVMF firmware not found, some ARM64 VMs may not boot properly"
+            log_info "Installing AAVMF firmware..."
+            
+            apt-get install -y qemu-efi-aarch64 || log_warn "Could not install AAVMF firmware"
+        else
+            log_success "AAVMF firmware verified"
+        fi
+        
+        # Enable KVM for ARM64
+        if [ -e /dev/kvm ]; then
+            log_success "KVM device available for ARM64"
+        else
+            log_warn "KVM device not found - VMs will run without hardware acceleration"
+            log_info "Attempting to load KVM module..."
+            modprobe kvm || log_warn "Could not load KVM module"
+        fi
+        
+    else
+        log_info "x86_64 architecture detected - using standard QEMU"
+    fi
+}
+
+# ============================================================
+# Architecture-Specific Optimizations
+# ============================================================
+configure_architecture_optimizations() {
+    log_step "Configuring architecture-specific optimizations..."
+    
+    ARCH=$(uname -m)
+    
+    # CPU Governor for ARM devices (performance vs power saving)
+    if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+        log_info "Setting CPU governor for ARM64..."
+        
+        # Install cpufrequtils for ARM CPU management
+        apt-get install -y cpufrequtils || log_warn "Could not install cpufrequtils"
+        
+        # Set performance governor for compute nodes
+        if command -v cpufreq-set &> /dev/null; then
+            for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+                if [ -f "$cpu" ]; then
+                    echo "performance" > "$cpu" 2>/dev/null || true
+                fi
+            done
+            log_success "CPU governor set to performance mode"
+        fi
+    fi
+}
+
+# ============================================================
+# ARM64 Image Cache Pre-warming (Optional)
+# ============================================================
+prewarm_arm_images() {
+    log_step "Pre-warming ARM64 image cache (optional)..."
+    
+    ARCH=$(uname -m)
+    
+    if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+        log_info "Downloading popular ARM64 cloud images..."
+        
+        IMAGE_CACHE_DIR="/var/lib/decloud/images"
+        mkdir -p "$IMAGE_CACHE_DIR"
+        
+        # Ubuntu 22.04 ARM64 (most popular)
+        if [ ! -f "$IMAGE_CACHE_DIR/ubuntu-22.04-arm64.img" ]; then
+            log_info "Downloading Ubuntu 22.04 ARM64 (350MB)..."
+            wget -q --show-progress \
+                -O "$IMAGE_CACHE_DIR/ubuntu-22.04-arm64.img" \
+                "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-arm64.img" \
+                || log_warn "Could not download Ubuntu 22.04 ARM64 image"
+        fi
+        
+        log_success "ARM64 image cache pre-warmed"
+    fi
+}
+
 install_wireguard() {
     if [ "$SKIP_WIREGUARD" = true ]; then
         log_warn "Skipping WireGuard installation (--skip-wireguard)"
@@ -1588,6 +1687,11 @@ main() {
     install_base_dependencies
     install_dotnet
     install_libvirt
+
+    # ARM64 support
+    install_arm_virtualization
+    configure_architecture_optimizations
+
     install_wireguard
     configure_wireguard_keys
     

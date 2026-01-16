@@ -35,6 +35,7 @@ public class LibvirtVmManager : IVmManager
     private readonly SemaphoreSlim _lock = new(1, 1);
     private int _nextVncPort;
     private bool _initialized = false;
+    private string _hostArchitecture = "x86_64"; // Default, will be detected
 
     public LibvirtVmManager(
         ICommandExecutor executor,
@@ -1556,5 +1557,158 @@ public class LibvirtVmManager : IVmManager
             _logger.LogError(ex, "Exception applying quota to VM {VmId}", vmId);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Initialize with architecture detection
+    /// </summary>
+    private async Task InitializeArchitectureAsync(CancellationToken ct)
+    {
+        try
+        {
+            // Get architecture from node metadata
+            var inventory = _nodeMetadata.Inventory;
+            if (inventory?.Cpu != null && !string.IsNullOrEmpty(inventory.Cpu.Architecture))
+            {
+                _hostArchitecture = inventory.Cpu.Architecture;
+                _logger.LogInformation("Detected host architecture: {Architecture}", _hostArchitecture);
+            }
+            else
+            {
+                _logger.LogWarning("Could not detect architecture from inventory, using default: x86_64");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to detect architecture, using default: x86_64");
+        }
+    }
+
+    /// <summary>
+    /// Generate architecture-aware libvirt XML
+    /// </summary>
+    private string GenerateLibvirtXmlMultiArch(VmSpec spec, string diskPath, string? cloudInitIso, int vncPort)
+    {
+        // Get architecture configuration
+        var archConfig = ArchitectureHelper.GetHostArchConfig(_hostArchitecture);
+
+        _logger.LogInformation(
+            "Generating VM XML for {Architecture} architecture: emulator={Emulator}, machine={Machine}",
+            archConfig.Architecture,
+            archConfig.QemuEmulator,
+            archConfig.MachineType);
+
+        // ========================================
+        // CPU SHARES CALCULATION
+        // ========================================
+        var config = _nodeMetadata.SchedulingConfig;
+        var pointsPerVCpu = config.BaselineOvercommitRatio *
+                           (config.BaselineOvercommitRatio / config.Tiers[spec.QualityTier].CpuOvercommitRatio);
+
+        spec.ComputePointCost = (int)(spec.VirtualCpuCores * pointsPerVCpu);
+        var cpuShares = spec.ComputePointCost * 1000;
+        cpuShares = Math.Min(262144, cpuShares);
+        cpuShares = Math.Max(1000, cpuShares);
+
+        // ========================================
+        // TIER-SPECIFIC CPU CONFIGURATION
+        // ========================================
+        var cpuTune = spec.QualityTier switch
+        {
+            QualityTier.Guaranteed => $@"
+              <cputune>
+                <shares>{cpuShares}</shares>
+                <period>100000</period>
+                <quota>-1</quota>
+              </cputune>",
+
+            QualityTier.Standard => $@"
+              <cputune>
+                <shares>{cpuShares}</shares>
+              </cputune>",
+
+            _ => $@"
+              <cputune>
+                <shares>{cpuShares}</shares>
+              </cputune>"
+        };
+
+        // ========================================
+        // ARCHITECTURE-SPECIFIC CONFIGURATION
+        // ========================================
+
+        // ARM64-specific: UEFI firmware for proper boot
+        var osSection = archConfig.Architecture == "aarch64"
+            ? $@"
+              <os>
+                <type arch='aarch64' machine='{archConfig.MachineType}'>hvm</type>
+                <loader readonly='yes' type='pflash'>/usr/share/AAVMF/AAVMF_CODE.fd</loader>
+                <boot dev='hd'/>
+              </os>"
+            : $@"
+              <os>
+                <type arch='x86_64' machine='{archConfig.MachineType}'>hvm</type>
+                <boot dev='hd'/>
+              </os>";
+
+        // ARM64 uses virtio for optimal performance
+        var diskBus = archConfig.Architecture == "aarch64" ? "virtio" : "virtio";
+
+        // Cloud-init disk (optional)
+        var cloudInitDisk = !string.IsNullOrEmpty(cloudInitIso)
+            ? $@"
+            <disk type='file' device='cdrom'>
+              <driver name='qemu' type='raw'/>
+              <source file='{cloudInitIso}'/>
+              <target dev='sda' bus='sata'/>
+              <readonly/>
+            </disk>"
+            : "";
+
+        // ========================================
+        // COMPLETE LIBVIRT XML
+        // ========================================
+        return $@"
+            <domain type='kvm'>
+              <name>{spec.Id}</name>
+              <uuid>{spec.Id}</uuid>
+              <memory unit='bytes'>{spec.MemoryBytes}</memory>
+              <vcpu placement='static'>{spec.VirtualCpuCores}</vcpu>
+              {cpuTune}
+              {osSection}
+              <features>
+                <acpi/>
+                <apic/>
+              </features>
+              <cpu mode='host-passthrough' check='none'/>
+              <clock offset='utc'>
+                <timer name='rtc' tickpolicy='catchup'/>
+                <timer name='pit' tickpolicy='delay'/>
+                <timer name='hpet' present='no'/>
+              </clock>
+              <on_poweroff>destroy</on_poweroff>
+              <on_reboot>restart</on_reboot>
+              <on_crash>destroy</on_crash>
+              <devices>
+                <emulator>{archConfig.QemuEmulator}</emulator>
+                <disk type='file' device='disk'>
+                  <driver name='qemu' type='qcow2'/>
+                  <source file='{diskPath}'/>
+                  <target dev='vda' bus='{diskBus}'/>
+                  <address type='pci' domain='0x0000' bus='0x00' slot='0x04' function='0x0'/>
+                </disk>
+                {cloudInitDisk}
+                <interface type='network'>
+                  <source network='default'/>
+                  <model type='virtio'/>
+                </interface>
+                <console type='pty'>
+                  <target type='serial' port='0'/>
+                </console>
+                <graphics type='vnc' port='{vncPort}' autoport='no' listen='0.0.0.0'>
+                  <listen type='address' address='0.0.0.0'/>
+                </graphics>
+              </devices>
+            </domain>";
     }
 }
