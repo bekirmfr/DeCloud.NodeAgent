@@ -39,7 +39,6 @@ write_files:
     content: |
       __CA_PUBLIC_KEY__
 
-
   # Universal SSH Password Authentication
   - path: /etc/ssh/sshd_config.d/99-decloud-password-auth.conf
     permissions: '0644'
@@ -63,6 +62,16 @@ write_files:
     content: |
       __WELCOME_SERVER_PY__
 
+  # VM ID for attestation agent
+  - path: /etc/decloud/vm-id
+    permissions: '0644'
+    content: __VM_ID__
+
+  # Orchestrator URL for health checks (read-only, no secrets)
+  - path: /etc/decloud/orchestrator-url
+    permissions: '0644'
+    content: __ORCHESTRATOR_URL__
+
   # Welcome page systemd service
   - path: /etc/systemd/system/welcome.service
     permissions: '0644'
@@ -77,6 +86,48 @@ write_files:
       WorkingDirectory=/var/www
       StandardOutput=journal
       StandardError=journal
+      
+      [Install]
+      WantedBy=multi-user.target
+
+  # Attestation agent binary (compiled Go, ~3MB base64)
+  # Build: CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o decloud-agent
+  # Encode: base64 decloud-agent > decloud-agent.b64
+  - path: /usr/local/bin/decloud-agent
+    permissions: '0755'
+    encoding: base64
+    content: |
+      __ATTESTATION_AGENT_BASE64__
+
+  # Attestation agent systemd service
+  - path: /etc/systemd/system/decloud-agent.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=DeCloud Ephemeral Attestation Agent
+      After=network.target
+      Documentation=https://docs.decloud.network/attestation
+      
+      [Service]
+      Type=simple
+      ExecStart=/usr/local/bin/decloud-agent
+      Restart=always
+      RestartSec=5
+      
+      # Security hardening
+      NoNewPrivileges=yes
+      ProtectSystem=strict
+      ProtectHome=yes
+      PrivateTmp=yes
+      
+      # Only needs to read /proc/* and /etc/machine-id
+      ReadOnlyPaths=/proc /sys
+      ReadWritePaths=/var/log
+      
+      # Logging
+      StandardOutput=journal
+      StandardError=journal
+      SyslogIdentifier=decloud-agent
       
       [Install]
       WantedBy=multi-user.target
@@ -100,6 +151,16 @@ runcmd:
   - mkdir -p /etc/ssh/auth_principals
   - echo vm-__VM_ID__ > /etc/ssh/auth_principals/root
   - chmod 644 /etc/ssh/auth_principals/root
+
+  # Create decloud config directory
+  - mkdir -p /etc/decloud
+
+  # Enable and start attestation agent
+  - systemctl daemon-reload
+  - systemctl enable decloud-agent
+  - systemctl start decloud-agent
+  # Log startup
+  - echo "DeCloud Attestation Agent started" | systemd-cat -t decloud-agent
   
   # Start welcome page service
   - systemctl daemon-reload

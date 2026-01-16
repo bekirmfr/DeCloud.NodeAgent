@@ -47,6 +47,9 @@ public class CloudInitTemplateVariables
     public string WireGuardListenPort { get; set; } = "51820";
     public string WireGuardAddress { get; set; } = "10.20.0.1/16";
 
+    // Attestation Agent
+    public string AttestationAgent { get; set; } = "";
+
     // Security
     public string SshPublicKey { get; set; } = "";
     public string AdminPassword { get; set; } = "";
@@ -71,7 +74,8 @@ public class CloudInitTemplateVariables
             ["__WIREGUARD_LISTEN_PORT__"] = WireGuardListenPort,
             ["__WIREGUARD_ADDRESS__"] = WireGuardAddress,
             ["__SSH_PUBLIC_KEY__"] = SshPublicKey,
-            ["__ADMIN_PASSWORD__"] = AdminPassword
+            ["__ADMIN_PASSWORD__"] = AdminPassword,
+            ["__ATTESTATION_AGENT_BASE64__"] = AttestationAgent,
         };
 
         // Add custom variables
@@ -434,8 +438,19 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             VmName = spec.Name,
             Hostname = spec.Name,
             SshPublicKey = spec.SshPublicKey ?? "",
-            AdminPassword = GenerateSecurePassword()
+            AdminPassword = GenerateSecurePassword(),
         };
+
+        // Add attestation agent binary
+        var agentBinaryPath = Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory,
+            "CloudInit", "Templates", "decloud-agent.b64");
+
+        if (File.Exists(agentBinaryPath))
+        {
+            variables.AttestationAgent =
+                await File.ReadAllTextAsync(agentBinaryPath, ct);
+        }
 
         // VM type-specific variable generation
         switch (vmType)
