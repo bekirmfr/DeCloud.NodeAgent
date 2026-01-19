@@ -1,7 +1,7 @@
 #cloud-config
 # DeCloud Relay VM Cloud-Init Configuration
 # This VM serves as a WireGuard relay for CGNAT nodes
-# Version: 3.1 (FIXED - Proper NAT callback idempotency)
+# Version: 3.2 (Sequential callback flow - NAT first, then orchestrator)
 
 hostname: __VM_NAME__
 manage_etc_hosts: true
@@ -196,7 +196,7 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
-  # FIXED: Systemd service for NAT callback with proper idempotency
+  # Systemd service for NAT callback (calls orchestrator after success)
   - path: /etc/systemd/system/decloud-relay-nat-callback.service
     permissions: '0644'
     content: |
@@ -207,16 +207,16 @@ write_files:
       
       [Service]
       Type=oneshot
-      # FIXED: Check if already completed before running
+      # Check if already completed before running
       ExecStartPre=/bin/bash -c 'if [ -f /var/lib/decloud/nat-callback-complete ]; then echo "NAT callback already completed"; exit 0; fi'
       ExecStart=/usr/local/bin/notify-nat-ready.sh
-      # FIXED: Create marker file on success
+      # Create marker file on success
       ExecStartPost=/bin/bash -c 'mkdir -p /var/lib/decloud && touch /var/lib/decloud/nat-callback-complete'
       RemainAfterExit=yes
       StandardOutput=journal
       StandardError=journal
       
-      # FIXED: Reduced retry attempts and added timeout
+      # Reduced retry attempts and added timeout
       Restart=on-failure
       RestartSec=5s
       StartLimitBurst=3
@@ -225,7 +225,7 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
-  # FIXED: NAT callback script (injected as complete file, not placeholder)
+  # NAT callback script (injected as complete file, not placeholder)
   - path: /usr/local/bin/notify-nat-ready.sh
     permissions: '0755'
     content: |
@@ -273,7 +273,7 @@ write_files:
         "orchestrator_public_key": "__ORCHESTRATOR_PUBLIC_KEY__",
         "relay_http_proxy": "__RELAY_HTTP_PROXY__",
         "created_at": "__TIMESTAMP__",
-        "version": "3.1"
+        "version": "3.2"
       }
 
 # =====================================================
@@ -326,15 +326,22 @@ runcmd:
       sleep 2
     done
 
-  # Notify orchestrator that relay is ready
+  # Create notify-orchestrator.sh script but DON'T execute it yet
+  # It will be called by notify-nat-ready.sh after NAT configuration succeeds
   - |
     cat > /usr/local/bin/notify-orchestrator.sh <<'EOF'
     #!/bin/bash
+    #
+    # DeCloud Relay Orchestrator Registration
+    # Called by notify-nat-ready.sh after NAT configuration succeeds
+    #
     ORCHESTRATOR_URL="__ORCHESTRATOR_URL__"
     NODE_ID="__NODE_ID__"
     RELAY_VM_ID="__VM_ID__"
     PUBLIC_KEY="__WIREGUARD_PUBLIC_KEY__"
     PUBLIC_IP="__PUBLIC_IP__"
+    
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] Notifying orchestrator at $ORCHESTRATOR_URL..."
     
     # Read WireGuard private key
     WIREGUARD_PRIVATE_KEY=$(cat /etc/wireguard/private.key | tr -d '\n')
@@ -344,7 +351,7 @@ runcmd:
     TOKEN=$(echo -n "$MESSAGE" | openssl dgst -sha256 -hmac "$WIREGUARD_PRIVATE_KEY" -binary | base64)
     
     # Call orchestrator callback endpoint
-    curl -X POST "$ORCHESTRATOR_URL/api/relay/register-callback" \
+    RESPONSE=$(curl -X POST "$ORCHESTRATOR_URL/api/relay/register-callback" \
       -H "Content-Type: application/json" \
       -H "X-Relay-Token: $TOKEN" \
       -d "{
@@ -355,25 +362,41 @@ runcmd:
       }" \
       --max-time 10 \
       --retry 3 \
-      --retry-delay 5
+      --retry-delay 5 \
+      -w "\nHTTP_CODE:%{http_code}" \
+      -s \
+      2>&1)
     
-    if [ $? -eq 0 ]; then
-      echo "✓ Successfully notified orchestrator - relay is now active"
+    HTTP_CODE=$(echo "$RESPONSE" | grep -oP 'HTTP_CODE:\K\d+')
+    
+    if [ "$HTTP_CODE" = "200" ]; then
+      echo "✓ Successfully notified orchestrator - relay is now ACTIVE"
+      echo "✓ IsActive flag set - RelayHealthMonitor will now check this relay"
+      logger -t decloud-relay "Orchestrator notified - relay active"
+      exit 0
     else
-      echo "⚠ Failed to notify orchestrator - will retry on health check"
+      echo "⚠ Failed to notify orchestrator (HTTP ${HTTP_CODE:-timeout})"
+      echo "   Response: $RESPONSE"
+      echo "   RelayHealthMonitor will eventually recover this relay"
+      logger -t decloud-relay "Orchestrator notification failed - will retry on health check"
+      exit 1
     fi
     EOF
     
   - chmod +x /usr/local/bin/notify-orchestrator.sh
-  - /usr/local/bin/notify-orchestrator.sh &
+  
+  # Don't execute notify-orchestrator.sh here
+  # It will be called by notify-nat-ready.sh after NAT succeeds
 
   # Start NAT callback service via systemd
+  # This will trigger the sequential flow: NAT → orchestrator
   - systemctl daemon-reload
   - systemctl enable decloud-relay-nat-callback.service
   - systemctl start decloud-relay-nat-callback.service
   
   # Log that NAT callback was initiated
   - 'echo "NAT callback service started at $(date)" >> /var/log/decloud-relay-bootstrap.log'
+  - 'echo "Sequential callback flow: NAT first, then orchestrator" >> /var/log/decloud-relay-bootstrap.log'
   
   # Verify orchestrator peer is configured
   - wg show wg-relay-server | grep -A 5 "__ORCHESTRATOR_PUBLIC_KEY__" || echo "WARNING - Orchestrator peer not found!"
@@ -415,5 +438,6 @@ runcmd:
   - 'echo "WireGuard Public Key: __WIREGUARD_PUBLIC_KEY__" >> /var/log/decloud-relay-bootstrap.log'
   - 'echo "Orchestrator Public Key: __ORCHESTRATOR_PUBLIC_KEY__" >> /var/log/decloud-relay-bootstrap.log'
   - 'echo "Orchestrator peer configured: YES" >> /var/log/decloud-relay-bootstrap.log'
+  - 'echo "NOTE: Orchestrator notification happens AFTER NAT configuration" >> /var/log/decloud-relay-bootstrap.log'
 
 final_message: "DeCloud Relay VM __VM_NAME__ is ready! Dashboard: http://__PUBLIC_IP__:8080/ WireGuard endpoint: __PUBLIC_IP__:51820"

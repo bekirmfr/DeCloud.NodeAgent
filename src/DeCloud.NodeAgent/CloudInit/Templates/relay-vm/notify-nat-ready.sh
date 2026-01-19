@@ -1,16 +1,21 @@
 #!/bin/bash
 #
 # DeCloud Relay VM NAT Configuration Callback
-# Version: 2.0 - Improved with idempotency and smarter retry logic
+# Version: 3.0 - Sequential orchestrator notification
 #
 # This script runs on relay VM boot to notify the node agent
 # of the VM's IP address so NAT rules can be configured.
 #
+# Flow:
+# 1. Configure NAT rules on host (node agent)
+# 2. On success → notify orchestrator that relay is fully ready
+# 3. Orchestrator sets IsActive=true only when relay can serve traffic
+#
 # Key improvements:
-# - Checks if callback already succeeded (idempotent)
-# - Validates node agent is actually ready before calling
+# - Sequential callbacks (NAT first, then orchestrator)
+# - Idempotent (checks marker file)
+# - Validates node agent is ready before calling
 # - Better error handling and logging
-# - Prevents duplicate callbacks
 #
 
 set -e
@@ -114,7 +119,7 @@ MESSAGE="${VM_ID}:${VM_IP}"
 TOKEN=$(echo -n "$MESSAGE" | openssl dgst -sha256 -hmac "$MACHINE_ID" -binary | base64)
 
 # =====================================================
-# Call NAT callback endpoint
+# STEP 1: Call NAT callback endpoint on node agent
 # =====================================================
 log "Notifying node agent at $NODE_AGENT_URL/api/relay/nat-ready..."
 
@@ -135,7 +140,7 @@ RESPONSE=$(curl -X POST "$NODE_AGENT_URL/api/relay/nat-ready" \
 HTTP_CODE=$(echo "$RESPONSE" | grep -oP 'HTTP_CODE:\K\d+')
 
 # =====================================================
-# Handle response
+# Handle NAT callback response
 # =====================================================
 if [ "$HTTP_CODE" = "200" ]; then
     log "✓ Successfully notified node agent - NAT rule configured!"
@@ -157,7 +162,36 @@ if [ "$HTTP_CODE" = "200" ]; then
     # Log to system journal
     logger -t decloud-relay "NAT rule configured successfully for $VM_IP via gateway $GATEWAY_IP"
     
+    # =====================================================
+    # STEP 2: Now notify orchestrator that relay is fully ready
+    # =====================================================
+    log ""
+    log "=========================================="
+    log "NAT configuration complete - notifying orchestrator..."
+    log "=========================================="
+    
+    if [ -f "/usr/local/bin/notify-orchestrator.sh" ]; then
+        log "Executing /usr/local/bin/notify-orchestrator.sh..."
+        
+        # Execute orchestrator notification
+        if /usr/local/bin/notify-orchestrator.sh; then
+            log "✓ Orchestrator notified successfully - relay is now ACTIVE"
+            log "✓ RelayHealthMonitor can now check this relay"
+            logger -t decloud-relay "Relay fully operational - orchestrator notified"
+        else
+            log "⚠ Failed to notify orchestrator (exit code: $?)"
+            log "   Relay is functional but orchestrator may not know yet"
+            log "   RelayHealthMonitor will eventually recover this relay"
+            logger -t decloud-relay "Orchestrator notification failed - health check will recover"
+        fi
+    else
+        log "❌ /usr/local/bin/notify-orchestrator.sh not found!"
+        log "   This should not happen - check cloud-init configuration"
+        logger -t decloud-relay "ERROR: notify-orchestrator.sh missing"
+    fi
+    
     exit 0
+    
 elif [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ]; then
     log "❌ Authentication failed (HTTP $HTTP_CODE)"
     log "   Token may be invalid - this is a configuration error"
