@@ -1359,7 +1359,7 @@ public class LibvirtVmManager : IVmManager
 
         var config = _nodeMetadata.SchedulingConfig;
 
-        var pointsPerVCpu = config.BaselineOvercommitRatio *
+        var pointsPerVCpu = (config.Tiers[spec.QualityTier].MinimumBenchmark/config.BaselineBenchmark) *
                            (config.BaselineOvercommitRatio / config.Tiers[spec.QualityTier].CpuOvercommitRatio);
 
         spec.ComputePointCost = (int)(spec.VirtualCpuCores * pointsPerVCpu);
