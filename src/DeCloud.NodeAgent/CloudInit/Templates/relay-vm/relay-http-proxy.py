@@ -105,8 +105,6 @@ class HTTPProxyHandler(BaseHTTPRequestHandler):
                     headers[key] = value
 
             # Add DeCloud headers
-            headers['X-DeCloud-VM-Id'] = route['vm_id']
-            headers['X-DeCloud-Target-Port'] = str(route['target_port'])
             headers['X-Forwarded-For'] = self.client_address[0]
             headers['X-Forwarded-Proto'] = 'http'
             headers['X-Forwarded-Host'] = self.headers.get('Host', '')

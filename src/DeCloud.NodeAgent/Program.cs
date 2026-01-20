@@ -1,5 +1,6 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
+using DeCloud.NodeAgent.Core.Settings;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using DeCloud.NodeAgent.Infrastructure.Network;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
@@ -31,6 +32,15 @@ builder.Services.Configure<AuditLogOptions>(
     builder.Configuration.GetSection("AuditLog"));
 
 // =====================================================
+// GenericProxyController Configuration
+// =====================================================
+// Configure ProxySettings for GenericProxyController
+// Note: GenericProxyController has sensible defaults and works without this,
+// but this allows runtime customization via appsettings.json
+builder.Services.Configure<ProxySettings>(
+    builder.Configuration.GetSection("ProxySettings"));
+
+// =====================================================
 // HTTP Clients
 // =====================================================
 builder.Services.ConfigureHttpJsonOptions(options =>
@@ -46,7 +56,9 @@ builder.Services.AddHttpClient<OrchestratorClient>()
     {
         client.Timeout = TimeSpan.FromMinutes(5);
     });
-// HttpClient for VM proxy (used by InternalProxyController)
+
+// HttpClient for VM proxy (used by InternalProxyController and GenericProxyController)
+// Both controllers share this named HttpClient for proxying to VMs
 builder.Services.AddHttpClient("VmProxy", client =>
 {
     client.Timeout = TimeSpan.FromSeconds(30);
@@ -226,6 +238,30 @@ using (var scope = app.Services.CreateScope())
     // Verify VmRepository encryption status
     var repository = scope.ServiceProvider.GetRequiredService<VmRepository>();
     // Note: VmRepository doesn't expose encryption status, but logs will show it
+
+    // =====================================================
+    // Log GenericProxyController configuration
+    // =====================================================
+    try
+    {
+        var proxySettings = scope.ServiceProvider.GetService<IOptions<ProxySettings>>()?.Value;
+        if (proxySettings != null && proxySettings.EnablePortWhitelist)
+        {
+            logger.LogInformation(
+                "✓ GenericProxyController configured with {Count} allowed ports: {Ports}",
+                proxySettings.AllowedPorts?.Count ?? 0,
+                string.Join(", ", proxySettings.AllowedPorts ?? new List<int>()));
+        }
+        else
+        {
+            logger.LogInformation(
+                "✓ GenericProxyController using default configuration (port whitelist: all ports)");
+        }
+    }
+    catch (Exception ex)
+    {
+        logger.LogWarning(ex, "Could not load ProxySettings - using defaults");
+    }
 }
 
 // =====================================================
