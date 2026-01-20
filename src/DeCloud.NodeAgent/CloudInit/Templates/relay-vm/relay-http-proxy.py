@@ -84,7 +84,7 @@ class HTTPProxyHandler(BaseHTTPRequestHandler):
                 return
 
             # Build target URL (CGNAT node agent's internal proxy endpoint)
-            target_url = f"http://{route['cgnat_node_tunnel_ip']}:{route['node_agent_port']}/internal/proxy/{route['vm_id']}{self.path}"
+            target_url = f"http://{route['cgnat_node_tunnel_ip']}:{route['node_agent_port']}/api/vms/{route['vm_id']}/proxy/http/{route['target_port']}{self.path}"
 
             logger.info(f"Forwarding {subdomain} → {target_url}")
 
