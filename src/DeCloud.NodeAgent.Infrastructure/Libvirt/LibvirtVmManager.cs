@@ -1247,10 +1247,12 @@ public class LibvirtVmManager : IVmManager
                 variables["__RELAY_CAPACITY__"] = relayCapacity;
                 variables["__RELAY_REGION__"] = relayRegion;
                 variables["__TIMESTAMP__"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                var relaySubnet = spec.Labels?.GetValueOrDefault("relay-subnet") ?? "0";
+                variables["__RELAY_SUBNET__"] = relaySubnet;
 
                 _logger.LogInformation(
-                    "VM {VmId}: Set relay metadata - Capacity={Capacity}, Region={Region}, PublicIP={PublicIp}, HostMachineId={MachineId}",
-                    spec.Id, relayCapacity, relayRegion, publicIp, _nodeMetadata.MachineId);
+                    "VM {VmId}: Set relay metadata - Subnet={Subnet}, Capacity={Capacity}, Region={Region}",
+                    spec.Id, relaySubnet, relayCapacity, relayRegion);
             }
 
             // =====================================================
