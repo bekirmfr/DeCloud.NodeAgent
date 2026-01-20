@@ -440,11 +440,15 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             SshPublicKey = spec.SshPublicKey ?? "",
             AdminPassword = GenerateSecurePassword(),
         };
+        // Determine target architecture
+        var architecture = GetTargetArchitecture(spec);
 
-        // Add attestation agent binary
+        // Load correct attestation agent binary based on architecture
+        var agentFileName = $"decloud-agent-{architecture}.b64";
         var agentBinaryPath = Path.Combine(
             AppDomain.CurrentDomain.BaseDirectory,
-            "CloudInit", "Templates", "decloud-agent.b64");
+            "CloudInit", "Templates",
+            agentFileName);
 
         if (File.Exists(agentBinaryPath))
         {
@@ -474,6 +478,23 @@ public class CloudInitTemplateService : ICloudInitTemplateService
         }
 
         return variables;
+    }
+
+    private string GetTargetArchitecture(VmSpec spec)
+    {
+        // Check if architecture is specified in spec (labels or dedicated field)
+        if (spec.Labels?.TryGetValue("architecture", out var arch) == true)
+        {
+            return arch.ToLowerInvariant() switch
+            {
+                "arm64" or "aarch64" or "arm" => "arm64",
+                "x86_64" or "amd64" or "x64" => "amd64",
+                _ => "amd64" // Default to amd64
+            };
+        }
+
+        // Default to amd64 (most common)
+        return "amd64";
     }
 
     private async Task PopulateRelayVariablesAsync(
