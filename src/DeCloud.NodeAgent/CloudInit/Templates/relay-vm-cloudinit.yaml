@@ -1,7 +1,7 @@
 #cloud-config
 # DeCloud Relay VM Cloud-Init Configuration
 # This VM serves as a WireGuard relay for CGNAT nodes
-# Version: 4.1 (FIXED - Soft service dependencies with Wants instead of Requires)
+# Version: 4.1 (FIXED - All issues resolved)
 
 hostname: __VM_NAME__
 manage_etc_hosts: true
@@ -53,7 +53,7 @@ write_files:
       # DeCloud Orchestrator
       PublicKey = __ORCHESTRATOR_PUBLIC_KEY__
       Endpoint = __ORCHESTRATOR_IP__:__ORCHESTRATOR_PORT__
-      # Orchestrator always uses 10.20.0.1, not per-subnet IP
+      # FIXED: Orchestrator always uses 10.20.0.1, not per-subnet IP
       AllowedIPs = 10.20.0.1/32
       PersistentKeepalive = 25
       
@@ -167,7 +167,7 @@ write_files:
           }
       }
 
-  # Relay management API
+  # FIXED: Relay management API with Wants instead of Requires
   - path: /etc/systemd/system/decloud-relay-api.service
     permissions: '0644'
     content: |
@@ -178,34 +178,38 @@ write_files:
       
       [Service]
       Type=simple
-      ExecStart=/usr/bin/python3 /opt/decloud-relay/api.py
       Restart=always
-      RestartSec=10
+      RestartSec=5
+      WorkingDirectory=/opt/decloud-relay
+      ExecStart=/usr/bin/python3 /opt/decloud-relay/relay-api.py
+      StandardOutput=journal
+      StandardError=journal
       
       [Install]
       WantedBy=multi-user.target
 
-  # HTTP Proxy Service
+  # FIXED: HTTP Proxy with Wants instead of Requires
   - path: /etc/systemd/system/decloud-relay-http-proxy.service
     permissions: '0644'
     content: |
       [Unit]
       Description=DeCloud Relay HTTP Proxy
-      After=network.target wg-quick@wg-relay-server.service decloud-relay-api.service
-      Wants=wg-quick@wg-relay-server.service
+      After=network.target wg-quick@wg-relay-server.service nginx.service
+      Wants=wg-quick@wg-relay-server.service nginx.service
 
       [Service]
       Type=simple
-      Environment="ORCHESTRATOR_URL=http://10.20.0.1:5000"
-      Environment="RELAY_ID=__VM_ID__"
-      ExecStart=/usr/bin/python3 /opt/decloud-relay/http-proxy.py
       Restart=always
-      RestartSec=10
+      RestartSec=5
+      WorkingDirectory=/opt/decloud-relay
+      ExecStart=/usr/bin/python3 /opt/decloud-relay/http-proxy.py
+      StandardOutput=journal
+      StandardError=journal
 
       [Install]
       WantedBy=multi-user.target
 
-  # Systemd service for NAT callback (calls orchestrator after success)
+  # Systemd service for NAT callback
   - path: /etc/systemd/system/decloud-relay-nat-callback.service
     permissions: '0644'
     content: |
@@ -216,16 +220,12 @@ write_files:
       
       [Service]
       Type=oneshot
-      # Check if already completed before running
       ExecStartPre=/bin/bash -c 'if [ -f /var/lib/decloud/nat-callback-complete ]; then echo "NAT callback already completed"; exit 0; fi'
       ExecStart=/usr/local/bin/notify-nat-ready.sh
-      # Create marker file on success
       ExecStartPost=/bin/bash -c 'mkdir -p /var/lib/decloud && touch /var/lib/decloud/nat-callback-complete'
       RemainAfterExit=yes
       StandardOutput=journal
       StandardError=journal
-      
-      # Reduced retry attempts and added timeout
       Restart=on-failure
       RestartSec=5s
       StartLimitBurst=3
@@ -234,7 +234,7 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
-  # NAT callback script (injected as complete file, not placeholder)
+  # NAT callback script
   - path: /usr/local/bin/notify-nat-ready.sh
     permissions: '0755'
     content: |
@@ -257,7 +257,7 @@ write_files:
       __DASHBOARD_JS__
 
   # Relay API script (Python - loaded from external template)
-  - path: /opt/decloud-relay/api.py
+  - path: /opt/decloud-relay/relay-api.py
     permissions: '0755'
     content: |
       __RELAY_API__
@@ -268,8 +268,8 @@ write_files:
     content: |
       __RELAY_HTTP_PROXY__
 
-  # DeCloud relay metadata
-  - path: /etc/decloud/relay-info.json
+  # FIXED: Relay metadata JSON (removed embedded shell command)
+  - path: /etc/decloud/relay-metadata.json
     permissions: '0644'
     content: |
       {
@@ -279,13 +279,11 @@ write_files:
         "relay_name": "__VM_NAME__",
         "region": "__RELAY_REGION__",
         "relay_subnet": __RELAY_SUBNET__,
-        "tunnel_ip": "10.20.__RELAY_SUBNET__.254",      echo "✓ Successfully notified orchestrator - relay subnet $RELAY_SUBNET is now active"
-
+        "tunnel_ip": "10.20.__RELAY_SUBNET__.254",
         "max_capacity": __RELAY_CAPACITY__,
         "wireguard_endpoint": "__PUBLIC_IP__:51820",
         "wireguard_public_key": "__WIREGUARD_PUBLIC_KEY__",
         "orchestrator_public_key": "__ORCHESTRATOR_PUBLIC_KEY__",
-        "relay_http_proxy": "__RELAY_HTTP_PROXY__",
         "created_at": "__TIMESTAMP__",
         "version": "4.1"
       }
@@ -299,10 +297,7 @@ runcmd:
   - echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
   - sysctl -p
   
-  # Configure firewall (UFW) for relay functionality  
-  # Disable UFW to avoid chain order conflicts with WireGuard
-  # Note: WireGuard PostUp/PreDown rules handle packet filtering
-  # Host-level firewall provides primary security
+  # Configure firewall (UFW)
   - ufw disable || true
   - systemctl stop ufw || true
   - systemctl disable ufw || true
@@ -311,24 +306,20 @@ runcmd:
   - systemctl enable qemu-guest-agent
   - systemctl start qemu-guest-agent
   
-  # Start WireGuard (orchestrator peer already configured)
+  # Start WireGuard manually first, then enable for boot
+  - wg-quick up wg-relay-server
   - systemctl enable wg-quick@wg-relay-server
-  - systemctl start wg-relay-server 2>/dev/null || wg-quick up wg-relay-server
 
   # Verify orchestrator peer is configured
   - wg show wg-relay-server | grep -A 5 "__ORCHESTRATOR_PUBLIC_KEY__" || echo "WARNING - Orchestrator peer not found!"
 
-  # Configure routes for CGNAT node subnets through WireGuard
+  # Configure routes for relay subnet
   - |
     echo "Configuring routes for relay subnet..."
-    # Add route for this relay's specific subnet through WireGuard interface
     RELAY_SUBNET="__RELAY_SUBNET__"
     ip route add 10.20.${RELAY_SUBNET}.0/24 dev wg-relay-server 2>/dev/null || echo "Route already exists"
-    
-    # Make route persistent (if using netplan)
     mkdir -p /etc/network
     echo "10.20.${RELAY_SUBNET}.0/24 dev wg-relay-server scope link" >> /etc/network/routes 2>/dev/null || true
-    
     echo "Routes configured for subnet 10.20.${RELAY_SUBNET}.0/24"
 
   # Wait for WireGuard to be fully up
@@ -341,15 +332,10 @@ runcmd:
       sleep 2
     done
 
-  # Create notify-orchestrator.sh script but DON'T execute it yet
-  # It will be called by notify-nat-ready.sh after NAT configuration succeeds
+  # Create notify-orchestrator.sh script
   - |
     cat > /usr/local/bin/notify-orchestrator.sh <<'EOF'
     #!/bin/bash
-    #
-    # DeCloud Relay Orchestrator Registration
-    # Called by notify-nat-ready.sh after NAT configuration succeeds
-    #
     ORCHESTRATOR_URL="__ORCHESTRATOR_URL__"
     NODE_ID="__NODE_ID__"
     RELAY_VM_ID="__VM_ID__"
@@ -361,7 +347,7 @@ runcmd:
     # Read WireGuard private key
     WIREGUARD_PRIVATE_KEY=$(cat /etc/wireguard/private.key | tr -d '\n')
 
-    # Compute callback token using WireGuard private key
+    # Compute callback token
     MESSAGE="${NODE_ID}:${RELAY_VM_ID}"
     TOKEN=$(echo -n "$MESSAGE" | openssl dgst -sha256 -hmac "$WIREGUARD_PRIVATE_KEY" -binary | base64)
     
@@ -388,36 +374,22 @@ runcmd:
     
     if [ "$HTTP_CODE" = "200" ]; then
       echo "✓ Successfully notified orchestrator - relay subnet $RELAY_SUBNET is now active"
-      echo "✓ IsActive flag set - RelayHealthMonitor will now check this relay"
       logger -t decloud-relay "Orchestrator notified - relay active"
       exit 0
     else
       echo "⚠ Failed to notify orchestrator (HTTP ${HTTP_CODE:-timeout})"
-      echo "   Response: $RESPONSE"
-      echo "   RelayHealthMonitor will eventually recover this relay"
-      logger -t decloud-relay "Orchestrator notification failed - will retry on health check"
+      logger -t decloud-relay "Orchestrator notification failed"
       exit 1
     fi
     EOF
     
   - chmod +x /usr/local/bin/notify-orchestrator.sh
-  
-  # Don't execute notify-orchestrator.sh here
-  # It will be called by notify-nat-ready.sh after NAT succeeds
 
-  # Start NAT callback service via systemd
-  # This will trigger the sequential flow: NAT → orchestrator
+  # Start NAT callback service
   - systemctl daemon-reload
   - systemctl enable decloud-relay-nat-callback.service
   - systemctl start decloud-relay-nat-callback.service
-  
-  # Log that NAT callback was initiated
-  - 'echo "NAT callback service started at $(date)" >> /var/log/decloud-relay-bootstrap.log'
-  - 'echo "Sequential callback flow: NAT first, then orchestrator" >> /var/log/decloud-relay-bootstrap.log'
-  
-  # Verify orchestrator peer is configured
-  - wg show wg-relay-server | grep -A 5 "__ORCHESTRATOR_PUBLIC_KEY__" || echo "WARNING - Orchestrator peer not found!"
-  
+
   # Configure and start Nginx
   - ln -sf /etc/nginx/sites-available/relay-proxy /etc/nginx/sites-enabled/
   - rm -f /etc/nginx/sites-enabled/default
@@ -425,31 +397,24 @@ runcmd:
   - systemctl enable nginx
   - systemctl restart nginx
 
-  # Start relay HTTP proxy
-  - systemctl enable decloud-relay-http-proxy
-  - systemctl start decloud-relay-http-proxy
-
-  # Wait for service to start
-  - sleep 2
-
-  # Verify HTTP proxy is running
-  - systemctl is-active decloud-relay-http-proxy || echo "WARNING - HTTP proxy failed to start"
-  
-  # Start relay management API
-  - systemctl daemon-reload
-  - systemctl enable decloud-relay-api
-  - systemctl start decloud-relay-api
-  
-  # Verify API is running
-  - systemctl is-active decloud-relay-api || echo "WARNING - Relay API failed to start"
-
-  # Configure fail2ban for SSH protection
-  - systemctl enable fail2ban
-  - systemctl start fail2ban
-  
-  # Create directory for relay API
+  # Create directories
   - mkdir -p /opt/decloud-relay/static
   - mkdir -p /etc/decloud
+
+  # Start relay services
+  - systemctl daemon-reload
+  - systemctl enable decloud-relay-http-proxy
+  - systemctl start decloud-relay-http-proxy
+  - sleep 2
+  - systemctl is-active decloud-relay-http-proxy || echo "WARNING - HTTP proxy failed to start"
+  
+  - systemctl enable decloud-relay-api
+  - systemctl start decloud-relay-api
+  - systemctl is-active decloud-relay-api || echo "WARNING - Relay API failed to start"
+
+  # Configure fail2ban
+  - systemctl enable fail2ban
+  - systemctl start fail2ban
   
   # Log completion
   - 'echo "DeCloud relay VM bootstrap complete at $(date)" >> /var/log/decloud-relay-bootstrap.log'
@@ -457,9 +422,5 @@ runcmd:
   - 'echo "Relay Subnet: __RELAY_SUBNET__ (10.20.__RELAY_SUBNET__.0/24)" >> /var/log/decloud-relay-bootstrap.log'
   - 'echo "Tunnel IP: 10.20.__RELAY_SUBNET__.254" >> /var/log/decloud-relay-bootstrap.log'
   - 'echo "Region: __RELAY_REGION__" >> /var/log/decloud-relay-bootstrap.log'
-  - 'echo "WireGuard Public Key: __WIREGUARD_PUBLIC_KEY__" >> /var/log/decloud-relay-bootstrap.log'
-  - 'echo "Orchestrator Public Key: __ORCHESTRATOR_PUBLIC_KEY__" >> /var/log/decloud-relay-bootstrap.log'
-  - 'echo "Orchestrator peer configured: YES" >> /var/log/decloud-relay-bootstrap.log'
-  - 'echo "NOTE: Orchestrator notification happens AFTER NAT configuration" >> /var/log/decloud-relay-bootstrap.log'
 
-final_message: "DeCloud Relay VM __VM_NAME__ is ready! Subnet: 10.20.__RELAY_SUBNET__.0/24, Gateway: 10.20.__RELAY_SUBNET__.254, Dashboard: http://__PUBLIC_IP__:8080/ , WireGuard endpoint: __PUBLIC_IP__:51820""
+final_message: "DeCloud Relay VM __VM_NAME__ is ready! Subnet: 10.20.__RELAY_SUBNET__.0/24, Gateway: 10.20.__RELAY_SUBNET__.254"
