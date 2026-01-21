@@ -251,8 +251,8 @@ runcmd:
   - systemctl start qemu-guest-agent
   
   # Start WireGuard (orchestrator peer already configured)
-  - systemctl enable wg-quick@wg-relay-server
-  - systemctl start wg-relay-server 2>/dev/null || wg-quick up wg-relay-server
+  - wg-quick up wg-relay-server
+  - systemctl enable wg-quick@wg-relay-server  # Enable for future reboots
 
   # Verify orchestrator peer is configured
   - wg show wg-relay-server | grep -A 5 "__ORCHESTRATOR_PUBLIC_KEY__" || echo "WARNING - Orchestrator peer not found!"
