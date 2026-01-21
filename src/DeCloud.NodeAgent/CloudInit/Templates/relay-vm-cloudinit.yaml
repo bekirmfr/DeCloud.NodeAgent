@@ -54,7 +54,7 @@ write_files:
       PublicKey = __ORCHESTRATOR_PUBLIC_KEY__
       Endpoint = __ORCHESTRATOR_IP__:__ORCHESTRATOR_PORT__
       # Orchestrator's peer IP on this relay's subnet (not actually used, but required)
-      AllowedIPs = 10.20.__RELAY_SUBNET__.1/32
+      AllowedIPs = 10.20.0.1/32
       PersistentKeepalive = 25
       
       # NOTE: CGNAT nodes will be added dynamically by relay API

@@ -157,10 +157,9 @@ public class WireGuardNetworkManager : INetworkManager
 
     /// <summary>
     /// Get peers from specific WireGuard interface
-    /// ✅ NOW TAKES INTERFACE NAME AS PARAMETER
     /// </summary>
     public async Task<List<WireGuardPeer>> GetPeersAsync(
-        string interfaceName,  // ← ADDED PARAMETER
+        string interfaceName,
         CancellationToken ct = default)
     {
         var peers = new List<WireGuardPeer>();
