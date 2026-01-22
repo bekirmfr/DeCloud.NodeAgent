@@ -174,6 +174,7 @@ public class GenericProxyController : ControllerBase
         // Copy response
         Response.StatusCode = (int)response.StatusCode;
 
+        // Copy response headers
         foreach (var header in response.Headers)
         {
             Response.Headers[header.Key] = header.Value.ToArray();
@@ -184,7 +185,15 @@ public class GenericProxyController : ControllerBase
             Response.Headers[header.Key] = header.Value.ToArray();
         }
 
-        await response.Content.CopyToAsync(Response.Body, ct);
+        // Only copy body for status codes that allow it
+        // 304 Not Modified, 204 No Content, and 1xx/HEAD responses must not have bodies
+        if (response.StatusCode != System.Net.HttpStatusCode.NotModified &&
+            response.StatusCode != System.Net.HttpStatusCode.NoContent &&
+            (int)response.StatusCode >= 200 &&
+            Request.Method != "HEAD")
+        {
+            await response.Content.CopyToAsync(Response.Body, ct);
+        }
 
         return new EmptyResult();
     }
