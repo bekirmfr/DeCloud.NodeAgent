@@ -53,7 +53,7 @@ write_files:
       # DeCloud Orchestrator
       PublicKey = __ORCHESTRATOR_PUBLIC_KEY__
       Endpoint = __ORCHESTRATOR_IP__:__ORCHESTRATOR_PORT__
-      # FIXED: Orchestrator always uses 10.20.0.1, not per-subnet IP
+      # Orchestrator always uses 10.20.0.1, not per-subnet IP
       AllowedIPs = 10.20.0.1/32
       PersistentKeepalive = 25
       
