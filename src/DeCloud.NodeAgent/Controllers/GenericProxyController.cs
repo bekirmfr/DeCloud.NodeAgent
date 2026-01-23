@@ -346,7 +346,7 @@ public class GenericProxyController : ControllerBase
     {
         return port switch
         {
-            9999 => TimeSpan.FromMilliseconds(150), // Attestation - fast
+            9999 => TimeSpan.FromSeconds(3), // Attestation - fast
             22 => TimeSpan.FromSeconds(30),          // SSH - medium
             80 or 443 or 8080 => TimeSpan.FromSeconds(10), // HTTP - medium
             _ => TimeSpan.FromSeconds(30)            // Default
