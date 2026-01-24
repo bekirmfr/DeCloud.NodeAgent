@@ -315,8 +315,8 @@ cmd_status() {
     echo -e "${BOLD}Network:${NC}"
     if check_service_running && [[ -f "$CREDENTIALS_FILE" ]]; then
         if status=$(api_get "/api/node/network/status" 2>/dev/null); then
-            local internet=$(echo "$status" | jq -r '.status.isInternetReachable // "unknown"' 2>/dev/null)
-            local orchestrator=$(echo "$status" | jq -r '.status.isOrchestratorReachable // "unknown"' 2>/dev/null)
+            local internet=$(echo "$status" | jq -r '.isInternetReachable // "unknown"' 2>/dev/null)
+            local orchestrator=$(echo "$status" | jq -r '.isOrchestratorReachable // "unknown"' 2>/dev/null)
             
             if [[ "$internet" == "true" ]]; then
                 log_success "Internet reachable"
