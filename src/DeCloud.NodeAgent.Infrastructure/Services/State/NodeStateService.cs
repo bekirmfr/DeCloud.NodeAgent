@@ -379,17 +379,6 @@ public class NodeStateService : INodeStateService
     // PRIVATE HELPERS
     // ================================================================
 
-    private DateTime? GetLastSuccessfulContact()
-    {
-        if (_lastHeartbeat == null && _lastSync == null)
-            return null;
-
-        if (_lastHeartbeat == null) return _lastSync;
-        if (_lastSync == null) return _lastHeartbeat;
-
-        return _lastHeartbeat > _lastSync ? _lastHeartbeat : _lastSync;
-    }
-
     private void SetStatusInternal(NodeStatus status)
     {
         if (_status != status)

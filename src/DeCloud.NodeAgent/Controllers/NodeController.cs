@@ -1,4 +1,6 @@
+using DeCloud.NodeAgent.Contracts.Response.Network;
 using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Services;
 using Microsoft.AspNetCore.Mvc;
@@ -11,15 +13,18 @@ public class NodeController : ControllerBase
 {
     private readonly IResourceDiscoveryService _resourceDiscovery;
     private readonly IOrchestratorClient _orchestratorClient;
+    private readonly INodeStateService _nodeStateService;
     private readonly ILogger<NodeController> _logger;
 
     public NodeController(
         IResourceDiscoveryService resourceDiscovery,
         IOrchestratorClient orchestratorClient,
+        INodeStateService nodeStateService,
         ILogger<NodeController> logger)
     {
         _resourceDiscovery = resourceDiscovery;
         _orchestratorClient = orchestratorClient;
+        _nodeStateService = nodeStateService;
         _logger = logger;
     }
 
@@ -91,6 +96,19 @@ public class NodeController : ControllerBase
     {
         var network = await _resourceDiscovery.GetNetworkInfoAsync(ct);
         return Ok(network);
+    }
+    /// <summary>
+    /// Get network information
+    /// </summary>
+    [HttpGet("network/status")]
+    public async Task<ActionResult<NetworkStatusResponse>> GetNetworkStatus(CancellationToken ct)
+    {
+        var networkStatusResponse = new NetworkStatusResponse
+        {
+            IsInternetReachable = _nodeStateService.IsInternetReachable,
+            IsOrchestratorReachable = _nodeStateService.IsOrchestratorReachable,
+        };
+        return Ok(networkStatusResponse);
     }
 
     /// <summary>

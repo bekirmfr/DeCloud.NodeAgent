@@ -552,7 +552,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                 info.PrivateIp = ipResult.StandardOutput.Trim().Split(' ').FirstOrDefault() ?? "";
         }
 
-        // ✅ NEW: Determine NAT type by comparing public and private IPs
+        // Determine NAT type by comparing public and private IPs
         if (!string.IsNullOrEmpty(info.PublicIp) && !string.IsNullOrEmpty(info.PrivateIp))
         {
             // Check if public IP matches any of the private IPs (for multi-interface systems)

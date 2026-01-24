@@ -115,6 +115,8 @@ public class NetworkInfo
     public NatType NatType { get; set; }
     
     public List<NetworkInterface> Interfaces { get; set; } = new();
+    public bool IsInternetReachable { get; set; }
+    public bool IsOrchestratorReachable { get; set; }
 }
 
 public enum NatType
