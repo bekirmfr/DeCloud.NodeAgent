@@ -442,7 +442,7 @@ cmd_vm_list() {
         if [[ $(echo "$vms" | jq -r 'length' 2>/dev/null) -eq 0 ]]; then
             log_info "No VMs found"
         else
-            echo "$vms" | jq -r '.[] | "\(.vmId)\t\(.name)\t\(.state)\t\(.spec.virtualCpuCores) cores\t\(.spec.1572864000) Bytes"' | \
+            echo "$vms" | jq -r '.[] | "\(.vmId)\t\(.name)\t\(.state)\t\(.spec.virtualCpuCores) cores\t\(.spec.memoryBytes) Bytes"' | \
                 column -t -s $'\t' -N "VM ID,NAME,STATE,CPU,MEMORY" || echo "$vms"
         fi
     else
