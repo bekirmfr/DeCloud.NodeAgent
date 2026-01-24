@@ -18,7 +18,7 @@ set -euo pipefail
 # GLOBAL CONSTANTS
 # ============================================================================
 
-readonly VERSION="1.0.0"
+readonly VERSION="1.1.0"
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -609,6 +609,174 @@ cmd_restart() {
     fi
 }
 
+cmd_reset() {
+    check_root
+    
+    local force=false
+    local keep_vms=false
+    
+    # Parse options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force)
+                force=true
+                shift
+                ;;
+            --keep-vms)
+                keep_vms=true
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    
+    echo ""
+    echo -e "${RED}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}  ⚠️  DESTRUCTIVE OPERATION - NODE RESET${NC}"
+    echo -e "${RED}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${YELLOW}This will perform the following actions:${NC}"
+    echo ""
+    echo "  1. Stop the node agent service"
+    echo "  2. Remove authentication credentials"
+    echo "  3. Clear all node agent logs"
+    if [[ "$keep_vms" == false ]]; then
+        echo "  4. Delete ALL virtual machines and their data"
+        echo "  5. Restart the node agent service"
+    else
+        echo "  4. Keep VMs intact (--keep-vms specified)"
+        echo "  5. Restart the node agent service"
+    fi
+    echo ""
+    echo -e "${RED}WARNING: This action is IRREVERSIBLE!${NC}"
+    echo ""
+    
+    if [[ "$force" == false ]]; then
+        echo -e "${YELLOW}You will need to re-authenticate after reset.${NC}"
+        echo ""
+        read -p "Type 'RESET' to confirm this action: " confirmation
+        
+        if [[ "$confirmation" != "RESET" ]]; then
+            log_info "Reset cancelled"
+            exit 0
+        fi
+    fi
+    
+    echo ""
+    log_info "Starting node reset..."
+    echo ""
+    
+    # Step 1: Stop service
+    log_info "[1/5] Stopping node agent service..."
+    if systemctl stop "$SERVICE_NAME" 2>/dev/null; then
+        log_success "Service stopped"
+    else
+        log_warn "Service was not running"
+    fi
+    sleep 2
+    
+    # Step 2: Remove credentials
+    log_info "[2/5] Removing authentication credentials..."
+    local creds_removed=0
+    
+    if [[ -f "$CREDENTIALS_FILE" ]]; then
+        rm -f "$CREDENTIALS_FILE"
+        log_success "Credentials removed"
+        ((creds_removed++))
+    fi
+    
+    if [[ -f "$PENDING_AUTH_FILE" ]]; then
+        rm -f "$PENDING_AUTH_FILE"
+        log_success "Pending auth removed"
+        ((creds_removed++))
+    fi
+    
+    if [[ $creds_removed -eq 0 ]]; then
+        log_info "No credentials found"
+    fi
+    
+    # Step 3: Clear logs
+    log_info "[3/5] Clearing node agent logs..."
+    if [[ -d "$LOG_DIR" ]]; then
+        # Clear log files but keep directory
+        find "$LOG_DIR" -type f -name "*.log" -delete 2>/dev/null || true
+        log_success "Logs cleared"
+    else
+        log_info "No log directory found"
+    fi
+    
+    # Also clear systemd journal for this service
+    journalctl --rotate >/dev/null 2>&1 || true
+    journalctl --vacuum-time=1s >/dev/null 2>&1 || true
+    log_success "Systemd journal vacuumed"
+    
+    # Step 4: Clean up VMs
+    if [[ "$keep_vms" == false ]]; then
+        log_info "[4/5] Cleaning up ALL virtual machines..."
+        
+        # Check if vm-cleanup.sh exists
+        if [[ -f "/usr/local/bin/vm-cleanup.sh" ]]; then
+            # Use vm-cleanup.sh script
+            /usr/local/bin/vm-cleanup.sh --all --force >/dev/null 2>&1 || {
+                log_warn "VM cleanup script encountered errors (may be OK)"
+            }
+            log_success "All VMs cleaned up"
+        else
+            # Fallback: manual cleanup
+            log_warn "vm-cleanup.sh not found, performing manual cleanup..."
+            
+            # Stop and undefine all VMs
+            local vm_count=0
+            while IFS= read -r vm_id; do
+                if [[ -n "$vm_id" ]]; then
+                    virsh destroy "$vm_id" 2>/dev/null || true
+                    virsh undefine "$vm_id" --remove-all-storage 2>/dev/null || true
+                    ((vm_count++))
+                fi
+            done < <(virsh list --all --uuid 2>/dev/null)
+            
+            # Clean VM storage directory
+            if [[ -d "$VM_STORAGE_PATH" ]]; then
+                rm -rf "${VM_STORAGE_PATH:?}"/* 2>/dev/null || true
+            fi
+            
+            log_success "Cleaned up $vm_count VMs manually"
+        fi
+    else
+        log_info "[4/5] Skipping VM cleanup (--keep-vms specified)"
+    fi
+    
+    # Step 5: Restart service
+    log_info "[5/5] Restarting node agent service..."
+    if systemctl start "$SERVICE_NAME" 2>/dev/null; then
+        sleep 3
+        
+        if systemctl is-active --quiet "$SERVICE_NAME"; then
+            log_success "Service restarted successfully"
+        else
+            log_error "Service failed to start"
+            log_info "Check logs with: journalctl -u $SERVICE_NAME -n 50"
+        fi
+    else
+        log_error "Failed to restart service"
+    fi
+    
+    echo ""
+    echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}  Reset Complete!${NC}"
+    echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo "Node has been reset to factory state."
+    echo ""
+    echo "Next steps:"
+    echo "  1. Re-authenticate: ${BOLD}sudo $SCRIPT_NAME login${NC}"
+    echo "  2. Check status:    ${BOLD}$SCRIPT_NAME status${NC}"
+    echo "  3. Monitor logs:    ${BOLD}$SCRIPT_NAME logs -f${NC}"
+    echo ""
+}
+
 cmd_logs() {
     local lines="${1:-50}"
     local follow=false
@@ -846,6 +1014,9 @@ ${BOLD}SERVICE MANAGEMENT:${NC}
     start               Start the node agent service
     stop                Stop the node agent service
     restart             Restart the node agent service
+    reset               Reset node to factory state (DESTRUCTIVE!)
+        --force             Skip confirmation prompt
+        --keep-vms          Don't delete VMs during reset
     logs [options]      View service logs
         -f, --follow        Follow log output
         -n, --lines <n>     Number of lines to show (default: 50)
@@ -877,6 +1048,9 @@ ${BOLD}EXAMPLES:${NC}
 
     # Run diagnostics
     $SCRIPT_NAME diagnose
+
+    # Reset node to factory state (removes auth, cleans VMs, clears logs)
+    sudo $SCRIPT_NAME reset
 
 ${BOLD}ENVIRONMENT VARIABLES:${NC}
     DEBUG=1             Enable debug output
@@ -997,6 +1171,9 @@ main() {
             ;;
         restart)
             cmd_restart "$@"
+            ;;
+        reset)
+            cmd_reset "$@"
             ;;
         logs)
             cmd_logs "$@"
