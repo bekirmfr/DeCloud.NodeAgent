@@ -34,7 +34,7 @@ readonly LOG_DIR="/var/log/decloud"
 readonly SERVICE_NAME="decloud-node-agent"
 
 # Node agent API
-readonly NODE_AGENT_URL="http://localhost:5050"
+readonly NODE_AGENT_URL="http://localhost:5100"
 
 # Colors
 readonly RED='\033[0;31m'
@@ -284,7 +284,7 @@ cmd_status() {
     # Health check
     echo -e "${BOLD}Health:${NC}"
     if check_service_running; then
-        if health=$(api_get "/health" 2>/dev/null); then
+        if health=$(api_get "/api/node/health" 2>/dev/null); then
             log_success "API responding"
             echo "$health" | jq -r '  .status' 2>/dev/null || echo "$health"
         else
@@ -298,7 +298,7 @@ cmd_status() {
     # VM count
     echo -e "${BOLD}Virtual Machines:${NC}"
     if [[ -f "$CREDENTIALS_FILE" ]] && check_service_running; then
-        if vms=$(api_get "/api/node/vms" 2>/dev/null); then
+        if vms=$(api_get "/api/vms" 2>/dev/null); then
             local total=$(echo "$vms" | jq -r 'length' 2>/dev/null || echo "0")
             local running=$(echo "$vms" | jq -r '[.[] | select(.state == "Running")] | length' 2>/dev/null || echo "0")
             echo "  Total:    $total"
@@ -438,7 +438,7 @@ cmd_vm_list() {
     echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
     echo ""
     
-    if vms=$(api_get "/api/node/vms" 2>/dev/null); then
+    if vms=$(api_get "/api/vms" 2>/dev/null); then
         if [[ $(echo "$vms" | jq -r 'length' 2>/dev/null) -eq 0 ]]; then
             log_info "No VMs found"
         else
@@ -880,7 +880,7 @@ ${BOLD}EXAMPLES:${NC}
 
 ${BOLD}ENVIRONMENT VARIABLES:${NC}
     DEBUG=1             Enable debug output
-    NODE_AGENT_URL      Override node agent URL (default: http://localhost:5050)
+    NODE_AGENT_URL      Override node agent URL (default: http://localhost:5100)
 
 ${BOLD}FILES:${NC}
     $CREDENTIALS_FILE
