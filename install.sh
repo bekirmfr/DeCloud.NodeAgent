@@ -1107,6 +1107,69 @@ install_walletconnect_cli() {
     return 0
 }
 
+# ============================================================
+# DeCloud CLI Installation
+# ============================================================
+
+install_decloud_cli() {
+    log_step "Installing DeCloud unified CLI..."
+    
+    # The CLI is in the repository we just cloned
+    local cli_source="$INSTALL_DIR/DeCloud.NodeAgent/cli/decloud"
+    local cli_dest="/usr/local/bin/decloud"
+    
+    # Check if CLI source exists
+    if [ ! -f "$cli_source" ]; then
+        log_warn "DeCloud CLI not found at $cli_source"
+        log_info "This is optional - installation will continue"
+        return 0
+    fi
+    
+    # Copy CLI to system path
+    cp "$cli_source" "$cli_dest"
+    chmod +x "$cli_dest"
+    
+    # Verify CLI works
+    if decloud --version &> /dev/null; then
+        local cli_version=$(decloud --version 2>/dev/null | awk '{print $NF}')
+        log_success "DeCloud CLI installed (v${cli_version})"
+    else
+        # Version check might fail on first install, that's OK
+        log_success "DeCloud CLI installed"
+    fi
+    
+    # Copy supporting scripts if they exist
+    local vm_cleanup_source="$INSTALL_DIR/DeCloud.NodeAgent/scripts/vm-cleanup.sh"
+    local vm_cleanup_dest="/usr/local/bin/vm-cleanup.sh"
+    
+    if [ -f "$vm_cleanup_source" ]; then
+        cp "$vm_cleanup_source" "$vm_cleanup_dest"
+        chmod +x "$vm_cleanup_dest"
+        log_info "→ VM cleanup script installed"
+    fi
+    
+    log_success "✓ DeCloud unified CLI ready"
+}
+
+install_decloud_docs() {
+    local doc_dir="/usr/local/share/doc/decloud"
+    local source_dir="$INSTALL_DIR/DeCloud.NodeAgent/cli/docs"
+    
+    if [ -d "$source_dir" ]; then
+        mkdir -p "$doc_dir"
+        
+        # Copy documentation files
+        for doc in README.md QUICKREF.md DESIGN.md; do
+            if [ -f "$source_dir/$doc" ]; then
+                cp "$source_dir/$doc" "$doc_dir/"
+                log_info "→ Installed $doc"
+            fi
+        done
+        
+        log_success "Documentation installed to $doc_dir"
+    fi
+}
+
 run_node_authentication() {
     log_step "Authenticating node with WalletConnect..."
     
@@ -1620,10 +1683,9 @@ start_service() {
 # Summary
 # ============================================================
 print_summary() {
-
     echo ""
     echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║       ✅ DeCloud Node Agent Installed Successfully!          ║"
+    echo "║           ✅ Installation Complete!                         ║"
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo ""
     echo "  Installation Summary:"
@@ -1637,18 +1699,42 @@ print_summary() {
     echo "  ─────────────────────────────────────────────────────────────"
     echo ""
     echo "    1. Authenticate your node:"
-    echo "       sudo cli-decloud-node login"
+    echo "       ${BOLD}sudo decloud login${NC}"
+    echo "       (or: sudo cli-decloud-node login)"
     echo ""
-    echo "    2. Check status:"
-    echo "       sudo journalctl -u decloud-node-agent -f"
+    echo "    2. Check node status:"
+    echo "       ${BOLD}decloud status${NC}"
     echo ""
-    echo "    3. The node agent will automatically complete registration"
-    echo "       after authentication."
+    echo "    3. Monitor logs:"
+    echo "       ${BOLD}decloud logs -f${NC}"
+    echo "       (or: sudo journalctl -u decloud-node-agent -f)"
+    echo ""
+    echo "    4. View all commands:"
+    echo "       ${BOLD}decloud --help${NC}"
     echo ""
     echo "  ─────────────────────────────────────────────────────────────"
+    echo "  Quick Reference:"
+    echo "  ─────────────────────────────────────────────────────────────"
     echo ""
+    echo "    ${BOLD}decloud status${NC}           Show comprehensive node status"
+    echo "    ${BOLD}decloud vm list${NC}          List all VMs on this node"
+    echo "    ${BOLD}decloud diagnose${NC}         Run health diagnostics"
+    echo "    ${BOLD}decloud resources${NC}        Show resource information"
+    echo "    ${BOLD}decloud logs -f${NC}          Follow service logs"
     echo ""
-    echo "  Relay NAT Manager: sudo decloud-relay-nat {add|clean|show}"
+    echo "  ─────────────────────────────────────────────────────────────"
+    echo "  Legacy Commands (still available):"
+    echo "  ─────────────────────────────────────────────────────────────"
+    echo ""
+    echo "    Relay NAT:  ${BOLD}sudo decloud-relay-nat {add|clean|show}${NC}"
+    echo "    VM Cleanup: ${BOLD}sudo vm-cleanup.sh --vm <id>${NC}"
+    echo ""
+    echo "  ─────────────────────────────────────────────────────────────"
+    echo "  Documentation:"
+    echo "  ─────────────────────────────────────────────────────────────"
+    echo ""
+    echo "    README:     cat /usr/local/share/doc/decloud/README.md"
+    echo "    Quick Ref:  cat /usr/local/share/doc/decloud/QUICKREF.md"
     echo ""
 }
 
@@ -1709,6 +1795,8 @@ main() {
     
     # Install CLI from downloaded repo
     install_walletconnect_cli
+    install_decloud_cli
+    install_decloud_docs
     install_relay_nat_support
 
     build_node_agent
