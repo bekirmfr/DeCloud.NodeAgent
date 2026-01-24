@@ -60,6 +60,7 @@ INSTALL_DIR="/opt/decloud"
 CONFIG_DIR="/opt/decloud/publish"
 DATA_DIR="/var/lib/decloud/vms"
 LOG_DIR="/var/log/decloud"
+BACKUP_DIR="/var/backups/decloud"
 REPO_URL="https://github.com/bekirmfr/DeCloud.NodeAgent.git"
 
 # Logging
@@ -1278,6 +1279,7 @@ create_directories() {
     mkdir -p "$CONFIG_DIR"
     mkdir -p "$DATA_DIR"
     mkdir -p "$LOG_DIR"
+    mkdir -p "$BACKUP_DIR"
     mkdir -p /var/lib/decloud
     
     log_success "Directories created"
