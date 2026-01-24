@@ -442,8 +442,8 @@ cmd_vm_list() {
         if [[ $(echo "$vms" | jq -r 'length' 2>/dev/null) -eq 0 ]]; then
             log_info "No VMs found"
         else
-            echo "$vms" | jq -r '.[] | "\(.id)\t\(.state)\t\(.cpuCores) cores\t\(.memoryMb)MB"' | \
-                column -t -s $'\t' -N "VM ID,STATE,CPU,MEMORY" || echo "$vms"
+            echo "$vms" | jq -r '.[] | "\(.vmId)\t\(.name)\t\(.state)\t\(.spec.virtualCpuCores) cores\t\(.spec.1572864000) Bytes"' | \
+                column -t -s $'\t' -N "VM ID,NAME,STATE,CPU,MEMORY" || echo "$vms"
         fi
     else
         log_error "Failed to fetch VM list"
