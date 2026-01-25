@@ -438,32 +438,50 @@ cmd_performance() {
         exit $EXIT_ERROR
     fi
     
-    # Query orchestrator via node agent API
-    if perf=$(api_get "/api/nodes/me/performance" 2>/dev/null); then
-        # Parse and display in human-readable format
-        local raw_score=$(echo "$perf" | jq -r '.benchmarkScore // "N/A"')
-        local capped_score=$(echo "$perf" | jq -r '.cappedScore // "N/A"')
+    # Query node agent orchestrator proxy
+    if perf=$(api_get "/api/orchestrator/performance" 2>/dev/null); then
+        # Parse actual C# model fields
+        local benchmark=$(echo "$perf" | jq -r '.benchmarkScore // "N/A"')
+        local capped=$(echo "$perf" | jq -r '.cappedBenchmarkScore // "N/A"')
         local points_per_core=$(echo "$perf" | jq -r '.pointsPerCore // "N/A"')
-        local highest_tier=$(echo "$perf" | jq -r '.highestEligibleTier // "N/A"')
+        local total_points=$(echo "$perf" | jq -r '.totalComputePoints // "N/A"')
+        local highest_tier=$(echo "$perf" | jq -r '.highestTier // "N/A"')
+        local is_acceptable=$(echo "$perf" | jq -r '.isAcceptable // "N/A"')
         
         echo -e "${BOLD}Benchmark Scores:${NC}"
-        echo "  Raw Score:        $raw_score"
-        echo "  Capped Score:     $capped_score"
-        echo "  Points per Core:  $points_per_core"
+        echo "  Raw Score:        $benchmark"
+        echo "  Capped Score:     $capped"
+        echo "  Points per Core:  $(printf "%.2f" "$points_per_core" 2>/dev/null || echo "$points_per_core")"
+        echo "  Total Points:     $(printf "%.0f" "$total_points" 2>/dev/null || echo "$total_points")"
         echo ""
         
         echo -e "${BOLD}Tier Eligibility:${NC}"
         echo "  Highest Tier:     ${BOLD}$highest_tier${NC}"
+        echo "  Is Acceptable:    $is_acceptable"
         echo ""
         
-        # Show eligible tiers
+        # Show eligible tiers from EligibleTiers array
         echo -e "${BOLD}Eligible Tiers:${NC}"
         if echo "$perf" | jq -e '.eligibleTiers' >/dev/null 2>&1; then
-            echo "$perf" | jq -r '.eligibleTiers[] | "  • \(.tier) - Max \(.maxVCpus) vCPUs, \(.pointsPerVCpu) points/vCPU"' 2>/dev/null
+            local tiers=$(echo "$perf" | jq -r '.eligibleTiers[]' 2>/dev/null)
+            if [[ -n "$tiers" ]]; then
+                echo "$tiers" | while read -r tier; do
+                    echo "  • $tier"
+                done
+            else
+                echo "  No tier data available"
+            fi
         else
             echo "  No tier data available"
         fi
         echo ""
+        
+        # Show tier capabilities if available
+        if echo "$perf" | jq -e '.tierCapabilities' >/dev/null 2>&1; then
+            echo -e "${BOLD}Tier Capabilities:${NC}"
+            echo "$perf" | jq -r '.tierCapabilities | to_entries[] | "  \(.key): Max \(.value.maxVCpus) vCPUs"' 2>/dev/null || echo "  No capability data"
+            echo ""
+        fi
         
         # Raw JSON for detailed inspection
         if [[ "${VERBOSE:-0}" == "1" ]] || [[ "${DEBUG:-0}" == "1" ]]; then
@@ -492,21 +510,35 @@ cmd_capacity() {
         exit $EXIT_ERROR
     fi
     
-    if capacity=$(api_get "/api/nodes/me/capacity" 2>/dev/null); then
-        # Parse physical resources
-        local cpu_cores=$(echo "$capacity" | jq -r '.physicalResources.cpuCores // "N/A"')
-        local memory_gb=$(echo "$capacity" | jq -r '.physicalResources.memoryGb // "N/A"')
-        local storage_gb=$(echo "$capacity" | jq -r '.physicalResources.storageGb // "N/A"')
+    if capacity=$(api_get "/api/orchestrator/capacity" 2>/dev/null); then
+        # Parse physical resources (note: using actual C# property names)
+        local cpu_cores=$(echo "$capacity" | jq -r '.physicalCores // "N/A"')
+        local memory_bytes=$(echo "$capacity" | jq -r '.physicalMemoryBytes // "N/A"')
+        local storage_bytes=$(echo "$capacity" | jq -r '.physicalStorageBytes // "N/A"')
+        
+        # Convert bytes to GB
+        local memory_gb="N/A"
+        local storage_gb="N/A"
+        if [[ "$memory_bytes" != "N/A" ]] && [[ "$memory_bytes" =~ ^[0-9]+$ ]]; then
+            memory_gb=$(awk "BEGIN {printf \"%.2f\", $memory_bytes / (1024^3)}")
+        fi
+        if [[ "$storage_bytes" != "N/A" ]] && [[ "$storage_bytes" =~ ^[0-9]+$ ]]; then
+            storage_gb=$(awk "BEGIN {printf \"%.2f\", $storage_bytes / (1024^3)}")
+        fi
         
         # Parse compute points
-        local total_points=$(echo "$capacity" | jq -r '.computePoints.total // "N/A"')
-        local allocated_points=$(echo "$capacity" | jq -r '.computePoints.allocated // "N/A"')
-        local available_points=$(echo "$capacity" | jq -r '.computePoints.available // "N/A"')
+        local total_points=$(echo "$capacity" | jq -r '.totalComputePoints // "N/A"')
+        local allocated_points=$(echo "$capacity" | jq -r '.allocatedComputePoints // "N/A"')
+        local available_points=$(echo "$capacity" | jq -r '.availableComputePoints // "N/A"')
+        local utilization=$(echo "$capacity" | jq -r '.utilizationPercent // "N/A"')
+        local points_per_core=$(echo "$capacity" | jq -r '.pointsPerCore // "N/A"')
         
-        # Parse allocations
-        local total_vcpus=$(echo "$capacity" | jq -r '.currentAllocations.totalVCpus // "N/A"')
-        local total_memory=$(echo "$capacity" | jq -r '.currentAllocations.totalMemoryMb // "N/A"')
-        local vm_count=$(echo "$capacity" | jq -r '.currentAllocations.vmCount // "N/A"')
+        # Parse memory allocation
+        local allocated_memory=$(echo "$capacity" | jq -r '.allocatedMemoryBytes // "N/A"')
+        local available_memory=$(echo "$capacity" | jq -r '.availableMemoryBytes // "N/A"')
+        
+        # Parse VM count
+        local vm_count=$(echo "$capacity" | jq -r '.activeVmCount // "N/A"')
         
         echo -e "${BOLD}Physical Resources:${NC}"
         echo "  CPU Cores:    $cpu_cores"
@@ -515,28 +547,35 @@ cmd_capacity() {
         echo ""
         
         echo -e "${BOLD}Compute Points:${NC}"
+        echo "  Points/Core:  $(printf "%.2f" "$points_per_core" 2>/dev/null || echo "$points_per_core")"
         echo "  Total:        $total_points"
         echo "  Allocated:    $allocated_points"
         echo "  Available:    $available_points"
         
-        # Calculate percentage if we have numbers
-        if [[ "$total_points" != "N/A" ]] && [[ "$allocated_points" != "N/A" ]] && [[ "$total_points" != "0" ]]; then
-            local usage_pct=$(awk "BEGIN {printf \"%.1f\", ($allocated_points / $total_points) * 100}")
-            echo "  Usage:        ${usage_pct}%"
+        # Show utilization if available
+        if [[ "$utilization" != "N/A" ]]; then
+            echo "  Usage:        $(printf "%.1f" "$utilization" 2>/dev/null || echo "$utilization")%"
         fi
         echo ""
         
         echo -e "${BOLD}Current Allocations:${NC}"
         echo "  VMs:          $vm_count"
-        echo "  vCPUs:        $total_vcpus"
-        echo "  Memory:       ${total_memory} MB"
+        
+        # Show memory allocation if available
+        if [[ "$allocated_memory" != "N/A" ]] && [[ "$allocated_memory" =~ ^[0-9]+$ ]]; then
+            local allocated_memory_mb=$(awk "BEGIN {printf \"%.0f\", $allocated_memory / (1024^2)}")
+            echo "  Memory:       ${allocated_memory_mb} MB allocated"
+        fi
         echo ""
         
         # Show per-VM breakdown if available
-        if echo "$capacity" | jq -e '.vmAllocations' >/dev/null 2>&1; then
-            echo -e "${BOLD}Per-VM Breakdown:${NC}"
-            echo "$capacity" | jq -r '.vmAllocations[] | "  • \(.vmId[0:8])... - \(.tier): \(.vCpus) vCPU, \(.pointsUsed) pts"' 2>/dev/null || echo "  No VMs allocated"
-            echo ""
+        if echo "$capacity" | jq -e '.vmBreakdown' >/dev/null 2>&1; then
+            local vm_count=$(echo "$capacity" | jq -r '.vmBreakdown | length' 2>/dev/null)
+            if [[ "$vm_count" -gt 0 ]]; then
+                echo -e "${BOLD}Per-VM Breakdown:${NC}"
+                echo "$capacity" | jq -r '.vmBreakdown[] | "  • \(.vmId[0:8])... - \(.tier): \(.vCpus) vCPU, \(.points) pts, \(.status)"' 2>/dev/null || echo "  Unable to parse VM data"
+                echo ""
+            fi
         fi
         
         # Raw JSON for detailed inspection
@@ -557,7 +596,7 @@ cmd_node_config() {
     
     echo ""
     echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
-    echo -e "${BOLD}  Node Scheduling Configuration${NC}"
+    echo -e "${BOLD}  Scheduling Configuration${NC}"
     echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
     echo ""
     
@@ -566,26 +605,37 @@ cmd_node_config() {
         exit $EXIT_ERROR
     fi
     
-    if config=$(api_get "/api/nodes/me/config" 2>/dev/null); then
-        # Parse configuration
+    if config=$(api_get "/api/orchestrator/config" 2>/dev/null); then
+        # Parse configuration fields
+        local version=$(echo "$config" | jq -r '.version // "N/A"')
         local baseline=$(echo "$config" | jq -r '.baselineBenchmark // "N/A"')
-        local points_formula=$(echo "$config" | jq -r '.pointsPerCoreFormula // "N/A"')
+        local baseline_overcommit=$(echo "$config" | jq -r '.baselineOvercommitRatio // "N/A"')
+        local max_perf_mult=$(echo "$config" | jq -r '.maxPerformanceMultiplier // "N/A"')
+        local updated_at=$(echo "$config" | jq -r '.updatedAt // "N/A"')
         
-        echo -e "${BOLD}System Configuration:${NC}"
-        echo "  Baseline Benchmark: $baseline"
-        echo "  Points Formula:     $points_formula"
+        echo -e "${BOLD}Configuration:${NC}"
+        echo "  Version:                $version"
+        echo "  Baseline Benchmark:     $baseline"
+        echo "  Baseline Overcommit:    $(printf "%.1f" "$baseline_overcommit" 2>/dev/null || echo "$baseline_overcommit")x"
+        echo "  Max Performance Mult:   $(printf "%.1f" "$max_perf_mult" 2>/dev/null || echo "$max_perf_mult")x"
+        echo "  Updated:                $updated_at"
         echo ""
         
         # Show tier configurations if available
         if echo "$config" | jq -e '.tiers' >/dev/null 2>&1; then
             echo -e "${BOLD}Tier Configurations:${NC}"
             echo ""
-            echo "$config" | jq -r '.tiers[] | 
-                "\u001b[1m\(.tier)\u001b[0m\n" +
-                "  Points/vCPU:     \(.pointsPerVCpu)\n" +
-                "  Memory/vCPU:     \(.memoryMbPerVCpu) MB\n" +
-                "  Max vCPUs:       \(.maxVCpus)\n" +
-                "  Overcommit:      \(.overcommitRatio)x\n"' 2>/dev/null
+            
+            # Parse tiers object (it's a dictionary)
+            echo "$config" | jq -r '.tiers | to_entries[] | 
+                "\u001b[1m\(.key)\u001b[0m\n" +
+                "  Min Benchmark:      \(.value.minimumBenchmark)\n" +
+                "  Points/vCPU:        \(.value.pointsPerVCpu // "N/A")\n" +
+                "  Memory/vCPU:        \(.value.memoryMbPerVCpu) MB\n" +
+                "  Max vCPUs:          \(.value.maxVCpus)\n" +
+                "  CPU Overcommit:     \(.value.cpuOvercommitRatio)x\n"' 2>/dev/null || {
+                log_warn "Unable to parse tier data"
+            }
         fi
         
         # Raw JSON for detailed inspection
@@ -615,54 +665,33 @@ cmd_node_summary() {
         exit $EXIT_ERROR
     fi
     
-    if summary=$(api_get "/api/nodes/me" 2>/dev/null); then
-        # Parse key fields
+    if summary=$(api_get "/api/orchestrator/summary" 2>/dev/null); then
+        # Parse key fields from NodeSummaryResponse
         local node_id=$(echo "$summary" | jq -r '.nodeId // "N/A"')
         local status=$(echo "$summary" | jq -r '.status // "N/A"')
-        local wallet=$(echo "$summary" | jq -r '.walletAddress // "N/A"')
         local region=$(echo "$summary" | jq -r '.region // "N/A"')
-        local zone=$(echo "$summary" | jq -r '.zone // "N/A"')
         local public_ip=$(echo "$summary" | jq -r '.publicIp // "N/A"')
+        local agent_version=$(echo "$summary" | jq -r '.agentVersion // "N/A"')
         local registered=$(echo "$summary" | jq -r '.registeredAt // "N/A"')
         local last_heartbeat=$(echo "$summary" | jq -r '.lastHeartbeat // "N/A"')
+        local config_version=$(echo "$summary" | jq -r '.schedulingConfigVersion // "N/A"')
         
         echo -e "${BOLD}Node Identity:${NC}"
-        echo "  Node ID:         $node_id"
-        echo "  Status:          $status"
-        echo "  Wallet:          $wallet"
+        echo "  Node ID:       $node_id"
+        echo "  Status:        $status"
+        echo "  Public IP:     $public_ip"
+        echo "  Region:        $region"
         echo ""
         
-        echo -e "${BOLD}Location:${NC}"
-        echo "  Public IP:       $public_ip"
-        echo "  Region:          $region"
-        echo "  Zone:            $zone"
+        echo -e "${BOLD}Software:${NC}"
+        echo "  Agent Version: $agent_version"
+        echo "  Config Ver:    $config_version"
         echo ""
         
         echo -e "${BOLD}Activity:${NC}"
-        echo "  Registered:      $registered"
-        echo "  Last Heartbeat:  $last_heartbeat"
+        echo "  Registered:    $registered"
+        echo "  Last Heartbeat:$last_heartbeat"
         echo ""
-        
-        # Show resources if available
-        if echo "$summary" | jq -e '.resources' >/dev/null 2>&1; then
-            local cpu=$(echo "$summary" | jq -r '.resources.cpuCores // "N/A"')
-            local memory=$(echo "$summary" | jq -r '.resources.memoryGb // "N/A"')
-            local storage=$(echo "$summary" | jq -r '.resources.storageGb // "N/A"')
-            
-            echo -e "${BOLD}Resources:${NC}"
-            echo "  CPU:             $cpu cores"
-            echo "  Memory:          $memory GB"
-            echo "  Storage:         $storage GB"
-            echo ""
-        fi
-        
-        # Show tier info if available
-        if echo "$summary" | jq -e '.highestEligibleTier' >/dev/null 2>&1; then
-            local highest_tier=$(echo "$summary" | jq -r '.highestEligibleTier // "N/A"')
-            echo -e "${BOLD}Performance:${NC}"
-            echo "  Highest Tier:    $highest_tier"
-            echo ""
-        fi
         
         # Raw JSON for detailed inspection
         if [[ "${VERBOSE:-0}" == "1" ]] || [[ "${DEBUG:-0}" == "1" ]]; then
@@ -675,6 +704,53 @@ cmd_node_summary() {
         log_info "Ensure orchestrator is reachable: decloud diagnose"
         exit $EXIT_API_ERROR
     fi
+}
+
+cmd_evaluate() {
+    check_authenticated
+    
+    echo ""
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}  Request Performance Re-evaluation${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    if ! check_service_running; then
+        log_error "Service not running"
+        exit $EXIT_ERROR
+    fi
+    
+    log_info "Requesting orchestrator to re-evaluate node performance..."
+    echo ""
+    
+    # Note: This is a GET endpoint in the controller
+    if result=$(api_get "/api/orchestrator/evaluate" 2>/dev/null); then
+        log_success "Re-evaluation completed successfully"
+        echo ""
+        
+        # Show new evaluation results (same format as NodePerformanceEvaluation)
+        local benchmark=$(echo "$result" | jq -r '.benchmarkScore // "N/A"')
+        local capped=$(echo "$result" | jq -r '.cappedBenchmarkScore // "N/A"')
+        local points_per_core=$(echo "$result" | jq -r '.pointsPerCore // "N/A"')
+        local total_points=$(echo "$result" | jq -r '.totalComputePoints // "N/A"')
+        local highest_tier=$(echo "$result" | jq -r '.highestTier // "N/A"')
+        
+        echo -e "${BOLD}New Evaluation Results:${NC}"
+        echo "  Raw Score:        $benchmark"
+        echo "  Capped Score:     $capped"
+        echo "  Points per Core:  $(printf "%.2f" "$points_per_core" 2>/dev/null || echo "$points_per_core")"
+        echo "  Total Points:     $(printf "%.0f" "$total_points" 2>/dev/null || echo "$total_points")"
+        echo "  Highest Tier:     $highest_tier"
+        echo ""
+        
+        log_info "Use 'decloud performance' to see full evaluation details"
+    else
+        log_error "Failed to request re-evaluation"
+        log_info "Ensure orchestrator is reachable: decloud diagnose"
+        exit $EXIT_API_ERROR
+    fi
+    
+    echo ""
 }
 
 # ============================================================================
@@ -1266,6 +1342,7 @@ ${BOLD}ORCHESTRATOR DIAGNOSTICS:${NC}
     capacity            Show capacity, compute points, and VM allocations
     config              Show node scheduling configuration
     node                Show node summary from orchestrator's perspective
+    evaluate            Request performance re-evaluation from orchestrator
 
 ${BOLD}VM MANAGEMENT:${NC}
     vm list             List all VMs on this node
@@ -1317,6 +1394,9 @@ ${BOLD}EXAMPLES:${NC}
 
     # View compute points allocation
     $SCRIPT_NAME capacity
+
+    # Request performance re-evaluation
+    $SCRIPT_NAME evaluate
 
     # View node from orchestrator perspective
     $SCRIPT_NAME node
@@ -1417,6 +1497,9 @@ main() {
             ;;
         node)
             cmd_node_summary "$@"
+            ;;
+        evaluate|eval)
+            cmd_evaluate "$@"
             ;;
         
         # VM Management

@@ -633,10 +633,10 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             }
 
             // Process Scheduling Config Update
-            if (data.TryGetProperty("schedulingConfig", out var schedulingConfigProg))
+            if (data.TryGetProperty("schedulingConfig", out var schedulingConfigProp))
             {
                 var schedulingConfig = JsonSerializer.Deserialize<SchedulingConfig>(
-                    schedulingConfigProg.GetRawText(),
+                    schedulingConfigProp.GetRawText(),
                     new JsonSerializerOptions
                     {
                         PropertyNameCaseInsensitive = true
@@ -790,7 +790,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         );
 
     // ================================================================
-    // METHODS - Internet Connectivity
+    // Internet Connectivity
     // ================================================================
 
     /// <summary>

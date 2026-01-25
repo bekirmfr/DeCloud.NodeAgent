@@ -7,12 +7,10 @@
 // OrchestratorClient.cs or keep as a separate partial class file.
 // =====================================================================
 
-using System.Net.Http.Json;
-using System.Text.Json;
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
-using Microsoft.Extensions.Logging;
 using Orchestrator.Models;
+using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Services;
 
