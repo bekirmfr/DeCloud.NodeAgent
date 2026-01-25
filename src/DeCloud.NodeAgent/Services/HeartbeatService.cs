@@ -158,6 +158,10 @@ public class HeartbeatService : BackgroundService
             snapshot.UsedVirtualCpuCores = activeVms.Where(v => v.State == VmState.Running).Sum(v => v.Spec.VirtualCpuCores);
             snapshot.UsedMemoryBytes = activeVms.Where(v => v.State == VmState.Running).Sum(v => v.Spec.MemoryBytes);
 
+            // Get CGNAT info from last heartbeat response (if available)
+            var lastHeartbeat = _orchestratorClient.GetLastHeartbeat();
+            var cgnatInfo = lastHeartbeat?.Heartbeat?.CgnatInfo;
+
             // Create heartbeat using the standard Heartbeat model
             var heartbeat = new Heartbeat
             {
@@ -167,6 +171,7 @@ public class HeartbeatService : BackgroundService
                 Resources = snapshot,
                 ActiveVms = vmSummaries,  // Now includes VncPort, MacAddress, EncryptedPassword
                 SchedulingConfigVersion = _nodeMetadata.GetSchedulingConfigVersion(),
+                CgnatInfo = cgnatInfo
             };
 
             // Send heartbeat - OrchestratorClient will transform to API format
