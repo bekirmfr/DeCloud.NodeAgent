@@ -439,7 +439,7 @@ cmd_performance() {
     fi
     
     # Query node agent orchestrator proxy
-    if perf=$(api_get "/api/orchestrator/performance" 2>/dev/null); then
+    if perf=$(api_get "/api/orchestrator/evaluation" 2>/dev/null); then
         # Parse actual C# model fields
         local benchmark=$(echo "$perf" | jq -r '.benchmarkScore // "N/A"')
         local capped=$(echo "$perf" | jq -r '.cappedBenchmarkScore // "N/A"')

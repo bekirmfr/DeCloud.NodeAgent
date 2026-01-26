@@ -44,7 +44,7 @@ public partial class OrchestratorClient
     // =====================================================================
 
     /// <inheritdoc />
-    public async Task<NodeSummaryResponse?> GetNodeSummaryAsync(CancellationToken ct = default)
+    public async Task<HttpResponse<NodeSummaryResponse>> GetNodeSummaryAsync(CancellationToken ct = default)
     {
         try
         {
@@ -52,40 +52,22 @@ public partial class OrchestratorClient
 
             var response = await _httpClient.GetAsync("/api/nodes/me", ct);
 
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.LogWarning(
-                    "Failed to get node summary: {StatusCode} - {Reason}",
-                    (int)response.StatusCode, response.ReasonPhrase);
-                return null;
-            }
-
-            var content = await response.Content.ReadAsStringAsync(ct);
-            var result = JsonSerializer.Deserialize<NodeSummaryResponse>(content, _jsonOptions);
-
-            if (result != null)
-            {
-                _logger.LogDebug(
-                    "✓ Node summary received: Status={Status}, LastHeartbeat={LastHeartbeat}",
-                    result.Status, result.LastHeartbeat);
-            }
-
-            return result;
+            return await HttpResponse<NodeSummaryResponse>.FromResponseAsync(response);
         }
         catch (HttpRequestException ex)
         {
             _logger.LogError(ex, "HTTP error fetching node summary");
-            return null;
+            return HttpResponse<NodeSummaryResponse>.FromException(ex);
         }
         catch (TaskCanceledException) when (ct.IsCancellationRequested)
         {
             _logger.LogDebug("Node summary request cancelled");
-            throw;
+            return HttpResponse<NodeSummaryResponse>.FromException(ex);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error fetching node summary");
-            return null;
+            return HttpResponse<NodeSummaryResponse>.FromException(ex);
         }
     }
 
