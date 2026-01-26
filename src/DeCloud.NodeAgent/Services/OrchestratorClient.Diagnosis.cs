@@ -44,7 +44,7 @@ public partial class OrchestratorClient
     // =====================================================================
 
     /// <inheritdoc />
-    public async Task<HttpResponse<NodeSummaryResponse>> GetNodeSummaryAsync(CancellationToken ct = default)
+    public async Task<NodeSummaryResponse?> GetNodeSummaryAsync(CancellationToken ct = default)
     {
         try
         {
@@ -52,22 +52,40 @@ public partial class OrchestratorClient
 
             var response = await _httpClient.GetAsync("/api/nodes/me", ct);
 
-            return await HttpResponse<NodeSummaryResponse>.FromResponseAsync(response);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "Failed to get node summary: {StatusCode} - {Reason}",
+                    (int)response.StatusCode, response.ReasonPhrase);
+                return null;
+            }
+
+            var content = await response.Content.ReadAsStringAsync(ct);
+            var result = JsonSerializer.Deserialize<NodeSummaryResponse>(content, _jsonOptions);
+
+            if (result != null)
+            {
+                _logger.LogDebug(
+                    "✓ Node summary received: Status={Status}, LastHeartbeat={LastHeartbeat}",
+                    result.Status, result.LastHeartbeat);
+            }
+
+            return result;
         }
         catch (HttpRequestException ex)
         {
             _logger.LogError(ex, "HTTP error fetching node summary");
-            return HttpResponse<NodeSummaryResponse>.FromException(ex);
+            return null;
         }
         catch (TaskCanceledException) when (ct.IsCancellationRequested)
         {
             _logger.LogDebug("Node summary request cancelled");
-            return HttpResponse<NodeSummaryResponse>.FromException(ex);
+            throw;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error fetching node summary");
-            return HttpResponse<NodeSummaryResponse>.FromException(ex);
+            return null;
         }
     }
 
