@@ -534,7 +534,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             },
             availableResources = new
             {
-                computePoints = heartbeat.Resources.AvailableVirtualCpuCores,
+                computePoints = heartbeat.Resources.AvailableComputePoints,
                 memoryBytes = heartbeat.Resources.AvailableMemoryBytes,
                 storageBytes = heartbeat.Resources.AvailableStorageBytes
             },

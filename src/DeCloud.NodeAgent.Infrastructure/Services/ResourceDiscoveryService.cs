@@ -607,6 +607,9 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         };
     }
 
+    // Add to constructor
+    private readonly INodeMetadataService _nodeMetadata;
+
     public async Task<ResourceSnapshot> GetCurrentSnapshotAsync(CancellationToken ct = default)
     {
         var cpu = await GetCpuInfoAsync(ct);
@@ -614,12 +617,21 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         var storage = await GetStorageInfoAsync(ct);
         var gpus = await GetGpuInfoAsync(ct);
 
+        // ✅ Get compute points from performance evaluation
+        var performanceEval = _nodeMetadata.PerformanceEvaluation;
+        var totalComputePoints = performanceEval?.TotalComputePoints ?? 0;
+
         return new ResourceSnapshot
         {
             TotalPhysicalCores = cpu.PhysicalCores,
             TotalVirtualCpuCores = cpu.LogicalCores,
             UsedVirtualCpuCores = cpu.LogicalCores - cpu.AvailableVCpus,
             VirtualCpuUsagePercent = cpu.UsagePercent,
+
+            // ✅ FIXED: Compute points from performance evaluation
+            TotalComputePoints = (int)totalComputePoints,
+            UsedComputePoints = 0, // Will be calculated by HeartbeatService
+
             TotalMemoryBytes = memory.TotalBytes,
             UsedMemoryBytes = memory.UsedBytes,
             TotalStorageBytes = storage.Sum(s => s.TotalBytes),

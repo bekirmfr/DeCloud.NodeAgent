@@ -155,8 +155,13 @@ public class HeartbeatService : BackgroundService
             }
 
             // Update resource usage based on running VMs
-            snapshot.UsedVirtualCpuCores = activeVms.Where(v => v.State == VmState.Running).Sum(v => v.Spec.VirtualCpuCores);
-            snapshot.UsedMemoryBytes = activeVms.Where(v => v.State == VmState.Running).Sum(v => v.Spec.MemoryBytes);
+            snapshot.UsedVirtualCpuCores = activeVms.Where(v => v.State == VmState.Running)
+                .Sum(v => v.Spec.VirtualCpuCores);
+            snapshot.UsedMemoryBytes = activeVms.Where(v => v.State == VmState.Running)
+                .Sum(v => v.Spec.MemoryBytes);
+            // Calculate used compute points
+            snapshot.UsedComputePoints = activeVms.Where(v => v.State == VmState.Running)
+                .Sum(v => v.Spec.ComputePointCost);
 
             // Get CGNAT info from last heartbeat response (if available)
             var lastHeartbeat = _orchestratorClient.GetLastHeartbeat();
