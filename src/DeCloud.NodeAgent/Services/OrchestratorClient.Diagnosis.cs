@@ -161,7 +161,7 @@ public partial class OrchestratorClient
         {
             _logger.LogDebug("Fetching performance evaluation from orchestrator...");
 
-            var response = await _httpClient.GetAsync("/api/nodes/me/performance", ct);
+            var response = await _httpClient.GetAsync("/api/nodes/me/evaluation", ct);
 
             if (!response.IsSuccessStatusCode)
             {
