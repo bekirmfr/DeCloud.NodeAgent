@@ -1360,18 +1360,28 @@ public class LibvirtVmManager : IVmManager
         // Formula: PointsPerVCpu = baselineOvercommit × (baselineOvercommit / tierOvercommit)
 
         var config = _nodeMetadata.SchedulingConfig;
+        var nodeTotalPoints = _nodeMetadata.PerformanceEvaluation.TotalComputePoints;
 
         var pointsPerVCpu = (config.Tiers[spec.QualityTier].MinimumBenchmark/config.BaselineBenchmark) *
                            (config.BaselineOvercommitRatio / config.Tiers[spec.QualityTier].CpuOvercommitRatio);
 
         spec.ComputePointCost = (int)(spec.VirtualCpuCores * pointsPerVCpu);
-        var cpuShares = spec.ComputePointCost * 1000;
+        int cpuShares;
 
-        // Cap at libvirt maximum
-        cpuShares = Math.Min(262144, cpuShares);
+        if (nodeTotalPoints > 0)
+        {
+            var shareRatio = (double)spec.ComputePointCost / nodeTotalPoints;
+            cpuShares = (int)(shareRatio * 10000);
+        }
+        else
+        {
+            // Fallback: shouldn't happen, but defensive programming
+            cpuShares = spec.ComputePointCost * 100;
+        }
 
-        // Ensure shares is at least 1 burstable tier equivalent
-        cpuShares = Math.Max(1000, cpuShares);
+        // Apply bounds
+        cpuShares = Math.Min(10000, cpuShares);  // libvirt cgroups v2 maximum
+        cpuShares = Math.Max(100, cpuShares);    // Minimum 1% of max shares
 
         // ========================================
         // TIER-SPECIFIC CPU CONFIGURATION
