@@ -45,11 +45,6 @@ public class CgnatNodeInfo
 public enum TunnelStatus
 {
     /// <summary>
-    /// Not connected to relay
-    /// </summary>
-    Disconnected,
-
-    /// <summary>
     /// Attempting to establish connection
     /// </summary>
     Connecting,
@@ -58,6 +53,11 @@ public enum TunnelStatus
     /// Tunnel is established and healthy
     /// </summary>
     Connected,
+
+    /// <summary>
+    /// Not connected to relay
+    /// </summary>
+    Disconnected,
 
     /// <summary>
     /// Tunnel configuration or connection error

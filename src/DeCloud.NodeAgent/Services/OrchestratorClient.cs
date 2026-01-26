@@ -511,33 +511,37 @@ REGISTERED_AT={DateTime.UtcNow:O}";
     /// <summary>
     /// Build heartbeat payload from Heartbeat object
     /// </summary>
+    /// <summary>
+    /// Build heartbeat payload matching orchestrator's NodeHeartbeat model
+    /// </summary>
     private object BuildHeartbeatPayload(Heartbeat heartbeat)
     {
-        var cpuUsage = heartbeat.Resources.VirtualCpuUsagePercent;
-        var memUsage = heartbeat.Resources.TotalMemoryBytes > 0
-            ? (double)heartbeat.Resources.UsedMemoryBytes / heartbeat.Resources.TotalMemoryBytes * 100
-            : 0;
-        var storageUsage = heartbeat.Resources.TotalStorageBytes > 0
-            ? (double)heartbeat.Resources.UsedStorageBytes / heartbeat.Resources.TotalStorageBytes * 100
-            : 0;
-
+        // Build payload matching orchestrator's NodeHeartbeat model exactly
         var payload = new
         {
             nodeId = heartbeat.NodeId,
-            metrics = new
+            metrics = new  // NodeMetrics structure
             {
                 timestamp = heartbeat.Timestamp.ToString("O"),
-                cpuUsagePercent = cpuUsage,
-                memoryUsagePercent = memUsage,
-                storageUsagePercent = storageUsage,
-                activeVmCount = heartbeat.ActiveVms.Count
+                cpuUsagePercent = heartbeat.Resources.VirtualCpuUsagePercent,
+                memoryUsagePercent = heartbeat.Resources.TotalMemoryBytes > 0
+                    ? (double)heartbeat.Resources.UsedMemoryBytes / heartbeat.Resources.TotalMemoryBytes * 100
+                    : 0,
+                storageUsagePercent = heartbeat.Resources.TotalStorageBytes > 0
+                    ? (double)heartbeat.Resources.UsedStorageBytes / heartbeat.Resources.TotalStorageBytes * 100
+                    : 0,
+                networkInMbps = (double)0,
+                networkOutMbps = (double)0,
+                activeVmCount = heartbeat.ActiveVms.Count,
+                loadAverage = (double)0
             },
-            availableResources = new
+            availableResources = new  // ResourceSnapshot structure
             {
                 computePoints = heartbeat.Resources.AvailableComputePoints,
                 memoryBytes = heartbeat.Resources.AvailableMemoryBytes,
                 storageBytes = heartbeat.Resources.AvailableStorageBytes
             },
+            schedulingConfigVersion = heartbeat.SchedulingConfigVersion,
             activeVms = heartbeat.ActiveVms.Select(v => new
             {
                 vmId = v.VmId,
@@ -554,16 +558,16 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 computePointCost = v.ComputePointCost,
                 memoryBytes = v.MemoryBytes,
                 diskBytes = v.DiskBytes,
+                imageId = v.Name,  // Use name as imageId for now
                 startedAt = v.StartedAt.ToString("O")
             }),
-            schedulingConfigVersion = heartbeat.SchedulingConfigVersion,
             cgnatInfo = heartbeat.CgnatInfo != null ? new
             {
                 assignedRelayNodeId = heartbeat.CgnatInfo.AssignedRelayNodeId,
                 tunnelIp = heartbeat.CgnatInfo.TunnelIp,
                 wireGuardConfig = heartbeat.CgnatInfo.WireGuardConfig,
                 publicEndpoint = heartbeat.CgnatInfo.PublicEndpoint,
-                tunnelStatus = heartbeat.CgnatInfo.TunnelStatus.ToString(),
+                tunnelStatus = (int)heartbeat.CgnatInfo.TunnelStatus,  // Send as int
                 lastHandshake = heartbeat.CgnatInfo.LastHandshake?.ToString("O")
             } : null
         };
