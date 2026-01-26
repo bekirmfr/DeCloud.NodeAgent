@@ -11,6 +11,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 {
     private readonly ICommandExecutor _executor;
     private readonly INodeStateService _nodeState;
+    private readonly INodeMetadataService _nodeMetadata;
     private readonly ILogger<ResourceDiscoveryService> _logger;
     private readonly ICpuBenchmarkService _benchmarkService;
     private readonly bool _isWindows;
@@ -24,11 +25,13 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     public ResourceDiscoveryService(
         ICommandExecutor executor,
         INodeStateService nodeState,
+        INodeMetadataService nodeMetadata,
         ILogger<ResourceDiscoveryService> logger,
         ICpuBenchmarkService benchmarkService)
     {
         _executor = executor;
         _nodeState = nodeState;
+        _nodeMetadata = nodeMetadata;
         _logger = logger;
         _benchmarkService = benchmarkService;
         _isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
@@ -606,9 +609,6 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             _ => "unknown"
         };
     }
-
-    // Add to constructor
-    private readonly INodeMetadataService _nodeMetadata;
 
     public async Task<ResourceSnapshot> GetCurrentSnapshotAsync(CancellationToken ct = default)
     {
