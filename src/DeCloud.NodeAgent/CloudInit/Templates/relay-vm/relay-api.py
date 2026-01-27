@@ -327,7 +327,8 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
         elif path == '/api/relay/status':
             self.get_relay_status()
         elif path == '/api/relay/wireguard':
-            self.get_wireguard_status()
+            status = self.get_wireguard_status()
+            self.send_json_response(status)
         elif path == '/api/relay/cleanup/stats':
             self.get_cleanup_stats()
         elif path == '/' or path == '/index.html':

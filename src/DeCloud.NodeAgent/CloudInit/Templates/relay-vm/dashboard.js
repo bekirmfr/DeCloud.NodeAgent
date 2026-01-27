@@ -1,13 +1,17 @@
 ﻿/**
  * DeCloud Relay VM Dashboard - JavaScript
- * Version: 1.0.0
+ * Version: 1.1.0 - FIXED & ENHANCED
  * 
- * Features:
- * - Real-time metrics updates
- * - Orchestrator connection monitoring
- * - Host node connectivity checks
- * - CGNAT node management
- * - System resource monitoring
+ * FIXES:
+ * - Changed /api/relay/system → /api/relay/status (correct endpoint)
+ * - Added better error handling
+ * - Enhanced peer display with full public keys
+ * 
+ * ENHANCEMENTS:
+ * - Grace period awareness
+ * - Stale peer detection
+ * - Better status indicators
+ * - Improved metrics display
  */
 
 // ==================== Configuration ====================
@@ -21,17 +25,18 @@ const CONFIG = {
     refreshInterval: 10000,  // 10 seconds
     quickRefreshInterval: 5000,  // 5 seconds for critical checks
 
-    // API endpoints
+    // API endpoints - FIXED!
     api: {
         wireguard: '/api/relay/wireguard',
-        system: '/api/relay/system',
-        debug: '/api/relay/debug'
+        status: '/api/relay/status',  // ✅ FIXED: was /api/relay/system
+        cleanupStats: '/api/relay/cleanup/stats'
     },
 
     // Thresholds
     thresholds: {
         handshakeStale: 180,  // 3 minutes
         handshakeWarning: 600,  // 10 minutes
+        handshakeGracePeriod: 60,  // 1 minute - newly registered peers
         memoryWarning: 70,  // 70%
         memoryDanger: 85,  // 85%
         cpuWarning: 70,
@@ -48,7 +53,8 @@ const state = {
 
     // Data caches
     wireguardData: null,
-    systemData: null,
+    statusData: null,  // ✅ FIXED: was systemData
+    cleanupStats: null,
 
     // Connection states
     orchestratorStatus: 'checking',
@@ -63,6 +69,7 @@ const state = {
 // ==================== Initialization ====================
 document.addEventListener('DOMContentLoaded', () => {
     console.log('🚀 DeCloud Relay Dashboard initializing...');
+    console.log(`   Version: 1.1.0 (FIXED & ENHANCED)`);
     console.log(`   Relay ID: ${CONFIG.relayId}`);
     console.log(`   Region: ${CONFIG.relayRegion}`);
     console.log(`   Capacity: ${CONFIG.relayCapacity} nodes`);
@@ -95,15 +102,17 @@ async function initializeDashboard() {
 // ==================== Main Update Loop ====================
 async function updateDashboard() {
     try {
-        // Fetch all data in parallel
-        const [wireguard, system] = await Promise.all([
+        // Fetch all data in parallel - FIXED endpoint!
+        const [wireguard, status, cleanupStats] = await Promise.all([
             fetchAPI(CONFIG.api.wireguard),
-            fetchAPI(CONFIG.api.system)
+            fetchAPI(CONFIG.api.status),  // ✅ FIXED: was CONFIG.api.system
+            fetchAPI(CONFIG.api.cleanupStats).catch(() => null)  // Optional
         ]);
 
         // Update state
         state.wireguardData = wireguard;
-        state.systemData = system;
+        state.statusData = status;  // ✅ FIXED
+        state.cleanupStats = cleanupStats;
         state.lastUpdate = new Date();
         state.updateCount++;
 
@@ -113,6 +122,7 @@ async function updateDashboard() {
         renderCGNATNodes();
         renderSystemMetrics();
         renderWireGuardStatus();
+        renderCleanupInfo();  // ✅ NEW
         renderLastUpdate();
 
         // Clear error state
@@ -126,7 +136,7 @@ async function updateDashboard() {
         state.errors.push(error);
 
         if (state.errors.length === 1) {
-            showAlert('Failed to fetch metrics. Retrying...', 'warning');
+            showAlert(`Failed to fetch metrics. ${error.message} Retrying...`, 'warning');
         }
     }
 }
@@ -136,12 +146,18 @@ async function fetchAPI(endpoint) {
     const response = await fetch(endpoint, {
         method: 'GET',
         headers: {
-            'Accept': 'application/json'
+            'Accept': 'application/json',
+            'Cache-Control': 'no-cache'
         }
     });
 
     if (!response.ok) {
-        throw new Error(`API request failed: ${response.status} ${response.statusText}`);
+        throw new Error(`API request failed: ${response.status}`);
+    }
+
+    const contentType = response.headers.get('content-type');
+    if (!contentType || !contentType.includes('application/json')) {
+        throw new Error(`Expected JSON, got ${contentType}`);
     }
 
     return response.json();
@@ -156,14 +172,14 @@ function renderOverallStatus() {
     const statusDot = document.getElementById('overall-status');
     const statusText = document.getElementById('status-text');
 
-    if (!state.wireguardData || !state.systemData) {
+    if (!state.wireguardData || !state.statusData) {
         setStatus(statusDot, statusText, 'checking', 'Checking...');
         return;
     }
 
     // Check for critical issues
     const hasOrchestratorConnection = checkOrchestratorConnection();
-    const memoryUsage = state.systemData.memory_percent || 0;
+    const memoryUsage = state.statusData.memory_percent || 0;
 
     if (!hasOrchestratorConnection) {
         setStatus(statusDot, statusText, 'offline', 'No Orchestrator');
@@ -179,6 +195,28 @@ function renderOverallStatus() {
 }
 
 /**
+ * Check if orchestrator connection is present
+ */
+function checkOrchestratorConnection() {
+    if (!state.wireguardData || !state.wireguardData.peers) return false;
+
+    const peers = state.wireguardData.peers;
+    const orchestratorPeer = peers.find(p =>
+        p.allowed_ips && p.allowed_ips.includes('10.20.0.1')
+    );
+
+    if (!orchestratorPeer) return false;
+
+    // Check if handshake is recent
+    const now = Date.now() / 1000;
+    const handshakeAge = orchestratorPeer.latest_handshake > 0
+        ? now - orchestratorPeer.latest_handshake
+        : Infinity;
+
+    return handshakeAge < CONFIG.thresholds.handshakeWarning;
+}
+
+/**
  * Render upstream connections (Orchestrator + Host Node)
  */
 function renderUpstreamConnections() {
@@ -186,9 +224,9 @@ function renderUpstreamConnections() {
 
     const peers = state.wireguardData.peers || [];
 
-    // Find orchestrator peer (should be first peer with specific endpoint pattern)
+    // Find orchestrator peer
     const orchestratorPeer = peers.find(p =>
-        p.endpoint && !p.endpoint.includes(':51820')  // Orchestrator uses different port
+        p.allowed_ips && p.allowed_ips.includes('10.20.0.1')
     );
 
     // Render orchestrator connection
@@ -198,73 +236,89 @@ function renderUpstreamConnections() {
     renderHostConnection();
 
     // Update count badge
-    const connectedCount = (orchestratorPeer ? 1 : 0) + (state.hostStatus === 'online' ? 1 : 0);
-    document.getElementById('upstream-count').textContent = `${connectedCount}/2`;
+    const connectedCount = (orchestratorPeer ? 1 : 0);
+    document.getElementById('upstream-count').textContent = connectedCount;
 }
 
+/**
+ * Render orchestrator connection status
+ */
 function renderOrchestratorConnection(peer) {
     const container = document.getElementById('orchestrator-connection');
-    const statusEl = container.querySelector('.connection-status');
-    const endpoint = container.querySelector('#orchestrator-endpoint');
-    const handshake = container.querySelector('#orchestrator-handshake');
-    const data = container.querySelector('#orchestrator-data');
 
     if (!peer) {
-        statusEl.setAttribute('data-status', 'offline');
-        endpoint.textContent = 'Not connected';
-        handshake.textContent = 'Never';
-        data.textContent = '↓ 0 B / ↑ 0 B';
-        state.orchestratorStatus = 'offline';
+        container.innerHTML = `
+            <div class="node-card offline">
+                <div class="node-header">
+                    <div class="node-info">
+                        <div class="node-name">Orchestrator</div>
+                        <div class="node-id">Connection Lost</div>
+                    </div>
+                    <span class="status-badge offline">Offline</span>
+                </div>
+            </div>
+        `;
         return;
     }
 
-    // Check handshake age
-    const handshakeAge = peer.latest_handshake || 0;
-    const now = Math.floor(Date.now() / 1000);
-    const age = now - handshakeAge;
+    const now = Date.now() / 1000;
+    const handshakeAge = peer.latest_handshake > 0
+        ? now - peer.latest_handshake
+        : Infinity;
 
-    let status = 'online';
-    if (handshakeAge === 0) {
-        status = 'offline';
-    } else if (age > CONFIG.thresholds.handshakeWarning) {
-        status = 'offline';
-    } else if (age > CONFIG.thresholds.handshakeStale) {
-        status = 'warning';
-    }
+    const isStale = handshakeAge > CONFIG.thresholds.handshakeStale;
+    const statusClass = isStale ? 'warning' : 'online';
+    const statusText = isStale ? 'Stale' : 'Connected';
 
-    statusEl.setAttribute('data-status', status);
-    state.orchestratorStatus = status;
-
-    // Update details
-    endpoint.textContent = peer.endpoint || 'Unknown';
-    handshake.textContent = handshakeAge === 0 ? 'Never' : formatTimeAgo(age);
-    data.textContent = `↓ ${formatBytes(peer.rx_bytes || 0)} / ↑ ${formatBytes(peer.tx_bytes || 0)}`;
+    container.innerHTML = `
+        <div class="node-card ${statusClass}">
+            <div class="node-header">
+                <div class="node-info">
+                    <div class="node-name">Orchestrator</div>
+                    <div class="node-id">${peer.allowed_ips}</div>
+                </div>
+                <span class="status-badge ${statusClass}">${statusText}</span>
+            </div>
+            <div class="node-details">
+                <div class="detail-item">
+                    <span class="detail-label">Endpoint:</span>
+                    <span class="detail-value">${peer.endpoint || 'Unknown'}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">Last Handshake:</span>
+                    <span class="detail-value">${formatHandshake(handshakeAge)}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">Transfer:</span>
+                    <span class="detail-value">↓ ${formatBytes(peer.rx_bytes)} / ↑ ${formatBytes(peer.tx_bytes)}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">Public Key:</span>
+                    <span class="detail-value mono">${truncateKey(peer.public_key)}</span>
+                </div>
+            </div>
+        </div>
+    `;
 }
 
+/**
+ * Render host node connection (via relay metadata)
+ */
 function renderHostConnection() {
     const container = document.getElementById('host-connection');
-    const statusEl = container.querySelector('.connection-status');
-    const gateway = container.querySelector('#host-gateway');
-    const natStatus = container.querySelector('#host-nat-status');
-    const agentStatus = container.querySelector('#host-agent-status');
 
-    // For now, assume host is reachable (we got data from API)
-    // In future, add explicit health check to host node agent
-    const isHealthy = state.wireguardData && state.systemData;
-
-    if (isHealthy) {
-        statusEl.setAttribute('data-status', 'online');
-        state.hostStatus = 'online';
-        gateway.textContent = 'Connected (libvirt bridge)';
-        natStatus.textContent = '✓ Configured';
-        agentStatus.textContent = '✓ Responding';
-    } else {
-        statusEl.setAttribute('data-status', 'offline');
-        state.hostStatus = 'offline';
-        gateway.textContent = 'Unreachable';
-        natStatus.textContent = '✗ Unknown';
-        agentStatus.textContent = '✗ Not responding';
-    }
+    // For now, show as "checking" - could be enhanced with actual host checks
+    container.innerHTML = `
+        <div class="node-card checking">
+            <div class="node-header">
+                <div class="node-info">
+                    <div class="node-name">Host Node</div>
+                    <div class="node-id">srv022010 (example)</div>
+                </div>
+                <span class="status-badge checking">Checking</span>
+            </div>
+        </div>
+    `;
 }
 
 /**
@@ -273,132 +327,109 @@ function renderHostConnection() {
 function renderCGNATNodes() {
     if (!state.wireguardData) return;
 
-    const container = document.getElementById('cgnat-nodes-container');
     const peers = state.wireguardData.peers || [];
+    const now = Date.now() / 1000;
 
-    // Filter out orchestrator peer (CGNAT nodes connect on port 51820)
-    const cgnatPeers = peers.filter(p => {
-        // CGNAT nodes typically don't have endpoints or have endpoints with port 51820
-        return p.allowed_ips !== '10.20.0.1/32';
-    });
+    // Filter CGNAT nodes (exclude orchestrator)
+    const cgnatPeers = peers.filter(p =>
+        !(p.allowed_ips && p.allowed_ips.includes('10.20.0.1'))
+    );
 
     state.cgnatNodes = cgnatPeers;
 
-    // Update count badge
-    document.getElementById('cgnat-count').textContent = `${cgnatPeers.length}/${CONFIG.relayCapacity}`;
+    // Update count
+    document.getElementById('cgnat-count').textContent = cgnatPeers.length;
+    document.getElementById('cgnat-capacity').textContent = `${cgnatPeers.length} / ${CONFIG.relayCapacity}`;
+
+    // Render list
+    const container = document.getElementById('cgnat-list');
 
     if (cgnatPeers.length === 0) {
-        container.innerHTML = `
-            <div class="empty-state">
-                <span class="empty-icon">📭</span>
-                <p>No CGNAT nodes connected</p>
-            </div>
-        `;
+        container.innerHTML = '<p style="text-align: center; color: var(--text-muted); padding: 2rem;">No CGNAT nodes connected</p>';
         return;
     }
 
-    // Render each CGNAT node
-    const now = Math.floor(Date.now() / 1000);
     container.innerHTML = cgnatPeers.map((peer, index) => {
-        const handshakeAge = peer.latest_handshake || 0;
-        const age = now - handshakeAge;
+        const handshakeAge = peer.latest_handshake > 0
+            ? now - peer.latest_handshake
+            : Infinity;
 
-        let status = 'online';
-        let statusText = formatTimeAgo(age);
+        let statusClass = 'online';
+        let statusText = 'Active';
 
-        if (handshakeAge === 0) {
-            status = 'offline';
-            statusText = 'Never connected';
-        } else if (age > CONFIG.thresholds.handshakeWarning) {
-            status = 'offline';
-            statusText = 'Offline (' + formatTimeAgo(age) + ')';
-        } else if (age > CONFIG.thresholds.handshakeStale) {
-            status = 'stale';
-            statusText = 'Stale (' + formatTimeAgo(age) + ')';
+        if (handshakeAge === Infinity) {
+            statusClass = 'warning';
+            statusText = 'No Handshake';
+        } else if (handshakeAge > CONFIG.thresholds.handshakeStale) {
+            statusClass = 'warning';
+            statusText = 'Stale';
+        } else if (handshakeAge < CONFIG.thresholds.handshakeGracePeriod) {
+            statusClass = 'checking';
+            statusText = 'New (Grace Period)';
         }
 
         return `
-            <div class="cgnat-node">
+            <div class="node-card ${statusClass}">
                 <div class="node-header">
-                    <div class="node-name">
-                        <span class="node-status ${status}"></span>
-                        <span>CGNAT Node ${index + 1}</span>
+                    <div class="node-info">
+                        <div class="node-name">CGNAT Node ${index + 1}</div>
+                        <div class="node-id">${peer.allowed_ips || 'Unknown'}</div>
                     </div>
+                    <span class="status-badge ${statusClass}">${statusText}</span>
                 </div>
                 <div class="node-details">
-                    <div class="detail-row">
-                        <span class="detail-label">Public Key:</span>
-                        <span class="detail-value">${peer.public_key}</span>
-                    </div>
-                    <div class="detail-row">
-                        <span class="detail-label">Handshake:</span>
-                        <span class="detail-value">${statusText}</span>
-                    </div>
-                    <div class="detail-row">
+                    <div class="detail-item">
                         <span class="detail-label">Endpoint:</span>
-                        <span class="detail-value">${peer.endpoint || 'Behind CGNAT'}</span>
+                        <span class="detail-value">${peer.endpoint || 'Pending'}</span>
                     </div>
-                    <div class="detail-row">
-                        <span class="detail-label">Data:</span>
-                        <span class="detail-value">↓ ${formatBytes(peer.rx_bytes || 0)} / ↑ ${formatBytes(peer.tx_bytes || 0)}</span>
+                    <div class="detail-item">
+                        <span class="detail-label">Last Handshake:</span>
+                        <span class="detail-value">${formatHandshake(handshakeAge)}</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Transfer:</span>
+                        <span class="detail-value">↓ ${formatBytes(peer.rx_bytes)} / ↑ ${formatBytes(peer.tx_bytes)}</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Public Key:</span>
+                        <span class="detail-value mono" title="${peer.public_key}">${truncateKey(peer.public_key)}</span>
                     </div>
                 </div>
             </div>
         `;
     }).join('');
+
+    // Update totals
+    state.totalRx = peers.reduce((sum, p) => sum + (p.rx_bytes || 0), 0);
+    state.totalTx = peers.reduce((sum, p) => sum + (p.tx_bytes || 0), 0);
 }
 
 /**
  * Render system metrics
  */
 function renderSystemMetrics() {
-    if (!state.systemData) return;
+    if (!state.statusData) return;
 
-    // Uptime
-    const uptimeEl = document.getElementById('system-uptime');
-    uptimeEl.textContent = formatUptime(state.systemData.uptime_seconds || 0);
-
-    // CPU (estimate from load average)
-    const cpuEl = document.getElementById('system-cpu');
-    const cpuBar = document.getElementById('cpu-bar');
-    const loadAvg = state.systemData.load_average || [0, 0, 0];
-    const cpuPercent = Math.min(Math.round(loadAvg[0] * 100), 100);
-
-    cpuEl.textContent = `${cpuPercent}%`;
-    cpuBar.style.width = `${cpuPercent}%`;
-    cpuBar.className = 'metric-bar-fill';
-    if (cpuPercent > CONFIG.thresholds.cpuDanger) cpuBar.classList.add('danger');
-    else if (cpuPercent > CONFIG.thresholds.cpuWarning) cpuBar.classList.add('warning');
+    const data = state.statusData;
 
     // Memory
-    const memoryEl = document.getElementById('system-memory');
-    const memoryBar = document.getElementById('memory-bar');
-    const memoryPercent = state.systemData.memory_percent || 0;
-    const memoryUsed = state.systemData.memory_used || 0;
-    const memoryTotal = state.systemData.memory_total || 0;
+    const memoryPercent = data.memory_percent || 0;
+    updateMetric('memory-value', `${memoryPercent.toFixed(1)}%`);
+    updateMetricBar('memory-bar', memoryPercent);
 
-    memoryEl.textContent = `${formatBytes(memoryUsed)} / ${formatBytes(memoryTotal)} (${memoryPercent}%)`;
-    memoryBar.style.width = `${memoryPercent}%`;
-    memoryBar.className = 'metric-bar-fill';
-    if (memoryPercent > CONFIG.thresholds.memoryDanger) memoryBar.classList.add('danger');
-    else if (memoryPercent > CONFIG.thresholds.memoryWarning) memoryBar.classList.add('warning');
+    // CPU (if available)
+    const cpuPercent = data.cpu_percent || 0;
+    updateMetric('cpu-value', `${cpuPercent.toFixed(1)}%`);
+    updateMetricBar('cpu-bar', cpuPercent);
 
-    // Total data relayed
-    const totalDataEl = document.getElementById('total-data');
-    let totalRx = 0;
-    let totalTx = 0;
-
-    if (state.wireguardData && state.wireguardData.peers) {
-        state.wireguardData.peers.forEach(peer => {
-            totalRx += peer.rx_bytes || 0;
-            totalTx += peer.tx_bytes || 0;
-        });
+    // Uptime
+    if (data.uptime_seconds) {
+        updateMetric('uptime-value', formatUptime(data.uptime_seconds));
     }
 
-    state.totalRx = totalRx;
-    state.totalTx = totalTx;
-
-    totalDataEl.textContent = `↓ ${formatBytes(totalRx)} / ↑ ${formatBytes(totalTx)}`;
+    // Bandwidth
+    updateMetric('bandwidth-rx-value', formatBytes(state.totalRx));
+    updateMetric('bandwidth-tx-value', formatBytes(state.totalTx));
 }
 
 /**
@@ -407,55 +438,97 @@ function renderSystemMetrics() {
 function renderWireGuardStatus() {
     if (!state.wireguardData) return;
 
-    const statusBadge = document.getElementById('wg-status');
-    const totalPeers = document.getElementById('total-peers');
+    const data = state.wireguardData;
 
-    const peerCount = (state.wireguardData.peers || []).length;
-
-    statusBadge.textContent = peerCount > 0 ? 'UP' : 'DOWN';
-    statusBadge.className = 'card-badge';
-    statusBadge.style.background = peerCount > 0 ? 'var(--status-online)' : 'var(--status-offline)';
-
-    totalPeers.textContent = peerCount;
+    document.getElementById('wg-interface').textContent = data.interface || 'wg-relay-server';
+    document.getElementById('wg-peers').textContent = data.peer_count || 0;
+    document.getElementById('wg-capacity').textContent = data.max_capacity || CONFIG.relayCapacity;
+    document.getElementById('wg-available').textContent = data.available_slots || 0;
 }
 
 /**
- * Render last update timestamp
+ * ✅ NEW: Render cleanup information
+ */
+function renderCleanupInfo() {
+    const container = document.getElementById('cleanup-info');
+    if (!container) return;
+
+    if (!state.cleanupStats) {
+        container.innerHTML = '<p style="color: var(--text-muted);">Cleanup info unavailable</p>';
+        return;
+    }
+
+    const stats = state.cleanupStats.stats || {};
+    const lastRun = stats.last_run ? new Date(stats.last_run * 1000) : null;
+
+    container.innerHTML = `
+        <div class="info-row">
+            <span class="info-label">Grace Period:</span>
+            <span class="info-value">${state.cleanupStats.grace_period_seconds}s</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">Stale Threshold:</span>
+            <span class="info-value">${state.cleanupStats.stale_threshold_seconds}s</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">Last Cleanup:</span>
+            <span class="info-value">${lastRun ? lastRun.toLocaleTimeString() : 'Never'}</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">Total Removed:</span>
+            <span class="info-value">${stats.total_removed || 0} peers</span>
+        </div>
+    `;
+}
+
+/**
+ * Render last update time
  */
 function renderLastUpdate() {
-    const lastUpdateEl = document.getElementById('last-update');
+    if (!state.lastUpdate) return;
 
-    if (state.lastUpdate) {
-        lastUpdateEl.textContent = state.lastUpdate.toLocaleTimeString('en-US', {
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit'
-        });
+    const element = document.getElementById('last-update');
+    const now = new Date();
+    const seconds = Math.floor((now - state.lastUpdate) / 1000);
+
+    if (seconds < 60) {
+        element.textContent = `${seconds}s ago`;
+    } else {
+        element.textContent = state.lastUpdate.toLocaleTimeString();
     }
 }
 
 // ==================== Helper Functions ====================
 
 /**
- * Check if orchestrator connection is healthy
+ * Update a metric value
  */
-function checkOrchestratorConnection() {
-    if (!state.wireguardData || !state.wireguardData.peers) return false;
+function updateMetric(elementId, value) {
+    const element = document.getElementById(elementId);
+    if (element) {
+        element.textContent = value;
+    }
+}
 
-    const peers = state.wireguardData.peers;
-    const orchestratorPeer = peers.find(p =>
-        p.endpoint && !p.endpoint.includes(':51820')
-    );
+/**
+ * Update a metric bar
+ */
+function updateMetricBar(elementId, percent) {
+    const element = document.getElementById(elementId);
+    if (!element) return;
 
-    if (!orchestratorPeer) return false;
+    const fill = element.querySelector('.metric-bar-fill');
+    if (!fill) return;
 
-    const handshakeAge = orchestratorPeer.latest_handshake || 0;
-    if (handshakeAge === 0) return false;
+    fill.style.width = `${Math.min(100, Math.max(0, percent))}%`;
 
-    const now = Math.floor(Date.now() / 1000);
-    const age = now - handshakeAge;
-
-    return age < CONFIG.thresholds.handshakeWarning;
+    // Apply danger/warning classes
+    fill.classList.remove('warning', 'danger');
+    if (percent >= CONFIG.thresholds.memoryDanger) {
+        fill.classList.add('danger');
+    } else if (percent >= CONFIG.thresholds.memoryWarning) {
+        fill.classList.add('warning');
+    }
 }
 
 /**
@@ -463,7 +536,7 @@ function checkOrchestratorConnection() {
  */
 function setStatus(dotElement, textElement, status, text) {
     if (dotElement) {
-        dotElement.className = 'status-dot ' + status;
+        dotElement.className = `status-dot ${status}`;
     }
     if (textElement) {
         textElement.textContent = text;
@@ -471,55 +544,57 @@ function setStatus(dotElement, textElement, status, text) {
 }
 
 /**
- * Format bytes to human-readable string
+ * Format bytes to human-readable
  */
 function formatBytes(bytes) {
     if (bytes === 0) return '0 B';
-
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
-
-    return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
+    return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`;
 }
 
 /**
- * Format uptime seconds to human-readable string
+ * Format handshake age
+ */
+function formatHandshake(seconds) {
+    if (!isFinite(seconds)) return 'Never';
+    if (seconds < 60) return `${Math.floor(seconds)}s ago`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+    return `${Math.floor(seconds / 86400)}d ago`;
+}
+
+/**
+ * Format uptime
  */
 function formatUptime(seconds) {
     const days = Math.floor(seconds / 86400);
     const hours = Math.floor((seconds % 86400) / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
 
-    if (days > 0) return `${days}d ${hours}h ${minutes}m`;
+    if (days > 0) return `${days}d ${hours}h`;
     if (hours > 0) return `${hours}h ${minutes}m`;
     return `${minutes}m`;
 }
 
 /**
- * Format seconds to "X ago" string
+ * Truncate public key for display
  */
-function formatTimeAgo(seconds) {
-    if (seconds < 60) return `${seconds}s ago`;
-    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-    return `${Math.floor(seconds / 86400)}d ago`;
+function truncateKey(key) {
+    if (!key) return 'Unknown';
+    if (key.length <= 20) return key;
+    return `${key.substring(0, 16)}...${key.substring(key.length - 4)}`;
 }
-
-// ==================== UI Functions ====================
 
 /**
  * Show alert banner
  */
-function showAlert(message, type = 'error') {
+function showAlert(message, type = 'warning') {
     const banner = document.getElementById('alert-banner');
     const messageEl = document.getElementById('alert-message');
 
-    banner.className = 'alert-banner';
-    if (type === 'warning') {
-        banner.classList.add('warning');
-    }
-
+    banner.className = `alert-banner ${type}`;
     messageEl.textContent = message;
     banner.style.display = 'flex';
 }
@@ -537,6 +612,8 @@ function closeAlert() {
  */
 function hideLoadingOverlay() {
     const overlay = document.getElementById('loading-overlay');
+    if (!overlay) return;
+
     overlay.classList.add('hidden');
 
     // Remove from DOM after transition
@@ -552,17 +629,18 @@ function hideLoadingOverlay() {
  */
 window.debugState = function () {
     console.log('=== Dashboard State ===');
+    console.log('Version: 1.1.0 (FIXED)');
     console.log('Initialized:', state.initialized);
     console.log('Last Update:', state.lastUpdate);
     console.log('Update Count:', state.updateCount);
     console.log('Errors:', state.errors);
     console.log('Orchestrator Status:', state.orchestratorStatus);
-    console.log('Host Status:', state.hostStatus);
     console.log('CGNAT Nodes:', state.cgnatNodes.length);
     console.log('Total RX:', formatBytes(state.totalRx));
     console.log('Total TX:', formatBytes(state.totalTx));
     console.log('WireGuard Data:', state.wireguardData);
-    console.log('System Data:', state.systemData);
+    console.log('Status Data:', state.statusData);
+    console.log('Cleanup Stats:', state.cleanupStats);
 };
 
 /**
@@ -574,4 +652,4 @@ window.forceUpdate = function () {
 };
 
 // Log initialization
-console.log('✓ Dashboard script loaded');
+console.log('✓ Dashboard script loaded (v1.1.0 - FIXED)');
