@@ -711,8 +711,10 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 
                 fields = line.split('\t')
                 if len(fields) >= 7:
+                    # Return FULL public keys for orchestrator matching
+                    # Dashboard can truncate for display if needed
                     peers.append({
-                        'public_key': fields[0][:16] + '...' if len(fields[0]) > 16 else fields[0],
+                        'public_key': fields[0],  # Full key, not truncated!
                         'endpoint': fields[2] if fields[2] != '(none)' else None,
                         'allowed_ips': fields[3],
                         'latest_handshake': int(fields[4]) if fields[4] and fields[4] != '0' else 0,
