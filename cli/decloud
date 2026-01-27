@@ -18,7 +18,7 @@ set -euo pipefail
 # GLOBAL CONSTANTS
 # ============================================================================
 
-readonly VERSION="1.2.0"
+readonly VERSION="1.2.1"
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -1001,6 +1001,9 @@ cmd_reset() {
     log_info "Starting node reset..."
     echo ""
     
+    # Disable errexit for reset operation - we want to continue even if steps fail
+    set +e
+    
     # Step 1: Stop service
     log_info "[1/5] Stopping node agent service..."
     if systemctl stop "$SERVICE_NAME" 2>/dev/null; then
@@ -1015,13 +1018,13 @@ cmd_reset() {
     local creds_removed=0
     
     if [[ -f "$CREDENTIALS_FILE" ]]; then
-        rm -f "$CREDENTIALS_FILE"
+        rm -f "$CREDENTIALS_FILE" 2>/dev/null || true
         log_success "Credentials removed"
         ((creds_removed++))
     fi
     
     if [[ -f "$PENDING_AUTH_FILE" ]]; then
-        rm -f "$PENDING_AUTH_FILE"
+        rm -f "$PENDING_AUTH_FILE" 2>/dev/null || true
         log_success "Pending auth removed"
         ((creds_removed++))
     fi
@@ -1055,20 +1058,24 @@ cmd_reset() {
             /usr/local/bin/vm-cleanup.sh --all --force >/dev/null 2>&1 || {
                 log_warn "VM cleanup script encountered errors (may be OK)"
             }
-            log_success "All VMs cleaned up"
+            log_success "All VMs cleaned up via vm-cleanup.sh"
         else
             # Fallback: manual cleanup
             log_warn "vm-cleanup.sh not found, performing manual cleanup..."
             
             # Stop and undefine all VMs
             local vm_count=0
-            while IFS= read -r vm_id; do
-                if [[ -n "$vm_id" ]]; then
-                    virsh destroy "$vm_id" 2>/dev/null || true
-                    virsh undefine "$vm_id" --remove-all-storage 2>/dev/null || true
-                    ((vm_count++))
-                fi
-            done < <(virsh list --all --uuid 2>/dev/null)
+            local vm_list=$(virsh list --all --uuid 2>/dev/null || echo "")
+            
+            if [[ -n "$vm_list" ]]; then
+                while IFS= read -r vm_id; do
+                    if [[ -n "$vm_id" ]]; then
+                        virsh destroy "$vm_id" 2>/dev/null || true
+                        virsh undefine "$vm_id" --remove-all-storage 2>/dev/null || true
+                        ((vm_count++))
+                    fi
+                done <<< "$vm_list"
+            fi
             
             # Clean VM storage directory
             if [[ -d "$VM_STORAGE_PATH" ]]; then
@@ -1086,7 +1093,7 @@ cmd_reset() {
     if systemctl start "$SERVICE_NAME" 2>/dev/null; then
         sleep 3
         
-        if systemctl is-active --quiet "$SERVICE_NAME"; then
+        if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
             log_success "Service restarted successfully"
         else
             log_error "Service failed to start"
@@ -1094,7 +1101,11 @@ cmd_reset() {
         fi
     else
         log_error "Failed to restart service"
+        log_info "Try manually: sudo systemctl start $SERVICE_NAME"
     fi
+    
+    # Re-enable errexit
+    set -e
     
     echo ""
     echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
