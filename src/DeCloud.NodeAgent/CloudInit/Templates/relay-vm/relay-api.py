@@ -1,12 +1,16 @@
 ﻿#!/usr/bin/env python3
 """
 DeCloud Relay VM Management API
-Version: 2.0.0
+Version: 2.1.0 - IMPROVED
 
 Provides REST API for relay monitoring, CGNAT peer management,
 and serves the dashboard interface.
 
-NEW: Automatic periodic cleanup of stale peers via background thread
+IMPROVEMENTS v2.1.0:
+- Added peer age tracking to prevent premature cleanup of new peers
+- Unified stale threshold across background and manual cleanup
+- Aligned with orchestrator 30-second grace period
+- Better logging for peer lifecycle events
 """
 
 import json
@@ -31,7 +35,15 @@ LISTEN_PORT = 8080
 # ==================== Periodic Cleanup Configuration ====================
 CLEANUP_ENABLED = True                    # Enable/disable automatic cleanup
 CLEANUP_INTERVAL_SECONDS = 300            # 5 minutes (300 seconds)
-STALE_THRESHOLD_SECONDS = 180             # 3 minutes - peer with no handshake for this long is stale
+
+# Unified stale threshold for both background and manual cleanup
+STALE_THRESHOLD_SECONDS = 300             # 5 minutes - peer with no handshake for this long is stale
+
+# Grace period for newly-added peers
+# Peers registered within this time window are never removed, even with no handshake
+# This aligns with orchestrator's 30-second grace period and provides buffer
+PEER_REGISTRATION_GRACE_PERIOD = 60       # 60 seconds - gives time for client to connect
+
 ORCHESTRATOR_IP = "10.20.0.1/32"          # Never remove orchestrator peer
 
 # ==================== Logging ====================
@@ -54,6 +66,65 @@ cleanup_stats = {
     'errors': 0
 }
 
+# Track when peers were registered (public_key -> timestamp)
+peer_registration_times = {}
+peer_registration_lock = threading.Lock()
+
+# ==================== Helper Functions ====================
+
+def record_peer_registration(public_key):
+    """Record timestamp when peer is registered"""
+    with peer_registration_lock:
+        peer_registration_times[public_key] = time.time()
+        logger.debug(f"📝 Recorded registration time for peer {public_key[:16]}...")
+
+def get_peer_age(public_key, current_time):
+    """Get age of peer in seconds since registration"""
+    with peer_registration_lock:
+        registration_time = peer_registration_times.get(public_key)
+        
+        if registration_time is None:
+            # Peer was registered before we started tracking (or tracking failed)
+            # Assume it's old enough to evaluate normally
+            return float('inf')
+        
+        return current_time - registration_time
+
+def cleanup_stale_peer_records():
+    """Remove registration records for peers that no longer exist"""
+    with peer_registration_lock:
+        # Get current peers
+        try:
+            result = subprocess.run(
+                ['wg', 'show', WIREGUARD_INTERFACE, 'dump'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            
+            if result.returncode != 0:
+                return
+            
+            lines = result.stdout.strip().split('\n')
+            current_peers = set()
+            
+            for line in lines[1:]:  # Skip interface line
+                if not line.strip():
+                    continue
+                fields = line.split('\t')
+                if len(fields) >= 1:
+                    current_peers.add(fields[0])
+            
+            # Remove records for peers that no longer exist
+            stale_records = [pk for pk in peer_registration_times.keys() if pk not in current_peers]
+            
+            for pk in stale_records:
+                del peer_registration_times[pk]
+                logger.debug(f"🧹 Cleaned up registration record for removed peer {pk[:16]}...")
+                
+        except Exception as e:
+            logger.debug(f"Error cleaning up peer records: {e}")
+
 # ==================== Background Cleanup Thread ====================
 class PeerCleanupThread(threading.Thread):
     """Background daemon thread for periodic peer cleanup"""
@@ -68,6 +139,7 @@ class PeerCleanupThread(threading.Thread):
         logger.info("🧹 Peer cleanup thread started")
         logger.info(f"   Cleanup interval: {CLEANUP_INTERVAL_SECONDS}s ({CLEANUP_INTERVAL_SECONDS // 60} minutes)")
         logger.info(f"   Stale threshold: {STALE_THRESHOLD_SECONDS}s ({STALE_THRESHOLD_SECONDS // 60} minutes)")
+        logger.info(f"   ✅ NEW: Grace period: {PEER_REGISTRATION_GRACE_PERIOD}s for newly-registered peers")
         
         # Wait 30 seconds before first run (let server stabilize)
         time.sleep(30)
@@ -75,6 +147,7 @@ class PeerCleanupThread(threading.Thread):
         while not self.stop_event.is_set():
             try:
                 self.cleanup_stale_peers()
+                cleanup_stale_peer_records()  # Clean up registration tracking
                 
                 # Wait for next interval or until stopped
                 self.stop_event.wait(CLEANUP_INTERVAL_SECONDS)
@@ -91,7 +164,10 @@ class PeerCleanupThread(threading.Thread):
         self.stop_event.set()
     
     def cleanup_stale_peers(self):
-        """Remove peers with no handshake or stale handshake"""
+        """
+        Remove peers with no handshake or stale handshake
+        Respects grace period for newly-registered peers
+        """
         try:
             current_time = int(time.time())
             
@@ -111,6 +187,7 @@ class PeerCleanupThread(threading.Thread):
             
             removed = []
             kept = []
+            skipped_new = []  # Track peers skipped due to grace period
             
             # Skip interface line (first line), process peers
             for line in lines[1:]:
@@ -134,16 +211,30 @@ class PeerCleanupThread(threading.Thread):
                     })
                     continue
                 
+                # Check if peer is within grace period
+                peer_age = get_peer_age(public_key, current_time)
+                
+                if peer_age < PEER_REGISTRATION_GRACE_PERIOD:
+                    skipped_new.append({
+                        'public_key': public_key[:16] + '...',
+                        'allowed_ips': allowed_ips,
+                        'age_seconds': int(peer_age)
+                    })
+                    logger.debug(
+                        f"⏱️  Skipping new peer {public_key[:16]}... "
+                        f"(age: {peer_age:.0f}s < {PEER_REGISTRATION_GRACE_PERIOD}s grace period)"
+                    )
+                    continue
+                
                 # Calculate time since last handshake
                 if latest_handshake == 0:
-                    # Never had a handshake
                     time_since_handshake = float('inf')
                     handshake_status = 'never'
                 else:
                     time_since_handshake = current_time - latest_handshake
                     handshake_status = f'{time_since_handshake}s ago'
                 
-                # Check if peer is stale
+                # Check if peer is stale (and past grace period)
                 if time_since_handshake > STALE_THRESHOLD_SECONDS:
                     # Remove stale peer
                     remove_result = subprocess.run(
@@ -157,11 +248,12 @@ class PeerCleanupThread(threading.Thread):
                         removed.append({
                             'public_key': public_key[:16] + '...',
                             'allowed_ips': allowed_ips,
-                            'handshake': handshake_status
+                            'handshake': handshake_status,
+                            'peer_age_seconds': int(peer_age) if peer_age != float('inf') else 'unknown'
                         })
                         logger.info(
                             f"🗑️  Removed stale peer: {public_key[:16]}... "
-                            f"({allowed_ips}, handshake: {handshake_status})"
+                            f"({allowed_ips}, handshake: {handshake_status}, peer age: {peer_age:.0f}s)"
                         )
                     else:
                         logger.error(
@@ -195,10 +287,10 @@ class PeerCleanupThread(threading.Thread):
             cleanup_stats['last_removed_count'] = len(removed)
             
             # Log summary
-            if removed:
+            if removed or skipped_new:
                 logger.info(
                     f"✅ Cleanup completed: removed {len(removed)} stale peers, "
-                    f"kept {len(kept)} active peers"
+                    f"kept {len(kept)} active peers, skipped {len(skipped_new)} new peers (grace period)"
                 )
             else:
                 logger.debug(
@@ -220,293 +312,108 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
     
     # Suppress default logging
     def log_message(self, format, *args):
-        """Override to use custom logging"""
-        logger.info(f"{self.address_string()} - {format % args}")
+        pass  # Disable default request logging
     
     def do_GET(self):
         """Handle GET requests"""
-        path = urlparse(self.path).path
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path
         
-        try:
-            # Route requests
-            if path == '/':
-                self.serve_dashboard()
-            elif path.startswith('/static/'):
-                self.serve_static_file(path)
-            elif path == '/api/relay/wireguard':
-                self.serve_wireguard_status()
-            elif path == '/api/relay/system':
-                self.serve_system_status()
-            elif path == '/api/relay/debug':
-                self.serve_debug_info()
-            elif path == '/api/relay/cleanup-stats':  # NEW ENDPOINT
-                self.serve_cleanup_stats()
-            elif path == '/health':
-                self.serve_health_check()
-            else:
-                self.send_error_response(404, 'Not Found', 'The requested resource was not found')
+        # Log request
+        logger.debug(f"GET {path}")
         
-        except Exception as e:
-            logger.error(f"Error handling GET {path}: {e}", exc_info=True)
-            self.send_error_response(500, 'Internal Server Error', str(e))
+        if path == '/health':
+            self.health_check()
+        elif path == '/api/relay/status':
+            self.get_relay_status()
+        elif path == '/api/relay/wireguard':
+            self.get_wireguard_status()
+        elif path == '/api/relay/cleanup/stats':
+            self.get_cleanup_stats()
+        elif path == '/' or path == '/index.html':
+            self.serve_dashboard()
+        elif path.startswith('/static/'):
+            self.serve_static_file(path)
+        else:
+            self.send_error_response(404, 'Not Found', f'Path {path} not found')
     
     def do_POST(self):
         """Handle POST requests"""
-        path = urlparse(self.path).path
-    
-        try:
-            if path in ['/api/relay/peer', '/api/relay/add-peer']:
-                self.add_cgnat_peer()
-            elif path == '/api/relay/remove-peer':
-                self.remove_cgnat_peer()
-            elif path == '/api/relay/cleanup-stale':
-                self.cleanup_stale_peers()
-            else:
-                self.send_error_response(404, 'Not Found', 'The requested resource was not found')
-    
-        except Exception as e:
-            logger.error(f"Error handling POST {path}: {e}", exc_info=True)
-    
-    # ==================== NEW: Cleanup Stats Endpoint ====================
-    
-    def serve_cleanup_stats(self):
-        """Serve cleanup statistics"""
-        import datetime
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path
         
-        stats = cleanup_stats.copy()
+        logger.info(f"POST {path}")
         
-        # Format last_run timestamp
-        if stats['last_run']:
-            stats['last_run_formatted'] = datetime.datetime.fromtimestamp(
-                stats['last_run']
-            ).isoformat()
-            stats['seconds_since_last_run'] = int(time.time() - stats['last_run'])
+        if path == '/api/relay/add-peer':
+            self.add_cgnat_peer()
+        elif path == '/api/relay/remove-peer':
+            self.remove_cgnat_peer()
+        elif path == '/api/relay/cleanup':
+            self.manual_cleanup()
         else:
-            stats['last_run_formatted'] = 'Never'
-            stats['seconds_since_last_run'] = None
-        
-        # Add configuration info
-        stats['config'] = {
-            'enabled': CLEANUP_ENABLED,
-            'interval_seconds': CLEANUP_INTERVAL_SECONDS,
-            'stale_threshold_seconds': STALE_THRESHOLD_SECONDS,
-            'orchestrator_protected_ip': ORCHESTRATOR_IP
-        }
-        
-        self.send_json_response(stats)
-    
-    # ==================== Dashboard & Static Files ====================
-    
-    def serve_dashboard(self):
-        """Serve the main dashboard HTML"""
-        self.serve_static_file('/static/dashboard.html')
-    
-    def serve_static_file(self, path):
-        """Serve static file with intelligent caching"""
-        # Extract filename from path
-        if path.startswith('/static/'):
-            filename = path[8:]  # Remove '/static/'
-        else:
-            filename = os.path.basename(path)
-    
-        file_path = os.path.join(STATIC_DIR, filename)
-    
-        try:
-            # Check if file exists
-            if not os.path.exists(file_path):
-                self.send_error_response(404, 'File Not Found', f'File {filename} not found')
-                return
-        
-            # Get file stats for caching
-            stat_info = os.stat(file_path)
-            mtime = stat_info.st_mtime
-            size = stat_info.st_size
-        
-            # Generate ETag
-            etag = f'"{int(mtime)}-{size}"'
-            last_modified = self.format_timestamp(mtime)
-        
-            # Check conditional requests
-            if_none_match = self.headers.get('If-None-Match')
-            if_modified_since = self.headers.get('If-Modified-Since')
-        
-            if if_none_match == etag or if_modified_since == last_modified:
-                # Return 304 Not Modified
-                self.send_response(304)
-                self.send_header('ETag', etag)
-                self.send_header('Last-Modified', last_modified)
-                self.send_header('Cache-Control', self.get_cache_control(filename))
-                self.end_headers()
-                return
-        
-            # Read file content
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-        
-            # Replace template variables (only for HTML)
-            if filename.endswith('.html'):
-                content = self.replace_template_variables(content)
-        
-            # Determine content type
-            content_type = self.get_content_type(filename)
-        
-            # Determine cache control based on file type
-            cache_control = self.get_cache_control(filename)
-        
-            # Send response with caching headers
-            self.send_response(200)
-            self.send_header('Content-Type', content_type)
-            self.send_header('Content-Length', len(content.encode('utf-8')))
-            self.send_header('Cache-Control', cache_control)
-            self.send_header('ETag', etag)
-            self.send_header('Last-Modified', last_modified)
-            self.send_header('X-Content-Type-Options', 'nosniff')
-        
-            # Add CORS headers if needed
-            self.send_header('Access-Control-Allow-Origin', '*')
-        
-            self.end_headers()
-            self.wfile.write(content.encode('utf-8'))
-        
-        except Exception as e:
-            logger.error(f"Error serving file {file_path}: {e}")
-            self.send_error_response(500, 'Error Reading File', str(e))
-
-    def get_cache_control(self, filename):
-        """Get appropriate Cache-Control header based on file type"""
-        ext = os.path.splitext(filename)[1].lower()
-        cache_policies = {
-            '.html': 'public, max-age=300, must-revalidate',
-            '.css': 'public, max-age=86400, must-revalidate',
-            '.js': 'public, max-age=86400, must-revalidate',
-            '.png': 'public, max-age=2592000, immutable',
-            '.jpg': 'public, max-age=2592000, immutable',
-            '.jpeg': 'public, max-age=2592000, immutable',
-            '.gif': 'public, max-age=2592000, immutable',
-            '.svg': 'public, max-age=2592000, immutable',
-            '.ico': 'public, max-age=2592000, immutable',
-            '.woff': 'public, max-age=2592000, immutable',
-            '.woff2': 'public, max-age=2592000, immutable',
-            '.ttf': 'public, max-age=2592000, immutable',
-        }
-        return cache_policies.get(ext, 'public, max-age=3600, must-revalidate')
-
-    def format_timestamp(self, timestamp):
-        """Format Unix timestamp to HTTP date format"""
-        from email.utils import formatdate
-        return formatdate(timestamp, usegmt=True)
-    
-    def replace_template_variables(self, content):
-        """Replace template variables in content"""
-        replacements = {
-            '__VM_ID__': RELAY_ID,
-            '__VM_NAME__': RELAY_NAME,
-            '__RELAY_REGION__': RELAY_REGION,
-            '__RELAY_CAPACITY__': str(RELAY_CAPACITY)
-        }
-        
-        for key, value in replacements.items():
-            content = content.replace(key, value)
-        
-        return content
-    
-    def get_content_type(self, filename):
-        """Determine content type based on file extension"""
-        ext = os.path.splitext(filename)[1].lower()
-        
-        content_types = {
-            '.html': 'text/html; charset=utf-8',
-            '.css': 'text/css; charset=utf-8',
-            '.js': 'application/javascript; charset=utf-8',
-            '.json': 'application/json; charset=utf-8',
-            '.png': 'image/png',
-            '.jpg': 'image/jpeg',
-            '.jpeg': 'image/jpeg',
-            '.gif': 'image/gif',
-            '.svg': 'image/svg+xml',
-            '.ico': 'image/x-icon',
-            '.woff': 'font/woff',
-            '.woff2': 'font/woff2',
-            '.ttf': 'font/ttf',
-        }
-        
-        return content_types.get(ext, 'application/octet-stream')
+            self.send_error_response(404, 'Not Found', f'Path {path} not found')
     
     # ==================== API Endpoints ====================
     
-    def serve_health_check(self):
-        """Enhanced health check with cleanup info"""
+    def health_check(self):
+        """Simple health check"""
         self.send_json_response({
             'status': 'healthy',
             'relay_id': RELAY_ID,
-            'timestamp': int(time.time()),
-            'cleanup_enabled': CLEANUP_ENABLED,
-            'last_cleanup': cleanup_stats.get('last_run'),
-            'total_cleanups': cleanup_stats.get('total_runs', 0)
+            'timestamp': int(time.time())
         })
     
-    def serve_wireguard_status(self):
-        """Serve WireGuard interface status"""
-        status = self.get_wireguard_status()
-        self.send_json_response(status)
-    
-    def serve_system_status(self):
-        """Serve system status information"""
+    def get_relay_status(self):
+        """Get comprehensive relay status"""
         try:
             # Get system uptime
             with open('/proc/uptime', 'r') as f:
-                uptime_seconds = float(f.read().split()[0])
+                uptime_seconds = int(float(f.read().split()[0]))
             
-            # Get load average
-            with open('/proc/loadavg', 'r') as f:
-                load = f.read().split()[:3]
-            
-            # Get memory info
-            mem_info = {}
-            with open('/proc/meminfo', 'r') as f:
-                for line in f:
-                    parts = line.split(':')
-                    if len(parts) == 2:
-                        key = parts[0].strip()
-                        value = parts[1].strip().split()[0]
-                        mem_info[key] = int(value)
+            # Get WireGuard stats
+            wg_status = self.get_wireguard_status()
             
             self.send_json_response({
-                'uptime_seconds': int(uptime_seconds),
-                'load_average': {
-                    '1min': float(load[0]),
-                    '5min': float(load[1]),
-                    '15min': float(load[2])
+                'relay_id': RELAY_ID,
+                'relay_name': RELAY_NAME,
+                'region': RELAY_REGION,
+                'max_capacity': RELAY_CAPACITY,
+                'current_load': wg_status.get('peer_count', 0),
+                'available_slots': wg_status.get('available_slots', RELAY_CAPACITY),
+                'uptime_seconds': uptime_seconds,
+                'wireguard_interface': WIREGUARD_INTERFACE,
+                'cleanup_config': {
+                    'enabled': CLEANUP_ENABLED,
+                    'interval_seconds': CLEANUP_INTERVAL_SECONDS,
+                    'stale_threshold_seconds': STALE_THRESHOLD_SECONDS,
+                    'grace_period_seconds': PEER_REGISTRATION_GRACE_PERIOD
                 },
-                'memory': {
-                    'total_kb': mem_info.get('MemTotal', 0),
-                    'available_kb': mem_info.get('MemAvailable', 0),
-                    'free_kb': mem_info.get('MemFree', 0)
+                'cleanup_stats': cleanup_stats,
+                'peer_tracking': {  # Peer registration tracking stats
+                    'tracked_peers': len(peer_registration_times),
+                    'tracking_enabled': True
                 }
             })
-        
         except Exception as e:
-            logger.error(f"Error getting system status: {e}", exc_info=True)
-            self.send_error_response(500, 'System Status Error', str(e))
+            logger.error(f"Error getting relay status: {e}", exc_info=True)
+            self.send_error_response(500, 'Internal Error', str(e))
     
-    def serve_debug_info(self):
-        """Serve debug information"""
+    def get_cleanup_stats(self):
+        """Get cleanup statistics"""
         self.send_json_response({
-            'relay_id': RELAY_ID,
-            'relay_name': RELAY_NAME,
-            'region': RELAY_REGION,
-            'capacity': RELAY_CAPACITY,
-            'interface': WIREGUARD_INTERFACE,
-            'cleanup_config': {
-                'enabled': CLEANUP_ENABLED,
-                'interval_seconds': CLEANUP_INTERVAL_SECONDS,
-                'stale_threshold_seconds': STALE_THRESHOLD_SECONDS
-            },
-            'cleanup_stats': cleanup_stats
+            'cleanup_enabled': CLEANUP_ENABLED,
+            'interval_seconds': CLEANUP_INTERVAL_SECONDS,
+            'stale_threshold_seconds': STALE_THRESHOLD_SECONDS,
+            'grace_period_seconds': PEER_REGISTRATION_GRACE_PERIOD,
+            'stats': cleanup_stats,
+            'tracked_peers_count': len(peer_registration_times)
         })
     
     def add_cgnat_peer(self):
-        """Add CGNAT node as WireGuard peer"""
+        """
+        ✅ IMPROVED: Add CGNAT node as WireGuard peer
+        Now records registration timestamp for grace period tracking
+        """
         try:
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length == 0:
@@ -528,10 +435,12 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 )
                 return
             
+            public_key = data['public_key']
+            
             # Build wg set command
             cmd = [
                 'wg', 'set', WIREGUARD_INTERFACE,
-                'peer', data['public_key'],
+                'peer', public_key,
                 'allowed-ips', data['allowed_ips']
             ]
             
@@ -568,16 +477,16 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 logger.warning(f"Failed to save WireGuard config: {e}")
             
-            logger.info(f"✅ Added CGNAT peer: {data['public_key'][:16]}... ({description})")
+            # Record peer registration timestamp
+            record_peer_registration(public_key)
+            
+            logger.info(f"✅ Added CGNAT peer: {public_key[:16]}... ({description})")
             
             self.send_json_response({
                 'success': True,
-                'message': 'Peer added successfully',
-                'peer': {
-                    'public_key': data['public_key'][:16] + '...',
-                    'allowed_ips': data['allowed_ips'],
-                    'description': description
-                }
+                'peer_public_key': public_key[:16] + '...',
+                'allowed_ips': data['allowed_ips'],
+                'description': description
             })
             
         except json.JSONDecodeError as e:
@@ -589,7 +498,7 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             self.send_error_response(500, 'Internal Error', str(e))
     
     def remove_cgnat_peer(self):
-        """Remove CGNAT node from WireGuard peers"""
+        """Remove CGNAT node peer"""
         try:
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length == 0:
@@ -599,59 +508,50 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(content_length)
             data = json.loads(body.decode('utf-8'))
             
-            # Require public_key
             if 'public_key' not in data:
-                self.send_error_response(
-                    400,
-                    'Missing Required Fields',
-                    'public_key field is required'
-                )
+                self.send_error_response(400, 'Missing Field', 'public_key is required')
                 return
             
             public_key = data['public_key']
-            node_id = data.get('node_id', 'unknown')
             
             # Remove peer
-            cmd = [
-                'wg', 'set', WIREGUARD_INTERFACE,
-                'peer', public_key,
-                'remove'
-            ]
-            
             result = subprocess.run(
-                cmd,
+                ['wg', 'set', WIREGUARD_INTERFACE, 'peer', public_key, 'remove'],
                 capture_output=True,
                 text=True,
                 timeout=5
             )
             
-            # Success if peer was removed OR if peer didn't exist
-            if result.returncode == 0 or 'Unable to remove' in result.stderr:
-                # Save configuration
-                try:
-                    subprocess.run(
-                        ['wg-quick', 'save', WIREGUARD_INTERFACE],
-                        capture_output=True,
-                        timeout=5
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to save WireGuard config: {e}")
-                
-                logger.info(f"✅ Removed peer {public_key[:16]}... (node: {node_id})")
-                
-                self.send_json_response({
-                    'success': True,
-                    'message': 'Peer removed successfully',
-                    'public_key': public_key[:16] + '...',
-                    'node_id': node_id
-                })
-            else:
+            if result.returncode != 0:
                 logger.error(f"Failed to remove peer: {result.stderr}")
                 self.send_error_response(
                     500,
                     'Failed to Remove Peer',
                     result.stderr or 'Unknown error'
                 )
+                return
+            
+            # Save configuration
+            try:
+                subprocess.run(
+                    ['wg-quick', 'save', WIREGUARD_INTERFACE],
+                    capture_output=True,
+                    timeout=5
+                )
+            except Exception as e:
+                logger.warning(f"Failed to save WireGuard config: {e}")
+            
+            # Clean up registration tracking
+            with peer_registration_lock:
+                if public_key in peer_registration_times:
+                    del peer_registration_times[public_key]
+            
+            logger.info(f"✅ Removed CGNAT peer: {public_key[:16]}...")
+            
+            self.send_json_response({
+                'success': True,
+                'peer_public_key': public_key[:16] + '...'
+            })
             
         except json.JSONDecodeError as e:
             self.send_error_response(400, 'Invalid JSON', str(e))
@@ -661,15 +561,15 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             logger.error(f"Remove peer error: {e}", exc_info=True)
             self.send_error_response(500, 'Internal Error', str(e))
     
-    def cleanup_stale_peers(self):
-        """Manual cleanup endpoint - calls same logic as background thread"""
+    def manual_cleanup(self):
+        """
+        Manually trigger peer cleanup
+        Uses consistent STALE_THRESHOLD_SECONDS and respects grace period
+        """
         try:
-            import time as time_module
+            current_time = int(time.time())
             
-            STALE_THRESHOLD = 300  # 5 minutes
-            ORCHESTRATOR_IP_LOCAL = "10.20.0.1/32"
-            
-            # Get current peers
+            # Get current peers from WireGuard
             result = subprocess.run(
                 ['wg', 'show', WIREGUARD_INTERFACE, 'dump'],
                 capture_output=True,
@@ -678,18 +578,13 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             )
             
             if result.returncode != 0:
-                self.send_error_response(
-                    500,
-                    'Failed to Get Peers',
-                    result.stderr or 'Unknown error'
-                )
+                self.send_error_response(500, 'WireGuard Error', result.stderr)
                 return
             
-            current_time = int(time_module.time())
             lines = result.stdout.strip().split('\n')
-            
             removed = []
             kept = []
+            skipped_new = []
             
             # Skip interface line, process peers
             for line in lines[1:]:
@@ -704,8 +599,8 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 allowed_ips = fields[3]
                 latest_handshake = int(fields[4]) if fields[4] else 0
                 
-                # Never remove orchestrator
-                if ORCHESTRATOR_IP_LOCAL in allowed_ips:
+                # Never remove orchestrator peer
+                if ORCHESTRATOR_IP in allowed_ips:
                     kept.append({
                         'public_key': public_key[:16] + '...',
                         'allowed_ips': allowed_ips,
@@ -713,22 +608,30 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                     })
                     continue
                 
-                # Check if stale
+                # ✅ NEW: Check grace period
+                peer_age = get_peer_age(public_key, current_time)
+                
+                if peer_age < PEER_REGISTRATION_GRACE_PERIOD:
+                    skipped_new.append({
+                        'public_key': public_key[:16] + '...',
+                        'allowed_ips': allowed_ips,
+                        'age_seconds': int(peer_age)
+                    })
+                    continue
+                
+                # Calculate handshake status
                 if latest_handshake == 0:
                     time_since_handshake = float('inf')
+                    handshake_status = 'never'
                 else:
                     time_since_handshake = current_time - latest_handshake
+                    handshake_status = f'{time_since_handshake}s ago'
                 
-                if time_since_handshake > STALE_THRESHOLD:
+                # Use consistent STALE_THRESHOLD_SECONDS
+                if time_since_handshake > STALE_THRESHOLD_SECONDS:
                     # Remove stale peer
-                    remove_cmd = [
-                        'wg', 'set', WIREGUARD_INTERFACE,
-                        'peer', public_key,
-                        'remove'
-                    ]
-                    
                     remove_result = subprocess.run(
-                        remove_cmd,
+                        ['wg', 'set', WIREGUARD_INTERFACE, 'peer', public_key, 'remove'],
                         capture_output=True,
                         text=True,
                         timeout=5
@@ -738,7 +641,7 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                         removed.append({
                             'public_key': public_key[:16] + '...',
                             'allowed_ips': allowed_ips,
-                            'stale_seconds': time_since_handshake if time_since_handshake != float('inf') else 'never'
+                            'handshake': handshake_status
                         })
                         logger.info(f"🗑️  Removed stale peer: {public_key[:16]}... ({allowed_ips})")
                     else:
@@ -747,7 +650,7 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                     kept.append({
                         'public_key': public_key[:16] + '...',
                         'allowed_ips': allowed_ips,
-                        'last_handshake_seconds': time_since_handshake
+                        'handshake': handshake_status
                     })
             
             # Save configuration if we removed any
@@ -765,8 +668,10 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 'success': True,
                 'removed_count': len(removed),
                 'kept_count': len(kept),
+                'skipped_new_count': len(skipped_new),
                 'removed': removed,
-                'kept': kept
+                'kept': kept,
+                'skipped_new': skipped_new
             })
             
         except subprocess.TimeoutExpired:
@@ -838,6 +743,68 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 'error': str(e)
             }
     
+    def serve_dashboard(self):
+        """Serve dashboard HTML"""
+        try:
+            dashboard_path = os.path.join(STATIC_DIR, 'dashboard.html')
+            
+            if not os.path.exists(dashboard_path):
+                self.send_error_response(404, 'Not Found', 'Dashboard file not found')
+                return
+            
+            with open(dashboard_path, 'rb') as f:
+                content = f.read()
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', len(content))
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            self.wfile.write(content)
+            
+        except Exception as e:
+            logger.error(f"Error serving dashboard: {e}", exc_info=True)
+            self.send_error_response(500, 'Internal Error', str(e))
+    
+    def serve_static_file(self, path):
+        """Serve static files (CSS, JS, etc.)"""
+        try:
+            # Remove /static/ prefix
+            file_path = path.replace('/static/', '', 1)
+            full_path = os.path.join(STATIC_DIR, file_path)
+            
+            # Security: prevent directory traversal
+            if not os.path.abspath(full_path).startswith(os.path.abspath(STATIC_DIR)):
+                self.send_error_response(403, 'Forbidden', 'Access denied')
+                return
+            
+            if not os.path.exists(full_path):
+                self.send_error_response(404, 'Not Found', f'File not found: {file_path}')
+                return
+            
+            # Determine content type
+            content_type = 'application/octet-stream'
+            if full_path.endswith('.css'):
+                content_type = 'text/css'
+            elif full_path.endswith('.js'):
+                content_type = 'application/javascript'
+            elif full_path.endswith('.json'):
+                content_type = 'application/json'
+            
+            with open(full_path, 'rb') as f:
+                content = f.read()
+            
+            self.send_response(200)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', len(content))
+            self.send_header('Cache-Control', 'public, max-age=3600')
+            self.end_headers()
+            self.wfile.write(content)
+            
+        except Exception as e:
+            logger.error(f"Error serving static file: {e}", exc_info=True)
+            self.send_error_response(500, 'Internal Error', str(e))
+    
     # ==================== Response Helpers ====================
     
     def send_json_response(self, data, status_code=200):
@@ -886,7 +853,7 @@ def main():
     logger.info('=' * 60)
     logger.info('DeCloud Relay VM Management API')
     logger.info('=' * 60)
-    logger.info(f'  Version:      2.0.0 (with auto-cleanup)')
+    logger.info(f'  Version:      2.1.0 (IMPROVED)')
     logger.info(f'  Relay ID:     {RELAY_ID}')
     logger.info(f'  Relay Name:   {RELAY_NAME}')
     logger.info(f'  Region:       {RELAY_REGION}')
@@ -898,6 +865,7 @@ def main():
     if CLEANUP_ENABLED:
         logger.info(f'  🧹 Cleanup:    Every {CLEANUP_INTERVAL_SECONDS}s ({CLEANUP_INTERVAL_SECONDS // 60} min)')
         logger.info(f'  ⏱️  Stale After: {STALE_THRESHOLD_SECONDS}s ({STALE_THRESHOLD_SECONDS // 60} min)')
+        logger.info(f'  ✅ Grace Period: {PEER_REGISTRATION_GRACE_PERIOD}s for new peers')
     logger.info('=' * 60)
     logger.info('✅ Server started successfully')
     logger.info('')
