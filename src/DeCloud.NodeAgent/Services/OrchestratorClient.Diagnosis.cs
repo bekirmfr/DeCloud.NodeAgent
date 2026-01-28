@@ -10,6 +10,7 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using Orchestrator.Models;
+using Org.BouncyCastle.Asn1.Ocsp;
 using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Services;
@@ -272,11 +273,16 @@ public partial class OrchestratorClient
     {
         try
         {
+            // 1. Run the benchmark test locally
+            // Get hardware inventory
+            var inventory = await _resourceDiscovery.DiscoverAllAsync(ct);
+
+            // 2. Request re-evaluation from orchestrator
             _logger.LogInformation("Requesting performance re-evaluation from orchestrator...");
 
-            var response = await _httpClient.PostAsync(
+            var response = await _httpClient.PostAsJsonAsync(
                 "/api/nodes/me/evaluate",
-                null,  // No body required
+                inventory,
                 ct);
 
             if (!response.IsSuccessStatusCode)
