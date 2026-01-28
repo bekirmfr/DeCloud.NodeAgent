@@ -8,6 +8,7 @@ using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.NodeAgent.Infrastructure.Services.Auth;
 using DeCloud.NodeAgent.Services;
 using Microsoft.Extensions.Options;
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -63,6 +64,11 @@ builder.Services.AddHttpClient("VmProxy", client =>
 {
     client.Timeout = TimeSpan.FromSeconds(30);
 });
+
+// =====================================================
+// In-Memory Queues
+// =====================================================
+builder.Services.AddSingleton<ConcurrentQueue<PendingCommand>>();
 
 // =====================================================
 // Core Services

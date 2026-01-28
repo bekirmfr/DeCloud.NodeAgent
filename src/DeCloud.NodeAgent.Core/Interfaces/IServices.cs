@@ -186,6 +186,11 @@ public interface IOrchestratorClient
     Task<bool> SendHeartbeatAsync(Heartbeat heartbeat, CancellationToken ct = default);
 
     Task<List<PendingCommand>> GetPendingCommandsAsync(CancellationToken ct = default);
+    /// <summary>
+    /// Fetch pending commands from orchestrator via dedicated endpoint
+    /// Used by hybrid push-pull command delivery system
+    /// </summary>
+    Task<List<PendingCommand>> FetchPendingCommandsAsync(CancellationToken ct = default);
     Task<bool> AcknowledgeCommandAsync(string commandId, bool success, string? errorMessage, CancellationToken ct = default);
     HeartbeatDto? GetLastHeartbeat();
     Task ReloadCredentialsAsync(CancellationToken ct = default);

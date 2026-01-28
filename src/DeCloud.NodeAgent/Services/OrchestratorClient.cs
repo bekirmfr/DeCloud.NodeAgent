@@ -597,42 +597,12 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             {
                 foreach (var cmd in commands.EnumerateArray())
                 {
-                    var commandId = cmd.GetProperty("commandId").GetString() ?? "";
-
-                    CommandType commandType;
-                    var typeProp = cmd.GetProperty("type");
-
-                    if (typeProp.ValueKind == JsonValueKind.Number)
+                    var command = ParseCommand(cmd);
+                    if (command != null)
                     {
-                        commandType = (CommandType)typeProp.GetInt32();
+                        _pendingCommands.Enqueue(command);
+                        _logger.LogDebug("Queued command {CommandId} from heartbeat", command.CommandId);
                     }
-                    else if (typeProp.ValueKind == JsonValueKind.String)
-                    {
-                        var typeStr = typeProp.GetString() ?? "";
-                        if (!Enum.TryParse<CommandType>(typeStr, true, out commandType))
-                        {
-                            _logger.LogWarning("Unknown command type: {Type}", typeStr);
-                            continue;
-                        }
-                    }
-                    else
-                    {
-                        _logger.LogWarning("Unexpected type format: {Kind}", typeProp.ValueKind);
-                        continue;
-                    }
-
-                    var payload = cmd.GetProperty("payload").GetString() ?? "";
-
-                    _logger.LogInformation("Received command from orchestrator: {Type} (ID: {CommandId})",
-                        commandType, commandId);
-
-                    _pendingCommands.Enqueue(new PendingCommand
-                    {
-                        CommandId = commandId,
-                        Type = commandType,
-                        Payload = payload,
-                        IssuedAt = DateTime.UtcNow
-                    });
                 }
             }
 
@@ -710,6 +680,121 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         }
 
         return Task.FromResult(commands);
+    }
+    /// <summary>
+    /// Fetch pending commands from orchestrator (dedicated endpoint for hybrid push-pull)
+    /// Unlike GetPendingCommandsAsync which returns queued commands from heartbeat,
+    /// this makes a direct API call to GET /api/nodes/{nodeId}/commands
+    /// </summary>
+    public async Task<List<PendingCommand>> FetchPendingCommandsAsync(CancellationToken ct = default)
+    {
+        if (!_nodeState.IsAuthenticated || string.IsNullOrEmpty(_nodeId))
+        {
+            _logger.LogWarning("Cannot fetch commands - node not registered");
+            return new List<PendingCommand>();
+        }
+
+        try
+        {
+            var requestPath = $"/api/nodes/{_nodeId}/commands";
+
+            var response = await _httpClient.GetAsync(requestPath, ct);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await response.Content.ReadAsStringAsync(ct);
+                _logger.LogWarning(
+                    "Failed to fetch commands: {Status} - {Error}",
+                    response.StatusCode, error);
+                return new List<PendingCommand>();
+            }
+
+            var content = await response.Content.ReadAsStringAsync(ct);
+            var json = JsonDocument.Parse(content);
+
+            if (!json.RootElement.TryGetProperty("data", out var data))
+            {
+                return new List<PendingCommand>();
+            }
+
+            var commands = new List<PendingCommand>();
+
+            if (data.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var cmd in data.EnumerateArray())
+                {
+                    var command = ParseCommand(cmd);
+                    if (command != null)
+                    {
+                        commands.Add(command);
+                    }
+                }
+            }
+
+            if (commands.Count > 0)
+            {
+                _logger.LogDebug(
+                    "Fetched {Count} pending command(s) from orchestrator",
+                    commands.Count);
+            }
+
+            return commands;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error fetching pending commands");
+            return new List<PendingCommand>();
+        }
+    }
+
+    /// <summary>
+    /// Parse command from JSON element (shared by heartbeat and fetch)
+    /// </summary>
+    private PendingCommand? ParseCommand(JsonElement cmd)
+    {
+        try
+        {
+            var commandId = cmd.GetProperty("commandId").GetString() ?? "";
+            var typeProp = cmd.GetProperty("type");
+
+            CommandType commandType;
+            if (typeProp.ValueKind == JsonValueKind.Number)
+            {
+                commandType = (CommandType)typeProp.GetInt32();
+            }
+            else if (typeProp.ValueKind == JsonValueKind.String)
+            {
+                if (!Enum.TryParse<CommandType>(typeProp.GetString(), true, out commandType))
+                {
+                    _logger.LogWarning("Unknown command type: {Type}", typeProp.GetString());
+                    return null;
+                }
+            }
+            else
+            {
+                _logger.LogWarning("Unexpected command type format: {Kind}", typeProp.ValueKind);
+                return null;
+            }
+
+            var payload = cmd.GetProperty("payload").GetString() ?? "";
+            var requiresAck = cmd.TryGetProperty("requiresAck", out var ackProp)
+                ? ackProp.GetBoolean()
+                : true;
+
+            return new PendingCommand
+            {
+                CommandId = commandId,
+                Type = commandType,
+                Payload = payload,
+                RequiresAck = requiresAck,
+                IssuedAt = DateTime.UtcNow
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to parse command");
+            return null;
+        }
     }
 
     /// <summary>

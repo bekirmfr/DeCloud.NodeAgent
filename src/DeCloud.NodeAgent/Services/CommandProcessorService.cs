@@ -1,8 +1,8 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
-using DeCloud.NodeAgent.Infrastructure.Services;
 using Microsoft.Extensions.Options;
+using System.Collections.Concurrent;
 using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Services;
@@ -15,6 +15,7 @@ public class CommandProcessorOptions
 public class CommandProcessorService : BackgroundService
 {
     private readonly IOrchestratorClient _orchestratorClient;
+    private readonly ConcurrentQueue<PendingCommand> _pushedCommands;
     private readonly IVmManager _vmManager;
     private readonly IResourceDiscoveryService _resourceDiscovery;
     private readonly INatRuleManager _natRuleManager;
@@ -35,6 +36,7 @@ public class CommandProcessorService : BackgroundService
 
     public CommandProcessorService(
         IOrchestratorClient orchestratorClient,
+        ConcurrentQueue<PendingCommand> pushedCommands,
         IVmManager vmManager,
         IResourceDiscoveryService resourceDiscovery,
         INatRuleManager natRuleManager,
@@ -42,6 +44,7 @@ public class CommandProcessorService : BackgroundService
         ILogger<CommandProcessorService> logger)
     {
         _orchestratorClient = orchestratorClient;
+        _pushedCommands = pushedCommands;
         _vmManager = vmManager;
         _resourceDiscovery = resourceDiscovery;
         _natRuleManager = natRuleManager;
@@ -51,53 +54,121 @@ public class CommandProcessorService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("Command processor starting with poll interval {Interval}s",
+        _logger.LogInformation(
+            "Command processor starting (hybrid push-pull mode) with poll interval {Interval}s",
             _options.PollInterval.TotalSeconds);
 
-        // Wait for heartbeat service to initialize and register
+        // Wait for node registration
         await Task.Delay(TimeSpan.FromSeconds(15), stoppingToken);
+
+        // Track processed commands for deduplication
+        var processedCommands = new HashSet<string>();
+        const int maxProcessedCache = 1000;
 
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await ProcessPendingCommandsAsync(stoppingToken);
+                // ============================================================
+                // PRIORITY 1: Process pushed commands (instant delivery)
+                // ============================================================
+                var pushedCount = 0;
+                while (_pushedCommands.TryDequeue(out var pushedCommand))
+                {
+                    pushedCount++;
+                    await ProcessCommandAsync(pushedCommand, processedCommands, stoppingToken);
+                }
+
+                if (pushedCount > 0)
+                {
+                    _logger.LogInformation(
+                        "✓ Processed {Count} pushed command(s)",
+                        pushedCount);
+                }
+
+                // ============================================================
+                // PRIORITY 2: Poll for queued commands (fallback)
+                // ============================================================
+                var pulledCommands = await _orchestratorClient.FetchPendingCommandsAsync(
+                    stoppingToken);
+
+                foreach (var command in pulledCommands)
+                {
+                    await ProcessCommandAsync(command, processedCommands, stoppingToken);
+                }
+
+                if (pulledCommands.Count > 0)
+                {
+                    _logger.LogInformation(
+                        "✓ Retrieved {Count} command(s) via pull",
+                        pulledCommands.Count);
+                }
+
+                // ============================================================
+                // Cleanup processed commands cache
+                // ============================================================
+                if (processedCommands.Count > maxProcessedCache)
+                {
+                    processedCommands.Clear();
+                    _logger.LogDebug("Cleared processed commands cache");
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error processing commands");
+                _logger.LogError(ex, "Error in command processing cycle");
             }
 
+            // Poll interval (pushed commands are processed immediately)
             await Task.Delay(_options.PollInterval, stoppingToken);
         }
+
+        _logger.LogInformation("Command processor stopping");
     }
 
-    private async Task ProcessPendingCommandsAsync(CancellationToken ct)
+    /// <summary>
+    /// Process command with deduplication
+    /// </summary>
+    private async Task ProcessCommandAsync(
+        PendingCommand command,
+        HashSet<string> processedCommands,
+        CancellationToken ct)
     {
-        var commands = await _orchestratorClient.GetPendingCommandsAsync(ct);
-
-        if (commands.Count > 0)
+        // Deduplication: command might arrive via both push and pull
+        if (processedCommands.Contains(command.CommandId))
         {
-            _logger.LogInformation("Processing {Count} pending command(s)", commands.Count);
+            _logger.LogWarning(
+                "⚠️  Command {CommandId} already processed (duplicate delivery, likely push+pull race)",
+                command.CommandId);
+            return;
         }
 
-        foreach (var command in commands)
+        processedCommands.Add(command.CommandId);
+
+        _logger.LogInformation(
+            "⚙️  Processing command {CommandId}: {Type}",
+            command.CommandId, command.Type);
+
+        try
         {
-            _logger.LogInformation("Processing command {CommandId}: {Type}",
-                command.CommandId, command.Type);
+            var success = await ExecuteCommandAsync(command, ct);
 
-            try
+            if (command.RequiresAck)
             {
-                var success = await ExecuteCommandAsync(command, ct);
-                if (command.RequiresAck) await _orchestratorClient.AcknowledgeCommandAsync(
+                await _orchestratorClient.AcknowledgeCommandAsync(
                     command.CommandId, success, null, ct);
-
-                _logger.LogInformation("Command {CommandId} completed: {Success}", command.CommandId, success);
             }
-            catch (Exception ex)
+
+            _logger.LogInformation(
+                "✓ Command {CommandId} completed: {Success}",
+                command.CommandId, success);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "✗ Command {CommandId} failed", command.CommandId);
+
+            if (command.RequiresAck)
             {
-                _logger.LogError(ex, "Command {CommandId} failed", command.CommandId);
-                if (command.RequiresAck) await _orchestratorClient.AcknowledgeCommandAsync(
+                await _orchestratorClient.AcknowledgeCommandAsync(
                     command.CommandId, false, ex.Message, ct);
             }
         }
