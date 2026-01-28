@@ -306,6 +306,55 @@ class PeerCleanupThread(threading.Thread):
             cleanup_stats['errors'] += 1
 
 
+# ==================== System Metrics Functions ====================
+
+def get_cpu_usage():
+    """Get current CPU usage percentage"""
+    try:
+        # Read CPU stats from /proc/stat
+        with open('/proc/stat', 'r') as f:
+            cpu_line = f.readline()
+        
+        # Parse CPU times
+        cpu_times = [float(x) for x in cpu_line.split()[1:]]
+        idle_time = cpu_times[3]  # idle is 4th value
+        total_time = sum(cpu_times)
+        
+        # Calculate usage (simplified - instant reading)
+        cpu_usage = 100.0 - (idle_time / total_time * 100.0) if total_time > 0 else 0.0
+        
+        return round(cpu_usage, 1)
+    except Exception as e:
+        logger.debug(f"Error reading CPU usage: {e}")
+        return 0.0
+
+def get_memory_usage():
+    """Get current memory usage percentage"""
+    try:
+        # Read memory info from /proc/meminfo
+        mem_info = {}
+        with open('/proc/meminfo', 'r') as f:
+            for line in f:
+                parts = line.split(':')
+                if len(parts) == 2:
+                    key = parts[0].strip()
+                    value = int(parts[1].strip().split()[0])  # Remove 'kB' and convert
+                    mem_info[key] = value
+        
+        # Calculate memory usage
+        total = mem_info.get('MemTotal', 0)
+        available = mem_info.get('MemAvailable', 0)
+        
+        if total > 0:
+            used = total - available
+            usage_percent = (used / total) * 100.0
+            return round(usage_percent, 1)
+        
+        return 0.0
+    except Exception as e:
+        logger.debug(f"Error reading memory usage: {e}")
+        return 0.0
+
 # ==================== Request Handler ====================
 class RelayAPIHandler(BaseHTTPRequestHandler):
     """HTTP request handler for relay management API"""
@@ -371,6 +420,10 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             with open('/proc/uptime', 'r') as f:
                 uptime_seconds = int(float(f.read().split()[0]))
             
+            # Get system metrics
+            cpu_percent = get_cpu_usage()
+            memory_percent = get_memory_usage()
+            
             # Get WireGuard stats
             wg_status = self.get_wireguard_status()
             
@@ -382,6 +435,8 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 'current_load': wg_status.get('peer_count', 0),
                 'available_slots': wg_status.get('available_slots', RELAY_CAPACITY),
                 'uptime_seconds': uptime_seconds,
+                'cpu_percent': cpu_percent,
+                'memory_percent': memory_percent,
                 'wireguard_interface': WIREGUARD_INTERFACE,
                 'cleanup_config': {
                     'enabled': CLEANUP_ENABLED,
@@ -390,7 +445,7 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                     'grace_period_seconds': PEER_REGISTRATION_GRACE_PERIOD
                 },
                 'cleanup_stats': cleanup_stats,
-                'peer_tracking': {  # Peer registration tracking stats
+                'peer_tracking': {
                     'tracked_peers': len(peer_registration_times),
                     'tracking_enabled': True
                 }
@@ -412,8 +467,8 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
     
     def add_cgnat_peer(self):
         """
-        ✅ IMPROVED: Add CGNAT node as WireGuard peer
-        Now records registration timestamp for grace period tracking
+        Add CGNAT node as WireGuard peer
+        Records registration timestamp for grace period tracking
         """
         try:
             content_length = int(self.headers.get('Content-Length', 0))
@@ -628,7 +683,6 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                     time_since_handshake = current_time - latest_handshake
                     handshake_status = f'{time_since_handshake}s ago'
                 
-                # Use consistent STALE_THRESHOLD_SECONDS
                 if time_since_handshake > STALE_THRESHOLD_SECONDS:
                     # Remove stale peer
                     remove_result = subprocess.run(
@@ -712,8 +766,6 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 
                 fields = line.split('\t')
                 if len(fields) >= 7:
-                    # Return FULL public keys for orchestrator matching
-                    # Dashboard can truncate for display if needed
                     peers.append({
                         'public_key': fields[0],  # Full key, not truncated!
                         'endpoint': fields[2] if fields[2] != '(none)' else None,

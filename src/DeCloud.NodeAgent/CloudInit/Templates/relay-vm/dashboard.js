@@ -235,8 +235,11 @@ function renderUpstreamConnections() {
     // Render host node connection
     renderHostConnection();
 
-    // Update count badge
-    const connectedCount = (orchestratorPeer ? 1 : 0);
+    // Update count badge - orchestrator + host
+    const orchestratorConnected = orchestratorPeer ? 1 : 0;
+    const hostConnected = state.statusData ? 1 : 0; // Host is connected if we have status data
+    const connectedCount = orchestratorConnected + hostConnected;
+
     document.getElementById('upstream-count').textContent = connectedCount;
 }
 
@@ -307,15 +310,66 @@ function renderOrchestratorConnection(peer) {
 function renderHostConnection() {
     const container = document.getElementById('host-connection');
 
-    // For now, show as "checking" - could be enhanced with actual host checks
+    if (!state.statusData) {
+        container.innerHTML = `
+            <div class="node-card checking">
+                <div class="node-header">
+                    <div class="node-info">
+                        <div class="node-name">Host Node</div>
+                        <div class="node-id">Checking...</div>
+                    </div>
+                    <span class="status-badge checking">Checking</span>
+                </div>
+            </div>
+        `;
+        return;
+    }
+
+    // Determine host status based on relay uptime and system health
+    const uptime = state.statusData.uptime_seconds || 0;
+    const memoryPercent = state.statusData.memory_percent || 0;
+
+    let statusClass = 'online';
+    let statusText = 'Connected';
+
+    if (uptime < 300) { // Less than 5 minutes - recently started
+        statusClass = 'checking';
+        statusText = 'Starting';
+    } else if (memoryPercent > 90) { // High memory - potential issue
+        statusClass = 'warning';
+        statusText = 'High Load';
+    }
+
+    // Extract gateway/host info
+    const relayName = state.statusData.relay_name || 'Unknown';
+    const hostNode = relayName.includes('relay-') ? 'Host Node (Active)' : 'Host Node';
+
     container.innerHTML = `
-        <div class="node-card checking">
+        <div class="node-card ${statusClass}">
             <div class="node-header">
                 <div class="node-info">
-                    <div class="node-name">Host Node</div>
-                    <div class="node-id">srv022010 (example)</div>
+                    <div class="node-name">${hostNode}</div>
+                    <div class="node-id">Bridge Network: 192.168.122.1</div>
                 </div>
-                <span class="status-badge checking">Checking</span>
+                <span class="status-badge ${statusClass}">${statusText}</span>
+            </div>
+            <div class="node-details">
+                <div class="detail-item">
+                    <span class="detail-label">VM Uptime:</span>
+                    <span class="detail-value">${formatUptime(uptime)}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">Memory Usage:</span>
+                    <span class="detail-value">${memoryPercent.toFixed(1)}%</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">Relay Status:</span>
+                    <span class="detail-value">${state.statusData.current_load || 0} / ${state.statusData.max_capacity || 10} nodes</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">Cleanup:</span>
+                    <span class="detail-value">${state.statusData.cleanup_config?.enabled ? 'Enabled' : 'Disabled'}</span>
+                </div>
             </div>
         </div>
     `;
