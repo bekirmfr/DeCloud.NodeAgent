@@ -1,4 +1,5 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.UserNetwork;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
@@ -28,6 +29,7 @@ public class LibvirtVmManager : IVmManager
     private readonly ILogger<LibvirtVmManager> _logger;
     private readonly LibvirtVmManagerOptions _options;
     private readonly VmRepository _repository;
+    private readonly IUserWireGuardManager _userWireGuardManager;
     private readonly bool _isWindows;
 
     // Track our VMs in memory
@@ -43,6 +45,7 @@ public class LibvirtVmManager : IVmManager
         IOptions<LibvirtVmManagerOptions> options,
         VmRepository repository,
         ICloudInitTemplateService templateService,
+        IUserWireGuardManager userWireGuardManager,
         INodeMetadataService nodeMetadata,
         ILogger<LibvirtVmManager> logger)
     {
@@ -50,6 +53,7 @@ public class LibvirtVmManager : IVmManager
         _imageManager = imageManager;
         _templateService = templateService;
         _nodeMetadata = nodeMetadata;
+        _userWireGuardManager = userWireGuardManager;
         _logger = logger;
         _options = options.Value;
         _repository = repository;
@@ -412,6 +416,28 @@ public class LibvirtVmManager : IVmManager
             }
 
             // =====================================================
+            // STEP 1.5: Setup User WireGuard Network
+            // =====================================================
+            if (!string.IsNullOrEmpty(spec.OwnerId))
+            {
+                _logger.LogInformation(
+                    "VM {VmId}: Setting up user network for owner {OwnerId}",
+                    spec.Id, spec.OwnerId);
+
+                var userNetwork = await _userWireGuardManager.EnsureUserNetworkAsync(
+                    spec.OwnerId, ct);
+
+                var vmIp = await _userWireGuardManager.AllocateVmIpAsync(
+                    spec.OwnerId, spec.Id, ct);
+
+                spec.IpAddress = vmIp;
+
+                _logger.LogInformation(
+                    "VM {VmId}: Assigned IP {VmIp} in user network {Subnet}.0/24",
+                    spec.Id, vmIp, userNetwork.Subnet);
+            }
+
+            // =====================================================
             // STEP 2: Create overlay disk
             // =====================================================
             _logger.LogInformation("VM {VmId}: Creating overlay disk ({DiskGB}GB)",
@@ -563,6 +589,31 @@ public class LibvirtVmManager : IVmManager
                                 await _repository.UpdateVmIpAsync(spec.Id, ip);
                                 _logger.LogInformation("VM {VmId} obtained IP: {Ip}", spec.Id, ip);
                             }
+
+                            if (startResult.Success && !string.IsNullOrEmpty(spec.OwnerId) &&
+                                !string.IsNullOrEmpty(spec.IpAddress))
+                            {
+                                try
+                                {
+                                    await _userWireGuardManager.AddVmPeerAsync(
+                                        spec.OwnerId,
+                                        spec.Id,
+                                        spec.IpAddress,
+                                        ct);
+
+                                    _logger.LogInformation(
+                                        "✓ VM {VmId} added to user network (IP: {VmIp})",
+                                        spec.Id, spec.IpAddress);
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogError(
+                                        ex,
+                                        "Failed to add VM {VmId} to user network, " +
+                                        "but VM is running. Network isolation may not work correctly.",
+                                        spec.Id);
+                                }
+                            }
                         }
                     }
                     finally
@@ -581,6 +632,7 @@ public class LibvirtVmManager : IVmManager
                 _logger.LogError("Failed to start VM {VmId}: {Error}", spec.Id, startResult.StandardError);
                 return VmOperationResult.Fail(spec.Id, startResult.StandardError, "START_FAILED");
             }
+
         }
         catch (Exception ex)
         {
@@ -738,6 +790,30 @@ public class LibvirtVmManager : IVmManager
 
         _logger.LogInformation("Deleting VM {VmId}", vmId);
 
+        if (!_vms.TryGetValue(vmId, out var instance)) { 
+            // Try to recover from database
+            instance = await _repository.LoadVmAsync(vmId);
+            if (instance != null)
+            {
+                _vms[vmId] = instance;
+                _logger.LogInformation("Recovered VM {VmId} from database for deletion", vmId);
+            }
+            else if (await VmExistsAsync(vmId, ct))
+            {
+                instance = await ReconstructVmInstanceAsync(vmId, ct);
+                if (instance != null)
+                {
+                    _vms[vmId] = instance;
+                    await _repository.SaveVmAsync(instance);
+                }
+            }
+            if (instance == null)
+            {
+                _logger.LogWarning("VM {VmId} not found for deletion", vmId);
+                return VmOperationResult.Fail(vmId, "VM not found", "NOT_FOUND");
+            }
+        }
+
         // Stop if running
         var state = await GetVmStateFromLibvirtAsync(vmId, ct);
         if (state == VmState.Running || state == VmState.Paused)
@@ -757,7 +833,7 @@ public class LibvirtVmManager : IVmManager
         // Remove from tracking
         _vms.Remove(vmId);
 
-        // NEW: Remove from database
+        // Remove from database
         await _repository.DeleteVmAsync(vmId);
 
         // Clean up directory
@@ -772,6 +848,33 @@ public class LibvirtVmManager : IVmManager
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Failed to delete VM directory {VmDir}", vmDirectory);
+            }
+        }
+
+        if (!string.IsNullOrEmpty(instance.Spec.OwnerId))
+        {
+            try
+            {
+                await _userWireGuardManager.RemoveVmPeerAsync(
+                    instance.Spec.OwnerId,
+                    vmId,
+                    ct);
+
+                // Cleanup user network if this was the last VM
+                await _userWireGuardManager.CleanupUserNetworkIfEmptyAsync(
+                    instance.Spec.OwnerId,
+                    ct);
+
+                _logger.LogInformation(
+                    "✓ VM {VmId} removed from user network",
+                    vmId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Failed to remove VM {VmId} from user network during deletion",
+                    vmId);
             }
         }
 

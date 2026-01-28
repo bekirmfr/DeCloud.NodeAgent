@@ -1,8 +1,10 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
+using DeCloud.NodeAgent.Core.Interfaces.UserNetwork;
 using DeCloud.NodeAgent.Core.Settings;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using DeCloud.NodeAgent.Infrastructure.Network;
+using DeCloud.NodeAgent.Infrastructure.Network.UserNetwork;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.NodeAgent.Infrastructure.Services.Auth;
@@ -151,6 +153,7 @@ builder.Services.AddSingleton<IVmManager>(sp => sp.GetRequiredService<LibvirtVmM
 // Network Services
 // =====================================================
 builder.Services.AddSingleton<INetworkManager, WireGuardNetworkManager>();
+builder.Services.AddSingleton<IUserWireGuardManager, UserWireGuardManager>();
 builder.Services.AddSingleton<ICloudInitCleaner, CloudInitCleaner>();
 builder.Services.AddSingleton<IEphemeralSshKeyService, EphemeralSshKeyService>();
 
