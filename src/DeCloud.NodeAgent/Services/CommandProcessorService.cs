@@ -1,4 +1,4 @@
-﻿using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using Microsoft.Extensions.Options;
@@ -19,6 +19,7 @@ public class CommandProcessorService : BackgroundService
     private readonly IVmManager _vmManager;
     private readonly IResourceDiscoveryService _resourceDiscovery;
     private readonly INatRuleManager _natRuleManager;
+    private readonly INodeMetadataService _nodeMetadata;
     private readonly ILogger<CommandProcessorService> _logger;
     private readonly CommandProcessorOptions _options;
 
@@ -40,6 +41,7 @@ public class CommandProcessorService : BackgroundService
         IVmManager vmManager,
         IResourceDiscoveryService resourceDiscovery,
         INatRuleManager natRuleManager,
+        INodeMetadataService nodeMetadata,
         IOptions<CommandProcessorOptions> options,
         ILogger<CommandProcessorService> logger)
     {
@@ -48,6 +50,7 @@ public class CommandProcessorService : BackgroundService
         _vmManager = vmManager;
         _resourceDiscovery = resourceDiscovery;
         _natRuleManager = natRuleManager;
+        _nodeMetadata = nodeMetadata;
         _logger = logger;
         _options = options.Value;
     }
@@ -201,6 +204,21 @@ public class CommandProcessorService : BackgroundService
 
     private async Task<bool> HandleCreateVmAsync(string payload, CancellationToken ct)
     {
+        // ========================================
+        // INITIALIZATION CHECK
+        // ========================================
+        // Refuse VM creation commands until node has received SchedulingConfig from orchestrator
+        // This prevents crashes when targeted deployment sends commands before first heartbeat
+        if (!_nodeMetadata.IsFullyInitialized)
+        {
+            _logger.LogWarning(
+                "❌ Refusing CreateVM command: Node not fully initialized. " +
+                "Waiting for SchedulingConfig from orchestrator (current version: {Version}). " +
+                "This command will be retried.",
+                _nodeMetadata.GetSchedulingConfigVersion());
+            return false; // Command will be retried by orchestrator
+        }
+
         var root = JsonDocument.Parse(payload).RootElement;
 
         string? vmId = GetStringProperty(root, "vmId", "VmId");

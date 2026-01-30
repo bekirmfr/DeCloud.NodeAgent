@@ -1,44 +1,52 @@
-﻿/**
+/**
  * DeCloud Relay VM Dashboard - Styles
- * Version: 1.0.0
+ * Version: 2.0.0 - Updated to match DeCloud Design System
  */
 
 /* ==================== */
 /* CSS Variables        */
 /* ==================== */
 :root {
-    /* Colors - Dark Theme */
-    --primary: #10b981;
-    --primary-hover: #059669;
+    /* Colors - Aligned with DeCloud Design System */
+    --primary: #00d4aa;
+    --primary-hover: #00b894;
     --danger: #ef4444;
     --warning: #f59e0b;
-    --info: #3b82f6;
+    --info: #00a8ff;
+    --success: #10b981;
+    
     /* Backgrounds */
-    --bg-primary: #0f172a;
-    --bg-secondary: #1e293b;
-    --bg-elevated: #334155;
-    --bg-hover: #475569;
+    --bg-primary: #0a0b0f;
+    --bg-secondary: #12141a;
+    --bg-elevated: #1a1d26;
+    --bg-hover: #22262f;
+    
     /* Text */
-    --text-primary: #f1f5f9;
-    --text-secondary: #cbd5e1;
-    --text-muted: #94a3b8;
+    --text-primary: #f0f2f5;
+    --text-secondary: #9ca3af;
+    --text-muted: #6b7280;
+    
     /* Borders */
-    --border-color: #334155;
-    --border-radius: 8px;
+    --border-color: rgba(255, 255, 255, 0.1);
+    --border-subtle: rgba(255, 255, 255, 0.06);
+    --border-radius: 10px;
+    
     /* Status Colors */
-    --status-online: #10b981;
+    --status-online: #00d4aa;
     --status-warning: #f59e0b;
     --status-offline: #ef4444;
-    --status-checking: #64748b;
+    --status-checking: #6b7280;
+    
     /* Spacing */
     --spacing-xs: 0.25rem;
     --spacing-sm: 0.5rem;
     --spacing-md: 1rem;
     --spacing-lg: 1.5rem;
     --spacing-xl: 2rem;
+    
     /* Typography */
-    --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
-    --font-mono: 'SF Mono', 'Monaco', 'Cascadia Code', 'Consolas', monospace;
+    --font-sans: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-mono: 'JetBrains Mono', 'SF Mono', 'Monaco', 'Consolas', monospace;
 }
 
 /* ==================== */
@@ -242,14 +250,15 @@ body {
 /* ==================== */
 .card {
     background: var(--bg-secondary);
-    border: 1px solid var(--border-color);
-    border-radius: var(--border-radius);
+    border: 1px solid var(--border-subtle);
+    border-radius: 16px;
     overflow: hidden;
-    transition: border-color 0.2s;
+    transition: all 0.25s ease;
 }
 
     .card:hover {
-        border-color: var(--bg-hover);
+        border-color: var(--border-color);
+        transform: translateY(-2px);
     }
 
 .card-header {

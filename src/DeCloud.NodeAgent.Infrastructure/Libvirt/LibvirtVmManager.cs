@@ -1,4 +1,4 @@
-﻿using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.UserNetwork;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
@@ -1465,8 +1465,17 @@ public class LibvirtVmManager : IVmManager
         var config = _nodeMetadata.SchedulingConfig;
         var nodeTotalPoints = _nodeMetadata.PerformanceEvaluation.TotalComputePoints;
 
-        var pointsPerVCpu = (config.Tiers[spec.QualityTier].MinimumBenchmark/config.BaselineBenchmark) *
-                           (config.BaselineOvercommitRatio / config.Tiers[spec.QualityTier].CpuOvercommitRatio);
+        // Defensive: Ensure tier exists in config, fallback to Standard if not
+        if (!config.Tiers.TryGetValue(spec.QualityTier, out var tierConfig))
+        {
+            _logger.LogWarning(
+                "VM {VmId}: Tier {Tier} not found in scheduling config, falling back to Standard tier",
+                spec.Id, spec.QualityTier);
+            tierConfig = config.Tiers[QualityTier.Standard];
+        }
+
+        var pointsPerVCpu = (tierConfig.MinimumBenchmark/config.BaselineBenchmark) *
+                           (config.BaselineOvercommitRatio / tierConfig.CpuOvercommitRatio);
 
         spec.ComputePointCost = (int)(spec.VirtualCpuCores * pointsPerVCpu);
         int cpuShares;
@@ -1717,8 +1726,18 @@ public class LibvirtVmManager : IVmManager
         // CPU SHARES CALCULATION
         // ========================================
         var config = _nodeMetadata.SchedulingConfig;
+        
+        // Defensive: Ensure tier exists in config, fallback to Standard if not
+        if (!config.Tiers.TryGetValue(spec.QualityTier, out var tierConfig))
+        {
+            _logger.LogWarning(
+                "VM {VmId}: Tier {Tier} not found in scheduling config, falling back to Standard tier",
+                spec.Id, spec.QualityTier);
+            tierConfig = config.Tiers[QualityTier.Standard];
+        }
+        
         var pointsPerVCpu = config.BaselineOvercommitRatio *
-                           (config.BaselineOvercommitRatio / config.Tiers[spec.QualityTier].CpuOvercommitRatio);
+                           (config.BaselineOvercommitRatio / tierConfig.CpuOvercommitRatio);
 
         spec.ComputePointCost = (int)(spec.VirtualCpuCores * pointsPerVCpu);
         var cpuShares = spec.ComputePointCost * 1000;

@@ -1,4 +1,4 @@
-﻿using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.Shared;
 using Microsoft.Extensions.Configuration;
@@ -25,6 +25,11 @@ public interface INodeMetadataService
     NodePerformanceEvaluation PerformanceEvaluation { get; }
     public SchedulingConfig SchedulingConfig { get; }
 
+    /// <summary>
+    /// Returns true if node has received SchedulingConfig from orchestrator
+    /// and is ready to accept VM creation commands
+    /// </summary>
+    bool IsFullyInitialized { get; }
 
     Task InitializeAsync(CancellationToken ct = default);
     void UpdatePublicIp(string publicIp);
@@ -57,6 +62,11 @@ public class NodeMetadataService : INodeMetadataService
     /// </summary>
     public SchedulingConfig? SchedulingConfig { get; private set; } = null;
 
+    /// <summary>
+    /// True when node has received SchedulingConfig from orchestrator (version > 0)
+    /// </summary>
+    public bool IsFullyInitialized => SchedulingConfig?.Version > 0;
+
     // Lock for thread-safe config updates
     private readonly SemaphoreSlim _configLock = new(1, 1);
 
@@ -87,13 +97,54 @@ public class NodeMetadataService : INodeMetadataService
         // Discover public IP
         PublicIp = await DiscoverPublicIpAsync(ct);
 
+        // Initialize with default tier configurations
+        // This ensures VMs can be created even before receiving config from orchestrator
         SchedulingConfig = new SchedulingConfig
         {
             Version = 0,  // v0 = not yet synced with Orchestrator
             BaselineBenchmark = 1000,
             BaselineOvercommitRatio = 4.0,
             MaxPerformanceMultiplier = 20.0,
-            UpdatedAt = DateTime.UtcNow
+            UpdatedAt = DateTime.UtcNow,
+            Tiers = new Dictionary<QualityTier, TierConfiguration>
+            {
+                [QualityTier.Guaranteed] = new TierConfiguration
+                {
+                    MinimumBenchmark = 1000,
+                    CpuOvercommitRatio = 1.0,
+                    StorageOvercommitRatio = 1.5,
+                    PriceMultiplier = 4.0m,
+                    Description = "Dedicated resources with guaranteed performance",
+                    TargetUseCase = "Production workloads, databases, critical services"
+                },
+                [QualityTier.Standard] = new TierConfiguration
+                {
+                    MinimumBenchmark = 1000,
+                    CpuOvercommitRatio = 1.6,
+                    StorageOvercommitRatio = 2.0,
+                    PriceMultiplier = 2.0m,
+                    Description = "Balanced performance and value",
+                    TargetUseCase = "General applications, web servers"
+                },
+                [QualityTier.Balanced] = new TierConfiguration
+                {
+                    MinimumBenchmark = 1000,
+                    CpuOvercommitRatio = 2.7,
+                    StorageOvercommitRatio = 2.5,
+                    PriceMultiplier = 1.0m,
+                    Description = "Cost-effective with moderate overcommit",
+                    TargetUseCase = "Development, testing, batch processing"
+                },
+                [QualityTier.Burstable] = new TierConfiguration
+                {
+                    MinimumBenchmark = 1000,
+                    CpuOvercommitRatio = 4.0,
+                    StorageOvercommitRatio = 3.0,
+                    PriceMultiplier = 0.5m,
+                    Description = "Low-cost with CPU quota limits",
+                    TargetUseCase = "Low-traffic websites, staging environments"
+                }
+            }
         };
 
         _ = Task.Run(async () => {
@@ -170,9 +221,18 @@ public class NodeMetadataService : INodeMetadataService
             var oldVersion = SchedulingConfig.Version;
             var oldBaseline = SchedulingConfig.BaselineBenchmark;
             var oldOvercommit = SchedulingConfig.BaselineOvercommitRatio;
+            var wasInitialized = IsFullyInitialized;
 
             // Atomic replacement
             SchedulingConfig = newConfig;
+
+            if (!wasInitialized && IsFullyInitialized)
+            {
+                _logger?.LogInformation(
+                    "✅ Node fully initialized: Received SchedulingConfig v{Version} from orchestrator. " +
+                    "Ready to accept VM commands.",
+                    newConfig.Version);
+            }
 
             _logger?.LogWarning(
                 "🔄 Scheduling config updated: v{OldVersion} → v{NewVersion}. " +
