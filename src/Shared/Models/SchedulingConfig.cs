@@ -1,9 +1,8 @@
-﻿using DeCloud.NodeAgent.Core.Models;
-
-namespace Orchestrator.Models; // or NodeAgent.Models
+// DeCloud.Shared/Models/SchedulingConfig.cs
+namespace DeCloud.Shared.Models;
 
 /// <summary>
-/// Lightweight scheduling configuration snapshot for Node Agents
+/// Lightweight scheduling configuration snapshot shared between Orchestrator and Node Agents
 /// Contains only the essential parameters needed for VM CPU quota calculations
 /// </summary>
 public class SchedulingConfig
@@ -78,4 +77,34 @@ public class TierConfiguration
     /// Target use case for this tier
     /// </summary>
     public string TargetUseCase { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Quality tier enumeration
+/// </summary>
+public enum QualityTier
+{
+    /// <summary>
+    /// Dedicated resources, guaranteed performance
+    /// Requires highest-performance nodes (4000+ benchmark)
+    /// </summary>
+    Guaranteed = 0,
+
+    /// <summary>
+    /// High performance for demanding applications
+    /// Requires high-end nodes (2500+ benchmark)
+    /// </summary>
+    Standard = 1,
+
+    /// <summary>
+    /// Balanced performance for production workloads
+    /// Requires mid-range nodes (1500+ benchmark)
+    /// </summary>
+    Balanced = 2,
+
+    /// <summary>
+    /// Best-effort, lowest cost
+    /// Minimum acceptable performance (1000+ benchmark)
+    /// </summary>
+    Burstable = 3
 }
