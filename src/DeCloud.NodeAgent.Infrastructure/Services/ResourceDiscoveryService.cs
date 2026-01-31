@@ -437,17 +437,10 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     {
         var gpus = new List<GpuInfo>();
 
-        // Quick check: does nvidia-smi exist?
-        if (!File.Exists("/usr/bin/nvidia-smi") &&
-            !File.Exists("/usr/local/bin/nvidia-smi"))
-        {
-            _logger.LogDebug("nvidia-smi not found - no GPU detected");
-            return gpus; // Return empty list immediately
-        }
-
         try
         {
-            // Try nvidia-smi first (works on both Windows and Linux)
+            // Try nvidia-smi (works on both Windows, Linux, and WSL)
+            // Don't check for file existence - just try to execute and handle failures
             var nvidiaSmi = await _executor.ExecuteAsync("nvidia-smi",
             "--query-gpu=name,pci.bus_id,memory.total,memory.used,driver_version,utilization.gpu,utilization.memory,temperature.gpu --format=csv,noheader,nounits",
             ct);
