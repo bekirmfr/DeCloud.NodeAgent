@@ -1,4 +1,4 @@
-﻿// =====================================================
+// =====================================================
 // NAT Rule Manager for Relay VMs
 // =====================================================
 //
@@ -176,6 +176,7 @@ public class NatRuleManager : INatRuleManager
 
     /// <summary>
     /// Checks if NAT rule exists for a relay VM
+    /// DEPRECATED: Use HasRulesForVmAsync() instead for comprehensive check
     /// </summary>
     public async Task<bool> RuleExistsAsync(
         string vmIp,
@@ -185,21 +186,9 @@ public class NatRuleManager : INatRuleManager
     {
         if (!_isLinux) return false;
 
-        try
-        {
-            // Check if PREROUTING rule exists using iptables directly
-            var result = await _executor.ExecuteAsync(
-                "iptables",
-                $"-t nat -C PREROUTING -p {protocol} --dport {port} " +
-                $"-j DNAT --to-destination {vmIp}:{port}",
-                ct);
-
-            return result.Success;
-        }
-        catch
-        {
-            return false;
-        }
+        // Delegate to the more comprehensive check method
+        // This checks all three required rules instead of just PREROUTING
+        return await HasRulesForVmAsync(vmIp, ct);
     }
 
     /// <summary>
@@ -308,40 +297,61 @@ public class NatRuleManager : INatRuleManager
 
     public async Task<bool> HasRulesForVmAsync(string vmIp, CancellationToken ct = default)
     {
+        if (!_isLinux) return false;
+
         try
         {
-            // Run the show command to check existing rules
+            // Check if NAT script exists first
+            if (!File.Exists(NAT_SCRIPT))
+            {
+                _logger.LogDebug(
+                    "NAT script not found at {Path}, cannot check rules for {VmIp}",
+                    NAT_SCRIPT, vmIp);
+                return false;
+            }
+
+            // Run the check command to verify existing rules
             var result = await _executor.ExecuteAsync(
-                "/usr/local/bin/decloud-relay-nat",
+                NAT_SCRIPT,
                 $"check {vmIp}",
                 ct);
 
             if (!result.Success)
             {
-                _logger.LogDebug("NAT check failed for {VmIp}, assuming rules missing", vmIp);
+                // Use Debug instead of Warning - this is expected when rules don't exist
+                _logger.LogDebug(
+                    "NAT check command failed for {VmIp} (exit code {ExitCode}), rules likely missing",
+                    vmIp, result.ExitCode);
                 return false;
             }
 
             // Parse output to verify all three required rules exist
             var output = result.StandardOutput;
-            bool hasPreroutingRule = output.Contains($"DNAT") && output.Contains($"{vmIp}:51820");
-            bool hasPostroutingRule = output.Contains($"MASQUERADE") && output.Contains(vmIp);
-            bool hasForwardRule = output.Contains($"ACCEPT") && output.Contains($"{vmIp}") && output.Contains("51820");
+            bool hasPreroutingRule = output.Contains("DNAT") && output.Contains($"{vmIp}:51820");
+            bool hasPostroutingRule = output.Contains("MASQUERADE") && output.Contains(vmIp);
+            bool hasForwardRule = output.Contains("ACCEPT") && output.Contains(vmIp) && output.Contains("51820");
 
             var allRulesPresent = hasPreroutingRule && hasPostroutingRule && hasForwardRule;
 
             if (!allRulesPresent)
             {
-                _logger.LogWarning(
+                // Use Debug instead of Warning for first detection
+                _logger.LogDebug(
                     "Incomplete NAT rules for {VmIp}: PREROUTING={PreRouting}, POSTROUTING={PostRouting}, FORWARD={Forward}",
                     vmIp, hasPreroutingRule, hasPostroutingRule, hasForwardRule);
+            }
+            else
+            {
+                _logger.LogTrace(
+                    "All NAT rules verified for {VmIp}: PREROUTING=✓, POSTROUTING=✓, FORWARD=✓",
+                    vmIp);
             }
 
             return allRulesPresent;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error checking NAT rules for {VmIp}", vmIp);
+            _logger.LogWarning(ex, "Error checking NAT rules for {VmIp}", vmIp);
             return false;
         }
     }

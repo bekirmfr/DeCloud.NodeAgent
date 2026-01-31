@@ -1,4 +1,4 @@
-﻿using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -12,6 +12,12 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
         private readonly ILogger<VmHealthService> _logger;
 
         private static readonly TimeSpan HealthCheckInterval = TimeSpan.FromMinutes(1);
+        private static readonly TimeSpan NatCheckInterval = TimeSpan.FromMinutes(10); // Only check NAT every 10 minutes
+        
+        // Track last NAT check time per VM to avoid excessive checking
+        private readonly Dictionary<string, DateTime> _lastNatCheckByVm = new();
+        private readonly SemaphoreSlim _natCheckLock = new(1, 1);
+
         public VmHealthService(
             IVmManager vmManager,
             INatRuleManager natRuleManager,
@@ -74,6 +80,25 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
 
             foreach (var vm in relayVms.Where(v => v.Spec.VmType == VmType.Relay))
             {
+                // Check if we recently verified NAT rules for this VM
+                await _natCheckLock.WaitAsync(ct);
+                try
+                {
+                    if (_lastNatCheckByVm.TryGetValue(vm.VmId, out var lastCheck))
+                    {
+                        var timeSinceLastCheck = DateTime.UtcNow - lastCheck;
+                        if (timeSinceLastCheck < NatCheckInterval)
+                        {
+                            // Skip check - we verified recently
+                            continue;
+                        }
+                    }
+                }
+                finally
+                {
+                    _natCheckLock.Release();
+                }
+
                 var vmIp = await _vmManager.GetVmIpAddressAsync(vm.VmId);
 
                 if (vmIp == null)
@@ -84,11 +109,9 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                     continue;
                 }
 
-                // Check if NAT rules exist for THIS specific VM IP
-                var hasNatRules = await _natRuleManager.RuleExistsAsync(vmIp,
-                    51820,
-                    "udp",
-                    ct);
+                // Use the proper NAT script check method instead of raw iptables
+                // This checks all three required rules: PREROUTING, POSTROUTING, FORWARD
+                var hasNatRules = await _natRuleManager.HasRulesForVmAsync(vmIp, ct);
 
                 if (!hasNatRules)
                 {
@@ -96,13 +119,38 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                         "Relay VM {VmId} at {Ip} missing NAT rules - reconfiguring",
                         vm.VmId, vmIp);
 
-                    await _natRuleManager.AddPortForwardingAsync(vmIp, 51820, "udp");
+                    var success = await _natRuleManager.AddPortForwardingAsync(vmIp, 51820, "udp", ct);
+                    
+                    if (success)
+                    {
+                        // Update last check time after successful configuration
+                        await _natCheckLock.WaitAsync(ct);
+                        try
+                        {
+                            _lastNatCheckByVm[vm.VmId] = DateTime.UtcNow;
+                        }
+                        finally
+                        {
+                            _natCheckLock.Release();
+                        }
+                    }
                 }
                 else
                 {
                     _logger.LogDebug(
-                        "Relay VM {VmId} at {Ip} has NAT rules configured",
+                        "✓ Relay VM {VmId} at {Ip} has complete NAT rules",
                         vm.VmId, vmIp);
+
+                    // Update last check time - rules verified OK
+                    await _natCheckLock.WaitAsync(ct);
+                    try
+                    {
+                        _lastNatCheckByVm[vm.VmId] = DateTime.UtcNow;
+                    }
+                    finally
+                    {
+                    _natCheckLock.Release();
+                    }
                 }
             }
         }
