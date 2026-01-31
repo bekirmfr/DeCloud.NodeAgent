@@ -1,4 +1,5 @@
 using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Interfaces.UserNetwork;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
@@ -23,6 +24,7 @@ public class LibvirtVmManagerOptions
 public class LibvirtVmManager : IVmManager
 {
     private readonly INodeMetadataService _nodeMetadata;
+    private readonly INodeStateService _nodeState;
     private readonly ICommandExecutor _executor;
     private readonly IImageManager _imageManager;
     private readonly ICloudInitTemplateService _templateService;
@@ -47,12 +49,14 @@ public class LibvirtVmManager : IVmManager
         ICloudInitTemplateService templateService,
         IUserWireGuardManager userWireGuardManager,
         INodeMetadataService nodeMetadata,
+        INodeStateService nodeState,
         ILogger<LibvirtVmManager> logger)
     {
         _executor = executor;
         _imageManager = imageManager;
         _templateService = templateService;
         _nodeMetadata = nodeMetadata;
+        _nodeState = nodeState;
         _userWireGuardManager = userWireGuardManager;
         _logger = logger;
         _options = options.Value;
@@ -1462,8 +1466,23 @@ public class LibvirtVmManager : IVmManager
 
         // Formula: PointsPerVCpu = baselineOvercommit × (baselineOvercommit / tierOvercommit)
 
-        var config = _nodeMetadata.SchedulingConfig;
-        var nodeTotalPoints = _nodeMetadata.PerformanceEvaluation.TotalComputePoints;
+        // Defensive: Ensure node is fully initialized before creating VMs
+        if (_nodeState.SchedulingConfig == null)
+        {
+            throw new InvalidOperationException(
+                "Cannot create VM: Node has not received scheduling configuration. " +
+                "Please ensure the node has successfully registered with the orchestrator.");
+        }
+        
+        if (_nodeState.PerformanceEvaluation == null)
+        {
+            throw new InvalidOperationException(
+                "Cannot create VM: Node has not completed performance evaluation. " +
+                "Please ensure the node has successfully registered with the orchestrator.");
+        }
+        
+        var config = _nodeState.SchedulingConfig;
+        var nodeTotalPoints = _nodeState.PerformanceEvaluation.TotalComputePoints;
 
         // Defensive: Ensure tier exists in config, fallback to Standard if not
         if (!config.Tiers.TryGetValue(spec.QualityTier, out var tierConfig))
@@ -1725,7 +1744,7 @@ public class LibvirtVmManager : IVmManager
         // ========================================
         // CPU SHARES CALCULATION
         // ========================================
-        var config = _nodeMetadata.SchedulingConfig;
+        var config = _nodeState.SchedulingConfig;
         
         // Defensive: Ensure tier exists in config, fallback to Standard if not
         if (!config.Tiers.TryGetValue(spec.QualityTier, out var tierConfig))

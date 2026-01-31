@@ -1,4 +1,4 @@
-﻿// Updated HeartbeatService.cs for Node Agent
+// Updated HeartbeatService.cs for Node Agent
 // Sends detailed VM information with each heartbeat
 
 using DeCloud.NodeAgent.Core.Interfaces;
@@ -49,7 +49,35 @@ public class HeartbeatService : BackgroundService
         // Wait for node to be registered
         await _nodeState.WaitForAuthenticationAsync(ct);
 
-        _logger.LogInformation("✓ Node registered, starting heartbeats");
+        _logger.LogInformation("✓ Node registered, fetching orchestrator state...");
+
+        // Fetch orchestrator state data on startup (critical for VM creation)
+        // This ensures PerformanceEvaluation and SchedulingConfig are populated even after node restarts
+        try
+        {
+            var perfEval = await _orchestratorClient.GetPerformanceEvaluationAsync(ct);
+            if (perfEval != null)
+            {
+                _nodeState.UpdatePerformanceEvaluation(perfEval);
+                _logger.LogInformation(
+                    "✓ Performance evaluation loaded: {Score} score, {Points} total points",
+                    perfEval.BenchmarkScore, perfEval.TotalComputePoints);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "⚠️  Failed to load performance evaluation on startup. " +
+                    "VM creation will be blocked until first successful evaluation.");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, 
+                "Failed to fetch performance evaluation on startup. " +
+                "VM creation will be blocked until evaluation is available.");
+        }
+
+        _logger.LogInformation("Starting heartbeat loop");
 
         // Send heartbeats
         while (!ct.IsCancellationRequested)
@@ -175,7 +203,7 @@ public class HeartbeatService : BackgroundService
                 Status = _nodeState.Status,
                 Resources = snapshot,
                 ActiveVms = vmSummaries,  // Now includes VncPort, MacAddress, EncryptedPassword
-                SchedulingConfigVersion = _nodeMetadata.GetSchedulingConfigVersion(),
+                SchedulingConfigVersion = _nodeState.SchedulingConfig?.Version ?? 0,
                 CgnatInfo = cgnatInfo
             };
 
@@ -252,7 +280,7 @@ public class HeartbeatService : BackgroundService
                 "VM {VmId} ({Name}) is ready - calculating Burstable tier quota (uptime: {Uptime:F0}s)",
                 vm.VmId, vm.Name, uptime);
 
-            var performanceEval = _nodeMetadata.PerformanceEvaluation;
+            var performanceEval = _nodeState.PerformanceEvaluation;
             if (performanceEval == null)
             {
                 _logger.LogWarning("VM {VmId}: Performance evaluation not available, skipping quota", vm.VmId);

@@ -1,4 +1,4 @@
-﻿// =====================================================================
+// =====================================================================
 // INodeStateService - Node State Interface
 // =====================================================================
 // File: src/DeCloud.NodeAgent.Core/Interfaces/INodeStateService.cs
@@ -8,6 +8,7 @@
 // =====================================================================
 
 using DeCloud.NodeAgent.Core.Models;
+using Orchestrator.Models;
 
 namespace DeCloud.NodeAgent.Core.Interfaces.State;
 
@@ -61,6 +62,28 @@ public interface INodeStateService
     public bool IsOnline {  get; }
 
     // ================================================================
+    // ORCHESTRATOR STATE DATA
+    // ================================================================
+
+    /// <summary>
+    /// Current performance evaluation from orchestrator
+    /// Null until fetched/received from orchestrator
+    /// </summary>
+    NodePerformanceEvaluation? PerformanceEvaluation { get; }
+
+    /// <summary>
+    /// Current scheduling configuration from orchestrator
+    /// Contains tier configurations and overcommit ratios
+    /// </summary>
+    SchedulingConfig? SchedulingConfig { get; }
+
+    /// <summary>
+    /// Whether node has received both SchedulingConfig and PerformanceEvaluation
+    /// Required before VM creation can proceed
+    /// </summary>
+    bool IsFullyInitialized { get; }
+
+    // ================================================================
     // CONNECTION STATE
     // ================================================================
 
@@ -112,6 +135,16 @@ public interface INodeStateService
     void SetOrchestratorReachable(bool isReachable);
     void RecordHeartbeat(bool success);
     void RecordSync(bool success);
+    
+    /// <summary>
+    /// Update performance evaluation from orchestrator
+    /// </summary>
+    void UpdatePerformanceEvaluation(NodePerformanceEvaluation evaluation);
+    
+    /// <summary>
+    /// Update scheduling configuration from orchestrator
+    /// </summary>
+    void UpdateSchedulingConfig(SchedulingConfig config);
 
     // ================================================================
     // ASYNC WAITERS
@@ -141,6 +174,12 @@ public interface INodeStateService
     /// <param name="ct">A cancellation token that can be used to cancel the wait operation.</param>
     /// <returns>A task that represents the asynchronous wait operation.</returns>
     Task WaitForOrchestratorAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Wait until node has received both SchedulingConfig and PerformanceEvaluation from orchestrator
+    /// Required before VM creation can proceed
+    /// </summary>
+    Task WaitForInitializationAsync(CancellationToken ct = default);
 
     // ================================================================
     // SNAPSHOT

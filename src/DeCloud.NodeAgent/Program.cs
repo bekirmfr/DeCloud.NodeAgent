@@ -204,6 +204,7 @@ var app = builder.Build();
 
 var nodeMetadata = app.Services.GetRequiredService<INodeMetadataService>();
 await nodeMetadata.InitializeAsync();
+
 var orchestratorClient = app.Services.GetRequiredService<IOrchestratorClient>();
 await orchestratorClient.InitializeAsync();
 

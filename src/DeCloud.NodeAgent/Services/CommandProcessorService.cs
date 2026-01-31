@@ -1,4 +1,5 @@
 using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using Microsoft.Extensions.Options;
@@ -20,6 +21,7 @@ public class CommandProcessorService : BackgroundService
     private readonly IResourceDiscoveryService _resourceDiscovery;
     private readonly INatRuleManager _natRuleManager;
     private readonly INodeMetadataService _nodeMetadata;
+    private readonly INodeStateService _nodeState;
     private readonly ILogger<CommandProcessorService> _logger;
     private readonly CommandProcessorOptions _options;
 
@@ -42,6 +44,7 @@ public class CommandProcessorService : BackgroundService
         IResourceDiscoveryService resourceDiscovery,
         INatRuleManager natRuleManager,
         INodeMetadataService nodeMetadata,
+        INodeStateService nodeState,
         IOptions<CommandProcessorOptions> options,
         ILogger<CommandProcessorService> logger)
     {
@@ -51,6 +54,7 @@ public class CommandProcessorService : BackgroundService
         _resourceDiscovery = resourceDiscovery;
         _natRuleManager = natRuleManager;
         _nodeMetadata = nodeMetadata;
+        _nodeState = nodeState;
         _logger = logger;
         _options = options.Value;
     }
@@ -207,15 +211,16 @@ public class CommandProcessorService : BackgroundService
         // ========================================
         // INITIALIZATION CHECK
         // ========================================
-        // Refuse VM creation commands until node has received SchedulingConfig from orchestrator
-        // This prevents crashes when targeted deployment sends commands before first heartbeat
-        if (!_nodeMetadata.IsFullyInitialized)
+        // Refuse VM creation commands until node has received SchedulingConfig and PerformanceEvaluation
+        // from orchestrator. This prevents crashes when targeted deployment sends commands before first registration/heartbeat.
+        if (!_nodeState.IsFullyInitialized)
         {
             _logger.LogWarning(
                 "❌ Refusing CreateVM command: Node not fully initialized. " +
-                "Waiting for SchedulingConfig from orchestrator (current version: {Version}). " +
+                "Waiting for SchedulingConfig (v{ConfigVersion}) and PerformanceEvaluation ({PerfStatus}) from orchestrator. " +
                 "This command will be retried.",
-                _nodeMetadata.GetSchedulingConfigVersion());
+                _nodeState.SchedulingConfig?.Version ?? 0,
+                _nodeState.PerformanceEvaluation != null ? "received" : "pending");
             return false; // Command will be retried by orchestrator
         }
 

@@ -1,4 +1,4 @@
-﻿// OrchestratorClient with Wallet Signature Authentication
+// OrchestratorClient with Wallet Signature Authentication
 // Stateless authentication - no tokens, no expiration, no re-registration!
 
 using DeCloud.NodeAgent.Core.Interfaces;
@@ -79,10 +79,17 @@ public partial class OrchestratorClient : IOrchestratorClient
     public async Task InitializeAsync(CancellationToken ct = default)
     {
         await LoadCredentialsAsync();
+
         var isInternetReachable = await IsInternetReachableAsync(ct);
         _nodeState.SetInternetReachable(isInternetReachable);
+
         var isOrchestratorReachable = await IsOrchestratorReachableAsync(ct);
         _nodeState.SetOrchestratorReachable(isOrchestratorReachable);
+
+        // Pre-fetch performance evaluation and scheduling config
+        // Node state is updated within these methods
+        await GetPerformanceEvaluationAsync(ct);
+        await GetSchedulingConfigAsync(ct);
 
         _logger.LogInformation("OrchestratorClient initialized with wallet: {Wallet} \n" +
             "internet connection: {Internet}" +
@@ -363,11 +370,11 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                     await SaveOrchestratorPublicKeyAsync(_orchestratorPublicKey, ct);
 
                     var performanceEval = registrationResponse.PerformanceEvaluation ?? throw new ArgumentNullException(nameof(registrationResponse.PerformanceEvaluation));
-                    _nodeMetadata.UpdatePerformanceEvaluation(performanceEval);
+                    _nodeState.UpdatePerformanceEvaluation(performanceEval);
                     _logger.LogInformation($"✓ Performance evaluation received and updated with cpu benchmark score {performanceEval.BenchmarkScore}, total compute points {performanceEval.TotalComputePoints}");
 
                     var schedulingConfig = registrationResponse.SchedulingConfig ?? throw new ArgumentNullException(nameof(registrationResponse.SchedulingConfig));
-                    _nodeMetadata.UpdateSchedulingConfig(schedulingConfig);
+                    _nodeState.UpdateSchedulingConfig(schedulingConfig);
                     _logger.LogInformation($"✓ Scheduling configuration version {schedulingConfig.Version} received and updated");
 
                     _logger.LogInformation(
@@ -619,7 +626,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 {
                     _logger.LogInformation("Received updated scheduling configuration version {Version}",
                         schedulingConfig.Version);
-                    _nodeMetadata.UpdateSchedulingConfig(schedulingConfig);
+                    _nodeState.UpdateSchedulingConfig(schedulingConfig);
                 }
             }
 

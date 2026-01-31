@@ -1,4 +1,4 @@
-﻿// =====================================================================
+// =====================================================================
 // OrchestratorClient Extension - /api/nodes/me Endpoints Implementation
 // =====================================================================
 // File: src/DeCloud.NodeAgent/Services/OrchestratorClient.NodeMe.cs
@@ -120,8 +120,8 @@ public partial class OrchestratorClient
                     "✓ Scheduling config received: v{Version}, Baseline={Baseline}, Overcommit={Overcommit:F1}",
                     config.Version, config.BaselineBenchmark, config.BaselineOvercommitRatio);
 
-                // Update local metadata service
-                _nodeMetadata.UpdateSchedulingConfig(new SchedulingConfig
+                // Update local state service
+                _nodeState.UpdateSchedulingConfig(new SchedulingConfig
                 {
                     Version = config.Version,
                     BaselineBenchmark = config.BaselineBenchmark,
@@ -186,8 +186,8 @@ public partial class OrchestratorClient
                     evaluation.HighestTier,
                     evaluation.TotalComputePoints);
 
-                // Update local metadata service
-                _nodeMetadata.UpdatePerformanceEvaluation(evaluation);
+                // Update local state service
+                _nodeState.UpdatePerformanceEvaluation(evaluation);
             }
 
             return evaluation;
@@ -307,8 +307,8 @@ public partial class OrchestratorClient
                     evaluation.HighestTier,
                     evaluation.IsAcceptable);
 
-                // Update local metadata service
-                _nodeMetadata.UpdatePerformanceEvaluation(evaluation);
+                // Update local state service
+                _nodeState.UpdatePerformanceEvaluation(evaluation);
             }
 
             return evaluation;

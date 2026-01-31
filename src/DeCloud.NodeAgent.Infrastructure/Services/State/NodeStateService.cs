@@ -1,4 +1,4 @@
-﻿// =====================================================================
+// =====================================================================
 // NodeStateService - Fixed Implementation
 // =====================================================================
 // File: src/DeCloud.NodeAgent.Infrastructure/Services/State/NodeStateService.cs
@@ -9,9 +9,12 @@
 // 3. WaitForDiscoveryAsync now works correctly
 // =====================================================================
 
+using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.Shared;
 using Microsoft.Extensions.Logging;
+using Orchestrator.Models;
 
 namespace DeCloud.NodeAgent.Infrastructure.Services;
 
@@ -38,6 +41,13 @@ public class NodeStateService : INodeStateService
     private int _consecutiveFailures;
 
     // ================================================================
+    // ORCHESTRATOR STATE DATA
+    // ================================================================
+
+    private NodePerformanceEvaluation? _performanceEvaluation;
+    private SchedulingConfig? _schedulingConfig;
+
+    // ================================================================
     // ASYNC WAITERS
     // ================================================================
 
@@ -45,6 +55,7 @@ public class NodeStateService : INodeStateService
     private TaskCompletionSource _discoveryComplete = new();
     private TaskCompletionSource _internetComplete = new();
     private TaskCompletionSource _orchestratorComplete = new();
+    private TaskCompletionSource _initializationComplete = new();
 
     // ================================================================
     // CONSTANTS
@@ -61,7 +72,7 @@ public class NodeStateService : INodeStateService
         _logger = logger;
         StartedAt = DateTime.UtcNow;
 
-        _logger.LogInformation("NodeStateService initialized at {StartedAt}", StartedAt);
+        _logger.LogInformation("NodeStateService started at {StartedAt}", StartedAt);
     }
 
     // ================================================================
@@ -131,6 +142,35 @@ public class NodeStateService : INodeStateService
     public bool IsInternetReachable
     {
         get { lock (_lock) return _isInternetReachable; }
+    }
+
+    // ================================================================
+    // PROPERTIES - Orchestrator State Data
+    // ================================================================
+
+    public NodePerformanceEvaluation? PerformanceEvaluation
+    {
+        get { lock (_lock) return _performanceEvaluation; }
+    }
+
+    public SchedulingConfig? SchedulingConfig
+    {
+        get { lock (_lock) return _schedulingConfig; }
+    }
+
+    /// <summary>
+    /// True when node has received both SchedulingConfig and PerformanceEvaluation
+    /// Both are required for VM creation to work correctly
+    /// </summary>
+    public bool IsFullyInitialized
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _schedulingConfig?.Version > 0 && _performanceEvaluation != null;
+            }
+        }
     }
 
     // ================================================================
@@ -314,6 +354,86 @@ public class NodeStateService : INodeStateService
         }
     }
 
+    /// <summary>
+    /// Update performance evaluation from orchestrator
+    /// </summary>
+    public void UpdatePerformanceEvaluation(NodePerformanceEvaluation evaluation)
+    {
+        lock (_lock)
+        {
+            _performanceEvaluation = evaluation;
+            
+            _logger.LogInformation(
+                "✓ Performance evaluation updated: {Score} score, {Points} total points",
+                evaluation.BenchmarkScore, evaluation.TotalComputePoints);
+
+            // Check if now fully initialized
+            CheckInitializationComplete();
+        }
+    }
+
+    /// <summary>
+    /// Update scheduling configuration from orchestrator
+    /// </summary>
+    public void UpdateSchedulingConfig(SchedulingConfig config)
+    {
+        lock (_lock)
+        {
+            if (config == null)
+            {
+                _logger.LogWarning("Attempted to update config with null, ignoring");
+                return;
+            }
+
+            // Validate config
+            if (config.BaselineBenchmark <= 0)
+            {
+                _logger.LogError(
+                    "Invalid config: BaselineBenchmark={Baseline} must be positive",
+                    config.BaselineBenchmark);
+                return;
+            }
+
+            if (config.BaselineOvercommitRatio <= 0)
+            {
+                _logger.LogError(
+                    "Invalid config: BaselineOvercommitRatio={Overcommit} must be positive",
+                    config.BaselineOvercommitRatio);
+                return;
+            }
+
+            // Only update if version is newer or first time
+            if (_schedulingConfig == null || config.Version > _schedulingConfig.Version)
+            {
+                var oldVersion = _schedulingConfig?.Version ?? 0;
+                var wasInitialized = IsFullyInitialized;
+                
+                _schedulingConfig = config;
+
+                _logger.LogInformation(
+                    "🔄 Scheduling config updated: v{OldVersion} → v{NewVersion}",
+                    oldVersion, config.Version);
+
+                // Check if now fully initialized
+                CheckInitializationComplete();
+
+                if (!wasInitialized && IsFullyInitialized)
+                {
+                    _logger.LogInformation(
+                        "✅ Node fully initialized: Received both SchedulingConfig v{Version} " +
+                        "and PerformanceEvaluation. Ready to accept VM commands.",
+                        config.Version);
+                }
+            }
+            else if (config.Version < _schedulingConfig.Version)
+            {
+                _logger.LogWarning(
+                    "Received older config v{NewVersion} (current: v{CurrentVersion}), ignoring",
+                    config.Version, _schedulingConfig.Version);
+            }
+        }
+    }
+
     // ================================================================
     // ASYNC WAITERS
     // ================================================================
@@ -347,6 +467,14 @@ public class NodeStateService : INodeStateService
         if (IsOrchestratorReachable)
             return;
         await _orchestratorComplete.Task.WaitAsync(ct);
+    }
+
+    public async Task WaitForInitializationAsync(CancellationToken ct = default)
+    {
+        if (IsFullyInitialized)
+            return;
+
+        await _initializationComplete.Task.WaitAsync(ct);
     }
 
     // ================================================================
@@ -389,6 +517,14 @@ public class NodeStateService : INodeStateService
             _logger.LogInformation(
                 "Node status changed: {OldStatus} → {NewStatus}",
                 oldStatus, status);
+        }
+    }
+
+    private void CheckInitializationComplete()
+    {
+        if (IsFullyInitialized && !_initializationComplete.Task.IsCompleted)
+        {
+            _initializationComplete.TrySetResult();
         }
     }
 }

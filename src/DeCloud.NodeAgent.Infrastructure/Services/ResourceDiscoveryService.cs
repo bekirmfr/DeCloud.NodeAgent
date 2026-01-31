@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
@@ -618,7 +618,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         var gpus = await GetGpuInfoAsync(ct);
 
         // ✅ Get compute points from performance evaluation
-        var performanceEval = _nodeMetadata.PerformanceEvaluation;
+        var performanceEval = _nodeState.PerformanceEvaluation;
         var totalComputePoints = performanceEval?.TotalComputePoints ?? 0;
 
         return new ResourceSnapshot
