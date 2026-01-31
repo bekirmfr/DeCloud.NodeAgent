@@ -456,8 +456,9 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         return storageList;
     }
 
-    // Cache GPU detection result to avoid repeated failures
+    // Cache GPU detection result to avoid repeated failures and slow nvidia-smi calls
     private bool? _hasGpuSupport = null;
+    private List<GpuInfo>? _cachedGpuList = null;
     private readonly SemaphoreSlim _gpuCheckLock = new(1, 1);
 
     public async Task<List<GpuInfo>> GetGpuInfoAsync(CancellationToken ct = default, bool forceRecheck = false)
@@ -468,9 +469,16 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         {
             // Check cached result first to avoid repeated nvidia-smi failures
             // But allow forced recheck during full discovery
-            if (_hasGpuSupport == false && !forceRecheck)
+            if (!forceRecheck)
             {
-                return gpus;
+                if (_hasGpuSupport == false)
+                {
+                    return gpus; // No GPU support, return empty list
+                }
+                if (_cachedGpuList != null)
+                {
+                    return _cachedGpuList; // Return cached GPU list
+                }
             }
 
             // Find nvidia-smi path first (important for WSL and systemd services)
@@ -544,10 +552,11 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                     try
                     {
                         _hasGpuSupport = true;
+                        _cachedGpuList = gpus;
                     }
                     finally
                     {
-                    _gpuCheckLock.Release();
+                        _gpuCheckLock.Release();
                     }
                 }
             }
