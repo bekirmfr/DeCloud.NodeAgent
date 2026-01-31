@@ -439,9 +439,19 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
         try
         {
+            // Find nvidia-smi path first (important for WSL and systemd services)
+            string nvidiaSmiPath = await FindNvidiaSmiPathAsync(ct);
+            
+            if (string.IsNullOrEmpty(nvidiaSmiPath))
+            {
+                _logger.LogDebug("nvidia-smi not found in PATH - no GPU detected");
+                return gpus;
+            }
+
+            _logger.LogDebug("Found nvidia-smi at: {Path}", nvidiaSmiPath);
+
             // Try nvidia-smi (works on both Windows, Linux, and WSL)
-            // Don't check for file existence - just try to execute and handle failures
-            var nvidiaSmi = await _executor.ExecuteAsync("nvidia-smi",
+            var nvidiaSmi = await _executor.ExecuteAsync(nvidiaSmiPath,
             "--query-gpu=name,pci.bus_id,memory.total,memory.used,driver_version,utilization.gpu,utilization.memory,temperature.gpu --format=csv,noheader,nounits",
             ct);
 
@@ -582,6 +592,55 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         }
 
         return info;
+    }
+
+    /// <summary>
+    /// Find the full path to nvidia-smi by checking common locations and using 'which'
+    /// Returns the full path if found, empty string otherwise
+    /// </summary>
+    private async Task<string> FindNvidiaSmiPathAsync(CancellationToken ct)
+    {
+        // Common paths for nvidia-smi
+        var commonPaths = new[]
+        {
+            "/usr/bin/nvidia-smi",
+            "/usr/local/bin/nvidia-smi",
+            "/usr/local/cuda/bin/nvidia-smi",
+            "/opt/cuda/bin/nvidia-smi",
+            "C:\\Windows\\System32\\nvidia-smi.exe",
+            "C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe"
+        };
+
+        // First, check common paths
+        foreach (var path in commonPaths)
+        {
+            if (File.Exists(path))
+            {
+                return path;
+            }
+        }
+
+        // If not found in common paths, try using 'which' (Linux/WSL) or 'where' (Windows)
+        try
+        {
+            var whichCommand = _isWindows ? "where" : "which";
+            var result = await _executor.ExecuteAsync(whichCommand, "nvidia-smi", ct);
+            
+            if (result.Success && !string.IsNullOrWhiteSpace(result.StandardOutput))
+            {
+                var path = result.StandardOutput.Trim().Split('\n')[0].Trim();
+                if (!string.IsNullOrEmpty(path) && File.Exists(path))
+                {
+                    return path;
+                }
+            }
+        }
+        catch
+        {
+            // Ignore errors from which/where command
+        }
+
+        return string.Empty;
     }
 
     /// <summary>
