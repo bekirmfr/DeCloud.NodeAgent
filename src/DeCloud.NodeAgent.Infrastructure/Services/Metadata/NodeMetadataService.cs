@@ -1,9 +1,9 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.Shared;
-using DeCloud.Shared.Models;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Orchestrator.Models;
 
 public interface INodeMetadataService
 {

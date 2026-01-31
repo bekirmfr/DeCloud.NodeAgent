@@ -1,5 +1,3 @@
-using DeCloud.Shared.Models;
-
 namespace DeCloud.NodeAgent.Core.Models;
 
 /// <summary>
@@ -26,7 +24,7 @@ public class VmSpec
 
     // Quality tier and point cost
     public QualityTier QualityTier { get; set; } = QualityTier.Standard;  // 0=Guaranteed, 1=Standard, 3=Balanced, 3=Burstable
-    public int ComputePointCost { get; set; } = 0; // Total points (vCPUs ? pointsPerVCpu)
+    public int ComputePointCost { get; set; } = 0; // Total points (vCPUs × pointsPerVCpu)
 
     // Image source
     public string BaseImageUrl { get; set; } = string.Empty;  // URL to download base image
@@ -117,7 +115,32 @@ public enum VmType
     Inference
 }
 
-// QualityTier enum moved to DeCloud.Shared.Models.SchedulingConfig.cs
+public enum QualityTier
+{
+    /// <summary>
+    /// Dedicated resources, guaranteed performance
+    /// Requires highest-performance nodes (4000+ benchmark)
+    /// </summary>
+    Guaranteed = 0,
+
+    /// <summary>
+    /// High performance for demanding applications
+    /// Requires high-end nodes (2500+ benchmark)
+    /// </summary>
+    Standard = 1,
+
+    /// <summary>
+    /// Balanced performance for production workloads
+    /// Requires mid-range nodes (1500+ benchmark)
+    /// </summary>
+    Balanced = 2,
+
+    /// <summary>
+    /// Best-effort, lowest cost
+    /// Minimum acceptable performance (1000+ benchmark)
+    /// </summary>
+    Burstable = 3
+}
 
 /// <summary>
 /// Capability information for a specific tier
