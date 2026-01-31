@@ -23,7 +23,9 @@ public class CommandExecutor : ICommandExecutor
     {
         var sw = Stopwatch.StartNew();
         
-        _logger.LogDebug("Executing: {Command} {Arguments}", command, arguments);
+        // Use Trace for command execution to reduce log noise
+        // Only Debug/Warning will be logged for slow or failed commands
+        _logger.LogTrace("Executing: {Command} {Arguments}", command, arguments);
 
         // If the cancellation token is already cancelled (e.g., during shutdown), 
         // use a much shorter timeout to fail fast
@@ -83,7 +85,16 @@ public class CommandExecutor : ICommandExecutor
 
             if (result.Success)
             {
-                _logger.LogDebug("Command succeeded in {Duration}ms", sw.ElapsedMilliseconds);
+                // Only log Debug for slow commands (>100ms), use Trace for quick ones
+                if (sw.ElapsedMilliseconds > 100)
+                {
+                    _logger.LogDebug("Command succeeded in {Duration}ms: {Command}", 
+                        sw.ElapsedMilliseconds, command);
+                }
+                else
+                {
+                    _logger.LogTrace("Command succeeded in {Duration}ms", sw.ElapsedMilliseconds);
+                }
             }
             else
             {

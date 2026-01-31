@@ -1,4 +1,4 @@
-﻿using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces;
 using Microsoft.AspNetCore.Mvc;
 using System.Net.WebSockets;
 
@@ -106,7 +106,8 @@ public class GenericProxyController : ControllerBase
             var queryString = Request.QueryString.HasValue ? Request.QueryString.Value : "";
             var targetUrl = $"http://{vmIp}:{port}{targetPath}{queryString}";
 
-            _logger.LogDebug(
+            // Use Trace for routine proxy requests to reduce log noise
+            _logger.LogTrace(
                 "Proxying HTTP {Method} for VM {VmId} to {Url}",
                 Request.Method, vmId, targetUrl);
 
@@ -119,7 +120,8 @@ public class GenericProxyController : ControllerBase
         }
         catch (TaskCanceledException)
         {
-            _logger.LogWarning("HTTP proxy timeout for VM {VmId} port {Port}", vmId, port);
+            // Only log warning if timeout is unusual (not for known slow endpoints)
+            _logger.LogDebug("HTTP proxy timeout for VM {VmId} port {Port}", vmId, port);
             return StatusCode(504, new { error = "Request timeout" });
         }
         catch (HttpRequestException ex)
