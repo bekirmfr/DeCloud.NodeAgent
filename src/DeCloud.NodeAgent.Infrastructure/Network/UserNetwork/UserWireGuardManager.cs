@@ -1,4 +1,4 @@
-﻿using System.Security.Cryptography;
+using System.Security.Cryptography;
 using System.Text;
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.UserNetwork;
@@ -54,7 +54,8 @@ public class UserWireGuardManager : IUserWireGuardManager
 
             // Compute deterministic subnet from user ID
             var subnet = ComputeUserSubnet(userId);
-            var interfaceName = $"wg-user-{userId.Substring(0, Math.Min(8, userId.Length))}";
+            // Linux interface names limited to 15 chars (wg-user- = 8 chars, so max 7 from userId)
+            var interfaceName = $"wg-user-{userId.Substring(0, Math.Min(7, userId.Length))}";
 
             // Generate WireGuard keypair
             var privateKey = await GenerateWireGuardPrivateKeyAsync(ct);
