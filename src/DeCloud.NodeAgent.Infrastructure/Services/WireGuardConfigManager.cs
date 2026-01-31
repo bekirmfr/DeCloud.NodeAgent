@@ -1,4 +1,4 @@
-﻿using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -212,6 +212,10 @@ public class WireGuardConfigManager : BackgroundService
     {
         try
         {
+            // Check if interface actually exists first
+            var checkResult = await _executor.ExecuteAsync("ip", $"link show {interfaceName}", ct);
+            bool interfaceExists = checkResult.Success;
+
             // Stop systemd service if exists
             await _executor.ExecuteAsync(
                 "systemctl",
@@ -223,20 +227,27 @@ public class WireGuardConfigManager : BackgroundService
                 $"disable wg-quick@{interfaceName}",
                 ct);
 
-            // Remove interface using wg-quick
-            await _executor.ExecuteAsync(
-                "wg-quick",
-                $"down {interfaceName}",
-                ct);
+            // Only attempt wg-quick down if config file exists
+            var configPath = $"/etc/wireguard/{interfaceName}.conf";
+            if (File.Exists(configPath))
+            {
+                // Remove interface using wg-quick
+                await _executor.ExecuteAsync(
+                    "wg-quick",
+                    $"down {interfaceName}",
+                    ct);
+            }
 
-            // Force remove via ip link (in case wg-quick failed)
-            await _executor.ExecuteAsync(
-                "ip",
-                $"link delete {interfaceName}",
-                ct);
+            // Force remove via ip link only if interface exists
+            if (interfaceExists)
+            {
+                await _executor.ExecuteAsync(
+                    "ip",
+                    $"link delete {interfaceName}",
+                    ct);
+            }
 
             // Remove config file (backup first)
-            var configPath = $"/etc/wireguard/{interfaceName}.conf";
             if (File.Exists(configPath))
             {
                 var backupPath = $"{configPath}.removed-{DateTime.UtcNow:yyyyMMdd-HHmmss}";

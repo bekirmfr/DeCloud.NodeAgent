@@ -550,10 +550,6 @@ public class LibvirtVmManager : IVmManager
                 // Non-fatal - continue with VM creation
             }
 
-            _logger.LogInformation(
-                "✓ VM {VmId} configured for auto-start on host boot",
-                spec.Id);
-
             // =====================================================
             // STEP 7: Start the VM
             // =====================================================

@@ -1,4 +1,4 @@
-﻿using DeCloud.NodeAgent.Core.Interfaces.State;
+using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using Orchestrator.Models;
 using System.Net.NetworkInformation;
@@ -35,7 +35,7 @@ public interface IResourceDiscoveryService
 {
     Task<HardwareInventory?> GetInventoryCachedAsync(CancellationToken ct = default);
     Task<HardwareInventory> DiscoverAllAsync(CancellationToken ct = default);
-    Task<CpuInfo> GetCpuInfoAsync(CancellationToken ct = default);
+    Task<CpuInfo> GetCpuInfoAsync(CancellationToken ct = default, bool runBenchmark = true);
     Task<MemoryInfo> GetMemoryInfoAsync(CancellationToken ct = default);
     Task<List<StorageInfo>> GetStorageInfoAsync(CancellationToken ct = default);
     Task<List<GpuInfo>> GetGpuInfoAsync(CancellationToken ct = default);

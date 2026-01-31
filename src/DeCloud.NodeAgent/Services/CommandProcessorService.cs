@@ -72,6 +72,11 @@ public class CommandProcessorService : BackgroundService
         var processedCommands = new HashSet<string>();
         const int maxProcessedCache = 1000;
 
+        // Exponential backoff for polling when idle
+        var currentPollInterval = _options.PollInterval;
+        var maxPollInterval = TimeSpan.FromSeconds(30);
+        var consecutiveEmptyPolls = 0;
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -91,6 +96,10 @@ public class CommandProcessorService : BackgroundService
                     _logger.LogInformation(
                         "✓ Processed {Count} pushed command(s)",
                         pushedCount);
+                    
+                    // Reset backoff when commands are processed
+                    currentPollInterval = _options.PollInterval;
+                    consecutiveEmptyPolls = 0;
                 }
 
                 // ============================================================
@@ -109,6 +118,25 @@ public class CommandProcessorService : BackgroundService
                     _logger.LogInformation(
                         "✓ Retrieved {Count} command(s) via pull",
                         pulledCommands.Count);
+                    
+                    // Reset backoff when commands found
+                    currentPollInterval = _options.PollInterval;
+                    consecutiveEmptyPolls = 0;
+                }
+                else
+                {
+                    // No commands found - increase backoff
+                    consecutiveEmptyPolls++;
+                    if (consecutiveEmptyPolls > 3)
+                    {
+                        // Exponential backoff up to max
+                        currentPollInterval = TimeSpan.FromSeconds(
+                            Math.Min(
+                                currentPollInterval.TotalSeconds * 1.5,
+                                maxPollInterval.TotalSeconds
+                            )
+                        );
+                    }
                 }
 
                 // ============================================================
@@ -125,8 +153,8 @@ public class CommandProcessorService : BackgroundService
                 _logger.LogError(ex, "Error in command processing cycle");
             }
 
-            // Poll interval (pushed commands are processed immediately)
-            await Task.Delay(_options.PollInterval, stoppingToken);
+            // Use current poll interval (with backoff)
+            await Task.Delay(currentPollInterval, stoppingToken);
         }
 
         _logger.LogInformation("Command processor stopping");

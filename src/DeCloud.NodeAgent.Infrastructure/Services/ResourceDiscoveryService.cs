@@ -21,6 +21,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     private readonly SemaphoreSlim _discoverySemaphore = new(1, 1);
     private DateTime _lastDiscoveryTime = DateTime.MinValue;
     private static readonly TimeSpan DiscoveryCacheDuration = TimeSpan.FromHours(1);
+    private int? _cachedBenchmarkScore = null;
 
     public ResourceDiscoveryService(
         ICommandExecutor executor,
@@ -112,17 +113,17 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         }
     }
 
-    public async Task<CpuInfo> GetCpuInfoAsync(CancellationToken ct = default)
+    public async Task<CpuInfo> GetCpuInfoAsync(CancellationToken ct = default, bool runBenchmark = true)
     {
         return _isWindows
-            ? await GetCpuInfoWindowsAsync(ct)
-            : await GetCpuInfoLinuxAsync(ct);
+            ? await GetCpuInfoWindowsAsync(ct, runBenchmark)
+            : await GetCpuInfoLinuxAsync(ct, runBenchmark);
     }
 
     /// <summary>
     /// Enhanced Windows CPU detection with architecture
     /// </summary>
-    private async Task<CpuInfo> GetCpuInfoWindowsAsync(CancellationToken ct)
+    private async Task<CpuInfo> GetCpuInfoWindowsAsync(CancellationToken ct, bool runBenchmark = true)
     {
         var info = new CpuInfo { Flags = new List<string>() };
 
@@ -171,22 +172,33 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
         info.AvailableVCpus = Math.Max(1, info.LogicalCores);
 
-        try
+        // Only run benchmark if requested (avoid repeated benchmarks)
+        if (runBenchmark)
         {
-            _logger.LogInformation("Running CPU benchmark for node performance evaluation...");
-            var benchmarkResult = await _benchmarkService.RunBenchmarkAsync(ct);
-            info.BenchmarkScore = benchmarkResult.Score;
+            try
+            {
+                _logger.LogInformation("Running CPU benchmark for node performance evaluation...");
+                var benchmarkResult = await _benchmarkService.RunBenchmarkAsync(ct);
+                info.BenchmarkScore = benchmarkResult.Score;
+                _cachedBenchmarkScore = benchmarkResult.Score;
 
-            _logger.LogInformation(
-                "CPU Benchmark: {Score} score via {Method} ({Details})",
-                benchmarkResult.Score,
-                benchmarkResult.Method,
-                benchmarkResult.Details);
+                _logger.LogInformation(
+                    "CPU Benchmark: {Score} score via {Method} ({Details})",
+                    benchmarkResult.Score,
+                    benchmarkResult.Method,
+                    benchmarkResult.Details);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "CPU benchmark failed, using default score of 1000");
+                info.BenchmarkScore = 1000; // Fallback to baseline
+                _cachedBenchmarkScore = 1000;
+            }
         }
-        catch (Exception ex)
+        else
         {
-            _logger.LogWarning(ex, "CPU benchmark failed, using default score of 1000");
-            info.BenchmarkScore = 1000; // Fallback to baseline
+            // Use cached benchmark score
+            info.BenchmarkScore = _cachedBenchmarkScore ?? 1000;
         }
 
         return info;
@@ -195,7 +207,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     /// <summary>
     /// Enhanced Linux CPU detection with architecture
     /// </summary>
-    private async Task<CpuInfo> GetCpuInfoLinuxAsync(CancellationToken ct)
+    private async Task<CpuInfo> GetCpuInfoLinuxAsync(CancellationToken ct, bool runBenchmark = true)
     {
         var info = new CpuInfo { Flags = new List<string>() };
 
@@ -276,22 +288,33 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         if (info.PhysicalCores == 0) info.PhysicalCores = info.LogicalCores;
         info.AvailableVCpus = info.LogicalCores;
 
-        try
+        // Only run benchmark if requested (avoid repeated benchmarks)
+        if (runBenchmark)
         {
-            _logger.LogInformation("Running CPU benchmark for node performance evaluation...");
-            var benchmarkResult = await _benchmarkService.RunBenchmarkAsync(ct);
-            info.BenchmarkScore = benchmarkResult.Score;
+            try
+            {
+                _logger.LogInformation("Running CPU benchmark for node performance evaluation...");
+                var benchmarkResult = await _benchmarkService.RunBenchmarkAsync(ct);
+                info.BenchmarkScore = benchmarkResult.Score;
+                _cachedBenchmarkScore = benchmarkResult.Score;
 
-            _logger.LogInformation(
-                "CPU Benchmark: {Score} score via {Method} ({Details})",
-                benchmarkResult.Score,
-                benchmarkResult.Method,
-                benchmarkResult.Details);
+                _logger.LogInformation(
+                    "CPU Benchmark: {Score} score via {Method} ({Details})",
+                    benchmarkResult.Score,
+                    benchmarkResult.Method,
+                    benchmarkResult.Details);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "CPU benchmark failed, using default score of 1000");
+                info.BenchmarkScore = 1000; // Fallback to baseline
+                _cachedBenchmarkScore = 1000;
+            }
         }
-        catch (Exception ex)
+        else
         {
-            _logger.LogWarning(ex, "CPU benchmark failed, using default score of 1000");
-            info.BenchmarkScore = 1000; // Fallback to baseline
+            // Use cached benchmark score
+            info.BenchmarkScore = _cachedBenchmarkScore ?? 1000;
         }
 
         return info;
@@ -433,17 +456,37 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         return storageList;
     }
 
+    // Cache GPU detection result to avoid repeated failures
+    private bool? _hasGpuSupport = null;
+    private readonly SemaphoreSlim _gpuCheckLock = new(1, 1);
+
     public async Task<List<GpuInfo>> GetGpuInfoAsync(CancellationToken ct = default)
     {
         var gpus = new List<GpuInfo>();
 
         try
         {
+            // Check cached result first to avoid repeated nvidia-smi failures
+            if (_hasGpuSupport == false)
+            {
+                return gpus;
+            }
+
             // Find nvidia-smi path first (important for WSL and systemd services)
             string nvidiaSmiPath = await FindNvidiaSmiPathAsync(ct);
             
             if (string.IsNullOrEmpty(nvidiaSmiPath))
             {
+                // Cache the negative result
+                await _gpuCheckLock.WaitAsync(ct);
+                try
+                {
+                    _hasGpuSupport = false;
+                }
+                finally
+                {
+                    _gpuCheckLock.Release();
+                }
                 _logger.LogDebug("nvidia-smi not found in PATH - no GPU detected");
                 return gpus;
             }
@@ -457,6 +500,16 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
             if (!nvidiaSmi.Success)
             {
+                // Cache the negative result
+                await _gpuCheckLock.WaitAsync(ct);
+                try
+                {
+                    _hasGpuSupport = false;
+                }
+                finally
+                {
+                    _gpuCheckLock.Release();
+                }
                 _logger.LogDebug("No NVIDIA GPUs detected");
                 return gpus;
             }
@@ -481,6 +534,20 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                         TemperatureCelsius = int.TryParse(parts[7], out var temp) ? temp : null,
                         IsAvailableForPassthrough = !_isWindows
                     });
+                }
+                
+                // Cache successful detection
+                if (gpus.Count > 0)
+                {
+                    await _gpuCheckLock.WaitAsync(ct);
+                    try
+                    {
+                        _hasGpuSupport = true;
+                    }
+                    finally
+                    {
+                    _gpuCheckLock.Release();
+                    }
                 }
             }
 
@@ -664,7 +731,8 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
     public async Task<ResourceSnapshot> GetCurrentSnapshotAsync(CancellationToken ct = default)
     {
-        var cpu = await GetCpuInfoAsync(ct);
+        // Skip benchmarking during snapshots - only run during full discovery
+        var cpu = await GetCpuInfoAsync(ct, runBenchmark: false);
         var memory = await GetMemoryInfoAsync(ct);
         var storage = await GetStorageInfoAsync(ct);
         var gpus = await GetGpuInfoAsync(ct);

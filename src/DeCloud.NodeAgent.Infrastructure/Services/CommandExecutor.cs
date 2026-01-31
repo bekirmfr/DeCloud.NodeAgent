@@ -25,6 +25,13 @@ public class CommandExecutor : ICommandExecutor
         
         _logger.LogDebug("Executing: {Command} {Arguments}", command, arguments);
 
+        // If the cancellation token is already cancelled (e.g., during shutdown), 
+        // use a much shorter timeout to fail fast
+        if (ct.IsCancellationRequested)
+        {
+            timeout = TimeSpan.FromMilliseconds(100);
+        }
+
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeout);
 
