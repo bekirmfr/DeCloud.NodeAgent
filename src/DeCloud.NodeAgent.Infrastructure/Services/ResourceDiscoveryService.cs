@@ -72,13 +72,13 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         await _discoverySemaphore.WaitAsync(ct);
         try
         {
-            _logger.LogInformation("Starting full resource discovery (Platform: {Platform})",
-                _isWindows ? "Windows" : "Linux");
+        _logger.LogInformation("Starting full resource discovery (Platform: {Platform})",
+            _isWindows ? "Windows" : "Linux");
 
-            var cpu = await GetCpuInfoAsync(ct);
-            var memory = await GetMemoryInfoAsync(ct);
-            var storage = await GetStorageInfoAsync(ct);
-            var gpus = await GetGpuInfoAsync(ct);
+        var cpu = await GetCpuInfoAsync(ct);
+        var memory = await GetMemoryInfoAsync(ct);
+        var storage = await GetStorageInfoAsync(ct);
+        var gpus = await GetGpuInfoAsync(ct, forceRecheck: true); // Force GPU recheck during full discovery
             var supportsGpu = gpus.Any();
             var network = await GetNetworkInfoAsync(ct);
 
@@ -460,14 +460,15 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     private bool? _hasGpuSupport = null;
     private readonly SemaphoreSlim _gpuCheckLock = new(1, 1);
 
-    public async Task<List<GpuInfo>> GetGpuInfoAsync(CancellationToken ct = default)
+    public async Task<List<GpuInfo>> GetGpuInfoAsync(CancellationToken ct = default, bool forceRecheck = false)
     {
         var gpus = new List<GpuInfo>();
 
         try
         {
             // Check cached result first to avoid repeated nvidia-smi failures
-            if (_hasGpuSupport == false)
+            // But allow forced recheck during full discovery
+            if (_hasGpuSupport == false && !forceRecheck)
             {
                 return gpus;
             }
@@ -674,6 +675,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             "/usr/local/bin/nvidia-smi",
             "/usr/local/cuda/bin/nvidia-smi",
             "/opt/cuda/bin/nvidia-smi",
+            "/usr/lib/wsl/lib/nvidia-smi",  // WSL-specific path
             "C:\\Windows\\System32\\nvidia-smi.exe",
             "C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe"
         };

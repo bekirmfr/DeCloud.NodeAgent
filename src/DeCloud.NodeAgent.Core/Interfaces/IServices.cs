@@ -38,7 +38,7 @@ public interface IResourceDiscoveryService
     Task<CpuInfo> GetCpuInfoAsync(CancellationToken ct = default, bool runBenchmark = true);
     Task<MemoryInfo> GetMemoryInfoAsync(CancellationToken ct = default);
     Task<List<StorageInfo>> GetStorageInfoAsync(CancellationToken ct = default);
-    Task<List<GpuInfo>> GetGpuInfoAsync(CancellationToken ct = default);
+    Task<List<GpuInfo>> GetGpuInfoAsync(CancellationToken ct = default, bool forceRecheck = false);
     Task<NetworkInfo> GetNetworkInfoAsync(CancellationToken ct = default);
     Task<ResourceSnapshot> GetCurrentSnapshotAsync(CancellationToken ct = default);
 }
