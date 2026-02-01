@@ -148,13 +148,38 @@ public class GenericProxyController : ControllerBase
             new HttpMethod(Request.Method),
             targetUrl);
 
-        // Copy headers (excluding some)
+        // Copy headers (excluding some). Forward original Host so backend (e.g. code-server)
+        // sees the public hostname and generates correct redirects/cookies.
         foreach (var header in Request.Headers)
         {
             if (!ShouldSkipHeader(header.Key))
             {
                 request.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
             }
+        }
+        if (Request.Headers.Host.Count > 0)
+        {
+            request.Headers.Host = Request.Headers.Host.ToString();
+        }
+
+        // Standard reverse-proxy headers so backends (e.g. code-server) see the public origin
+        // and can set cookies/redirects correctly. Overwrite any existing values.
+        var host = Request.Headers.Host.ToString();
+        if (!string.IsNullOrEmpty(host))
+        {
+            request.Headers.Remove("X-Forwarded-Host");
+            request.Headers.TryAddWithoutValidation("X-Forwarded-Host", host);
+        }
+        var proto = Request.Headers["X-Forwarded-Proto"].FirstOrDefault() ?? Request.Scheme;
+        request.Headers.Remove("X-Forwarded-Proto");
+        request.Headers.TryAddWithoutValidation("X-Forwarded-Proto", proto);
+        var clientIp = HttpContext.Connection.RemoteIpAddress?.ToString();
+        if (!string.IsNullOrEmpty(clientIp))
+        {
+            var existingFor = Request.Headers["X-Forwarded-For"].FirstOrDefault();
+            var forValue = string.IsNullOrEmpty(existingFor) ? clientIp : $"{existingFor}, {clientIp}";
+            request.Headers.Remove("X-Forwarded-For");
+            request.Headers.TryAddWithoutValidation("X-Forwarded-For", forValue);
         }
 
         // Copy body if present
