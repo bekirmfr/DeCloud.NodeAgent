@@ -204,7 +204,9 @@ public class LibvirtVmManager : IVmManager
             foreach (var vmId in missingVms)
             {
                 var vm = _vms[vmId];
-                if (vm.State != VmState.Stopped && vm.State != VmState.Failed)
+                // Skip VMs that are being created - they legitimately aren't in libvirt yet
+                // Also skip already Stopped/Failed VMs
+                if (vm.State != VmState.Stopped && vm.State != VmState.Failed && vm.State != VmState.Creating)
                 {
                     _logger.LogWarning("VM {VmId} missing from libvirt - marking as failed", vmId);
                     vm.State = VmState.Failed;
