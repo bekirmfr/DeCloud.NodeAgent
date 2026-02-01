@@ -156,17 +156,25 @@ public class GenericProxyController : ControllerBase
         }
 
         // Copy body if present
-        if (Request.ContentLength > 0)
+        // Enable buffering to allow body to be read (in case middleware consumed it)
+        Request.EnableBuffering();
+        
+        if (Request.ContentLength > 0 || Request.Body.CanRead)
         {
+            Request.Body.Position = 0; // Reset to start
             var bodyStream = new MemoryStream();
             await Request.Body.CopyToAsync(bodyStream, ct);
-            bodyStream.Position = 0;
-            request.Content = new StreamContent(bodyStream);
-
-            if (Request.ContentType != null)
+            
+            if (bodyStream.Length > 0)
             {
-                request.Content.Headers.ContentType =
-                    System.Net.Http.Headers.MediaTypeHeaderValue.Parse(Request.ContentType);
+                bodyStream.Position = 0;
+                request.Content = new StreamContent(bodyStream);
+
+                if (Request.ContentType != null)
+                {
+                    request.Content.Headers.ContentType =
+                        System.Net.Http.Headers.MediaTypeHeaderValue.Parse(Request.ContentType);
+                }
             }
         }
 
