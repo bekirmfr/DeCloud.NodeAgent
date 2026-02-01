@@ -809,8 +809,33 @@ public class LibvirtVmManager : IVmManager
             }
             if (instance == null)
             {
-                _logger.LogWarning("VM {VmId} not found for deletion", vmId);
-                return VmOperationResult.Fail(vmId, "VM not found", "NOT_FOUND");
+                // ====================================================================
+                // RECONCILIATION: VM doesn't exist - treat as successful deletion
+                // This makes delete operations idempotent and prevents stuck VMs
+                // ====================================================================
+                _logger.LogInformation(
+                    "✓ VM {VmId} not found for deletion - already deleted (idempotent success). " +
+                    "Cleaning up any remaining local state.",
+                    vmId);
+                
+                // Clean up any orphaned resources that might still exist
+                await _repository.DeleteVmAsync(vmId);
+                
+                var vmDirectory = Path.Combine(_options.VmStoragePath, vmId);
+                if (Directory.Exists(vmDirectory))
+                {
+                    try
+                    {
+                        Directory.Delete(vmDirectory, recursive: true);
+                        _logger.LogInformation("Cleaned up orphaned VM directory: {VmDir}", vmDirectory);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to clean up orphaned VM directory {VmDir}", vmDirectory);
+                    }
+                }
+                
+                return VmOperationResult.Ok(vmId, VmState.Stopped);
             }
         }
 
