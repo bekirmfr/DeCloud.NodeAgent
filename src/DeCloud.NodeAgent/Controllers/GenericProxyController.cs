@@ -155,23 +155,18 @@ public class GenericProxyController : ControllerBase
             }
         }
 
-        // Copy body if present (check for POST/PUT/PATCH methods or explicit ContentLength)
-        if (Request.Method != "GET" && Request.Method != "HEAD" && Request.Method != "OPTIONS" &&
-            (Request.ContentLength == null || Request.ContentLength > 0))
+        // Copy body if present
+        if (Request.ContentLength > 0)
         {
             var bodyStream = new MemoryStream();
             await Request.Body.CopyToAsync(bodyStream, ct);
-            
-            if (bodyStream.Length > 0)
-            {
-                bodyStream.Position = 0;
-                request.Content = new StreamContent(bodyStream);
+            bodyStream.Position = 0;
+            request.Content = new StreamContent(bodyStream);
 
-                if (Request.ContentType != null)
-                {
-                    request.Content.Headers.ContentType =
-                        System.Net.Http.Headers.MediaTypeHeaderValue.Parse(Request.ContentType);
-                }
+            if (Request.ContentType != null)
+            {
+                request.Content.Headers.ContentType =
+                    System.Net.Http.Headers.MediaTypeHeaderValue.Parse(Request.ContentType);
             }
         }
 
