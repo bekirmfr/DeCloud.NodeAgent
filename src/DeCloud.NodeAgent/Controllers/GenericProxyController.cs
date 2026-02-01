@@ -156,14 +156,30 @@ public class GenericProxyController : ControllerBase
         }
 
         // Copy body if present
-        // Enable buffering to allow body to be read (in case middleware consumed it)
-        Request.EnableBuffering();
-        
-        if (Request.ContentLength > 0 || Request.Body.CanRead)
+        if (Request.ContentLength > 0)
         {
-            Request.Body.Position = 0; // Reset to start
+            // Enable buffering to allow body to be read multiple times
+            Request.EnableBuffering();
+            
+            try
+            {
+                // Reset position to start
+                if (Request.Body.CanSeek)
+                {
+                    Request.Body.Position = 0;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("Could not seek request body: {Error}", ex.Message);
+            }
+            
             var bodyStream = new MemoryStream();
             await Request.Body.CopyToAsync(bodyStream, ct);
+            
+            _logger.LogDebug(
+                "HTTP proxy {Method} to {VmId}:{Port} - ContentLength={ContentLength}, CopiedBytes={Copied}",
+                Request.Method, vmId, port, Request.ContentLength, bodyStream.Length);
             
             if (bodyStream.Length > 0)
             {
@@ -175,6 +191,12 @@ public class GenericProxyController : ControllerBase
                     request.Content.Headers.ContentType =
                         System.Net.Http.Headers.MediaTypeHeaderValue.Parse(Request.ContentType);
                 }
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "POST body was empty despite ContentLength={Length} for {VmId}:{Port}",
+                    Request.ContentLength, vmId, port);
             }
         }
 
