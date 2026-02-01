@@ -1,4 +1,4 @@
-﻿using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Interfaces.UserNetwork;
 using DeCloud.NodeAgent.Core.Settings;
@@ -277,6 +277,13 @@ using (var scope = app.Services.CreateScope())
 // =====================================================
 // Middleware Pipeline
 // =====================================================
+// Enable request body buffering early so proxy can read POST bodies.
+// Without this, middleware may consume the body and GenericProxyController sees empty body.
+app.Use(async (context, next) =>
+{
+    context.Request.EnableBuffering();
+    await next();
+});
 app.UseWebSockets(new WebSocketOptions
 {
     KeepAliveInterval = TimeSpan.FromSeconds(120)
