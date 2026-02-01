@@ -9,7 +9,7 @@ A unified, production-grade command-line interface for managing DeCloud node age
 - 🖥️ **VM Management** - List, inspect, and clean up virtual machines
 - 🔧 **Service Control** - Start, stop, restart the node agent service
 - 🩺 **Built-in Diagnostics** - Automated health checks and troubleshooting
-- 📝 **Detailed Logging** - Access and follow service logs
+- 📝 **Advanced Log Management** - View, follow, and clear both file and journal logs
 - ✨ **CLI Best Practices** - Inspired by industry-standard tools (docker, kubectl, systemctl)
 
 ## Quick Start
@@ -229,12 +229,13 @@ Restart the DeCloud node agent service.
 sudo decloud restart
 ```
 
-#### `decloud logs`
-View service logs from journalctl.
+#### `decloud logs [view]`
+View node agent logs from `/var/log/decloud/nodeagent.log` (default) or systemd journal.
 
 ```bash
-# Show last 50 lines (default)
+# Show last 50 lines from file (default)
 decloud logs
+decloud logs view
 
 # Show last 100 lines
 decloud logs -n 100
@@ -242,12 +243,19 @@ decloud logs -n 100
 # Follow logs in real-time
 decloud logs -f
 
-# Alternative syntax
-decloud logs --lines 100
-decloud logs --follow
+# View systemd journal instead of file
+decloud logs --journal
+decloud logs --journal -f
+
+# Explicitly view file logs
+decloud logs --file -f
 ```
 
-#### `decloud log clear`
+**Log Sources:**
+- `--file` (default): Read from `/var/log/decloud/nodeagent.log`
+- `--journal`: Read from systemd journal (`journalctl`)
+
+#### `decloud logs clear`
 Clear node agent logs (file-based and systemd journal).
 
 **Requires:** root/sudo
@@ -256,15 +264,20 @@ Clear node agent logs (file-based and systemd journal).
 
 ```bash
 # Clear all logs (with confirmation)
-sudo decloud log clear
+sudo decloud logs clear
 
 # Clear only logs before the last service start
 # (keeps recent logs since service started)
-sudo decloud log clear --before-last-start
+sudo decloud logs clear --before-last-start
 
 # Skip confirmation
-sudo decloud log clear --force
+sudo decloud logs clear --force
 ```
+
+**What gets cleared:**
+- Node agent log file: `/var/log/decloud/nodeagent.log`
+- Audit logs and rotated logs in `/var/log/decloud/`
+- Systemd journal logs for the service
 
 **Use cases:**
 - Free up disk space when logs grow too large
@@ -360,8 +373,11 @@ AUTHORIZED_AT=2025-01-15T10:30:00Z
 ### `/etc/decloud/pending-auth`
 Temporary file used during authentication process.
 
-### `/var/lib/libvirt/decloud-vms/`
+### `/var/lib/decloud/vms/`
 VM storage directory (disk images, configs, cloud-init ISOs).
+
+### `/var/log/decloud/nodeagent.log`
+Primary log file for the node agent service. This is the default source for `decloud logs`.
 
 ## Exit Codes
 
@@ -379,7 +395,10 @@ VM storage directory (disk images, configs, cloud-init ISOs).
 # Morning check
 decloud status
 
-# View what's happening
+# View recent logs
+decloud logs
+
+# Follow logs in real-time
 decloud logs -f
 
 # Check resources
@@ -392,8 +411,11 @@ decloud resources
 # Node not working?
 decloud diagnose
 
-# Check recent errors
+# Check recent file logs
 decloud logs -n 100
+
+# Check systemd journal
+decloud logs --journal -n 100
 
 # Test API connectivity
 decloud test-api
@@ -418,14 +440,20 @@ sudo decloud vm cleanup abc-123-def
 ### Log Management
 
 ```bash
-# View logs
+# View file logs (last 50 lines)
+decloud logs
+
+# Follow file logs in real-time
 decloud logs -f
 
+# View systemd journal
+decloud logs --journal -f
+
 # Clear all logs
-sudo decloud log clear
+sudo decloud logs clear
 
 # Clear only old logs (keep recent)
-sudo decloud log clear --before-last-start
+sudo decloud logs clear --before-last-start
 ```
 
 ### Fresh Start
@@ -617,9 +645,11 @@ MIT License - See LICENSE file for details
 ## Changelog
 
 ### v1.3.0 (2025-02-01)
-- Added log management commands
-- `decloud log clear` - Clear all node agent logs
-- `decloud log clear --before-last-start` - Clear only old logs
+- Enhanced log management with subcommands
+- `decloud logs` - View logs from `/var/log/decloud/nodeagent.log` by default
+- `decloud logs --journal` - View systemd journal logs
+- `decloud logs clear` - Clear all node agent logs
+- `decloud logs clear --before-last-start` - Clear only old logs
 - Supports both file-based logs and systemd journal
 - Interactive confirmation prompts for safety
 - Updated documentation with log management examples

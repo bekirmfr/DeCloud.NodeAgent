@@ -30,9 +30,11 @@
 | `decloud start` | Start service | ✅ |
 | `decloud stop` | Stop service | ✅ |
 | `decloud restart` | Restart service | ✅ |
-| `decloud logs` | View logs | ❌ |
-| `decloud log clear` | Clear all logs | ✅ |
-| `decloud log clear --before-last-start` | Clear old logs only | ✅ |
+| `decloud logs` | View file logs | ❌ |
+| `decloud logs -f` | Follow file logs | ❌ |
+| `decloud logs --journal` | View journal logs | ❌ |
+| `decloud logs clear` | Clear all logs | ✅ |
+| `decloud logs clear --before-last-start` | Clear old logs only | ✅ |
 
 ### Diagnostics
 | Command | Description | Requires Root |
@@ -129,7 +131,7 @@ sudo decloud stop
 sudo decloud vm cleanup --all
 
 # Clear old logs to free up space
-sudo decloud log clear --before-last-start
+sudo decloud logs clear --before-last-start
 
 # Restart service
 sudo decloud start
@@ -349,29 +351,35 @@ watch -n 5 decloud status
 
 ### 3. Quick Logs
 
-Last 50 lines:
+View last 50 lines (from `/var/log/decloud/nodeagent.log`):
 ```bash
 decloud logs
 ```
 
-Follow logs:
+Follow logs in real-time:
 ```bash
 decloud logs -f
 ```
 
-Errors only:
+View systemd journal logs:
 ```bash
-journalctl -u decloud-node-agent -p err -f
+decloud logs --journal
+decloud logs --journal -f
+```
+
+View last 100 lines:
+```bash
+decloud logs -n 100
 ```
 
 Clear all logs:
 ```bash
-sudo decloud log clear
+sudo decloud logs clear
 ```
 
 Clear only old logs (keep recent):
 ```bash
-sudo decloud log clear --before-last-start
+sudo decloud logs clear --before-last-start
 ```
 
 ### 4. JSON Processing
@@ -562,9 +570,12 @@ When using `decloud logs -f`:
 │   decloud vm info <id>      - VM details            │
 │   sudo decloud vm cleanup   - Clean up VM           │
 │                                                     │
-│ Service                                             │
+│ Service & Logs                                      │
 │   sudo decloud restart      - Restart service       │
-│   decloud logs -f           - Follow logs           │
+│   decloud logs              - View file logs        │
+│   decloud logs -f           - Follow file logs      │
+│   decloud logs --journal    - View journal logs     │
+│   sudo decloud logs clear   - Clear all logs        │
 │                                                     │
 │ Diagnostics                                         │
 │   decloud diagnose          - Health check          │
