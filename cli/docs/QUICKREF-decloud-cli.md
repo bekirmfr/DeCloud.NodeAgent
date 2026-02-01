@@ -31,6 +31,8 @@
 | `decloud stop` | Stop service | ✅ |
 | `decloud restart` | Restart service | ✅ |
 | `decloud logs` | View logs | ❌ |
+| `decloud log clear` | Clear all logs | ✅ |
+| `decloud log clear --before-last-start` | Clear old logs only | ✅ |
 
 ### Diagnostics
 | Command | Description | Requires Root |
@@ -125,6 +127,9 @@ sudo decloud stop
 
 # Clean up all VMs (DESTRUCTIVE!)
 sudo decloud vm cleanup --all
+
+# Clear old logs to free up space
+sudo decloud log clear --before-last-start
 
 # Restart service
 sudo decloud start
@@ -357,6 +362,16 @@ decloud logs -f
 Errors only:
 ```bash
 journalctl -u decloud-node-agent -p err -f
+```
+
+Clear all logs:
+```bash
+sudo decloud log clear
+```
+
+Clear only old logs (keep recent):
+```bash
+sudo decloud log clear --before-last-start
 ```
 
 ### 4. JSON Processing

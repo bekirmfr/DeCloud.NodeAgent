@@ -247,6 +247,31 @@ decloud logs --lines 100
 decloud logs --follow
 ```
 
+#### `decloud log clear`
+Clear node agent logs (file-based and systemd journal).
+
+**Requires:** root/sudo
+
+**⚠️ WARNING:** This permanently deletes log data!
+
+```bash
+# Clear all logs (with confirmation)
+sudo decloud log clear
+
+# Clear only logs before the last service start
+# (keeps recent logs since service started)
+sudo decloud log clear --before-last-start
+
+# Skip confirmation
+sudo decloud log clear --force
+```
+
+**Use cases:**
+- Free up disk space when logs grow too large
+- Clear old logs for privacy/compliance
+- Clean up logs before archiving or migration
+- Prepare node for fresh start after troubleshooting
+
 ### Diagnostic Commands
 
 #### `decloud diagnose`
@@ -388,6 +413,19 @@ decloud vm info abc-123-def
 
 # Clean up failed VM
 sudo decloud vm cleanup abc-123-def
+```
+
+### Log Management
+
+```bash
+# View logs
+decloud logs -f
+
+# Clear all logs
+sudo decloud log clear
+
+# Clear only old logs (keep recent)
+sudo decloud log clear --before-last-start
 ```
 
 ### Fresh Start
@@ -577,6 +615,14 @@ NODE_AGENT_URL="http://test-server:5050" decloud status
 MIT License - See LICENSE file for details
 
 ## Changelog
+
+### v1.3.0 (2025-02-01)
+- Added log management commands
+- `decloud log clear` - Clear all node agent logs
+- `decloud log clear --before-last-start` - Clear only old logs
+- Supports both file-based logs and systemd journal
+- Interactive confirmation prompts for safety
+- Updated documentation with log management examples
 
 ### v1.0.0 (2025-01-24)
 - Initial release

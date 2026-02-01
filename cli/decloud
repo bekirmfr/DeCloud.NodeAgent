@@ -18,7 +18,7 @@ set -euo pipefail
 # GLOBAL CONSTANTS
 # ============================================================================
 
-readonly VERSION="1.2.1"
+readonly VERSION="1.3.0"
 readonly SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -1149,6 +1149,195 @@ cmd_logs() {
     fi
 }
 
+cmd_log_empty() {
+    check_root
+    
+    local before_last_start=false
+    local force=false
+    
+    # Parse options
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --before-last-start)
+                before_last_start=true
+                shift
+                ;;
+            --force)
+                force=true
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    
+    echo ""
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    if [[ "$before_last_start" == true ]]; then
+        echo -e "${BOLD}  Clear Logs Before Last Service Start${NC}"
+    else
+        echo -e "${BOLD}  Clear All Node Agent Logs${NC}"
+    fi
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    if [[ "$before_last_start" == true ]]; then
+        echo -e "${YELLOW}This will clear all logs from before the last service start.${NC}"
+        echo "Recent logs (since last service start) will be preserved."
+    else
+        echo -e "${YELLOW}This will clear ALL node agent logs:${NC}"
+        echo ""
+        echo "  • File-based logs in $LOG_DIR"
+        echo "  • Systemd journal logs for $SERVICE_NAME"
+        echo ""
+        echo -e "${RED}WARNING: This action cannot be undone!${NC}"
+    fi
+    echo ""
+    
+    if [[ "$force" == false ]]; then
+        if [[ "$before_last_start" == true ]]; then
+            read -p "Clear logs before last start? [y/N]: " confirmation
+        else
+            read -p "Clear ALL logs? [y/N]: " confirmation
+        fi
+        
+        if [[ ! "$confirmation" =~ ^[Yy]$ ]]; then
+            log_info "Operation cancelled"
+            exit 0
+        fi
+    fi
+    
+    echo ""
+    log_info "Clearing logs..."
+    echo ""
+    
+    # Disable errexit for log clearing - we want to continue even if steps fail
+    set +e
+    
+    if [[ "$before_last_start" == true ]]; then
+        # Get the timestamp of the last service start
+        local last_start=$(systemctl show -p ActiveEnterTimestamp "$SERVICE_NAME" | cut -d= -f2)
+        
+        if [[ -z "$last_start" || "$last_start" == "0" || "$last_start" == "n/a" ]]; then
+            log_warn "Could not determine last service start time"
+            log_info "Service may not be running or has never started"
+            echo ""
+            
+            # Re-enable errexit
+            set -e
+            exit $EXIT_ERROR
+        fi
+        
+        log_info "Last service start: $last_start"
+        echo ""
+        
+        # Clear systemd journal logs before last start
+        log_info "Clearing systemd journal logs before last start..."
+        
+        # Convert timestamp to date for journalctl
+        # journalctl uses --vacuum-time to remove old logs
+        # We'll use --rotate to close current journal and then --vacuum-time
+        
+        journalctl --rotate >/dev/null 2>&1 || true
+        
+        # Get journal size before cleanup
+        local before_size=$(journalctl -u "$SERVICE_NAME" --disk-usage 2>/dev/null | grep -oP '\d+\.\d+[KMGT]' | head -1 || echo "unknown")
+        
+        # Calculate time since last start
+        local last_start_epoch=$(date -d "$last_start" +%s 2>/dev/null || echo "0")
+        local current_epoch=$(date +%s)
+        local time_diff=$((current_epoch - last_start_epoch))
+        
+        if [[ "$time_diff" -gt 0 ]]; then
+            local days_ago=$((time_diff / 86400))
+            local hours_ago=$(((time_diff % 86400) / 3600))
+            
+            log_info "Service has been running for ${days_ago}d ${hours_ago}h"
+            
+            # Vacuum logs older than the last start time
+            # We add a small buffer to ensure we keep all logs from the current run
+            local vacuum_time="${time_diff}s"
+            
+            if journalctl -u "$SERVICE_NAME" --vacuum-time="${vacuum_time}" >/dev/null 2>&1; then
+                log_success "Systemd journal logs cleared before last start"
+            else
+                log_warn "Could not clear systemd journal (may require elevated privileges)"
+            fi
+        else
+            log_warn "Could not calculate time difference for log cleanup"
+        fi
+        
+        # Note: File-based logs don't have timestamps in filenames, so we can't easily
+        # clear only old file logs. We'll skip file log cleanup for --before-last-start
+        log_info "Note: File-based logs in $LOG_DIR are not affected"
+        log_info "Use 'decloud log empty' to clear all file logs if needed"
+        
+    else
+        # Clear ALL logs (original behavior)
+        
+        # Step 1: Clear file-based logs
+        log_info "[1/2] Clearing file-based logs in $LOG_DIR..."
+        local files_cleared=0
+        
+        if [[ -d "$LOG_DIR" ]]; then
+            # Find and delete all log files
+            local log_files=$(find "$LOG_DIR" -type f \( -name "*.log" -o -name "*.log.*" \) 2>/dev/null || echo "")
+            
+            if [[ -n "$log_files" ]]; then
+                while IFS= read -r log_file; do
+                    if [[ -n "$log_file" ]]; then
+                        rm -f "$log_file" 2>/dev/null && ((files_cleared++)) || true
+                    fi
+                done <<< "$log_files"
+                
+                log_success "Cleared $files_cleared file(s) from $LOG_DIR"
+            else
+                log_info "No log files found in $LOG_DIR"
+            fi
+        else
+            log_info "Log directory $LOG_DIR does not exist"
+        fi
+        
+        # Step 2: Clear systemd journal
+        log_info "[2/2] Clearing systemd journal logs..."
+        
+        # Get journal size before cleanup
+        local before_size=$(journalctl -u "$SERVICE_NAME" --disk-usage 2>/dev/null | grep -oP '\d+\.\d+[KMGT]' | head -1 || echo "unknown")
+        
+        # Rotate journal to close current log file
+        journalctl --rotate >/dev/null 2>&1 || true
+        
+        # Vacuum all old logs (keep only 1 second of logs, effectively clearing all)
+        if journalctl -u "$SERVICE_NAME" --vacuum-time=1s >/dev/null 2>&1; then
+            local after_size=$(journalctl -u "$SERVICE_NAME" --disk-usage 2>/dev/null | grep -oP '\d+\.\d+[KMGT]' | head -1 || echo "unknown")
+            log_success "Systemd journal cleared (was: $before_size, now: $after_size)"
+        else
+            log_warn "Could not clear systemd journal (may require elevated privileges)"
+        fi
+    fi
+    
+    # Re-enable errexit
+    set -e
+    
+    echo ""
+    echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}  Log Clearing Complete!${NC}"
+    echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    if [[ "$before_last_start" == true ]]; then
+        echo "Logs before the last service start have been cleared."
+        echo "Recent logs since service start are preserved."
+    else
+        echo "All node agent logs have been cleared."
+    fi
+    echo ""
+    echo "To view current logs: ${BOLD}$SCRIPT_NAME logs${NC}"
+    echo "To follow logs:       ${BOLD}$SCRIPT_NAME logs -f${NC}"
+    echo ""
+}
+
 # ============================================================================
 # DIAGNOSTIC COMMANDS
 # ============================================================================
@@ -1371,6 +1560,9 @@ ${BOLD}SERVICE MANAGEMENT:${NC}
     logs [options]      View service logs
         -f, --follow        Follow log output
         -n, --lines <n>     Number of lines to show (default: 50)
+    log clear           Clear all node agent logs (DESTRUCTIVE!)
+        --before-last-start Clear only logs before the last service start
+        --force             Skip confirmation prompt
 
 ${BOLD}DIAGNOSTIC COMMANDS:${NC}
     diagnose            Run comprehensive diagnostics
@@ -1390,6 +1582,12 @@ ${BOLD}EXAMPLES:${NC}
 
     # View service logs (follow)
     $SCRIPT_NAME logs -f
+
+    # Clear all logs
+    sudo $SCRIPT_NAME log clear
+
+    # Clear only old logs (keep logs since last service start)
+    sudo $SCRIPT_NAME log clear --before-last-start
 
     # List VMs
     $SCRIPT_NAME vm list
@@ -1557,6 +1755,29 @@ main() {
             ;;
         logs)
             cmd_logs "$@"
+            ;;
+        
+        # Log Management
+        log)
+            if [[ $# -eq 0 ]]; then
+                log_error "Log subcommand required"
+                echo "Usage: $SCRIPT_NAME log <clear>"
+                exit $EXIT_USAGE
+            fi
+            
+            local log_command="$1"
+            shift
+            
+            case "$log_command" in
+                clear|empty)
+                    cmd_log_empty "$@"
+                    ;;
+                *)
+                    log_error "Unknown log command: $log_command"
+                    echo "Valid commands: clear"
+                    exit $EXIT_USAGE
+                    ;;
+            esac
             ;;
         
         # Diagnostics
