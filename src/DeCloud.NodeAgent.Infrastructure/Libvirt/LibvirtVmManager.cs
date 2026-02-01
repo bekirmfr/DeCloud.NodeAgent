@@ -1401,7 +1401,18 @@ public class LibvirtVmManager : IVmManager
                     "VM {VmId}: Using custom cloud-init UserData from orchestrator ({Bytes} bytes)",
                     spec.Id, spec.CloudInitUserData.Length);
                 
-                cloudInitYaml = spec.CloudInitUserData;
+                // IMPORTANT: Custom UserData from orchestrator needs to be merged with
+                // base configuration (hostname, password, SSH keys, etc.)
+                cloudInitYaml = MergeCustomUserDataWithBaseConfig(
+                    spec.CloudInitUserData,
+                    spec.Name,
+                    sshKeysBlock,
+                    passwordBlock,
+                    hasPassword);
+                
+                _logger.LogInformation(
+                    "VM {VmId}: Merged custom UserData with base configuration",
+                    spec.Id);
             }
             else
             {
@@ -1494,6 +1505,114 @@ public class LibvirtVmManager : IVmManager
                 spec.Id);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Merge custom cloud-init UserData with base configuration (hostname, password, SSH)
+    /// This ensures marketplace templates get proper authentication even when using custom cloud-init
+    /// </summary>
+    private string MergeCustomUserDataWithBaseConfig(
+        string customUserData,
+        string hostname,
+        string sshKeysBlock,
+        string passwordBlock,
+        bool hasPassword)
+    {
+        var lines = new List<string>();
+        
+        // Parse custom UserData line by line
+        using var reader = new StringReader(customUserData);
+        string? line;
+        bool foundRuncmd = false;
+        bool afterRuncmd = false;
+        
+        while ((line = reader.ReadLine()) != null)
+        {
+            // Skip the first #cloud-config line, we'll add it back at the start
+            if (line.Trim() == "#cloud-config" && lines.Count == 0)
+            {
+                continue;
+            }
+            
+            // Check if we're entering the runcmd section
+            if (line.TrimStart().StartsWith("runcmd:") && !foundRuncmd)
+            {
+                foundRuncmd = true;
+                
+                // Before runcmd, inject base configuration if not already present
+                if (!customUserData.Contains("hostname:", StringComparison.OrdinalIgnoreCase))
+                {
+                    lines.Add($"hostname: {hostname}");
+                    lines.Add("manage_etc_hosts: true");
+                    lines.Add("");
+                }
+                
+                if (!customUserData.Contains("disable_root:", StringComparison.OrdinalIgnoreCase))
+                {
+                    lines.Add("disable_root: false");
+                    lines.Add("");
+                }
+                
+                // Add SSH keys if provided
+                if (!string.IsNullOrEmpty(sshKeysBlock) && !sshKeysBlock.Contains("# No SSH keys"))
+                {
+                    lines.Add(sshKeysBlock);
+                    lines.Add("");
+                }
+                
+                // Add password configuration if provided (root user only)
+                if (hasPassword && !string.IsNullOrEmpty(passwordBlock) && !passwordBlock.Contains("# No password"))
+                {
+                    // Use the password block as-is (already configured for root)
+                    lines.Add(passwordBlock);
+                    lines.Add("");
+                }
+                
+                // Add SSH password auth flag
+                if (hasPassword)
+                {
+                    lines.Add("ssh_pwauth: true");
+                    lines.Add("");
+                }
+                
+                // Now add the runcmd line
+                lines.Add(line);
+                afterRuncmd = true;
+                continue;
+            }
+            
+            // If we just added runcmd, inject SSH setup commands as first runcmd items
+            if (afterRuncmd && hasPassword && line.TrimStart().StartsWith("-"))
+            {
+                // Add SSH configuration commands before other runcmd items
+                lines.Add("  # Enable password authentication for SSH");
+                lines.Add("  - mkdir -p /etc/ssh/sshd_config.d");
+                lines.Add("  - |");
+                lines.Add("    cat > /etc/ssh/sshd_config.d/99-decloud-password-auth.conf <<'SSHEOF'");
+                lines.Add("    # DeCloud: Enable password authentication");
+                lines.Add("    PasswordAuthentication yes");
+                lines.Add("    PermitRootLogin yes");
+                lines.Add("    ChallengeResponseAuthentication no");
+                lines.Add("    UsePAM yes");
+                lines.Add("    SSHEOF");
+                lines.Add("  - systemctl restart sshd || systemctl restart ssh");
+                lines.Add("");
+                
+                // Now add the first actual runcmd item
+                afterRuncmd = false;
+            }
+            
+            lines.Add(line);
+        }
+        
+        // Rebuild with #cloud-config header
+        var merged = "#cloud-config\n\n" + string.Join("\n", lines);
+        
+        _logger.LogDebug(
+            "Merged custom UserData with base config (hostname: {Hostname}, password: {HasPassword}, ssh: {HasSsh})",
+            hostname, hasPassword, !sshKeysBlock.Contains("# No SSH keys"));
+        
+        return merged;
     }
 
     private string GenerateLibvirtXml(VmSpec spec, string diskPath, string? cloudInitIso, int vncPort)
