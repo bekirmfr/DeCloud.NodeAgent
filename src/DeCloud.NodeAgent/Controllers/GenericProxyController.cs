@@ -176,15 +176,22 @@ public class GenericProxyController : ControllerBase
         // Copy response
         Response.StatusCode = (int)response.StatusCode;
 
-        // Copy response headers
+        // Copy response headers (excluding problematic ones)
         foreach (var header in response.Headers)
         {
-            Response.Headers[header.Key] = header.Value.ToArray();
+            if (!ShouldSkipResponseHeader(header.Key))
+            {
+                Response.Headers[header.Key] = header.Value.ToArray();
+            }
         }
 
+        // Copy content headers - IMPORTANT: Include Content-Length if present
         foreach (var header in response.Content.Headers)
         {
-            Response.Headers[header.Key] = header.Value.ToArray();
+            if (!ShouldSkipResponseHeader(header.Key))
+            {
+                Response.Headers[header.Key] = header.Value.ToArray();
+            }
         }
 
         // Only copy body for status codes that allow it
@@ -194,6 +201,12 @@ public class GenericProxyController : ControllerBase
             (int)response.StatusCode >= 200 &&
             Request.Method != "HEAD")
         {
+            // If Content-Length is known, disable chunked encoding
+            if (response.Content.Headers.ContentLength.HasValue)
+            {
+                Response.ContentLength = response.Content.Headers.ContentLength.Value;
+            }
+            
             await response.Content.CopyToAsync(Response.Body, ct);
         }
 
@@ -203,6 +216,13 @@ public class GenericProxyController : ControllerBase
     private static bool ShouldSkipHeader(string headerName)
     {
         var skip = new[] { "host", "connection", "transfer-encoding", "content-length" };
+        return skip.Contains(headerName.ToLowerInvariant());
+    }
+    
+    private static bool ShouldSkipResponseHeader(string headerName)
+    {
+        // Skip headers that ASP.NET Core manages automatically
+        var skip = new[] { "connection", "transfer-encoding" };
         return skip.Contains(headerName.ToLowerInvariant());
     }
 
