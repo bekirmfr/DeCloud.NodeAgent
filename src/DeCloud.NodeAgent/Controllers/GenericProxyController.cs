@@ -116,7 +116,7 @@ public class GenericProxyController : ControllerBase
             httpClient.Timeout = GetTimeoutForPort(port);
 
             // Forward request
-            return await ForwardHttpRequestAsync(httpClient, targetUrl, ct);
+            return await ForwardHttpRequestAsync(httpClient, targetUrl, vmId, port, ct);
         }
         catch (TaskCanceledException)
         {
@@ -139,6 +139,8 @@ public class GenericProxyController : ControllerBase
     private async Task<IActionResult> ForwardHttpRequestAsync(
         HttpClient client,
         string targetUrl,
+        string vmId,
+        int port,
         CancellationToken ct)
     {
         // Build request message
