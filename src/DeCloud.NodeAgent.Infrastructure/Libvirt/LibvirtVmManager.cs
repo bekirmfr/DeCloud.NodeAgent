@@ -1394,25 +1394,38 @@ public class LibvirtVmManager : IVmManager
             // =====================================================
             string cloudInitYaml;
 
-            try
+            // Check if custom UserData is provided (from orchestrator template)
+            if (!string.IsNullOrEmpty(spec.CloudInitUserData))
             {
-                cloudInitYaml = await _templateService.ProcessTemplateAsync(
-                    spec.VmType,
-                    spec,
-                    variables,
-                    ct);
-
                 _logger.LogInformation(
-                    "VM {VmId}: Successfully processed cloud-init template for {VmType}",
-                    spec.Id, spec.VmType);
+                    "VM {VmId}: Using custom cloud-init UserData from orchestrator ({Bytes} bytes)",
+                    spec.Id, spec.CloudInitUserData.Length);
+                
+                cloudInitYaml = spec.CloudInitUserData;
             }
-            catch (Exception ex)
+            else
             {
-                _logger.LogError(
-                    ex,
-                    "VM {VmId}: Failed to process cloud-init template for {VmType}",
-                    spec.Id, spec.VmType);
-                throw;
+                // Use built-in template processing
+                try
+                {
+                    cloudInitYaml = await _templateService.ProcessTemplateAsync(
+                        spec.VmType,
+                        spec,
+                        variables,
+                        ct);
+
+                    _logger.LogInformation(
+                        "VM {VmId}: Successfully processed cloud-init template for {VmType}",
+                        spec.Id, spec.VmType);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(
+                        ex,
+                        "VM {VmId}: Failed to process cloud-init template for {VmType}",
+                        spec.Id, spec.VmType);
+                    throw;
+                }
             }
 
             // =====================================================

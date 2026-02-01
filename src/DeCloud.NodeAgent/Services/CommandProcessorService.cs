@@ -267,6 +267,7 @@ public class CommandProcessorService : BackgroundService
         string? baseImageUrl = GetStringProperty(root, "baseImageUrl", "BaseImageUrl");
         string? imageId = GetStringProperty(root, "imageId", "ImageId");
         string? sshPublicKey = GetStringProperty(root, "sshPublicKey", "SshPublicKey");
+        string? userData = GetStringProperty(root, "userData", "UserData");
 
         Dictionary<string, string>? labels = null;
         if (root.TryGetProperty("Labels", out var labelsElement) ||
@@ -292,6 +293,7 @@ public class CommandProcessorService : BackgroundService
             DiskBytes = diskBytes,
             BaseImageUrl = baseImageUrl,
             SshPublicKey = sshPublicKey,
+            CloudInitUserData = userData,
             Labels = labels
         };
 
@@ -301,6 +303,13 @@ public class CommandProcessorService : BackgroundService
             vmSpec.VmType.ToString(), vmId, virtualCpuCores,
             memoryBytes / 1024 / 1024, diskBytes / 1024 / 1024 / 1024,
             baseImageUrl, qualityTier);
+
+        if (!string.IsNullOrEmpty(userData))
+        {
+            _logger.LogInformation(
+                "VM {VmId}: Using cloud-init UserData ({Bytes} bytes)",
+                vmId, userData.Length);
+        }
 
         var result = await _vmManager.CreateVmAsync(vmSpec, password, ct);
 
