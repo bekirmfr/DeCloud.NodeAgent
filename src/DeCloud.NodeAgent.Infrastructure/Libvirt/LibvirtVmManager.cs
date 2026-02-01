@@ -820,20 +820,7 @@ public class LibvirtVmManager : IVmManager
                 
                 // Clean up any orphaned resources that might still exist
                 await _repository.DeleteVmAsync(vmId);
-                
-                var vmDirectory = Path.Combine(_options.VmStoragePath, vmId);
-                if (Directory.Exists(vmDirectory))
-                {
-                    try
-                    {
-                        Directory.Delete(vmDirectory, recursive: true);
-                        _logger.LogInformation("Cleaned up orphaned VM directory: {VmDir}", vmDirectory);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Failed to clean up orphaned VM directory {VmDir}", vmDirectory);
-                    }
-                }
+                CleanupVmDirectory(vmId, orphaned: true);
                 
                 return VmOperationResult.Ok(vmId, VmState.Stopped);
             }
@@ -862,19 +849,7 @@ public class LibvirtVmManager : IVmManager
         await _repository.DeleteVmAsync(vmId);
 
         // Clean up directory
-        var vmDirectory = Path.Combine(_options.VmStoragePath, vmId);
-        if (Directory.Exists(vmDirectory))
-        {
-            try
-            {
-                Directory.Delete(vmDirectory, recursive: true);
-                _logger.LogInformation("Deleted VM directory: {VmDir}", vmDirectory);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to delete VM directory {VmDir}", vmDirectory);
-            }
-        }
+        CleanupVmDirectory(vmId, orphaned: false);
 
         if (!string.IsNullOrEmpty(instance.Spec.OwnerId))
         {
@@ -904,6 +879,35 @@ public class LibvirtVmManager : IVmManager
         }
 
         return VmOperationResult.Ok(vmId, VmState.Stopped);
+    }
+
+    /// <summary>
+    /// Clean up VM directory
+    /// </summary>
+    private void CleanupVmDirectory(string vmId, bool orphaned)
+    {
+        var vmDirectory = Path.Combine(_options.VmStoragePath, vmId);
+        if (Directory.Exists(vmDirectory))
+        {
+            try
+            {
+                Directory.Delete(vmDirectory, recursive: true);
+                _logger.LogInformation(
+                    orphaned 
+                        ? "Cleaned up orphaned VM directory: {VmDir}" 
+                        : "Deleted VM directory: {VmDir}", 
+                    vmDirectory);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex, 
+                    orphaned 
+                        ? "Failed to clean up orphaned VM directory {VmDir}" 
+                        : "Failed to delete VM directory {VmDir}", 
+                    vmDirectory);
+            }
+        }
     }
 
     public async Task<VmOperationResult> PauseVmAsync(string vmId, CancellationToken ct = default)
