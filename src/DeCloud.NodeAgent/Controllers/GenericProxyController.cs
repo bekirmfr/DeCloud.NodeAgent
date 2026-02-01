@@ -148,8 +148,7 @@ public class GenericProxyController : ControllerBase
             new HttpMethod(Request.Method),
             targetUrl);
 
-        // Copy headers (excluding some). Forward original Host so backend (e.g. code-server)
-        // sees the public hostname and generates correct redirects/cookies.
+        // Copy headers (excluding some). We will set Host and X-Forwarded-* explicitly below.
         foreach (var header in Request.Headers)
         {
             if (!ShouldSkipHeader(header.Key))
@@ -157,19 +156,19 @@ public class GenericProxyController : ControllerBase
                 request.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
             }
         }
-        if (Request.Headers.Host.Count > 0)
+
+        // Use the PUBLIC hostname for the backend (e.g. code-server). When Caddy proxies to us,
+        // it may rewrite Host to our address; X-Forwarded-Host keeps the original client host.
+        // Backends need the public host to set cookies/redirects correctly (e.g. code-server login).
+        var publicHost = Request.Headers["X-Forwarded-Host"].FirstOrDefault()
+            ?? Request.Headers.Host.ToString();
+        if (!string.IsNullOrEmpty(publicHost))
         {
-            request.Headers.Host = Request.Headers.Host.ToString();
+            request.Headers.Host = publicHost;
+            request.Headers.Remove("X-Forwarded-Host");
+            request.Headers.TryAddWithoutValidation("X-Forwarded-Host", publicHost);
         }
 
-        // Standard reverse-proxy headers so backends (e.g. code-server) see the public origin
-        // and can set cookies/redirects correctly. Overwrite any existing values.
-        var host = Request.Headers.Host.ToString();
-        if (!string.IsNullOrEmpty(host))
-        {
-            request.Headers.Remove("X-Forwarded-Host");
-            request.Headers.TryAddWithoutValidation("X-Forwarded-Host", host);
-        }
         var proto = Request.Headers["X-Forwarded-Proto"].FirstOrDefault() ?? Request.Scheme;
         request.Headers.Remove("X-Forwarded-Proto");
         request.Headers.TryAddWithoutValidation("X-Forwarded-Proto", proto);

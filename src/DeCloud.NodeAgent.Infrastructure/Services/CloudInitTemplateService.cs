@@ -328,7 +328,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
     }
 
     /// <summary>
-    /// Load an external template file from the relay-vm subdirectory
+    /// Load an external template file from the vm subdirectory
     /// </summary>
     private async Task<string> LoadExternalTemplateAsync(
         string filename,
