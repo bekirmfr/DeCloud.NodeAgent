@@ -101,7 +101,19 @@ public class GenericProxyController : ControllerBase
                 return BadRequest(new { error = "VM IP not available" });
             }
 
-            // Build target URL
+            // Check if this is a WebSocket upgrade request
+            if (IsWebSocketUpgradeRequest())
+            {
+                _logger.LogInformation(
+                    "Detected WebSocket upgrade request for VM {VmId} port {Port}",
+                    vmId, port);
+                
+                // Handle as WebSocket tunnel
+                await HandleWebSocketTunnel(vmId, vmIp, port, ct);
+                return new EmptyResult();
+            }
+
+            // Build target URL for regular HTTP request
             var targetPath = string.IsNullOrEmpty(path) ? "" : "/" + path;
             var queryString = Request.QueryString.HasValue ? Request.QueryString.Value : "";
             var targetUrl = $"http://{vmIp}:{port}{targetPath}{queryString}";
@@ -406,6 +418,55 @@ public class GenericProxyController : ControllerBase
     #endregion
 
     #region Helper Methods
+
+    private bool IsWebSocketUpgradeRequest()
+    {
+        var connectionHeader = Request.Headers["Connection"].ToString();
+        var upgradeHeader = Request.Headers["Upgrade"].ToString();
+        
+        return connectionHeader.Contains("Upgrade", StringComparison.OrdinalIgnoreCase) &&
+               upgradeHeader.Equals("websocket", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task HandleWebSocketTunnel(string vmId, string vmIp, int port, CancellationToken ct)
+    {
+        if (!HttpContext.WebSockets.IsWebSocketRequest)
+        {
+            HttpContext.Response.StatusCode = 400;
+            await HttpContext.Response.WriteAsync("WebSocket connection required");
+            return;
+        }
+
+        try
+        {
+            _logger.LogInformation(
+                "Opening WebSocket tunnel for VM {VmId} to {VmIp}:{Port}",
+                vmId, vmIp, port);
+
+            // Accept WebSocket connection from client
+            var webSocket = await HttpContext.WebSockets.AcceptWebSocketAsync();
+
+            // Create TCP connection to VM
+            using var tcpClient = new System.Net.Sockets.TcpClient();
+            await tcpClient.ConnectAsync(vmIp, port, ct);
+
+            using var stream = tcpClient.GetStream();
+
+            // Bidirectional proxy
+            await Task.WhenAny(
+                ProxyWebSocketToTcpAsync(webSocket, stream, ct),
+                ProxyTcpToWebSocketAsync(stream, webSocket, ct)
+            );
+
+            _logger.LogInformation(
+                "WebSocket tunnel closed for VM {VmId} port {Port}",
+                vmId, port);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "WebSocket tunnel error for VM {VmId} port {Port}", vmId, port);
+        }
+    }
 
     private static TimeSpan GetTimeoutForPort(int port)
     {
