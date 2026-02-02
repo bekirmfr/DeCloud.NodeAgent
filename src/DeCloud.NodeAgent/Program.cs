@@ -65,6 +65,11 @@ builder.Services.AddHttpClient<OrchestratorClient>()
 builder.Services.AddHttpClient("VmProxy", client =>
 {
     client.Timeout = TimeSpan.FromSeconds(30);
+})
+.ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+{
+    AllowAutoRedirect = false,
+    UseCookies = false
 });
 
 // =====================================================

@@ -112,7 +112,7 @@ public class GenericProxyController : ControllerBase
                 Request.Method, vmId, targetUrl);
 
             // Create HTTP client with appropriate timeout
-            var httpClient = _httpClientFactory.CreateClient();
+            var httpClient = _httpClientFactory.CreateClient("VmProxy");
             httpClient.Timeout = GetTimeoutForPort(port);
 
             // Forward request
@@ -182,47 +182,34 @@ public class GenericProxyController : ControllerBase
         }
 
         // Copy body if present
-        if (Request.ContentLength > 0)
+        var hasBody = Request.ContentLength > 0
+    || (Request.ContentLength == null && HttpMethods.IsPost(Request.Method))
+    || (Request.ContentLength == null && HttpMethods.IsPut(Request.Method))
+    || (Request.ContentLength == null && HttpMethods.IsPatch(Request.Method));
+
+        if (hasBody)
         {
-            // Enable buffering to allow body to be read multiple times
             Request.EnableBuffering();
-            
-            try
+
+            if (Request.Body.CanSeek)
             {
-                // Reset position to start
-                if (Request.Body.CanSeek)
-                {
-                    Request.Body.Position = 0;
-                }
+                Request.Body.Position = 0;
             }
-            catch (Exception ex)
-            {
-                _logger.LogWarning("Could not seek request body: {Error}", ex.Message);
-            }
-            
+
             var bodyStream = new MemoryStream();
             await Request.Body.CopyToAsync(bodyStream, ct);
-            
-            _logger.LogDebug(
-                "HTTP proxy {Method} to {VmId}:{Port} - ContentLength={ContentLength}, CopiedBytes={Copied}",
-                Request.Method, vmId, port, Request.ContentLength, bodyStream.Length);
-            
+
             if (bodyStream.Length > 0)
             {
                 bodyStream.Position = 0;
                 request.Content = new StreamContent(bodyStream);
-
                 if (Request.ContentType != null)
                 {
                     request.Content.Headers.ContentType =
                         System.Net.Http.Headers.MediaTypeHeaderValue.Parse(Request.ContentType);
                 }
-            }
-            else
-            {
-                _logger.LogWarning(
-                    "POST body was empty despite ContentLength={Length} for {VmId}:{Port}",
-                    Request.ContentLength, vmId, port);
+
+                request.Content.Headers.ContentLength = bodyStream.Length;
             }
         }
 
