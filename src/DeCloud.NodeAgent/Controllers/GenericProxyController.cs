@@ -440,31 +440,119 @@ public class GenericProxyController : ControllerBase
         try
         {
             _logger.LogInformation(
-                "Opening WebSocket tunnel for VM {VmId} to {VmIp}:{Port}",
-                vmId, vmIp, port);
+                "Proxying WebSocket upgrade for VM {VmId} to {VmIp}:{Port}, path: {Path}",
+                vmId, vmIp, port, Request.Path);
 
-            // Accept WebSocket connection from client
-            var webSocket = await HttpContext.WebSockets.AcceptWebSocketAsync();
+            // Build the backend WebSocket URL
+            var path = Request.Path.ToString();
+            var queryString = Request.QueryString.HasValue ? Request.QueryString.Value : "";
+            
+            // Extract the actual path after /proxy/http/{port}/
+            var proxyPrefix = $"/api/vms/{vmId}/proxy/http/{port}";
+            if (path.StartsWith(proxyPrefix))
+            {
+                path = path.Substring(proxyPrefix.Length);
+            }
+            
+            var backendWsUrl = $"wss://{vmIp}:{port}{path}{queryString}";
+            
+            _logger.LogDebug("Backend WebSocket URL: {Url}", backendWsUrl);
 
-            // Create TCP connection to VM
-            using var tcpClient = new System.Net.Sockets.TcpClient();
-            await tcpClient.ConnectAsync(vmIp, port, ct);
+            // Create WebSocket client to backend
+            using var backendWs = new System.Net.WebSockets.ClientWebSocket();
+            
+            // Copy headers from client request to backend request
+            foreach (var header in Request.Headers)
+            {
+                if (IsWebSocketHeader(header.Key))
+                {
+                    continue; // Skip WebSocket-specific headers, ClientWebSocket handles these
+                }
+                if (!ShouldSkipHeader(header.Key))
+                {
+                    try
+                    {
+                        backendWs.Options.SetRequestHeader(header.Key, header.Value.ToString());
+                    }
+                    catch
+                    {
+                        // Skip headers that can't be set
+                    }
+                }
+            }
 
-            using var stream = tcpClient.GetStream();
+            // For code-server, we need to connect via HTTP (not HTTPS) to the VM's internal IP
+            var httpBackendWsUrl = $"ws://{vmIp}:{port}{path}{queryString}";
+            
+            _logger.LogDebug("Connecting to backend via: {Url}", httpBackendWsUrl);
+            
+            // Connect to backend WebSocket
+            await backendWs.ConnectAsync(new Uri(httpBackendWsUrl), ct);
 
-            // Bidirectional proxy
-            await Task.WhenAny(
-                ProxyWebSocketToTcpAsync(webSocket, stream, ct),
-                ProxyTcpToWebSocketAsync(stream, webSocket, ct)
+            _logger.LogInformation("WebSocket tunnel established for VM {VmId}", vmId);
+
+            // Accept client WebSocket
+            var clientWs = await HttpContext.WebSockets.AcceptWebSocketAsync();
+
+            // Bidirectional bridge
+            await Task.WhenAll(
+                RelayWebSocketAsync(clientWs, backendWs, "client->backend", ct),
+                RelayWebSocketAsync(backendWs, clientWs, "backend->client", ct)
             );
 
-            _logger.LogInformation(
-                "WebSocket tunnel closed for VM {VmId} port {Port}",
-                vmId, port);
+            _logger.LogInformation("WebSocket tunnel closed for VM {VmId}", vmId);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "WebSocket tunnel error for VM {VmId} port {Port}", vmId, port);
+            throw;
+        }
+    }
+
+    private static bool IsWebSocketHeader(string headerName)
+    {
+        var wsHeaders = new[] { 
+            "sec-websocket-key", "sec-websocket-version", "sec-websocket-protocol",
+            "sec-websocket-extensions", "upgrade", "connection"
+        };
+        return wsHeaders.Contains(headerName.ToLowerInvariant());
+    }
+
+    private async Task RelayWebSocketAsync(
+        System.Net.WebSockets.WebSocket source,
+        System.Net.WebSockets.WebSocket destination,
+        string direction,
+        CancellationToken ct)
+    {
+        var buffer = new byte[8192];
+        
+        try
+        {
+            while (source.State == System.Net.WebSockets.WebSocketState.Open &&
+                   destination.State == System.Net.WebSockets.WebSocketState.Open &&
+                   !ct.IsCancellationRequested)
+            {
+                var result = await source.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+
+                if (result.MessageType == System.Net.WebSockets.WebSocketMessageType.Close)
+                {
+                    await destination.CloseAsync(
+                        System.Net.WebSockets.WebSocketCloseStatus.NormalClosure,
+                        result.CloseStatusDescription,
+                        ct);
+                    break;
+                }
+
+                await destination.SendAsync(
+                    new ArraySegment<byte>(buffer, 0, result.Count),
+                    result.MessageType,
+                    result.EndOfMessage,
+                    ct);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "WebSocket relay {Direction} ended", direction);
         }
     }
 
