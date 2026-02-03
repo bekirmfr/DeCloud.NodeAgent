@@ -15,6 +15,7 @@ public interface INodeMetadataService
     string WalletAddress { get; }
     string Region { get; }
     string Zone { get; }
+    NodePricing? Pricing { get; }
     HardwareInventory? Inventory { get; }
 
     Task InitializeAsync(CancellationToken ct = default);
@@ -36,6 +37,7 @@ public class NodeMetadataService : INodeMetadataService
     public string WalletAddress { get; private set; } = string.Empty;
     public string Region { get; private set; } = string.Empty;
     public string Zone { get; private set; } = string.Empty;
+    public NodePricing? Pricing { get; private set; }
     public HardwareInventory? Inventory { get; private set; } = null;
 
     public NodeMetadataService(IConfiguration configuration, ILogger<NodeMetadataService> logger)
@@ -61,6 +63,14 @@ public class NodeMetadataService : INodeMetadataService
         Name = _configuration["Node:Name"] ?? Environment.MachineName;
         Region = _configuration["Node:Region"] ?? "default";
         Zone = _configuration["Node:Zone"] ?? "default";
+
+        // Load operator pricing from config (optional)
+        var pricingSection = _configuration.GetSection("Node:Pricing");
+        if (pricingSection.Exists())
+        {
+            Pricing = new NodePricing();
+            pricingSection.Bind(Pricing);
+        }
 
         // Discover public IP
         PublicIp = await DiscoverPublicIpAsync(ct);
