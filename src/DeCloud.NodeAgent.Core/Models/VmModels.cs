@@ -37,6 +37,9 @@ public class VmSpec
     public string IpAddress { get; set; } = string.Empty;  // Within overlay network
     public string MacAddress { get; set; } = string.Empty;
 
+    // Bandwidth limiting (enforced via libvirt QoS)
+    public BandwidthTier BandwidthTier { get; set; } = BandwidthTier.Unmetered;
+
     // Cloud-init configuration (optional)
     public string? CloudInitUserData { get; set; }
     public string? SshPublicKey { get; set; }
@@ -140,6 +143,25 @@ public enum QualityTier
     /// Minimum acceptable performance (1000+ benchmark)
     /// </summary>
     Burstable = 3
+}
+
+/// <summary>
+/// Bandwidth tier for VM network rate limiting.
+/// Enforced via libvirt QoS on the VM's virtio network interface.
+/// </summary>
+public enum BandwidthTier
+{
+    /// <summary>10 Mbps average, 20 Mbps burst - Light browsing, text</summary>
+    Basic = 0,
+
+    /// <summary>50 Mbps average, 100 Mbps burst - General browsing, streaming</summary>
+    Standard = 1,
+
+    /// <summary>200 Mbps average, 400 Mbps burst - HD video, downloads</summary>
+    Performance = 2,
+
+    /// <summary>No artificial cap - limited only by host NIC</summary>
+    Unmetered = 3
 }
 
 /// <summary>

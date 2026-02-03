@@ -1745,6 +1745,33 @@ public class LibvirtVmManager : IVmManager
             </disk>";
 
         // ========================================
+        // BANDWIDTH QoS (libvirt rate limiting)
+        // ========================================
+        // Values are in KB/s. Burst is in KB.
+        var bandwidthXml = spec.BandwidthTier switch
+        {
+            BandwidthTier.Basic =>       // 10 Mbps avg, 20 Mbps peak
+                @"
+                  <bandwidth>
+                    <inbound average='1250' peak='2500' burst='1250'/>
+                    <outbound average='1250' peak='2500' burst='1250'/>
+                  </bandwidth>",
+            BandwidthTier.Standard =>    // 50 Mbps avg, 100 Mbps peak
+                @"
+                  <bandwidth>
+                    <inbound average='6250' peak='12500' burst='6250'/>
+                    <outbound average='6250' peak='12500' burst='6250'/>
+                  </bandwidth>",
+            BandwidthTier.Performance => // 200 Mbps avg, 400 Mbps peak
+                @"
+                  <bandwidth>
+                    <inbound average='25000' peak='50000' burst='25000'/>
+                    <outbound average='25000' peak='50000' burst='25000'/>
+                  </bandwidth>",
+            _ => "" // Unmetered: no bandwidth element = no cap
+        };
+
+        // ========================================
         // COMPLETE LIBVIRT XML
         // ========================================
         return $@"
@@ -1780,7 +1807,7 @@ public class LibvirtVmManager : IVmManager
                 </disk>{cloudInitDisk}
                 <interface type='network'>
                   <source network='default'/>
-                  <model type='virtio'/>
+                  <model type='virtio'/>{bandwidthXml}
                 </interface>
                 <serial type='pty'>
                   <target port='0'/>
@@ -1978,6 +2005,32 @@ public class LibvirtVmManager : IVmManager
             : "";
 
         // ========================================
+        // BANDWIDTH QoS (libvirt rate limiting)
+        // ========================================
+        var bandwidthXml = spec.BandwidthTier switch
+        {
+            BandwidthTier.Basic =>
+                @"
+                  <bandwidth>
+                    <inbound average='1250' peak='2500' burst='1250'/>
+                    <outbound average='1250' peak='2500' burst='1250'/>
+                  </bandwidth>",
+            BandwidthTier.Standard =>
+                @"
+                  <bandwidth>
+                    <inbound average='6250' peak='12500' burst='6250'/>
+                    <outbound average='6250' peak='12500' burst='6250'/>
+                  </bandwidth>",
+            BandwidthTier.Performance =>
+                @"
+                  <bandwidth>
+                    <inbound average='25000' peak='50000' burst='25000'/>
+                    <outbound average='25000' peak='50000' burst='25000'/>
+                  </bandwidth>",
+            _ => ""
+        };
+
+        // ========================================
         // COMPLETE LIBVIRT XML
         // ========================================
         return $@"
@@ -2012,7 +2065,7 @@ public class LibvirtVmManager : IVmManager
                 {cloudInitDisk}
                 <interface type='network'>
                   <source network='default'/>
-                  <model type='virtio'/>
+                  <model type='virtio'/>{bandwidthXml}
                 </interface>
                 <console type='pty'>
                   <target type='serial' port='0'/>
