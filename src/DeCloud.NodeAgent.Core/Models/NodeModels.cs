@@ -159,13 +159,18 @@ public class NodeRegistration
     public string? Message { get; set; }
 
     public DateTime RegisteredAt { get; set; } = DateTime.UtcNow;
+
+    /// <summary>
+    /// Node operator pricing (optional). If null, platform defaults are used.
+    /// </summary>
+    public NodePricing? Pricing { get; set; }
 }
 
 public class NodePricing
 {
-    public decimal PricePerVCpuHour { get; set; }
-    public decimal PricePerGbRamHour { get; set; }
-    public decimal PricePerGbStorageMonth { get; set; }
-    public decimal PricePerGpuHour { get; set; }
-    public string Currency { get; set; } = "USDC";  // Stablecoin default
+    public decimal CpuPerHour { get; set; }
+    public decimal MemoryPerGbPerHour { get; set; }
+    public decimal StoragePerGbPerHour { get; set; }
+    public decimal GpuPerHour { get; set; }
+    public string Currency { get; set; } = "USDC";
 }
