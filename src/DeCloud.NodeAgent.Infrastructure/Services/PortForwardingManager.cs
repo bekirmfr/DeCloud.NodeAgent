@@ -1,0 +1,442 @@
+using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Infrastructure.Persistence;
+using Microsoft.Extensions.Logging;
+
+namespace DeCloud.NodeAgent.Infrastructure.Services;
+
+/// <summary>
+/// Manages iptables port forwarding rules for Smart Port Allocation.
+/// Creates DNAT rules to forward public ports to VM internal ports.
+///
+/// Separate from NatRuleManager (which handles Relay VMs).
+/// </summary>
+public interface IPortForwardingManager
+{
+    /// <summary>
+    /// Create port forwarding rule: PublicPort → VM:VmPort
+    /// </summary>
+    Task<bool> CreateForwardingAsync(
+        string vmIp,
+        int vmPort,
+        int publicPort,
+        PortProtocol protocol,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Remove port forwarding rule
+    /// </summary>
+    Task<bool> RemoveForwardingAsync(
+        int publicPort,
+        PortProtocol protocol,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Remove all forwarding rules for a VM
+    /// </summary>
+    Task<bool> RemoveAllForVmAsync(
+        string vmIp,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Reconcile iptables rules with database (after restart)
+    /// </summary>
+    Task ReconcileRulesAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Check if forwarding rule exists
+    /// </summary>
+    Task<bool> RuleExistsAsync(int publicPort, CancellationToken ct = default);
+}
+
+public class PortForwardingManager : IPortForwardingManager
+{
+    private readonly ICommandExecutor _executor;
+    private readonly PortMappingRepository _repository;
+    private readonly ILogger<PortForwardingManager> _logger;
+    private readonly bool _isLinux;
+    private readonly SemaphoreSlim _lock = new(1, 1);
+
+    // Chain name for port forwarding rules (keeps them organized)
+    private const string CHAIN_NAME = "DECLOUD_PORT_FWD";
+
+    public PortForwardingManager(
+        ICommandExecutor executor,
+        PortMappingRepository repository,
+        ILogger<PortForwardingManager> logger)
+    {
+        _executor = executor;
+        _repository = repository;
+        _logger = logger;
+        _isLinux = Environment.OSVersion.Platform == PlatformID.Unix;
+    }
+
+    public async Task<bool> CreateForwardingAsync(
+        string vmIp,
+        int vmPort,
+        int publicPort,
+        PortProtocol protocol,
+        CancellationToken ct = default)
+    {
+        if (!_isLinux)
+        {
+            _logger.LogWarning("Port forwarding not supported on non-Linux platforms");
+            return false;
+        }
+
+        await _lock.WaitAsync(ct);
+        try
+        {
+            // Ensure our custom chain exists
+            await EnsureChainExistsAsync(ct);
+
+            _logger.LogInformation(
+                "Creating port forwarding: :{PublicPort} → {VmIp}:{VmPort} ({Protocol})",
+                publicPort, vmIp, vmPort, protocol);
+
+            // Create forwarding rules based on protocol
+            if (protocol == PortProtocol.TCP || protocol == PortProtocol.Both)
+            {
+                await CreateIptablesRuleAsync("tcp", vmIp, vmPort, publicPort, ct);
+            }
+
+            if (protocol == PortProtocol.UDP || protocol == PortProtocol.Both)
+            {
+                await CreateIptablesRuleAsync("udp", vmIp, vmPort, publicPort, ct);
+            }
+
+            // Save rules persistently
+            await SaveRulesAsync(ct);
+
+            _logger.LogInformation(
+                "✓ Port forwarding created: :{PublicPort} → {VmIp}:{VmPort}",
+                publicPort, vmIp, vmPort);
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to create port forwarding for {VmIp}:{VmPort} → :{PublicPort}",
+                vmIp, vmPort, publicPort);
+            return false;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<bool> RemoveForwardingAsync(
+        int publicPort,
+        PortProtocol protocol,
+        CancellationToken ct = default)
+    {
+        if (!_isLinux)
+        {
+            return false;
+        }
+
+        await _lock.WaitAsync(ct);
+        try
+        {
+            _logger.LogInformation(
+                "Removing port forwarding for port {PublicPort} ({Protocol})",
+                publicPort, protocol);
+
+            bool success = true;
+
+            // Remove TCP rule
+            if (protocol == PortProtocol.TCP || protocol == PortProtocol.Both)
+            {
+                var result = await _executor.ExecuteAsync(
+                    "iptables",
+                    $"-t nat -D {CHAIN_NAME} -p tcp --dport {publicPort} -j DNAT",
+                    ct);
+
+                if (!result.Success)
+                {
+                    _logger.LogWarning(
+                        "Failed to remove TCP rule for port {PublicPort}: {Error}",
+                        publicPort, result.StandardError);
+                    success = false;
+                }
+            }
+
+            // Remove UDP rule
+            if (protocol == PortProtocol.UDP || protocol == PortProtocol.Both)
+            {
+                var result = await _executor.ExecuteAsync(
+                    "iptables",
+                    $"-t nat -D {CHAIN_NAME} -p udp --dport {publicPort} -j DNAT",
+                    ct);
+
+                if (!result.Success)
+                {
+                    _logger.LogWarning(
+                        "Failed to remove UDP rule for port {PublicPort}: {Error}",
+                        publicPort, result.StandardError);
+                    success = false;
+                }
+            }
+
+            if (success)
+            {
+                await SaveRulesAsync(ct);
+                _logger.LogInformation("✓ Port forwarding removed for port {PublicPort}", publicPort);
+            }
+
+            return success;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error removing port forwarding for port {PublicPort}", publicPort);
+            return false;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<bool> RemoveAllForVmAsync(string vmIp, CancellationToken ct = default)
+    {
+        if (!_isLinux)
+        {
+            return false;
+        }
+
+        await _lock.WaitAsync(ct);
+        try
+        {
+            _logger.LogInformation("Removing all port forwarding rules for VM {VmIp}", vmIp);
+
+            // This is a bit brute-force, but effective:
+            // Flush all rules in our chain, then recreate rules for other VMs
+
+            // Get all mappings except for this VM
+            var allMappings = await _repository.GetAllActiveAsync();
+            var otherVmMappings = allMappings.Where(m => m.VmPrivateIp != vmIp).ToList();
+
+            // Flush our chain
+            await _executor.ExecuteAsync("iptables", $"-t nat -F {CHAIN_NAME}", ct);
+
+            // Recreate rules for other VMs
+            foreach (var mapping in otherVmMappings)
+            {
+                await CreateForwardingAsync(
+                    mapping.VmPrivateIp,
+                    mapping.VmPort,
+                    mapping.PublicPort,
+                    mapping.Protocol,
+                    ct);
+            }
+
+            await SaveRulesAsync(ct);
+
+            _logger.LogInformation("✓ Removed all forwarding rules for VM {VmIp}", vmIp);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error removing forwarding rules for VM {VmIp}", vmIp);
+            return false;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task ReconcileRulesAsync(CancellationToken ct = default)
+    {
+        if (!_isLinux)
+        {
+            _logger.LogDebug("Skipping reconciliation on non-Linux platform");
+            return;
+        }
+
+        await _lock.WaitAsync(ct);
+        try
+        {
+            _logger.LogInformation("Reconciling port forwarding rules from database...");
+
+            // Ensure chain exists
+            await EnsureChainExistsAsync(ct);
+
+            // Flush existing rules in our chain
+            await _executor.ExecuteAsync("iptables", $"-t nat -F {CHAIN_NAME}", ct);
+
+            // Get all active mappings from database
+            var mappings = await _repository.GetAllActiveAsync();
+
+            _logger.LogInformation("Recreating {Count} port forwarding rules", mappings.Count);
+
+            // Recreate all rules
+            foreach (var mapping in mappings)
+            {
+                await CreateForwardingAsync(
+                    mapping.VmPrivateIp,
+                    mapping.VmPort,
+                    mapping.PublicPort,
+                    mapping.Protocol,
+                    ct);
+            }
+
+            await SaveRulesAsync(ct);
+
+            _logger.LogInformation("✓ Reconciliation complete: {Count} rules restored", mappings.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to reconcile port forwarding rules");
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<bool> RuleExistsAsync(int publicPort, CancellationToken ct = default)
+    {
+        if (!_isLinux)
+        {
+            return false;
+        }
+
+        try
+        {
+            var result = await _executor.ExecuteAsync(
+                "iptables",
+                $"-t nat -L {CHAIN_NAME} -n --line-numbers",
+                ct);
+
+            if (result.Success)
+            {
+                return result.StandardOutput.Contains($"dpt:{publicPort}");
+            }
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Create iptables DNAT rule for specific protocol
+    /// </summary>
+    private async Task CreateIptablesRuleAsync(
+        string protocol,
+        string vmIp,
+        int vmPort,
+        int publicPort,
+        CancellationToken ct)
+    {
+        // PREROUTING DNAT: Rewrite destination
+        var preRoutingRule = $@"-t nat -A {CHAIN_NAME} \
+            -p {protocol} --dport {publicPort} \
+            -j DNAT --to-destination {vmIp}:{vmPort}";
+
+        var result = await _executor.ExecuteAsync("iptables", preRoutingRule, ct);
+        if (!result.Success)
+        {
+            throw new Exception($"Failed to create DNAT rule: {result.StandardError}");
+        }
+
+        // FORWARD: Allow forwarded traffic
+        var forwardRule = $@"-A FORWARD \
+            -p {protocol} -d {vmIp} --dport {vmPort} \
+            -m state --state NEW,ESTABLISHED,RELATED \
+            -j ACCEPT";
+
+        result = await _executor.ExecuteAsync("iptables", forwardRule, ct);
+        if (!result.Success)
+        {
+            _logger.LogWarning(
+                "Failed to create FORWARD rule (may already exist): {Error}",
+                result.StandardError);
+            // Don't fail - FORWARD rule might already exist
+        }
+
+        _logger.LogDebug(
+            "Created {Protocol} iptables rule: :{PublicPort} → {VmIp}:{VmPort}",
+            protocol.ToUpper(), publicPort, vmIp, vmPort);
+    }
+
+    /// <summary>
+    /// Ensure our custom chain exists
+    /// </summary>
+    private async Task EnsureChainExistsAsync(CancellationToken ct)
+    {
+        // Create chain if it doesn't exist
+        var result = await _executor.ExecuteAsync(
+            "iptables",
+            $"-t nat -N {CHAIN_NAME}",
+            ct);
+
+        // If chain already exists, that's fine (exit code 1)
+        if (!result.Success && !result.StandardError.Contains("Chain already exists"))
+        {
+            _logger.LogWarning("Failed to create chain {Chain}: {Error}",
+                CHAIN_NAME, result.StandardError);
+        }
+
+        // Ensure our chain is called from PREROUTING
+        result = await _executor.ExecuteAsync(
+            "iptables",
+            $"-t nat -C PREROUTING -j {CHAIN_NAME}",
+            ct);
+
+        if (!result.Success)
+        {
+            // Chain not in PREROUTING, add it
+            result = await _executor.ExecuteAsync(
+                "iptables",
+                $"-t nat -A PREROUTING -j {CHAIN_NAME}",
+                ct);
+
+            if (result.Success)
+            {
+                _logger.LogInformation("✓ Created iptables chain {Chain}", CHAIN_NAME);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Save iptables rules persistently
+    /// </summary>
+    private async Task SaveRulesAsync(CancellationToken ct)
+    {
+        try
+        {
+            // Try iptables-save with netfilter-persistent (Debian/Ubuntu)
+            var result = await _executor.ExecuteAsync(
+                "netfilter-persistent",
+                "save",
+                ct);
+
+            if (result.Success)
+            {
+                _logger.LogDebug("Saved iptables rules via netfilter-persistent");
+                return;
+            }
+
+            // Fallback: iptables-save to file (RHEL/CentOS)
+            result = await _executor.ExecuteAsync(
+                "sh",
+                "-c \"iptables-save > /etc/sysconfig/iptables\"",
+                ct);
+
+            if (result.Success)
+            {
+                _logger.LogDebug("Saved iptables rules to /etc/sysconfig/iptables");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to save iptables rules persistently");
+        }
+    }
+}
