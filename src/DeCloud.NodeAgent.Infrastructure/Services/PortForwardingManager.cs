@@ -335,9 +335,7 @@ public class PortForwardingManager : IPortForwardingManager
         CancellationToken ct)
     {
         // PREROUTING DNAT: Rewrite destination
-        var preRoutingRule = $@"-t nat -A {CHAIN_NAME} \
-            -p {protocol} --dport {publicPort} \
-            -j DNAT --to-destination {vmIp}:{vmPort}";
+        var preRoutingRule = $"-t nat -A {CHAIN_NAME} -p {protocol} --dport {publicPort} -j DNAT --to-destination {vmIp}:{vmPort}";
 
         var result = await _executor.ExecuteAsync("iptables", preRoutingRule, ct);
         if (!result.Success)
@@ -346,10 +344,7 @@ public class PortForwardingManager : IPortForwardingManager
         }
 
         // FORWARD: Allow forwarded traffic
-        var forwardRule = $@"-A FORWARD \
-            -p {protocol} -d {vmIp} --dport {vmPort} \
-            -m state --state NEW,ESTABLISHED,RELATED \
-            -j ACCEPT";
+        var forwardRule = $"-A FORWARD -p {protocol} -d {vmIp} --dport {vmPort} -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT";
 
         result = await _executor.ExecuteAsync("iptables", forwardRule, ct);
         if (!result.Success)
