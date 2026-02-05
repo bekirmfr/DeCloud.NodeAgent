@@ -39,7 +39,8 @@ public partial class OrchestratorClient : IOrchestratorClient
     private HeartbeatDto? _lastHeartbeat = null;
 
     // Queue for pending commands received from heartbeat responses
-    private readonly ConcurrentQueue<PendingCommand> _pendingCommands = new();
+    // Shared singleton with CommandProcessorService via DI
+    private readonly ConcurrentQueue<PendingCommand> _pendingCommands;
 
     private static readonly TimeSpan OrchestratorTimeout = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan InternetCheckTimeout = TimeSpan.FromSeconds(10);
@@ -60,6 +61,7 @@ public partial class OrchestratorClient : IOrchestratorClient
         IResourceDiscoveryService resourceDiscovery,
         INodeStateService nodeState,
         INodeMetadataService nodeMetadata,
+        ConcurrentQueue<PendingCommand> pendingCommands,
         ILogger<OrchestratorClient> logger)
     {
         _httpClient = httpClient;
@@ -69,6 +71,7 @@ public partial class OrchestratorClient : IOrchestratorClient
         _nodeMetadata = nodeMetadata;
         _walletAddress = _options.WalletAddress;
         _nodeState = nodeState;
+        _pendingCommands = pendingCommands;
         _httpClient.BaseAddress = new Uri(_options.BaseUrl.TrimEnd('/'));
         _httpClient.Timeout = _options.Timeout;
 
