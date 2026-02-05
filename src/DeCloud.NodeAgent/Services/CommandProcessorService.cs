@@ -2,6 +2,8 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
+using DeCloud.NodeAgent.Infrastructure.Persistence;
+using DeCloud.NodeAgent.Infrastructure.Services;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 using System.Text.Json;
@@ -22,6 +24,9 @@ public class CommandProcessorService : BackgroundService
     private readonly INatRuleManager _natRuleManager;
     private readonly INodeMetadataService _nodeMetadata;
     private readonly INodeStateService _nodeState;
+    private readonly IPortPoolManager _portPoolManager;
+    private readonly IPortForwardingManager _portForwardingManager;
+    private readonly PortMappingRepository _portMappingRepository;
     private readonly ILogger<CommandProcessorService> _logger;
     private readonly CommandProcessorOptions _options;
 
@@ -45,6 +50,9 @@ public class CommandProcessorService : BackgroundService
         INatRuleManager natRuleManager,
         INodeMetadataService nodeMetadata,
         INodeStateService nodeState,
+        IPortPoolManager portPoolManager,
+        IPortForwardingManager portForwardingManager,
+        PortMappingRepository portMappingRepository,
         IOptions<CommandProcessorOptions> options,
         ILogger<CommandProcessorService> logger)
     {
@@ -55,6 +63,9 @@ public class CommandProcessorService : BackgroundService
         _natRuleManager = natRuleManager;
         _nodeMetadata = nodeMetadata;
         _nodeState = nodeState;
+        _portPoolManager = portPoolManager;
+        _portForwardingManager = portForwardingManager;
+        _portMappingRepository = portMappingRepository;
         _logger = logger;
         _options = options.Value;
     }
@@ -227,6 +238,12 @@ public class CommandProcessorService : BackgroundService
 
             case CommandType.Benchmark:
                 return await HandleBenchmarkAsync(ct);
+
+            case CommandType.AllocatePort:
+                return await HandleAllocatePortAsync(command.Payload, ct);
+
+            case CommandType.RemovePort:
+                return await HandleRemovePortAsync(command.Payload, ct);
 
             default:
                 _logger.LogWarning("Unknown command type: {Type}", command.Type);
@@ -480,5 +497,162 @@ public class CommandProcessorService : BackgroundService
             }
         }
         return null;
+    }
+
+    /// <summary>
+    /// Handle AllocatePort command for Smart Port Allocation.
+    /// Payload format: { "VmId": "...", "VmPrivateIp": "...", "VmPort": 22, "Protocol": 1, "Label": "SSH" }
+    /// </summary>
+    private async Task<bool> HandleAllocatePortAsync(string payload, CancellationToken ct)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(payload);
+            var root = doc.RootElement;
+
+            string? vmId = GetStringProperty(root, "vmId", "VmId");
+            string? vmPrivateIp = GetStringProperty(root, "vmPrivateIp", "VmPrivateIp");
+            int? vmPort = GetIntProperty(root, "vmPort", "VmPort");
+            int? protocolInt = GetIntProperty(root, "protocol", "Protocol");
+            string? label = GetStringProperty(root, "label", "Label");
+
+            if (string.IsNullOrEmpty(vmId) || string.IsNullOrEmpty(vmPrivateIp) || vmPort == null || protocolInt == null)
+            {
+                _logger.LogError("Invalid AllocatePort payload: missing required fields");
+                return false;
+            }
+
+            var protocol = (PortProtocol)protocolInt.Value;
+
+            _logger.LogInformation(
+                "Allocating port for VM {VmId} ({VmIp}:{VmPort}) - {Protocol}",
+                vmId, vmPrivateIp, vmPort, protocol);
+
+            // Allocate public port from pool
+            var publicPort = await _portPoolManager.AllocatePortAsync(ct);
+            if (publicPort == null)
+            {
+                _logger.LogError("Port pool exhausted - cannot allocate port for VM {VmId}", vmId);
+                return false;
+            }
+
+            // Create port mapping in database
+            var mapping = new PortMapping
+            {
+                VmId = vmId,
+                VmPrivateIp = vmPrivateIp,
+                VmPort = vmPort.Value,
+                PublicPort = publicPort.Value,
+                Protocol = protocol,
+                Label = label
+            };
+
+            var added = await _portMappingRepository.AddAsync(mapping);
+            if (!added)
+            {
+                _logger.LogError("Failed to save port mapping to database");
+                await _portPoolManager.ReleasePortAsync(publicPort.Value, ct);
+                return false;
+            }
+
+            // Create iptables forwarding rules
+            var success = await _portForwardingManager.CreateForwardingAsync(
+                vmPrivateIp,
+                vmPort.Value,
+                publicPort.Value,
+                protocol,
+                ct);
+
+            if (!success)
+            {
+                _logger.LogError("Failed to create iptables rules");
+                await _portMappingRepository.RemoveAsync(vmId, vmPort.Value);
+                await _portPoolManager.ReleasePortAsync(publicPort.Value, ct);
+                return false;
+            }
+
+            _logger.LogInformation(
+                "✓ Port allocated: {PublicPort} → {VmIp}:{VmPort} (VM {VmId})",
+                publicPort.Value, vmPrivateIp, vmPort.Value, vmId);
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling AllocatePort command");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Handle RemovePort command for Smart Port Allocation.
+    /// Payload format: { "VmId": "...", "VmPort": 22, "Protocol": 1 }
+    /// </summary>
+    private async Task<bool> HandleRemovePortAsync(string payload, CancellationToken ct)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(payload);
+            var root = doc.RootElement;
+
+            string? vmId = GetStringProperty(root, "vmId", "VmId");
+            int? vmPort = GetIntProperty(root, "vmPort", "VmPort");
+            int? protocolInt = GetIntProperty(root, "protocol", "Protocol");
+
+            if (string.IsNullOrEmpty(vmId) || vmPort == null || protocolInt == null)
+            {
+                _logger.LogError("Invalid RemovePort payload: missing required fields");
+                return false;
+            }
+
+            var protocol = (PortProtocol)protocolInt.Value;
+
+            _logger.LogInformation(
+                "Removing port mapping for VM {VmId} port {VmPort} ({Protocol})",
+                vmId, vmPort, protocol);
+
+            // Get mapping to find public port
+            var mappings = await _portMappingRepository.GetByVmIdAsync(vmId);
+            var mapping = mappings.FirstOrDefault(m => m.VmPort == vmPort.Value);
+
+            if (mapping == null)
+            {
+                _logger.LogWarning("Port mapping not found for VM {VmId} port {VmPort}", vmId, vmPort);
+                return false;
+            }
+
+            // Remove iptables rules
+            var success = await _portForwardingManager.RemoveForwardingAsync(
+                mapping.PublicPort,
+                protocol,
+                ct);
+
+            if (!success)
+            {
+                _logger.LogWarning("Failed to remove iptables rules (may not exist)");
+            }
+
+            // Remove from database
+            var removed = await _portMappingRepository.RemoveAsync(vmId, vmPort.Value);
+            if (!removed)
+            {
+                _logger.LogError("Failed to remove port mapping from database");
+                return false;
+            }
+
+            // Release port back to pool
+            await _portPoolManager.ReleasePortAsync(mapping.PublicPort, ct);
+
+            _logger.LogInformation(
+                "✓ Port mapping removed: {PublicPort} → VM {VmId}:{VmPort}",
+                mapping.PublicPort, vmId, vmPort.Value);
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling RemovePort command");
+            return false;
+        }
     }
 }
