@@ -196,12 +196,12 @@ public class CommandProcessorService : BackgroundService
 
         try
         {
-            var success = await ExecuteCommandAsync(command, ct);
+            var (success, data) = await ExecuteCommandAsync(command, ct);
 
             if (command.RequiresAck)
             {
                 await _orchestratorClient.AcknowledgeCommandAsync(
-                    command.CommandId, success, null, ct);
+                    command.CommandId, success, null, data, ct);
             }
 
             _logger.LogInformation(
@@ -215,39 +215,39 @@ public class CommandProcessorService : BackgroundService
             if (command.RequiresAck)
             {
                 await _orchestratorClient.AcknowledgeCommandAsync(
-                    command.CommandId, false, ex.Message, ct);
+                    command.CommandId, false, ex.Message, null, ct);
             }
         }
     }
 
-    private async Task<bool> ExecuteCommandAsync(PendingCommand command, CancellationToken ct)
+    private async Task<(bool success, string? data)> ExecuteCommandAsync(PendingCommand command, CancellationToken ct)
     {
         switch (command.Type)
         {
             case CommandType.CreateVm:
-                return await HandleCreateVmAsync(command.Payload, ct);
+                return (await HandleCreateVmAsync(command.Payload, ct), null);
 
             case CommandType.StartVm:
-                return await HandleStartVmAsync(command.Payload, ct);
+                return (await HandleStartVmAsync(command.Payload, ct), null);
 
             case CommandType.StopVm:
-                return await HandleStopVmAsync(command.Payload, ct);
+                return (await HandleStopVmAsync(command.Payload, ct), null);
 
             case CommandType.DeleteVm:
-                return await HandleDeleteVmAsync(command.Payload, ct);
+                return (await HandleDeleteVmAsync(command.Payload, ct), null);
 
             case CommandType.Benchmark:
-                return await HandleBenchmarkAsync(ct);
+                return (await HandleBenchmarkAsync(ct), null);
 
             case CommandType.AllocatePort:
                 return await HandleAllocatePortAsync(command.Payload, ct);
 
             case CommandType.RemovePort:
-                return await HandleRemovePortAsync(command.Payload, ct);
+                return (await HandleRemovePortAsync(command.Payload, ct), null);
 
             default:
                 _logger.LogWarning("Unknown command type: {Type}", command.Type);
-                return false;
+                return (false, null);
         }
     }
 
@@ -503,7 +503,7 @@ public class CommandProcessorService : BackgroundService
     /// Handle AllocatePort command for Smart Port Allocation.
     /// Payload format: { "VmId": "...", "VmPrivateIp": "...", "VmPort": 22, "Protocol": 1, "Label": "SSH" }
     /// </summary>
-    private async Task<bool> HandleAllocatePortAsync(string payload, CancellationToken ct)
+    private async Task<(bool success, string? data)> HandleAllocatePortAsync(string payload, CancellationToken ct)
     {
         try
         {
@@ -519,7 +519,7 @@ public class CommandProcessorService : BackgroundService
             if (string.IsNullOrEmpty(vmId) || string.IsNullOrEmpty(vmPrivateIp) || vmPort == null || protocolInt == null)
             {
                 _logger.LogError("Invalid AllocatePort payload: missing required fields");
-                return false;
+                return (false, null);
             }
 
             var protocol = (PortProtocol)protocolInt.Value;
@@ -533,7 +533,7 @@ public class CommandProcessorService : BackgroundService
             if (publicPort == null)
             {
                 _logger.LogError("Port pool exhausted - cannot allocate port for VM {VmId}", vmId);
-                return false;
+                return (false, null);
             }
 
             // Create port mapping in database
@@ -552,7 +552,7 @@ public class CommandProcessorService : BackgroundService
             {
                 _logger.LogError("Failed to save port mapping to database");
                 await _portPoolManager.ReleasePortAsync(publicPort.Value, ct);
-                return false;
+                return (false, null);
             }
 
             // Create iptables forwarding rules
@@ -568,19 +568,27 @@ public class CommandProcessorService : BackgroundService
                 _logger.LogError("Failed to create iptables rules");
                 await _portMappingRepository.RemoveAsync(vmId, vmPort.Value);
                 await _portPoolManager.ReleasePortAsync(publicPort.Value, ct);
-                return false;
+                return (false, null);
             }
 
             _logger.LogInformation(
                 "✓ Port allocated: {PublicPort} → {VmIp}:{VmPort} (VM {VmId})",
                 publicPort.Value, vmPrivateIp, vmPort.Value, vmId);
 
-            return true;
+            // Create acknowledgment data with allocated port info
+            var ackData = JsonSerializer.Serialize(new
+            {
+                VmPort = vmPort.Value,
+                PublicPort = publicPort.Value,
+                Protocol = (int)protocol
+            });
+
+            return (true, ackData);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error handling AllocatePort command");
-            return false;
+            return (false, null);
         }
     }
 
