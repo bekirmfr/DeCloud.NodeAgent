@@ -812,6 +812,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         string commandId,
         bool success,
         string? errorMessage,
+        string? data = null,
         CancellationToken ct = default)
     {
         if (!_nodeState.IsAuthenticated)
@@ -834,7 +835,8 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 commandId,
                 success,
                 errorMessage = errorMessage ?? string.Empty,
-                completedAt = DateTime.UtcNow.ToString("O")
+                completedAt = DateTime.UtcNow.ToString("O"),
+                data
             };
 
             request.Content = JsonContent.Create(payload);

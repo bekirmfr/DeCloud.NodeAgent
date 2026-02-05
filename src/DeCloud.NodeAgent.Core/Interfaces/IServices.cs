@@ -191,7 +191,7 @@ public interface IOrchestratorClient
     /// Used by hybrid push-pull command delivery system
     /// </summary>
     Task<List<PendingCommand>> FetchPendingCommandsAsync(CancellationToken ct = default);
-    Task<bool> AcknowledgeCommandAsync(string commandId, bool success, string? errorMessage, CancellationToken ct = default);
+    Task<bool> AcknowledgeCommandAsync(string commandId, bool success, string? errorMessage, string? data = null, CancellationToken ct = default);
     HeartbeatDto? GetLastHeartbeat();
     Task ReloadCredentialsAsync(CancellationToken ct = default);
     /// <summary>
@@ -448,7 +448,9 @@ public enum CommandType
     DeleteVm,
     UpdateNetwork,
     Benchmark,
-    Shutdown
+    Shutdown,
+    AllocatePort,
+    RemovePort
 }
 
 /// <summary>
