@@ -24,9 +24,11 @@ public interface IPortForwardingManager
         CancellationToken ct = default);
 
     /// <summary>
-    /// Remove port forwarding rule
+    /// Remove port forwarding rule (both DNAT and FORWARD)
     /// </summary>
     Task<bool> RemoveForwardingAsync(
+        string vmIp,
+        int vmPort,
         int publicPort,
         PortProtocol protocol,
         CancellationToken ct = default);
@@ -128,6 +130,8 @@ public class PortForwardingManager : IPortForwardingManager
     }
 
     public async Task<bool> RemoveForwardingAsync(
+        string vmIp,
+        int vmPort,
         int publicPort,
         PortProtocol protocol,
         CancellationToken ct = default)
@@ -141,14 +145,15 @@ public class PortForwardingManager : IPortForwardingManager
         try
         {
             _logger.LogInformation(
-                "Removing port forwarding for port {PublicPort} ({Protocol})",
-                publicPort, protocol);
+                "Removing port forwarding for {VmIp}:{VmPort} → :{PublicPort} ({Protocol})",
+                vmIp, vmPort, publicPort, protocol);
 
             bool success = true;
 
-            // Remove TCP rule
+            // Remove TCP rules
             if (protocol == PortProtocol.TCP || protocol == PortProtocol.Both)
             {
+                // Remove DNAT rule
                 var result = await _executor.ExecuteAsync(
                     "iptables",
                     $"-t nat -D {CHAIN_NAME} -p tcp --dport {publicPort} -j DNAT",
@@ -157,15 +162,30 @@ public class PortForwardingManager : IPortForwardingManager
                 if (!result.Success)
                 {
                     _logger.LogWarning(
-                        "Failed to remove TCP rule for port {PublicPort}: {Error}",
+                        "Failed to remove TCP DNAT rule for port {PublicPort}: {Error}",
                         publicPort, result.StandardError);
                     success = false;
                 }
+
+                // Remove FORWARD rule
+                result = await _executor.ExecuteAsync(
+                    "iptables",
+                    $"-D FORWARD -p tcp -d {vmIp} --dport {vmPort} -j ACCEPT",
+                    ct);
+
+                if (!result.Success)
+                {
+                    _logger.LogWarning(
+                        "Failed to remove TCP FORWARD rule: {Error}",
+                        result.StandardError);
+                    // Don't mark as failure - maybe it was already removed
+                }
             }
 
-            // Remove UDP rule
+            // Remove UDP rules
             if (protocol == PortProtocol.UDP || protocol == PortProtocol.Both)
             {
+                // Remove DNAT rule
                 var result = await _executor.ExecuteAsync(
                     "iptables",
                     $"-t nat -D {CHAIN_NAME} -p udp --dport {publicPort} -j DNAT",
@@ -174,9 +194,23 @@ public class PortForwardingManager : IPortForwardingManager
                 if (!result.Success)
                 {
                     _logger.LogWarning(
-                        "Failed to remove UDP rule for port {PublicPort}: {Error}",
+                        "Failed to remove UDP DNAT rule for port {PublicPort}: {Error}",
                         publicPort, result.StandardError);
                     success = false;
+                }
+
+                // Remove FORWARD rule
+                result = await _executor.ExecuteAsync(
+                    "iptables",
+                    $"-D FORWARD -p udp -d {vmIp} --dport {vmPort} -j ACCEPT",
+                    ct);
+
+                if (!result.Success)
+                {
+                    _logger.LogWarning(
+                        "Failed to remove UDP FORWARD rule: {Error}",
+                        result.StandardError);
+                    // Don't mark as failure - maybe it was already removed
                 }
             }
 
@@ -334,19 +368,11 @@ public class PortForwardingManager : IPortForwardingManager
         int publicPort,
         CancellationToken ct)
     {
-        // PREROUTING DNAT: Rewrite destination
-        var preRoutingRule = $"-t nat -A {CHAIN_NAME} -p {protocol} --dport {publicPort} -j DNAT --to-destination {vmIp}:{vmPort}";
+        // FORWARD: Allow traffic to reach the VM (must be BEFORE DNAT to bypass Libvirt's REJECT rules)
+        // Insert at position 1 to ensure it's processed before Docker/Libvirt chains
+        var forwardRule = $"-I FORWARD 1 -p {protocol} -d {vmIp} --dport {vmPort} -j ACCEPT";
 
-        var result = await _executor.ExecuteAsync("iptables", preRoutingRule, ct);
-        if (!result.Success)
-        {
-            throw new Exception($"Failed to create DNAT rule: {result.StandardError}");
-        }
-
-        // FORWARD: Allow forwarded traffic
-        var forwardRule = $"-A FORWARD -p {protocol} -d {vmIp} --dport {vmPort} -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT";
-
-        result = await _executor.ExecuteAsync("iptables", forwardRule, ct);
+        var result = await _executor.ExecuteAsync("iptables", forwardRule, ct);
         if (!result.Success)
         {
             _logger.LogWarning(
@@ -355,8 +381,17 @@ public class PortForwardingManager : IPortForwardingManager
             // Don't fail - FORWARD rule might already exist
         }
 
+        // PREROUTING DNAT: Rewrite destination
+        var preRoutingRule = $"-t nat -A {CHAIN_NAME} -p {protocol} --dport {publicPort} -j DNAT --to-destination {vmIp}:{vmPort}";
+
+        result = await _executor.ExecuteAsync("iptables", preRoutingRule, ct);
+        if (!result.Success)
+        {
+            throw new Exception($"Failed to create DNAT rule: {result.StandardError}");
+        }
+
         _logger.LogDebug(
-            "Created {Protocol} iptables rule: :{PublicPort} → {VmIp}:{VmPort}",
+            "Created {Protocol} iptables rules (FORWARD + DNAT): :{PublicPort} → {VmIp}:{VmPort}",
             protocol.ToUpper(), publicPort, vmIp, vmPort);
     }
 

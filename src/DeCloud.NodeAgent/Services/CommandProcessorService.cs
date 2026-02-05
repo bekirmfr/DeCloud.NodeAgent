@@ -629,8 +629,10 @@ public class CommandProcessorService : BackgroundService
                 return false;
             }
 
-            // Remove iptables rules
+            // Remove iptables rules (both DNAT and FORWARD)
             var success = await _portForwardingManager.RemoveForwardingAsync(
+                mapping.VmPrivateIp,
+                mapping.VmPort,
                 mapping.PublicPort,
                 protocol,
                 ct);
