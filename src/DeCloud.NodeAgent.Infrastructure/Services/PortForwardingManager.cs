@@ -86,9 +86,12 @@ public class PortForwardingManager : IPortForwardingManager
             return false;
         }
 
-        await _lock.WaitAsync(ct);
+        bool lockAcquired = false;
         try
         {
+            await _lock.WaitAsync(ct);
+            lockAcquired = true;
+            
             // Ensure our custom chain exists
             await EnsureChainExistsAsync(ct);
 
@@ -125,7 +128,10 @@ public class PortForwardingManager : IPortForwardingManager
         }
         finally
         {
-            _lock.Release();
+            if (lockAcquired)
+            {
+                _lock.Release();
+            }
         }
     }
 
@@ -141,9 +147,12 @@ public class PortForwardingManager : IPortForwardingManager
             return false;
         }
 
-        await _lock.WaitAsync(ct);
+        bool lockAcquired = false;
         try
         {
+            await _lock.WaitAsync(ct);
+            lockAcquired = true;
+            
             _logger.LogInformation(
                 "Removing port forwarding for {VmIp}:{VmPort} → :{PublicPort} ({Protocol})",
                 vmIp, vmPort, publicPort, protocol);
@@ -229,7 +238,10 @@ public class PortForwardingManager : IPortForwardingManager
         }
         finally
         {
-            _lock.Release();
+            if (lockAcquired)
+            {
+                _lock.Release();
+            }
         }
     }
 
