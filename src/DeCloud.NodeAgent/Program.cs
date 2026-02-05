@@ -91,6 +91,35 @@ builder.Services.AddSingleton<IOrchestratorClient>(sp =>
     sp.GetRequiredService<OrchestratorClient>());
 
 // =====================================================
+// Port Mapping Repository (Smart Port Allocation)
+// =====================================================
+builder.Services.AddSingleton<PortMappingRepository>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<LibvirtVmManagerOptions>>().Value;
+    var logger = sp.GetRequiredService<ILogger<PortMappingRepository>>();
+
+    // Check if running on Windows
+    var isWindows = System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
+        System.Runtime.InteropServices.OSPlatform.Windows);
+
+    if (isWindows)
+    {
+        logger.LogWarning("Running on Windows - PortMappingRepository will not be used");
+        var tempPath = Path.Combine(Path.GetTempPath(), "decloud-port-mappings-dummy.db");
+        return new PortMappingRepository(tempPath, logger);
+    }
+
+    var dbPath = Path.Combine(options.VmStoragePath, "port-mappings.db");
+    return new PortMappingRepository(dbPath, logger);
+});
+
+// =====================================================
+// Smart Port Allocation Services
+// =====================================================
+builder.Services.AddSingleton<IPortPoolManager, PortPoolManager>();
+builder.Services.AddSingleton<IPortForwardingManager, PortForwardingManager>();
+
+// =====================================================
 // VM Repository with Encryption Support
 // =====================================================
 builder.Services.AddSingleton<VmRepository>(sp =>
@@ -174,6 +203,9 @@ builder.Services.AddHostedService<VmHealthService>();
 
 // Initialize VM Manager on startup to load VMs from database
 builder.Services.AddHostedService<VmManagerInitializationService>();
+
+// Reconcile port forwarding rules on startup (Smart Port Allocation)
+builder.Services.AddHostedService<PortForwardingReconciliationService>();
 
 // =====================================================
 // Security services for port validation and auditing
