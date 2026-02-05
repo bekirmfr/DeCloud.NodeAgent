@@ -89,7 +89,8 @@ public class PortForwardingManager : IPortForwardingManager
         bool lockAcquired = false;
         try
         {
-            await _lock.WaitAsync(ct);
+            // Don't pass ct to WaitAsync - prevents cancellation from crashing host
+            await _lock.WaitAsync();
             lockAcquired = true;
             
             // Ensure our custom chain exists
