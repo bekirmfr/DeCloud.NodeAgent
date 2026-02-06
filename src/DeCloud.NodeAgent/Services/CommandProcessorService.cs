@@ -515,6 +515,12 @@ public class CommandProcessorService : BackgroundService
             int? vmPort = GetIntProperty(root, "vmPort", "VmPort");
             int? protocolInt = GetIntProperty(root, "protocol", "Protocol");
             string? label = GetStringProperty(root, "label", "Label");
+            
+            // NEW: Relay forwarding fields
+            bool? isRelayForwarding = root.TryGetProperty("isRelayForwarding", out var relayProp) || root.TryGetProperty("IsRelayForwarding", out relayProp) 
+                ? relayProp.GetBoolean() 
+                : false;
+            string? tunnelDestinationIp = GetStringProperty(root, "tunnelDestinationIp", "TunnelDestinationIp");
 
             if (string.IsNullOrEmpty(vmId) || string.IsNullOrEmpty(vmPrivateIp) || vmPort == null || protocolInt == null)
             {
@@ -524,9 +530,34 @@ public class CommandProcessorService : BackgroundService
 
             var protocol = (PortProtocol)protocolInt.Value;
 
+            // Determine forwarding destination
+            string forwardingDestination;
+            string forwardingType;
+            
+            if (isRelayForwarding == true && !string.IsNullOrEmpty(tunnelDestinationIp))
+            {
+                // Relay node - forward to CGNAT node via tunnel
+                forwardingDestination = tunnelDestinationIp;
+                forwardingType = "relay→tunnel";
+                
+                _logger.LogInformation(
+                    "Relay forwarding for CGNAT VM {VmId}: will forward to tunnel {TunnelIp}:{VmPort}",
+                    vmId, tunnelDestinationIp, vmPort);
+            }
+            else
+            {
+                // Direct access - forward to local VM
+                forwardingDestination = vmPrivateIp;
+                forwardingType = "direct→vm";
+                
+                _logger.LogInformation(
+                    "Direct forwarding for VM {VmId}: will forward to {VmIp}:{VmPort}",
+                    vmId, vmPrivateIp, vmPort);
+            }
+
             _logger.LogInformation(
-                "Allocating port for VM {VmId} ({VmIp}:{VmPort}) - {Protocol}",
-                vmId, vmPrivateIp, vmPort, protocol);
+                "Allocating port for VM {VmId} ({Destination}:{VmPort}) - {Protocol} [{Type}]",
+                vmId, forwardingDestination, vmPort, protocol, forwardingType);
 
             // Allocate public port from pool
             var publicPort = await _portPoolManager.AllocatePortAsync(ct);
@@ -540,11 +571,11 @@ public class CommandProcessorService : BackgroundService
             var mapping = new PortMapping
             {
                 VmId = vmId,
-                VmPrivateIp = vmPrivateIp,
+                VmPrivateIp = forwardingDestination,  // Store actual forwarding destination
                 VmPort = vmPort.Value,
                 PublicPort = publicPort.Value,
                 Protocol = protocol,
-                Label = label
+                Label = $"{label} ({forwardingType})"  // Include forwarding type in label
             };
 
             var added = await _portMappingRepository.AddAsync(mapping);
@@ -557,7 +588,7 @@ public class CommandProcessorService : BackgroundService
 
             // Create iptables forwarding rules
             var success = await _portForwardingManager.CreateForwardingAsync(
-                vmPrivateIp,
+                forwardingDestination,  // Tunnel IP for relay, VM IP for direct
                 vmPort.Value,
                 publicPort.Value,
                 protocol,
@@ -572,8 +603,8 @@ public class CommandProcessorService : BackgroundService
             }
 
             _logger.LogInformation(
-                "✓ Port allocated: {PublicPort} → {VmIp}:{VmPort} (VM {VmId})",
-                publicPort.Value, vmPrivateIp, vmPort.Value, vmId);
+                "✓ Port allocated: {PublicPort} → {Destination}:{VmPort} (VM {VmId}) [{Type}]",
+                publicPort.Value, forwardingDestination, vmPort.Value, vmId, forwardingType);
 
             // Create acknowledgment data with allocated port info
             var ackData = JsonSerializer.Serialize(new
