@@ -90,10 +90,15 @@ public class CommandsController : ControllerBase
     {
         return typeValue switch
         {
-            0 => CommandType.CreateVm,    // NodeCommandType.CreateVm
-            1 => CommandType.StopVm,      // NodeCommandType.StopVm
-            2 => CommandType.StartVm,     // NodeCommandType.StartVm
-            3 => CommandType.DeleteVm,    // NodeCommandType.DeleteVm
+            0 => CommandType.CreateVm,       // NodeCommandType.CreateVm
+            1 => CommandType.StartVm,        // NodeCommandType.StartVm (FIXED: was backwards)
+            2 => CommandType.StopVm,         // NodeCommandType.StopVm (FIXED: was backwards)
+            3 => CommandType.DeleteVm,       // NodeCommandType.DeleteVm
+            4 => CommandType.UpdateNetwork,  // NodeCommandType.UpdateNetwork
+            5 => CommandType.Benchmark,      // NodeCommandType.Benchmark
+            6 => CommandType.Shutdown,       // NodeCommandType.Shutdown
+            7 => CommandType.AllocatePort,   // NodeCommandType.AllocatePort
+            8 => CommandType.RemovePort,     // NodeCommandType.RemovePort
             _ => throw new ArgumentException($"Unknown command type: {typeValue}")
         };
     }
