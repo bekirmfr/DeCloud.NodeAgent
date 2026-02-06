@@ -69,7 +69,7 @@ public class OrphanedPortCleanupService : BackgroundService
 
             // Get all active VM IDs from libvirt
             var activeVms = await _vmManager.GetAllVmsAsync(ct);
-            var activeVmIds = activeVms.Select(vm => vm.Id).ToHashSet();
+            var activeVmIds = activeVms.Select(vm => vm.Spec.VmId).ToHashSet();
 
             _logger.LogDebug(
                 "Checking {MappingCount} port mappings against {VmCount} active VMs",
