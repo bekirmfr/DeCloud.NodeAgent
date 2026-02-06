@@ -383,6 +383,8 @@ public class CommandProcessorService : BackgroundService
         if (string.IsNullOrEmpty(vmId)) return false;
 
         var vmInstance = await _vmManager.GetVmAsync(vmId, ct);
+        
+        // Clean up relay VM NAT rules
         if (vmInstance?.Spec.VmType == VmType.Relay &&
             !string.IsNullOrEmpty(vmInstance.Spec.IpAddress))
         {
@@ -395,6 +397,66 @@ public class CommandProcessorService : BackgroundService
                 51820,
                 "udp",
                 ct);
+        }
+
+        // Clean up Direct Access ports (Smart Port Allocation)
+        try
+        {
+            var portMappings = await _portMappingRepository.GetByVmIdAsync(vmId);
+            if (portMappings.Any())
+            {
+                _logger.LogInformation(
+                    "Cleaning up {Count} Direct Access port(s) for VM {VmId}",
+                    portMappings.Count, vmId);
+
+                foreach (var mapping in portMappings)
+                {
+                    _logger.LogInformation(
+                        "Removing port {PublicPort} → {Destination}:{VmPort} (VM {VmId})",
+                        mapping.PublicPort, mapping.VmPrivateIp, mapping.VmPort, vmId);
+
+                    // Remove iptables rules
+                    try
+                    {
+                        await _portForwardingManager.RemoveForwardingAsync(
+                            mapping.VmPrivateIp,  // Could be VM IP or tunnel IP for relay forwarding
+                            mapping.VmPort,
+                            mapping.PublicPort,
+                            mapping.Protocol,
+                            ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex,
+                            "Failed to remove iptables rules for port {PublicPort}, continuing cleanup",
+                            mapping.PublicPort);
+                    }
+
+                    // Release port back to pool
+                    try
+                    {
+                        await _portPoolManager.ReleasePortAsync(mapping.PublicPort, ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex,
+                            "Failed to release port {PublicPort} back to pool",
+                            mapping.PublicPort);
+                    }
+
+                    // Remove from database
+                    await _portMappingRepository.RemoveAsync(vmId, mapping.VmPort);
+                }
+
+                _logger.LogInformation(
+                    "✓ Cleaned up {Count} Direct Access port(s) for VM {VmId}",
+                    portMappings.Count, vmId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error cleaning up Direct Access ports for VM {VmId}", vmId);
+            // Continue with VM deletion even if port cleanup fails
         }
 
         _logger.LogInformation("Deleting VM {VmId}", vmId);

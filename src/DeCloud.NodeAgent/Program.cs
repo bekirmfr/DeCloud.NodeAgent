@@ -207,6 +207,9 @@ builder.Services.AddHostedService<VmManagerInitializationService>();
 // Reconcile port forwarding rules on startup (Smart Port Allocation)
 builder.Services.AddHostedService<PortForwardingReconciliationService>();
 
+// Periodic cleanup of orphaned ports (hourly)
+builder.Services.AddHostedService<OrphanedPortCleanupService>();
+
 // =====================================================
 // Security services for port validation and auditing
 // =====================================================
