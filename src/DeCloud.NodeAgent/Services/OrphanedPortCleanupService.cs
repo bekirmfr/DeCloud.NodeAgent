@@ -1,4 +1,5 @@
 using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
 
 namespace DeCloud.NodeAgent.Services;
