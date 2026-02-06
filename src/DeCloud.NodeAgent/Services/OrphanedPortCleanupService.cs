@@ -11,7 +11,7 @@ namespace DeCloud.NodeAgent.Services;
 public class OrphanedPortCleanupService : BackgroundService
 {
     private readonly IVmManager _vmManager;
-    private readonly IPortMappingRepository _portMappingRepository;
+    private readonly PortMappingRepository _portMappingRepository;
     private readonly IPortForwardingManager _portForwardingManager;
     private readonly IPortPoolManager _portPoolManager;
     private readonly ILogger<OrphanedPortCleanupService> _logger;
@@ -20,7 +20,7 @@ public class OrphanedPortCleanupService : BackgroundService
 
     public OrphanedPortCleanupService(
         IVmManager vmManager,
-        IPortMappingRepository portMappingRepository,
+        PortMappingRepository portMappingRepository,
         IPortForwardingManager portForwardingManager,
         IPortPoolManager portPoolManager,
         ILogger<OrphanedPortCleanupService> logger)
