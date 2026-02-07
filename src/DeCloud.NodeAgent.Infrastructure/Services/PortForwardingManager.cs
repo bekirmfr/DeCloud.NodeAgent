@@ -158,7 +158,10 @@ public class PortForwardingManager : IPortForwardingManager
             // If this is relay forwarding, also create rules INSIDE the relay VM
             if (isRelayForwarding && relayVmIp != null)
             {
-                await CreateRelayVmForwardingAsync(relayVmIp, publicPort, vmIp, vmPort, protocol, ct);
+                // CRITICAL: For 3-hop forwarding, relay VM forwards to the SAME port on CGNAT node
+                // Example: relayVM:40000 → cgnatNode:40000 → VM:22
+                // NOT: relayVM:40000 → cgnatNode:22 (bypasses CGNAT node's iptables)
+                await CreateRelayVmForwardingAsync(relayVmIp, publicPort, vmIp, publicPort, protocol, ct);
             }
 
             // Save rules persistently
