@@ -404,6 +404,8 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             self.add_port_forward()
         elif path == '/api/relay/remove-port-forward':
             self.remove_port_forward()
+        elif path == '/api/relay/flush-port-forwards':
+            self.flush_port_forwards()
         else:
             self.send_error_response(404, 'Not Found', f'Path {path} not found')
 
@@ -973,6 +975,42 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             self.send_error_response(400, 'Invalid Value', str(e))
         except Exception as e:
             logger.error(f"Remove port forward error: {e}", exc_info=True)
+            self.send_error_response(500, 'Internal Error', str(e))
+    
+
+    def flush_port_forwards(self):
+        """
+        Flush all DeCloud port forwarding rules
+        Used during reconciliation to clear stale rules
+        """
+        try:
+            logger.info("POST /api/relay/flush-port-forwards")
+            
+            # Flush DECLOUD_PORT_FWD chain in NAT table
+            flush_cmd = [
+                'iptables', '-t', 'nat', '-F', 'DECLOUD_PORT_FWD'
+            ]
+            
+            result = subprocess.run(flush_cmd, capture_output=True, text=True, timeout=5)
+            
+            if result.returncode != 0:
+                logger.error(f"Failed to flush DECLOUD_PORT_FWD chain: {result.stderr}")
+                self.send_error_response(
+                    500,
+                    'Flush Failed',
+                    f"Failed to flush port forwarding rules: {result.stderr}")
+                return
+            
+            logger.info("✅ Flushed all DECLOUD_PORT_FWD rules")
+            self.send_json_response({
+                'success': True,
+                'message': 'Port forwarding rules flushed successfully'
+            })
+            
+        except subprocess.TimeoutExpired:
+            self.send_error_response(504, 'Command Timeout', 'iptables command timed out')
+        except Exception as e:
+            logger.error(f"Flush port forwards error: {e}", exc_info=True)
             self.send_error_response(500, 'Internal Error', str(e))
     
 

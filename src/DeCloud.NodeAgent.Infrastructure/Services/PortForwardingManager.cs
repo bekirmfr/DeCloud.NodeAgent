@@ -208,6 +208,30 @@ public class PortForwardingManager : IPortForwardingManager
                 "Removing port forwarding for {VmIp}:{VmPort} → :{PublicPort} ({Protocol})",
                 vmIp, vmPort, publicPort, protocol);
 
+            // Check if this is a tunnel IP (CGNAT VM) - need to remove relay VM rules too
+            bool isRelayForwarding = IsTunnelIp(vmIp);
+            string? relayVmIp = null;
+
+            if (isRelayForwarding)
+            {
+                relayVmIp = await GetRelayVmIpAsync(ct);
+                if (relayVmIp != null)
+                {
+                    _logger.LogInformation(
+                        "Detected tunnel IP {VmIp} - will remove relay VM rules at {RelayVmIp}",
+                        vmIp, relayVmIp);
+
+                    // Remove second hop (relay VM -> tunnel IP) FIRST
+                    await RemoveRelayVmForwardingAsync(relayVmIp, publicPort, protocol, ct);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Tunnel IP {VmIp} detected but no relay VM found - only removing host rules",
+                        vmIp);
+                }
+            }
+
             bool success = true;
 
             // Remove TCP rules
@@ -357,6 +381,14 @@ public class PortForwardingManager : IPortForwardingManager
         try
         {
             _logger.LogInformation("Reconciling port forwarding rules from database...");
+
+            // Check if relay VM exists and flush its rules first
+            var relayVmIp = await GetRelayVmIpAsync(ct);
+            if (relayVmIp != null)
+            {
+                _logger.LogInformation("Relay VM found at {RelayVmIp}, flushing its port forwarding rules", relayVmIp);
+                await FlushRelayVmRulesAsync(relayVmIp, ct);
+            }
 
             // Ensure chain exists
             await EnsureChainExistsAsync(ct);
@@ -634,6 +666,106 @@ public class PortForwardingManager : IPortForwardingManager
                 "Failed to create relay VM forwarding for {TunnelIp}:{TunnelPort}",
                 tunnelIp, tunnelPort);
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Remove port forwarding rules inside the relay VM via its API.
+    /// This removes the second hop: relay VM port -> tunnel IP
+    /// </summary>
+    private async Task RemoveRelayVmForwardingAsync(
+        string relayVmIp,
+        int publicPort,
+        PortProtocol protocol,
+        CancellationToken ct)
+    {
+        try
+        {
+            var protocolStr = protocol switch
+            {
+                PortProtocol.TCP => "tcp",
+                PortProtocol.UDP => "udp",
+                PortProtocol.Both => "both",
+                _ => throw new ArgumentException($"Invalid protocol: {protocol}")
+            };
+
+            var payload = new
+            {
+                public_port = publicPort,
+                protocol = protocolStr
+            };
+
+            using var httpClient = new HttpClient();
+            httpClient.Timeout = TimeSpan.FromSeconds(10);
+
+            var content = new StringContent(
+                System.Text.Json.JsonSerializer.Serialize(payload),
+                System.Text.Encoding.UTF8,
+                "application/json");
+
+            var response = await httpClient.PostAsync(
+                $"http://{relayVmIp}:8080/api/relay/remove-port-forward",
+                content,
+                ct);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorBody = await response.Content.ReadAsStringAsync(ct);
+                _logger.LogWarning(
+                    "Failed to remove relay VM forwarding for port {PublicPort}: {StatusCode} - {Error}",
+                    publicPort, response.StatusCode, errorBody);
+                // Don't throw - allow host cleanup to continue
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "✓ Relay VM forwarding removed: port {PublicPort}",
+                    publicPort);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to remove relay VM forwarding for port {PublicPort}",
+                publicPort);
+            // Don't throw - allow host cleanup to continue
+        }
+    }
+
+    /// <summary>
+    /// Flush all port forwarding rules inside the relay VM via its API.
+    /// Used during reconciliation to clear stale rules.
+    /// </summary>
+    private async Task FlushRelayVmRulesAsync(
+        string relayVmIp,
+        CancellationToken ct)
+    {
+        try
+        {
+            using var httpClient = new HttpClient();
+            httpClient.Timeout = TimeSpan.FromSeconds(10);
+
+            var response = await httpClient.PostAsync(
+                $"http://{relayVmIp}:8080/api/relay/flush-port-forwards",
+                null,
+                ct);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("✓ Flushed relay VM port forwarding rules");
+            }
+            else
+            {
+                var errorBody = await response.Content.ReadAsStringAsync(ct);
+                _logger.LogWarning(
+                    "Failed to flush relay VM rules: {StatusCode} - {Error}",
+                    response.StatusCode, errorBody);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to flush relay VM rules - will continue with reconciliation");
+            // Don't throw - allow reconciliation to continue
         }
     }
 }
