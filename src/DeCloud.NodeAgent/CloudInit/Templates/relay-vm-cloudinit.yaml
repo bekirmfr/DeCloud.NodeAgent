@@ -44,9 +44,12 @@ write_files:
       PostUp = iptables -A FORWARD -i wg-relay-server -j ACCEPT
       PostUp = iptables -A FORWARD -o wg-relay-server -j ACCEPT
       PostUp = bash -c 'DEFAULT_IFACE=$(ip route | grep default | awk "{print \$5}"); iptables -t nat -A POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE'
+      # Block SSH to relay VM via tunnel (prevents interception of forwarded SSH)
+      PostUp = iptables -A INPUT -i wg-relay-server -p tcp --dport 22 -j DROP
       PreDown = iptables -D FORWARD -i wg-relay-server -j ACCEPT
       PreDown = iptables -D FORWARD -o wg-relay-server -j ACCEPT
       PreDown = bash -c 'DEFAULT_IFACE=$(ip route | grep default | awk "{print \$5}"); iptables -t nat -D POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE'
+      PreDown = iptables -D INPUT -i wg-relay-server -p tcp --dport 22 -j DROP
       
       # Orchestrator peer (pre-configured during provisioning)
       [Peer]
