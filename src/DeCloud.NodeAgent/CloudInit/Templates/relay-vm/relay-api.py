@@ -400,8 +400,13 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             self.remove_cgnat_peer()
         elif path == '/api/relay/cleanup':
             self.manual_cleanup()
+        elif path == '/api/relay/add-port-forward':
+            self.add_port_forward()
+        elif path == '/api/relay/remove-port-forward':
+            self.remove_port_forward()
         else:
             self.send_error_response(404, 'Not Found', f'Path {path} not found')
+
     
     # ==================== API Endpoints ====================
     
@@ -735,6 +740,219 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             logger.error(f"Cleanup error: {e}", exc_info=True)
             self.send_error_response(500, 'Internal Error', str(e))
     
+    def add_port_forward(self):
+        """
+        Add port forwarding rule via iptables for CGNAT traffic
+        Forwards from public port on relay VM to tunnel IP through WireGuard
+        """
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length == 0:
+                self.send_error_response(400, 'Bad Request', 'Request body is empty')
+                return
+            
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode('utf-8'))
+            
+            # Validate required fields
+            required_fields = ['public_port', 'tunnel_ip', 'tunnel_port', 'protocol']
+            missing_fields = [f for f in required_fields if f not in data]
+            
+            if missing_fields:
+                self.send_error_response(
+                    400,
+                    'Missing Required Fields',
+                    f"Missing fields: {', '.join(missing_fields)}"
+                )
+                return
+            
+            public_port = int(data['public_port'])
+            tunnel_ip = data['tunnel_ip']
+            tunnel_port = int(data['tunnel_port'])
+            protocol = data['protocol'].lower()  # 'tcp' or 'udp'
+            
+            # Validate protocol
+            if protocol not in ['tcp', 'udp', 'both']:
+                self.send_error_response(400, 'Invalid Protocol', 'Protocol must be tcp, udp, or both')
+                return
+            
+            # Validate tunnel IP (should be 10.20.x.x)
+            if not tunnel_ip.startswith('10.20.'):
+                self.send_error_response(400, 'Invalid Tunnel IP', 'Tunnel IP must be in 10.20.0.0/16 range')
+                return
+            
+            # Ensure DECLOUD_PORT_FWD chain exists
+            subprocess.run(
+                ['iptables', '-t', 'nat', '-N', 'DECLOUD_PORT_FWD'],
+                capture_output=True,
+                timeout=5
+            )
+            # Ignore error if chain already exists
+            
+            # Ensure the chain is called from PREROUTING
+            result = subprocess.run(
+                ['iptables', '-t', 'nat', '-C', 'PREROUTING', '-j', 'DECLOUD_PORT_FWD'],
+                capture_output=True,
+                timeout=5
+            )
+            if result.returncode != 0:
+                subprocess.run(
+                    ['iptables', '-t', 'nat', '-I', 'PREROUTING', '-j', 'DECLOUD_PORT_FWD'],
+                    capture_output=True,
+                    timeout=5
+                )
+            
+            protocols = []
+            if protocol == 'both':
+                protocols = ['tcp', 'udp']
+            else:
+                protocols = [protocol]
+            
+            for proto in protocols:
+                # Create DNAT rule in custom chain
+                cmd = [
+                    'iptables', '-t', 'nat', '-A', 'DECLOUD_PORT_FWD',
+                    '-p', proto, '--dport', str(public_port),
+                    '-j', 'DNAT', '--to-destination', f'{tunnel_ip}:{tunnel_port}'
+                ]
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                
+                if result.returncode != 0:
+                    logger.error(f"Failed to add {proto} DNAT rule: {result.stderr}")
+                    self.send_error_response(
+                        500,
+                        'Failed to Add Port Forward',
+                        f"Failed to add {proto} rule: {result.stderr}"
+                    )
+                    return
+                
+                # Add FORWARD rule to allow traffic
+                cmd_forward = [
+                    'iptables', '-A', 'FORWARD',
+                    '-p', proto, '-d', tunnel_ip, '--dport', str(tunnel_port),
+                    '-j', 'ACCEPT'
+                ]
+                
+                subprocess.run(cmd_forward, capture_output=True, timeout=5)
+                
+                logger.info(f"✅ Added {proto} port forward: :{public_port} → {tunnel_ip}:{tunnel_port}")
+            
+            # Save iptables rules
+            try:
+                subprocess.run(
+                    ['netfilter-persistent', 'save'],
+                    capture_output=True,
+                    timeout=5
+                )
+            except Exception as e:
+                logger.warning(f"Failed to persist iptables rules: {e}")
+            
+            self.send_json_response({
+                'success': True,
+                'public_port': public_port,
+                'tunnel_ip': tunnel_ip,
+                'tunnel_port': tunnel_port,
+                'protocol': protocol
+            })
+            
+        except json.JSONDecodeError as e:
+            self.send_error_response(400, 'Invalid JSON', str(e))
+        except subprocess.TimeoutExpired:
+            self.send_error_response(504, 'Command Timeout', 'iptables command timed out')
+        except ValueError as e:
+            self.send_error_response(400, 'Invalid Value', str(e))
+        except Exception as e:
+            logger.error(f"Add port forward error: {e}", exc_info=True)
+            self.send_error_response(500, 'Internal Error', str(e))
+    
+    def remove_port_forward(self):
+        """Remove port forwarding rule via iptables"""
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length == 0:
+                self.send_error_response(400, 'Bad Request', 'Request body is empty')
+                return
+            
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode('utf-8'))
+            
+            # Validate required fields
+            required_fields = ['public_port', 'tunnel_ip', 'tunnel_port', 'protocol']
+            missing_fields = [f for f in required_fields if f not in data]
+            
+            if missing_fields:
+                self.send_error_response(
+                    400,
+                    'Missing Required Fields',
+                    f"Missing fields: {', '.join(missing_fields)}"
+                )
+                return
+            
+            public_port = int(data['public_port'])
+            tunnel_ip = data['tunnel_ip']
+            tunnel_port = int(data['tunnel_port'])
+            protocol = data['protocol'].lower()
+            
+            protocols = []
+            if protocol == 'both':
+                protocols = ['tcp', 'udp']
+            else:
+                protocols = [protocol]
+            
+            for proto in protocols:
+                # Remove DNAT rule
+                cmd = [
+                    'iptables', '-t', 'nat', '-D', 'DECLOUD_PORT_FWD',
+                    '-p', proto, '--dport', str(public_port),
+                    '-j', 'DNAT', '--to-destination', f'{tunnel_ip}:{tunnel_port}'
+                ]
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                
+                if result.returncode != 0:
+                    logger.warning(f"Failed to remove {proto} DNAT rule: {result.stderr}")
+                
+                # Remove FORWARD rule
+                cmd_forward = [
+                    'iptables', '-D', 'FORWARD',
+                    '-p', proto, '-d', tunnel_ip, '--dport', str(tunnel_port),
+                    '-j', 'ACCEPT'
+                ]
+                
+                subprocess.run(cmd_forward, capture_output=True, timeout=5)
+                
+                logger.info(f"✅ Removed {proto} port forward: :{public_port} → {tunnel_ip}:{tunnel_port}")
+            
+            # Save iptables rules
+            try:
+                subprocess.run(
+                    ['netfilter-persistent', 'save'],
+                    capture_output=True,
+                    timeout=5
+                )
+            except Exception as e:
+                logger.warning(f"Failed to persist iptables rules: {e}")
+            
+            self.send_json_response({
+                'success': True,
+                'public_port': public_port,
+                'tunnel_ip': tunnel_ip,
+                'tunnel_port': tunnel_port,
+                'protocol': protocol
+            })
+            
+        except json.JSONDecodeError as e:
+            self.send_error_response(400, 'Invalid JSON', str(e))
+        except subprocess.TimeoutExpired:
+            self.send_error_response(504, 'Command Timeout', 'iptables command timed out')
+        except ValueError as e:
+            self.send_error_response(400, 'Invalid Value', str(e))
+        except Exception as e:
+            logger.error(f"Remove port forward error: {e}", exc_info=True)
+            self.send_error_response(500, 'Internal Error', str(e))
+    
+
     def get_wireguard_status(self):
         """Get WireGuard interface status"""
         try:

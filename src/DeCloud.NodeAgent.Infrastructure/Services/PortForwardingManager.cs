@@ -106,13 +106,16 @@ public class PortForwardingManager : IPortForwardingManager
             string actualDestination = vmIp;
             int actualPort = vmPort;
             
+            bool isRelayForwarding = false;
+            string? relayVmIp = null;
+            
             if (IsTunnelIp(vmIp))
             {
                 _logger.LogInformation(
                     "Detected tunnel IP {TunnelIp} - checking for local relay VM...",
                     vmIp);
                 
-                var relayVmIp = await GetRelayVmIpAsync(ct);
+                relayVmIp = await GetRelayVmIpAsync(ct);
                 if (relayVmIp != null)
                 {
                     _logger.LogInformation(
@@ -123,6 +126,7 @@ public class PortForwardingManager : IPortForwardingManager
                     // The relay VM will then forward to the tunnel IP
                     actualDestination = relayVmIp;
                     actualPort = publicPort;
+                    isRelayForwarding = true;
                     
                     _logger.LogInformation(
                         "Creating 2-hop forwarding: :{PublicPort} → {RelayVmIp}:{Port} → {TunnelIp}:{VmPort}",
@@ -149,6 +153,12 @@ public class PortForwardingManager : IPortForwardingManager
             if (protocol == PortProtocol.UDP || protocol == PortProtocol.Both)
             {
                 await CreateIptablesRuleAsync("udp", actualDestination, actualPort, publicPort, ct);
+            }
+            
+            // If this is relay forwarding, also create rules INSIDE the relay VM
+            if (isRelayForwarding && relayVmIp != null)
+            {
+                await CreateRelayVmForwardingAsync(relayVmIp, publicPort, vmIp, vmPort, protocol, ct);
             }
 
             // Save rules persistently
@@ -557,6 +567,73 @@ public class PortForwardingManager : IPortForwardingManager
         {
             _logger.LogWarning(ex, "Failed to query for relay VM");
             return null;
+        }
+    }
+    
+    /// <summary>
+    /// Create port forwarding rules inside the relay VM via its API.
+    /// This sets up the second hop: relay VM port -> tunnel IP
+    /// </summary>
+    private async Task CreateRelayVmForwardingAsync(
+        string relayVmIp,
+        int publicPort,
+        string tunnelIp,
+        int tunnelPort,
+        PortProtocol protocol,
+        CancellationToken ct)
+    {
+        try
+        {
+            var httpClient = new HttpClient
+            {
+                Timeout = TimeSpan.FromSeconds(10)
+            };
+            
+            var request = new
+            {
+                public_port = publicPort,
+                tunnel_ip = tunnelIp,
+                tunnel_port = tunnelPort,
+                protocol = protocol switch
+                {
+                    PortProtocol.TCP => "tcp",
+                    PortProtocol.UDP => "udp",
+                    PortProtocol.Both => "both",
+                    _ => "tcp"
+                }
+            };
+            
+            var json = System.Text.Json.JsonSerializer.Serialize(request);
+            var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+            
+            _logger.LogInformation(
+                "Calling relay VM API to create second hop: {RelayVmIp}:{PublicPort} → {TunnelIp}:{TunnelPort}",
+                relayVmIp, publicPort, tunnelIp, tunnelPort);
+            
+            var response = await httpClient.PostAsync(
+                $"http://{relayVmIp}:8080/api/relay/add-port-forward",
+                content,
+                ct);
+            
+            if (!response.IsSuccessStatusCode)
+            {
+                var errorBody = await response.Content.ReadAsStringAsync(ct);
+                _logger.LogError(
+                    "Failed to create relay VM forwarding: {StatusCode} - {Error}",
+                    response.StatusCode, errorBody);
+                throw new Exception($"Relay VM API returned {response.StatusCode}: {errorBody}");
+            }
+            
+            _logger.LogInformation(
+                "✓ Relay VM forwarding created: {RelayVmIp}:{PublicPort} → {TunnelIp}:{TunnelPort}",
+                relayVmIp, publicPort, tunnelIp, tunnelPort);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to create relay VM forwarding for {TunnelIp}:{TunnelPort}",
+                tunnelIp, tunnelPort);
+            throw;
         }
     }
 }
