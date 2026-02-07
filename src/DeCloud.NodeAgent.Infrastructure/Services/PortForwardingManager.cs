@@ -55,20 +55,26 @@ public class PortForwardingManager : IPortForwardingManager
 {
     private readonly ICommandExecutor _executor;
     private readonly PortMappingRepository _repository;
+    private readonly IVmManager _vmManager;
     private readonly ILogger<PortForwardingManager> _logger;
     private readonly bool _isLinux;
     private readonly SemaphoreSlim _lock = new(1, 1);
 
     // Chain name for port forwarding rules (keeps them organized)
     private const string CHAIN_NAME = "DECLOUD_PORT_FWD";
+    
+    // DeCloud tunnel network range (10.20.0.0/16)
+    private const string TUNNEL_IP_PREFIX = "10.20.";
 
     public PortForwardingManager(
         ICommandExecutor executor,
         PortMappingRepository repository,
+        IVmManager vmManager,
         ILogger<PortForwardingManager> logger)
     {
         _executor = executor;
         _repository = repository;
+        _vmManager = vmManager;
         _logger = logger;
         _isLinux = Environment.OSVersion.Platform == PlatformID.Unix;
     }
@@ -96,27 +102,61 @@ public class PortForwardingManager : IPortForwardingManager
             // Ensure our custom chain exists
             await EnsureChainExistsAsync(ct);
 
+            // Check if this is relay forwarding (tunnel IP destination)
+            string actualDestination = vmIp;
+            int actualPort = vmPort;
+            
+            if (IsTunnelIp(vmIp))
+            {
+                _logger.LogInformation(
+                    "Detected tunnel IP {TunnelIp} - checking for local relay VM...",
+                    vmIp);
+                
+                var relayVmIp = await GetRelayVmIpAsync(ct);
+                if (relayVmIp != null)
+                {
+                    _logger.LogInformation(
+                        "Found relay VM at {RelayVmIp} - will forward through it",
+                        relayVmIp);
+                    
+                    // Forward to relay VM on the same public port
+                    // The relay VM will then forward to the tunnel IP
+                    actualDestination = relayVmIp;
+                    actualPort = publicPort;
+                    
+                    _logger.LogInformation(
+                        "Creating 2-hop forwarding: :{PublicPort} → {RelayVmIp}:{Port} → {TunnelIp}:{VmPort}",
+                        publicPort, relayVmIp, publicPort, vmIp, vmPort);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Tunnel IP {TunnelIp} detected but no relay VM found - direct forwarding may fail",
+                        vmIp);
+                }
+            }
+
             _logger.LogInformation(
-                "Creating port forwarding: :{PublicPort} → {VmIp}:{VmPort} ({Protocol})",
-                publicPort, vmIp, vmPort, protocol);
+                "Creating port forwarding: :{PublicPort} → {Destination}:{Port} ({Protocol})",
+                publicPort, actualDestination, actualPort, protocol);
 
             // Create forwarding rules based on protocol
             if (protocol == PortProtocol.TCP || protocol == PortProtocol.Both)
             {
-                await CreateIptablesRuleAsync("tcp", vmIp, vmPort, publicPort, ct);
+                await CreateIptablesRuleAsync("tcp", actualDestination, actualPort, publicPort, ct);
             }
 
             if (protocol == PortProtocol.UDP || protocol == PortProtocol.Both)
             {
-                await CreateIptablesRuleAsync("udp", vmIp, vmPort, publicPort, ct);
+                await CreateIptablesRuleAsync("udp", actualDestination, actualPort, publicPort, ct);
             }
 
             // Save rules persistently
             await SaveRulesAsync(ct);
 
             _logger.LogInformation(
-                "✓ Port forwarding created: :{PublicPort} → {VmIp}:{VmPort}",
-                publicPort, vmIp, vmPort);
+                "✓ Port forwarding created: :{PublicPort} → {Destination}:{Port}",
+                publicPort, actualDestination, actualPort);
 
             return true;
         }
@@ -480,6 +520,43 @@ public class PortForwardingManager : IPortForwardingManager
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to save iptables rules persistently");
+        }
+    }
+
+    /// <summary>
+    /// Check if IP is in the DeCloud tunnel network (10.20.0.0/16)
+    /// </summary>
+    private bool IsTunnelIp(string ip)
+    {
+        return ip.StartsWith(TUNNEL_IP_PREFIX, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Find the local relay VM that manages WireGuard tunnels.
+    /// Returns the relay VM's IP address if found, null otherwise.
+    /// </summary>
+    private async Task<string?> GetRelayVmIpAsync(CancellationToken ct)
+    {
+        try
+        {
+            var vms = await _vmManager.GetAllVmsAsync(ct);
+            var relayVm = vms.FirstOrDefault(vm => vm.Spec.VmType == VmType.Relay);
+            
+            if (relayVm != null && !string.IsNullOrEmpty(relayVm.Spec.IpAddress))
+            {
+                _logger.LogDebug(
+                    "Found relay VM {VmId} at {IpAddress}",
+                    relayVm.Spec.Id, relayVm.Spec.IpAddress);
+                return relayVm.Spec.IpAddress;
+            }
+            
+            _logger.LogDebug("No relay VM found on this node");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to query for relay VM");
+            return null;
         }
     }
 }
