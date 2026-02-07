@@ -838,6 +838,29 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 
                 logger.info(f"✅ Added {proto} port forward: :{public_port} → {tunnel_ip}:{tunnel_port}")
             
+            # Add MASQUERADE rule for WireGuard interface (needed for return traffic)
+            # Check if MASQUERADE rule already exists for wg-relay-server
+            masq_check = subprocess.run(
+                ['iptables', '-t', 'nat', '-C', 'POSTROUTING', '-o', 'wg-relay-server', '-j', 'MASQUERADE'],
+                capture_output=True,
+                timeout=5
+            )
+            
+            if masq_check.returncode != 0:
+                # Rule doesn't exist, add it
+                masq_cmd = [
+                    'iptables', '-t', 'nat', '-A', 'POSTROUTING',
+                    '-o', 'wg-relay-server',
+                    '-j', 'MASQUERADE'
+                ]
+                
+                result = subprocess.run(masq_cmd, capture_output=True, text=True, timeout=5)
+                
+                if result.returncode == 0:
+                    logger.info("✅ Added MASQUERADE rule for wg-relay-server")
+                else:
+                    logger.warning(f"Failed to add MASQUERADE rule: {result.stderr}")
+            
             # Save iptables rules
             try:
                 subprocess.run(
