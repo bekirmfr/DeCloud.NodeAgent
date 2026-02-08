@@ -243,7 +243,7 @@ public class PortForwardingManager : IPortForwardingManager
                 // Remove DNAT rule
                 var result = await _executor.ExecuteAsync(
                     "iptables",
-                    $"-t nat -D {CHAIN_NAME} -p tcp --dport {publicPort} -j DNAT",
+                    $"-t nat -D {CHAIN_NAME} -p tcp --dport {publicPort} -j DNAT --to-destination {vmIp}:{vmPort}",
                     ct);
 
                 if (!result.Success)
@@ -275,7 +275,7 @@ public class PortForwardingManager : IPortForwardingManager
                 // Remove DNAT rule
                 var result = await _executor.ExecuteAsync(
                     "iptables",
-                    $"-t nat -D {CHAIN_NAME} -p udp --dport {publicPort} -j DNAT",
+                    $"-t nat -D {CHAIN_NAME} -p udp --dport {publicPort} -j DNAT --to-destination {vmIp}:{vmPort}",
                     ct);
 
                 if (!result.Success)
