@@ -99,6 +99,37 @@ public class PortForwardingManager : IPortForwardingManager
             await _lock.WaitAsync();
             lockAcquired = true;
             
+            return await CreateForwardingInternalAsync(vmIp, vmPort, publicPort, protocol, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to create port forwarding for {VmIp}:{VmPort} → :{PublicPort}",
+                vmIp, vmPort, publicPort);
+            return false;
+        }
+        finally
+        {
+            if (lockAcquired)
+            {
+                _lock.Release();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Internal method that creates port forwarding WITHOUT acquiring lock.
+    /// MUST be called either from CreateForwardingAsync (which holds lock) or from ReconcileRulesAsync (which already holds lock).
+    /// </summary>
+    private async Task<bool> CreateForwardingInternalAsync(
+        string vmIp,
+        int vmPort,
+        int publicPort,
+        PortProtocol protocol,
+        CancellationToken ct)
+    {
+        try
+        {
             // Ensure our custom chain exists
             await EnsureChainExistsAsync(ct);
 
@@ -179,13 +210,6 @@ public class PortForwardingManager : IPortForwardingManager
                 "Failed to create port forwarding for {VmIp}:{VmPort} → :{PublicPort}",
                 vmIp, vmPort, publicPort);
             return false;
-        }
-        finally
-        {
-            if (lockAcquired)
-            {
-                _lock.Release();
-            }
         }
     }
 
@@ -407,7 +431,8 @@ public class PortForwardingManager : IPortForwardingManager
             // Recreate all rules
             foreach (var mapping in mappings)
             {
-                await CreateForwardingAsync(
+                // Call internal method directly - we already hold the lock
+                await CreateForwardingInternalAsync(
                     mapping.VmPrivateIp,
                     mapping.VmPort,
                     mapping.PublicPort,
