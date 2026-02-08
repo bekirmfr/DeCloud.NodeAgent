@@ -235,13 +235,28 @@ public class PortForwardingManager : IPortForwardingManager
                 "Removing port forwarding for {VmIp}:{VmPort} → :{PublicPort} ({Protocol})",
                 vmIp, vmPort, publicPort, protocol);
 
+            // Determine actual destination port for iptables deletion
+            // For relay forwarding (relay node → tunnel IP): destination port = publicPort
+            // For direct forwarding (node → VM): destination port = vmPort
+            int actualDestPort = vmPort;
+            string? relayVmIp = await GetRelayVmIpAsync(ct);
+            bool isRelayNodeRules = (relayVmIp != null && vmIp == relayVmIp);
+            
+            if (isRelayNodeRules)
+            {
+                // This is the relay node's own rules (relay node → tunnel IP)
+                // Rules were created with destination port = publicPort
+                actualDestPort = publicPort;
+                _logger.LogInformation(
+                    "Detected relay node rules - using publicPort {PublicPort} as destination",
+                    publicPort);
+            }
+
             // Check if this is a tunnel IP (CGNAT VM) - need to remove relay VM rules too
             bool isRelayForwarding = IsTunnelIp(vmIp);
-            string? relayVmIp = null;
 
             if (isRelayForwarding)
             {
-                relayVmIp = await GetRelayVmIpAsync(ct);
                 if (relayVmIp != null)
                 {
                     _logger.LogInformation(
@@ -267,7 +282,7 @@ public class PortForwardingManager : IPortForwardingManager
                 // Remove DNAT rule
                 var result = await _executor.ExecuteAsync(
                     "iptables",
-                    $"-t nat -D {CHAIN_NAME} -p tcp --dport {publicPort} -j DNAT --to-destination {vmIp}:{vmPort}",
+                    $"-t nat -D {CHAIN_NAME} -p tcp --dport {publicPort} -j DNAT --to-destination {vmIp}:{actualDestPort}",
                     ct);
 
                 if (!result.Success)
@@ -281,7 +296,7 @@ public class PortForwardingManager : IPortForwardingManager
                 // Remove FORWARD rule
                 result = await _executor.ExecuteAsync(
                     "iptables",
-                    $"-D FORWARD -p tcp -d {vmIp} --dport {vmPort} -j ACCEPT",
+                    $"-D FORWARD -p tcp -d {vmIp} --dport {actualDestPort} -j ACCEPT",
                     ct);
 
                 if (!result.Success)
@@ -299,7 +314,7 @@ public class PortForwardingManager : IPortForwardingManager
                 // Remove DNAT rule
                 var result = await _executor.ExecuteAsync(
                     "iptables",
-                    $"-t nat -D {CHAIN_NAME} -p udp --dport {publicPort} -j DNAT --to-destination {vmIp}:{vmPort}",
+                    $"-t nat -D {CHAIN_NAME} -p udp --dport {publicPort} -j DNAT --to-destination {vmIp}:{actualDestPort}",
                     ct);
 
                 if (!result.Success)
@@ -313,7 +328,7 @@ public class PortForwardingManager : IPortForwardingManager
                 // Remove FORWARD rule
                 result = await _executor.ExecuteAsync(
                     "iptables",
-                    $"-D FORWARD -p udp -d {vmIp} --dport {vmPort} -j ACCEPT",
+                    $"-D FORWARD -p udp -d {vmIp} --dport {actualDestPort} -j ACCEPT",
                     ct);
 
                 if (!result.Success)
