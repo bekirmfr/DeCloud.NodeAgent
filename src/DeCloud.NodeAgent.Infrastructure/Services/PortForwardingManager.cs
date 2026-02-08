@@ -34,6 +34,11 @@ public interface IPortForwardingManager
         CancellationToken ct = default);
 
     /// <summary>
+    /// Get the IP address of the local relay VM, if one exists
+    /// </summary>
+    Task<string?> GetRelayVmIpAsync(CancellationToken ct);
+
+    /// <summary>
     /// Remove all forwarding rules for a VM
     /// </summary>
     Task<bool> RemoveAllForVmAsync(
@@ -620,7 +625,7 @@ public class PortForwardingManager : IPortForwardingManager
     /// Find the local relay VM that manages WireGuard tunnels.
     /// Returns the relay VM's IP address if found, null otherwise.
     /// </summary>
-    private async Task<string?> GetRelayVmIpAsync(CancellationToken ct)
+    public async Task<string?> GetRelayVmIpAsync(CancellationToken ct)
     {
         try
         {

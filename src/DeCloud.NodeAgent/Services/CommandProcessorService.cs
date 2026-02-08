@@ -748,9 +748,32 @@ public class CommandProcessorService : BackgroundService
                 return false;
             }
 
+
             // Remove iptables rules (both DNAT and FORWARD)
+            // For relay forwarding, iptables rules use relay VM IP, not tunnel IP
+            string ipForIptables = mapping.VmPrivateIp;
+            
+            // Check if this is relay forwarding (tunnel IP)
+            if (mapping.VmPrivateIp.StartsWith("10.20.") || mapping.VmPrivateIp.StartsWith("10.30."))
+            {
+                // This is a tunnel IP - need to resolve relay VM IP for iptables deletion
+                var relayVmIp = await _portForwardingManager.GetRelayVmIpAsync(ct);
+                if (relayVmIp != null)
+                {
+                    ipForIptables = relayVmIp;
+                    _logger.LogInformation(
+                        "Detected relay forwarding - using relay VM IP {RelayVmIp} instead of tunnel IP {TunnelIp}",
+                        relayVmIp, mapping.VmPrivateIp);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Tunnel IP detected but no relay VM found - deletion may fail");
+                }
+            }
+            
             var success = await _portForwardingManager.RemoveForwardingAsync(
-                mapping.VmPrivateIp,
+                ipForIptables,
                 mapping.VmPort,
                 mapping.PublicPort,
                 protocol,
