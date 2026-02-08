@@ -800,7 +800,18 @@ public class CommandProcessorService : BackgroundService
             }
 
             // Remove from database
-            var removed = await _portMappingRepository.RemoveAsync(vmId, vmPort.Value);
+            // For relay mappings (VmPort=0), remove by PublicPort to avoid deleting all relay mappings
+            bool removed;
+            if (vmPort.Value == 0)
+            {
+                removed = await _portMappingRepository.RemoveByPublicPortAsync(mapping.PublicPort);
+                _logger.LogDebug("Removed relay mapping by PublicPort {PublicPort}", mapping.PublicPort);
+            }
+            else
+            {
+                removed = await _portMappingRepository.RemoveAsync(vmId, vmPort.Value);
+            }
+            
             if (!removed)
             {
                 _logger.LogError("Failed to remove port mapping from database");

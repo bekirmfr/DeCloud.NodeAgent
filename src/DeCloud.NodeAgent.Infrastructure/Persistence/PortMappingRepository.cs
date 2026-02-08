@@ -147,6 +147,40 @@ public class PortMappingRepository : IDisposable
     }
 
     /// <summary>
+    /// Remove a port mapping by public port (used for relay nodes where all mappings have VmPort=0)
+    /// </summary>
+    public async Task<bool> RemoveByPublicPortAsync(int publicPort)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "DELETE FROM PortMappings WHERE PublicPort = @PublicPort";
+            cmd.Parameters.AddWithValue("@PublicPort", publicPort);
+
+            var rowsAffected = await cmd.ExecuteNonQueryAsync();
+
+            if (rowsAffected > 0)
+            {
+                _logger.LogInformation(
+                    "Port mapping removed: PublicPort {PublicPort}",
+                    publicPort);
+            }
+
+            return rowsAffected > 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to remove port mapping by public port");
+            return false;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>
     /// Remove all port mappings for a VM
     /// </summary>
     public async Task<int> RemoveAllForVmAsync(string vmId)
