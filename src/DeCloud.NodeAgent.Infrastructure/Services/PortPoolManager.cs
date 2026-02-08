@@ -18,6 +18,11 @@ public interface IPortPoolManager
     Task<int?> AllocatePortAsync(CancellationToken ct = default);
 
     /// <summary>
+    /// Reserve a specific port (used for coordinated multi-hop forwarding)
+    /// </summary>
+    Task<bool> ReserveSpecificPortAsync(int port, CancellationToken ct = default);
+
+    /// <summary>
     /// Release a port back to the pool (done via repository removal)
     /// </summary>
     Task ReleasePortAsync(int port, CancellationToken ct = default);
@@ -88,6 +93,44 @@ public class PortPoolManager : IPortPoolManager
                 TOTAL_PORTS);
 
             return null; // Pool exhausted
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<bool> ReserveSpecificPortAsync(int port, CancellationToken ct = default)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            // Validate port is in range
+            if (port < POOL_START || port > POOL_END)
+            {
+                _logger.LogWarning(
+                    "Requested port {Port} is outside pool range [{Start}-{End}]",
+                    port, POOL_START, POOL_END);
+                return false;
+            }
+
+            // Get currently allocated ports
+            var allocatedPorts = await GetOrRefreshAllocatedPortsAsync(ct);
+
+            // Check if already allocated
+            if (allocatedPorts.Contains(port))
+            {
+                _logger.LogWarning(
+                    "Requested port {Port} is already allocated",
+                    port);
+                return false;
+            }
+
+            // Reserve the port by adding to cache
+            allocatedPorts.Add(port);
+            _logger.LogDebug("Reserved specific port {Port} from pool", port);
+
+            return true;
         }
         finally
         {

@@ -621,12 +621,38 @@ public class CommandProcessorService : BackgroundService
                 "Allocating port for VM {VmId} ({Destination}:{VmPort}) - {Protocol} [{Type}]",
                 vmId, forwardingDestination, vmPort, protocol, forwardingType);
 
-            // Allocate public port from pool
-            var publicPort = await _portPoolManager.AllocatePortAsync(ct);
-            if (publicPort == null)
+            // Check if a specific public port was requested (for 3-hop CGNAT forwarding)
+            int? requestedPublicPort = GetIntProperty(root, "publicPort", "PublicPort");
+            
+            int? publicPort;
+            if (requestedPublicPort.HasValue && requestedPublicPort.Value > 0)
             {
-                _logger.LogError("Port pool exhausted - cannot allocate port for VM {VmId}", vmId);
-                return (false, null);
+                // Use the specified port (orchestrator is coordinating multi-hop forwarding)
+                _logger.LogInformation(
+                    "Using specified public port {PublicPort} for VM {VmId} (3-hop forwarding)",
+                    requestedPublicPort.Value, vmId);
+                    
+                // Reserve this specific port in the pool
+                bool reserved = await _portPoolManager.ReserveSpecificPortAsync(requestedPublicPort.Value, ct);
+                if (!reserved)
+                {
+                    _logger.LogError(
+                        "Cannot allocate requested port {PublicPort} for VM {VmId} - port already in use or out of range",
+                        requestedPublicPort.Value, vmId);
+                    return (false, null);
+                }
+                
+                publicPort = requestedPublicPort.Value;
+            }
+            else
+            {
+                // Allocate any available port from pool (normal Direct Access)
+                publicPort = await _portPoolManager.AllocatePortAsync(ct);
+                if (publicPort == null)
+                {
+                    _logger.LogError("Port pool exhausted - cannot allocate port for VM {VmId}", vmId);
+                    return (false, null);
+                }
             }
 
             // Create port mapping in database
