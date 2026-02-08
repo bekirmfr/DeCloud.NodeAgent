@@ -724,6 +724,7 @@ public class CommandProcessorService : BackgroundService
 
             string? vmId = GetStringProperty(root, "vmId", "VmId");
             int? vmPort = GetIntProperty(root, "vmPort", "VmPort");
+            int? publicPort = GetIntProperty(root, "publicPort", "PublicPort");
             int? protocolInt = GetIntProperty(root, "protocol", "Protocol");
 
             if (string.IsNullOrEmpty(vmId) || vmPort == null || protocolInt == null)
@@ -740,7 +741,21 @@ public class CommandProcessorService : BackgroundService
 
             // Get mapping to find public port
             var mappings = await _portMappingRepository.GetByVmIdAsync(vmId);
-            var mapping = mappings.FirstOrDefault(m => m.VmPort == vmPort.Value);
+            
+            // For relay forwarding (VmPort=0), match by PublicPort instead
+            // All relay mappings have VmPort=0, so matching by VmPort would return first mapping
+            PortMapping? mapping;
+            if (vmPort.Value == 0 && publicPort.HasValue)
+            {
+                mapping = mappings.FirstOrDefault(m => m.PublicPort == publicPort.Value);
+                _logger.LogDebug(
+                    "Relay port removal - matching by PublicPort {PublicPort}",
+                    publicPort.Value);
+            }
+            else
+            {
+                mapping = mappings.FirstOrDefault(m => m.VmPort == vmPort.Value);
+            }
 
             if (mapping == null)
             {
