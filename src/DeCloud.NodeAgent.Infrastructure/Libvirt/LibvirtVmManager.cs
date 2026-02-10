@@ -1440,6 +1440,11 @@ public class LibvirtVmManager : IVmManager
             }
 
             // =====================================================
+            // STEP 6.5: Ensure qemu-guest-agent is installed (required for readiness monitoring)
+            // =====================================================
+            cloudInitYaml = EnsureQemuGuestAgent(cloudInitYaml);
+
+            // =====================================================
             // STEP 7: Write user-data and meta-data files
             // =====================================================
             var userDataPath = Path.Combine(vmDir, "user-data");
@@ -1505,6 +1510,34 @@ public class LibvirtVmManager : IVmManager
                 spec.Id);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Ensure qemu-guest-agent is in the cloud-init packages list.
+    /// Required for VmReadinessMonitor to probe service readiness via virtio channel.
+    /// </summary>
+    private static string EnsureQemuGuestAgent(string cloudInitYaml)
+    {
+        const string pkg = "qemu-guest-agent";
+        if (cloudInitYaml.Contains(pkg))
+            return cloudInitYaml;
+
+        // Find existing packages: section and append to it
+        var packagesIndex = cloudInitYaml.IndexOf("\npackages:", StringComparison.Ordinal);
+        if (packagesIndex >= 0)
+        {
+            var lineEnd = cloudInitYaml.IndexOf('\n', packagesIndex + 1);
+            if (lineEnd >= 0)
+                return cloudInitYaml.Insert(lineEnd + 1, $"  - {pkg}\n");
+        }
+
+        // No packages: section — inject one before runcmd:
+        var runcmdIndex = cloudInitYaml.IndexOf("\nruncmd:", StringComparison.Ordinal);
+        if (runcmdIndex >= 0)
+            return cloudInitYaml.Insert(runcmdIndex, $"\npackages:\n  - {pkg}\n");
+
+        // Fallback: append packages section at the end
+        return cloudInitYaml + $"\n\npackages:\n  - {pkg}\n";
     }
 
     /// <summary>
