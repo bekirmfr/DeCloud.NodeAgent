@@ -2067,12 +2067,25 @@ public class LibvirtVmManager : IVmManager
                   <source network='default'/>
                   <model type='virtio'/>{bandwidthXml}
                 </interface>
+                <serial type='pty'>
+                  <target port='0'/>
+                </serial>
                 <console type='pty'>
                   <target type='serial' port='0'/>
                 </console>
                 <graphics type='vnc' port='{vncPort}' autoport='no' listen='0.0.0.0'>
                   <listen type='address' address='0.0.0.0'/>
                 </graphics>
+                <video>
+                  <model type='virtio' heads='1'/>
+                </video>
+                <rng model='virtio'>
+                  <backend model='random'>/dev/urandom</backend>
+                </rng>
+                <channel type='unix'>
+                  <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.Id}.org.qemu.guest_agent.0'/>
+                  <target type='virtio' name='org.qemu.guest_agent.0'/>
+                </channel>
               </devices>
             </domain>";
     }
