@@ -173,7 +173,15 @@ public class HeartbeatService : BackgroundService
                         IsIpAssigned = isIpAssigned,
                         IpAddress = ipAddress,
                         VncPort = vm.VncPort,
-                        MacAddress = vm.Spec.MacAddress
+                        MacAddress = vm.Spec.MacAddress,
+                        Services = vm.Services.Count > 0 ? vm.Services.Select(s => new ServiceSummary
+                        {
+                            Name = s.Name,
+                            Port = s.Port,
+                            Protocol = s.Protocol,
+                            Status = s.Status.ToString(),
+                            ReadyAt = s.ReadyAt
+                        }).ToList() : null
                     });
                 }
                 catch (Exception ex)

@@ -210,6 +210,9 @@ builder.Services.AddHostedService<PortForwardingReconciliationService>();
 // Periodic cleanup of orphaned ports (hourly)
 builder.Services.AddHostedService<OrphanedPortCleanupService>();
 
+// Per-service VM readiness monitoring via qemu-guest-agent
+builder.Services.AddHostedService<VmReadinessMonitor>();
+
 // =====================================================
 // Security services for port validation and auditing
 // =====================================================

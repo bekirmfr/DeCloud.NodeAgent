@@ -3,6 +3,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Infrastructure.Persistence;
 
@@ -22,7 +23,7 @@ public class VmRepository : IDisposable
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly bool _encrypted;
 
-    private const int CURRENT_SCHEMA_VERSION = 2; // Incremented when schema changes
+    private const int CURRENT_SCHEMA_VERSION = 3; // Incremented when schema changes
 
     public VmRepository(string databasePath, ILogger logger, string? encryptionKey = null)
     {
@@ -156,6 +157,7 @@ public class VmRepository : IDisposable
             CREATE TABLE IF NOT EXISTS VmRecords (
                 VmId TEXT PRIMARY KEY,
                 Name TEXT NOT NULL,
+                ServicesJson TEXT DEFAULT '[]',
                 OwnerId TEXT,
                 QualityTier INTEGER NOT NULL DEFAULT 3,
                 ComputePointCost INTEGER NOT NULL DEFAULT 4,
@@ -209,8 +211,13 @@ public class VmRepository : IDisposable
                 SetSchemaVersion(2);
             }
 
-            // Future migrations go here
-            // if (fromVersion < 3) { MigrateToV3(); }
+            // Migration v2 → v3: Add ServicesJson column
+            if (fromVersion < 3)
+            {
+                _logger.LogInformation("Applying migration: v{From} → v3 (ServicesJson column)", Math.Max(fromVersion, 2));
+                MigrateToV3();
+                SetSchemaVersion(3);
+            }
 
             transaction.Commit();
         }
@@ -313,6 +320,20 @@ public class VmRepository : IDisposable
     }
 
     /// <summary>
+    /// Migrate to schema v3: Add ServicesJson column for per-service readiness tracking
+    /// </summary>
+    private void MigrateToV3()
+    {
+        if (!ColumnExists("VmRecords", "ServicesJson"))
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "ALTER TABLE VmRecords ADD COLUMN ServicesJson TEXT DEFAULT '[]'";
+            cmd.ExecuteNonQuery();
+            _logger.LogInformation("Added ServicesJson column to VmRecords");
+        }
+    }
+
+    /// <summary>
     /// Save or update a VM record
     /// </summary>
     public async Task SaveVmAsync(VmInstance vm)
@@ -321,14 +342,14 @@ public class VmRepository : IDisposable
         try
         {
             var sql = @"
-                INSERT OR REPLACE INTO VmRecords 
-                (VmId, Name, OwnerId, QualityTier, ComputePointCost,
-                 VirtualCpuCores, MemoryBytes, DiskBytes, 
+                INSERT OR REPLACE INTO VmRecords
+                (VmId, Name, ServicesJson, OwnerId, QualityTier, ComputePointCost,
+                 VirtualCpuCores, MemoryBytes, DiskBytes,
                  State, IpAddress, MacAddress, VncPort, Pid,
                  CreatedAt, StartedAt, StoppedAt, LastUpdated, DiskPath, ConfigPath,
                  BaseImageUrl, BaseImageHash, SshPublicKey, EncryptedPassword)
-                VALUES 
-                (@VmId, @Name, @OwnerId, @QualityTier, @ComputePointCost,
+                VALUES
+                (@VmId, @Name, @ServicesJson, @OwnerId, @QualityTier, @ComputePointCost,
                  @VirtualCpuCores, @MemoryBytes, @DiskBytes,
                  @State, @IpAddress, @MacAddress, @VncPort, @Pid,
                  @CreatedAt, @StartedAt, @StoppedAt, @LastUpdated, @DiskPath, @ConfigPath,
@@ -340,6 +361,8 @@ public class VmRepository : IDisposable
 
             cmd.Parameters.AddWithValue("@VmId", vm.VmId);
             cmd.Parameters.AddWithValue("@Name", vm.Name);
+            cmd.Parameters.AddWithValue("@ServicesJson",
+                vm.Services.Count > 0 ? JsonSerializer.Serialize(vm.Services) : "[]");
             cmd.Parameters.AddWithValue("@OwnerId", vm.Spec.OwnerId ?? (object)DBNull.Value);
             cmd.Parameters.AddWithValue("@QualityTier", vm.Spec.QualityTier);
             cmd.Parameters.AddWithValue("@ComputePointCost", vm.Spec.ComputePointCost);
@@ -617,6 +640,7 @@ public class VmRepository : IDisposable
             {
                 VmId = reader.GetString(reader.GetOrdinal("VmId")),
                 Name = reader.GetString(reader.GetOrdinal("Name")),
+                Services = DeserializeServices(GetNullableString(reader, "ServicesJson")),
                 Spec = new VmSpec
                 {
                     Id = reader.GetString(reader.GetOrdinal("VmId")),
@@ -670,6 +694,22 @@ public class VmRepository : IDisposable
     {
         var ordinal = reader.GetOrdinal(columnName);
         return reader.IsDBNull(ordinal) ? null : DateTime.Parse(reader.GetString(ordinal));
+    }
+
+    /// <summary>
+    /// Deserialize services JSON from database, with fallback to empty list.
+    /// </summary>
+    private static List<VmServiceStatus> DeserializeServices(string? json)
+    {
+        if (string.IsNullOrEmpty(json) || json == "[]") return new List<VmServiceStatus>();
+        try
+        {
+            return JsonSerializer.Deserialize<List<VmServiceStatus>>(json) ?? new List<VmServiceStatus>();
+        }
+        catch
+        {
+            return new List<VmServiceStatus>();
+        }
     }
 
     public void Dispose()
