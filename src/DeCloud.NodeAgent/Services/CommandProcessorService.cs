@@ -372,6 +372,7 @@ public class CommandProcessorService : BackgroundService
     /// <summary>
     /// Parse service definitions from the orchestrator's CreateVm command payload.
     /// Falls back to default System-only service if none provided.
+    /// Uses GetIntProperty/GetStringProperty helpers for null-safe JSON parsing.
     /// </summary>
     private static List<VmServiceStatus> ParseServiceDefinitions(JsonElement root)
     {
@@ -384,6 +385,8 @@ public class CommandProcessorService : BackgroundService
             {
                 foreach (var svcElement in servicesElement.EnumerateArray())
                 {
+                    // Use existing helpers — they check ValueKind before calling
+                    // GetInt32/GetString, preventing crashes on null JSON values
                     var name = GetStringProperty(svcElement, "Name", "name");
                     var port = GetIntProperty(svcElement, "Port", "port");
                     var protocol = GetStringProperty(svcElement, "Protocol", "protocol");

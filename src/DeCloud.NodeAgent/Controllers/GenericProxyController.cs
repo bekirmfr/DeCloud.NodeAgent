@@ -27,19 +27,26 @@ public class GenericProxyController : ControllerBase
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<GenericProxyController> _logger;
 
-    // Security: Allowed ports (can be configured via appsettings)
-    private static readonly HashSet<int> AllowedPorts = new()
+    // Security: Always-allowed ports (infrastructure services present on all VMs)
+    private static readonly HashSet<int> InfrastructurePorts = new()
     {
         22,    // SSH
-        80,    // HTTP
-        443,   // HTTPS
-        3306,  // MySQL
-        5432,  // PostgreSQL
-        6379,  // Redis
-        8080,  // Common HTTP alt
-        8443,  // Common HTTPS alt
         9999,  // Attestation agent
     };
+
+    /// <summary>
+    /// Check if a port is allowed for proxy access.
+    /// A port is allowed if it's an infrastructure port (SSH, attestation)
+    /// or if it's defined in the VM's service list (from template ExposedPorts).
+    /// </summary>
+    private static bool IsPortAllowed(int port, Core.Models.VmInstance vm)
+    {
+        if (InfrastructurePorts.Contains(port))
+            return true;
+
+        // Allow any port defined in the VM's service definitions
+        return vm.Services.Any(s => s.Port == port);
+    }
 
     // Ports that require special handling (e.g., authentication)
     private static readonly HashSet<int> ProtectedPorts = new() { 22, 3306, 5432, 6379 };
@@ -79,20 +86,20 @@ public class GenericProxyController : ControllerBase
     {
         try
         {
-            // Security validation
-            if (!AllowedPorts.Contains(port))
+            // Get VM details first (needed for dynamic port validation)
+            var vm = await _vmManager.GetVmAsync(vmId, ct);
+            if (vm == null)
+            {
+                return NotFound(new { error = "VM not found" });
+            }
+
+            // Security: allow infrastructure ports + any port in VM's service definitions
+            if (!IsPortAllowed(port, vm))
             {
                 _logger.LogWarning(
                     "Blocked proxy attempt to unauthorized port {Port} for VM {VmId}",
                     port, vmId);
                 return StatusCode(403, new { error = $"Port {port} is not allowed" });
-            }
-
-            // Get VM details
-            var vm = await _vmManager.GetVmAsync(vmId, ct);
-            if (vm == null)
-            {
-                return NotFound(new { error = "VM not found" });
             }
 
             var vmIp = vm.Spec.IpAddress;
@@ -305,25 +312,25 @@ public class GenericProxyController : ControllerBase
             return;
         }
 
-        // Security validation
-        if (!AllowedPorts.Contains(port))
-        {
-            _logger.LogWarning(
-                "Blocked WebSocket tunnel to unauthorized port {Port} for VM {VmId}",
-                port, vmId);
-            HttpContext.Response.StatusCode = 403;
-            await HttpContext.Response.WriteAsync($"Port {port} is not allowed");
-            return;
-        }
-
         try
         {
-            // Get VM details
+            // Get VM details first (needed for dynamic port validation)
             var vm = await _vmManager.GetVmAsync(vmId, ct);
             if (vm == null)
             {
                 HttpContext.Response.StatusCode = 404;
                 await HttpContext.Response.WriteAsync("VM not found");
+                return;
+            }
+
+            // Security: allow infrastructure ports + any port in VM's service definitions
+            if (!IsPortAllowed(port, vm))
+            {
+                _logger.LogWarning(
+                    "Blocked WebSocket tunnel to unauthorized port {Port} for VM {VmId}",
+                    port, vmId);
+                HttpContext.Response.StatusCode = 403;
+                await HttpContext.Response.WriteAsync($"Port {port} is not allowed");
                 return;
             }
 
