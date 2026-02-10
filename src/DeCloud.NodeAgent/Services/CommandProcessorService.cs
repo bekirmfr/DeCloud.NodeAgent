@@ -27,6 +27,7 @@ public class CommandProcessorService : BackgroundService
     private readonly IPortPoolManager _portPoolManager;
     private readonly IPortForwardingManager _portForwardingManager;
     private readonly PortMappingRepository _portMappingRepository;
+    private readonly VmRepository _repository;
     private readonly ILogger<CommandProcessorService> _logger;
     private readonly CommandProcessorOptions _options;
 
@@ -53,6 +54,7 @@ public class CommandProcessorService : BackgroundService
         IPortPoolManager portPoolManager,
         IPortForwardingManager portForwardingManager,
         PortMappingRepository portMappingRepository,
+        VmRepository repository,
         IOptions<CommandProcessorOptions> options,
         ILogger<CommandProcessorService> logger)
     {
@@ -66,6 +68,7 @@ public class CommandProcessorService : BackgroundService
         _portPoolManager = portPoolManager;
         _portForwardingManager = portForwardingManager;
         _portMappingRepository = portMappingRepository;
+        _repository = repository;
         _logger = logger;
         _options = options.Value;
     }
@@ -330,6 +333,19 @@ public class CommandProcessorService : BackgroundService
 
         var result = await _vmManager.CreateVmAsync(vmSpec, password, ct);
 
+        // Parse service definitions from orchestrator payload
+        if (result.Success)
+        {
+            var vm = (await _vmManager.GetAllVmsAsync(ct)).FirstOrDefault(v => v.VmId == vmId);
+            if (vm != null)
+            {
+                vm.Services = ParseServiceDefinitions(root);
+                await _repository.SaveVmAsync(vm);
+                _logger.LogInformation("VM {VmId}: {Count} service readiness checks registered",
+                    vmId, vm.Services.Count);
+            }
+        }
+
         if (result.Success)
         {
             _logger.LogInformation(
@@ -351,6 +367,81 @@ public class CommandProcessorService : BackgroundService
             //await _orchestratorClient.NotifyVmStatusAsync(vmId, VmState.Failed, ct);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Parse service definitions from the orchestrator's CreateVm command payload.
+    /// Falls back to default System-only service if none provided.
+    /// </summary>
+    private static List<VmServiceStatus> ParseServiceDefinitions(JsonElement root)
+    {
+        var services = new List<VmServiceStatus>();
+
+        if (root.TryGetProperty("Services", out var servicesElement) ||
+            root.TryGetProperty("services", out servicesElement))
+        {
+            if (servicesElement.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var svcElement in servicesElement.EnumerateArray())
+                {
+                    var name = svcElement.TryGetProperty("Name", out var n) ? n.GetString()
+                             : svcElement.TryGetProperty("name", out n) ? n.GetString()
+                             : "Unknown";
+
+                    var port = svcElement.TryGetProperty("Port", out var p) ? p.GetInt32()
+                             : svcElement.TryGetProperty("port", out p) ? (int?)p.GetInt32()
+                             : null;
+
+                    var protocol = svcElement.TryGetProperty("Protocol", out var pr) ? pr.GetString()
+                                 : svcElement.TryGetProperty("protocol", out pr) ? pr.GetString()
+                                 : null;
+
+                    var checkTypeStr = svcElement.TryGetProperty("CheckType", out var ct2) ? ct2.GetString()
+                                     : svcElement.TryGetProperty("checkType", out ct2) ? ct2.GetString()
+                                     : "CloudInitDone";
+
+                    Enum.TryParse<CheckType>(checkTypeStr, true, out var checkType);
+
+                    var httpPath = svcElement.TryGetProperty("HttpPath", out var hp) ? hp.GetString()
+                                 : svcElement.TryGetProperty("httpPath", out hp) ? hp.GetString()
+                                 : null;
+
+                    var execCommand = svcElement.TryGetProperty("ExecCommand", out var ec) ? ec.GetString()
+                                    : svcElement.TryGetProperty("execCommand", out ec) ? ec.GetString()
+                                    : null;
+
+                    var timeout = svcElement.TryGetProperty("TimeoutSeconds", out var ts) ? ts.GetInt32()
+                                : svcElement.TryGetProperty("timeoutSeconds", out ts) ? ts.GetInt32()
+                                : 300;
+
+                    services.Add(new VmServiceStatus
+                    {
+                        Name = name ?? "Unknown",
+                        Port = port,
+                        Protocol = protocol,
+                        CheckType = checkType,
+                        HttpPath = httpPath,
+                        ExecCommand = execCommand,
+                        Status = ServiceReadiness.Pending,
+                        TimeoutSeconds = timeout
+                    });
+                }
+            }
+        }
+
+        // Default: at least a System service
+        if (services.Count == 0)
+        {
+            services.Add(new VmServiceStatus
+            {
+                Name = "System",
+                CheckType = CheckType.CloudInitDone,
+                Status = ServiceReadiness.Pending,
+                TimeoutSeconds = 300
+            });
+        }
+
+        return services;
     }
 
     private async Task<bool> HandleStartVmAsync(string payload, CancellationToken ct)

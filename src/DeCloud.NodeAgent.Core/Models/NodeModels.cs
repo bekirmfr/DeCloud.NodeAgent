@@ -114,6 +114,19 @@ public class VmSummary
     public int? VncPort { get; set; }
     public string? MacAddress { get; set; }
     public DateTime StartedAt { get; set; }
+    public List<ServiceSummary>? Services { get; set; }
+}
+
+/// <summary>
+/// Lightweight service status for heartbeat reporting.
+/// </summary>
+public class ServiceSummary
+{
+    public string Name { get; set; } = string.Empty;
+    public int? Port { get; set; }
+    public string? Protocol { get; set; }
+    public string Status { get; set; } = "Pending";
+    public DateTime? ReadyAt { get; set; }
 }
 
 /// <summary>

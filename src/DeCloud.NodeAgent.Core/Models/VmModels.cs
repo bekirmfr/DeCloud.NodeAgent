@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace DeCloud.NodeAgent.Core.Models;
 
 /// <summary>
@@ -24,7 +26,7 @@ public class VmSpec
 
     // Quality tier and point cost
     public QualityTier QualityTier { get; set; } = QualityTier.Standard;  // 0=Guaranteed, 1=Standard, 3=Balanced, 3=Burstable
-    public int ComputePointCost { get; set; } = 0; // Total points (vCPUs � pointsPerVCpu)
+    public int ComputePointCost { get; set; } = 0; // Total points (vCPUs � pointsPerVCpu)
 
     // Image source
     public string BaseImageUrl { get; set; } = string.Empty;  // URL to download base image
@@ -70,6 +72,15 @@ public class VmInstance
     public string VmId { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public VmState State { get; set; }
+
+    /// <summary>
+    /// Per-service readiness statuses.
+    /// "System" (cloud-init) always first. Additional services from template.
+    /// Checked via qemu-guest-agent by VmReadinessMonitor.
+    /// </summary>
+    public List<VmServiceStatus> Services { get; set; } = new();
+    public bool IsFullyReady => Services.Count > 0 && Services.All(s => s.Status == ServiceReadiness.Ready);
+
     public VmSpec Spec { get; set; } = new();
     public string? NetworkInterface { get; set; }  // e.g., "vnet0"
 
@@ -216,4 +227,60 @@ public class VmOperationResult
         ErrorMessage = error,
         ErrorCode = code
     };
+}
+
+/// <summary>
+/// Readiness status of a single service inside a VM.
+/// Checked via qemu-guest-agent (virtio channel, no network needed).
+/// </summary>
+public class VmServiceStatus
+{
+    public string Name { get; set; } = string.Empty;
+    public int? Port { get; set; }
+    public string? Protocol { get; set; }
+    public CheckType CheckType { get; set; } = CheckType.CloudInitDone;
+    public string? HttpPath { get; set; }
+    public string? ExecCommand { get; set; }
+
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public ServiceReadiness Status { get; set; } = ServiceReadiness.Pending;
+
+    public DateTime? ReadyAt { get; set; }
+    public DateTime? LastCheckAt { get; set; }
+    public int TimeoutSeconds { get; set; } = 300;
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum CheckType
+{
+    /// <summary>cloud-init status --format json → status == "done"</summary>
+    CloudInitDone,
+
+    /// <summary>nc -zv -w2 localhost {port} → exit 0</summary>
+    TcpPort,
+
+    /// <summary>curl -sf -o /dev/null http://localhost:{port}{path} → exit 0</summary>
+    HttpGet,
+
+    /// <summary>Arbitrary command via bash -c → exit 0</summary>
+    ExecCommand
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum ServiceReadiness
+{
+    /// <summary>Waiting for System (cloud-init) to complete first</summary>
+    Pending,
+
+    /// <summary>Actively being probed</summary>
+    Checking,
+
+    /// <summary>Check passed — service is accepting traffic</summary>
+    Ready,
+
+    /// <summary>Timeout expired without passing check</summary>
+    TimedOut,
+
+    /// <summary>cloud-init reported error (System service only)</summary>
+    Failed
 }
