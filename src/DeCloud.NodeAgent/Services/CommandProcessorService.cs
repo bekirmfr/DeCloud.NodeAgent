@@ -372,6 +372,7 @@ public class CommandProcessorService : BackgroundService
     /// <summary>
     /// Parse service definitions from the orchestrator's CreateVm command payload.
     /// Falls back to default System-only service if none provided.
+    /// Uses GetIntProperty/GetStringProperty helpers for null-safe JSON parsing.
     /// </summary>
     private static List<VmServiceStatus> ParseServiceDefinitions(JsonElement root)
     {
@@ -384,35 +385,18 @@ public class CommandProcessorService : BackgroundService
             {
                 foreach (var svcElement in servicesElement.EnumerateArray())
                 {
-                    var name = svcElement.TryGetProperty("Name", out var n) ? n.GetString()
-                             : svcElement.TryGetProperty("name", out n) ? n.GetString()
-                             : "Unknown";
+                    // Use existing helpers — they check ValueKind before calling
+                    // GetInt32/GetString, preventing crashes on null JSON values
+                    var name = GetStringProperty(svcElement, "Name", "name");
+                    var port = GetIntProperty(svcElement, "Port", "port");
+                    var protocol = GetStringProperty(svcElement, "Protocol", "protocol");
 
-                    var port = svcElement.TryGetProperty("Port", out var p) ? p.GetInt32()
-                             : svcElement.TryGetProperty("port", out p) ? (int?)p.GetInt32()
-                             : null;
-
-                    var protocol = svcElement.TryGetProperty("Protocol", out var pr) ? pr.GetString()
-                                 : svcElement.TryGetProperty("protocol", out pr) ? pr.GetString()
-                                 : null;
-
-                    var checkTypeStr = svcElement.TryGetProperty("CheckType", out var ct2) ? ct2.GetString()
-                                     : svcElement.TryGetProperty("checkType", out ct2) ? ct2.GetString()
-                                     : "CloudInitDone";
-
+                    var checkTypeStr = GetStringProperty(svcElement, "CheckType", "checkType") ?? "CloudInitDone";
                     Enum.TryParse<CheckType>(checkTypeStr, true, out var checkType);
 
-                    var httpPath = svcElement.TryGetProperty("HttpPath", out var hp) ? hp.GetString()
-                                 : svcElement.TryGetProperty("httpPath", out hp) ? hp.GetString()
-                                 : null;
-
-                    var execCommand = svcElement.TryGetProperty("ExecCommand", out var ec) ? ec.GetString()
-                                    : svcElement.TryGetProperty("execCommand", out ec) ? ec.GetString()
-                                    : null;
-
-                    var timeout = svcElement.TryGetProperty("TimeoutSeconds", out var ts) ? ts.GetInt32()
-                                : svcElement.TryGetProperty("timeoutSeconds", out ts) ? ts.GetInt32()
-                                : 300;
+                    var httpPath = GetStringProperty(svcElement, "HttpPath", "httpPath");
+                    var execCommand = GetStringProperty(svcElement, "ExecCommand", "execCommand");
+                    var timeout = GetIntProperty(svcElement, "TimeoutSeconds", "timeoutSeconds") ?? 300;
 
                     services.Add(new VmServiceStatus
                     {
