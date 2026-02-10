@@ -166,7 +166,7 @@ public class VmReadinessMonitor : BackgroundService
         try
         {
             var result = await _commandExecutor.ExecuteAsync(
-                "virsh", $"qemu-agent-command {domain} '{{\"execute\":\"guest-ping\"}}'",
+                "virsh", VirshQemuAgentArgs(domain, "{\"execute\":\"guest-ping\"}"),
                 TimeSpan.FromSeconds(5), ct);
             return result.ExitCode == 0;
         }
@@ -174,6 +174,19 @@ public class VmReadinessMonitor : BackgroundService
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Build virsh arguments for qemu-agent-command with proper escaping.
+    /// .NET Process.Start splits Arguments using Windows-style rules even on Linux:
+    /// double quotes delimit argument groups, backslash-quote (\") is a literal quote.
+    /// Single quotes have NO special meaning, so '{"execute":"guest-ping"}' fails
+    /// because the inner double quotes are consumed as group delimiters.
+    /// </summary>
+    private static string VirshQemuAgentArgs(string domain, string jsonCommand)
+    {
+        var escaped = jsonCommand.Replace("\\", "\\\\").Replace("\"", "\\\"");
+        return $"qemu-agent-command {domain} \"{escaped}\"";
     }
 
     /// <summary>
@@ -221,7 +234,7 @@ public class VmReadinessMonitor : BackgroundService
         {
             // Step 1: Send guest-exec, get PID
             var execResult = await _commandExecutor.ExecuteAsync(
-                "virsh", $"qemu-agent-command {domain} '{execCmd}'",
+                "virsh", VirshQemuAgentArgs(domain, execCmd),
                 TimeSpan.FromSeconds(10), ct);
 
             if (execResult.ExitCode != 0) return (false, false);
@@ -234,7 +247,7 @@ public class VmReadinessMonitor : BackgroundService
 
             var statusCmd = $"{{\"execute\":\"guest-exec-status\",\"arguments\":{{\"pid\":{pid}}}}}";
             var statusResult = await _commandExecutor.ExecuteAsync(
-                "virsh", $"qemu-agent-command {domain} '{statusCmd}'",
+                "virsh", VirshQemuAgentArgs(domain, statusCmd),
                 TimeSpan.FromSeconds(10), ct);
 
             if (statusResult.ExitCode != 0) return (false, false);
