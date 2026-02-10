@@ -107,8 +107,12 @@ public class VmReadinessMonitor : BackgroundService
                 continue;
             }
 
-            // Check timeout
-            var elapsed = (DateTime.UtcNow - (vm.StartedAt ?? vm.CreatedAt)).TotalSeconds;
+            // Check timeout — System counts from VM start; other services count from
+            // when System became Ready, since they're gated behind it.
+            var timeoutBase = service.Name == "System"
+                            ? (vm.StartedAt ?? vm.CreatedAt)
+                            : (systemService?.ReadyAt ?? vm.StartedAt ?? vm.CreatedAt);
+            var elapsed = (DateTime.UtcNow - timeoutBase).TotalSeconds;
             if (elapsed > service.TimeoutSeconds)
             {
                 if (service.Status != ServiceReadiness.TimedOut)
@@ -214,7 +218,9 @@ public class VmReadinessMonitor : BackgroundService
             case CheckType.HttpGet:
                 path = "/usr/bin/curl";
                 var url = $"http://localhost:{service.Port}{service.HttpPath ?? "/"}";
-                args = new[] { "-sf", "-o", "/dev/null", "-m", "5", url };
+                // Use -s (silent) without -f: any HTTP response (including 401 auth)
+                // means the service is running. Only connection refused/timeout = not ready.
+                args = new[] { "-s", "-o", "/dev/null", "-m", "5", url };
                 break;
 
             case CheckType.ExecCommand:
