@@ -78,7 +78,7 @@ public class VmReadinessMonitor : BackgroundService
 
     private async Task CheckVmServicesAsync(VmInstance vm, CancellationToken ct)
     {
-        var domainName = $"decloud-{vm.VmId}";
+        var domainName = vm.VmId;
         bool anyChanged = false;
 
         // Check if guest agent is responding first
