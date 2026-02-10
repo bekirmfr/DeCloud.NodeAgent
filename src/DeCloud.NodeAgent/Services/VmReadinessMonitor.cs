@@ -19,6 +19,7 @@ public class VmReadinessMonitor : BackgroundService
     private readonly ILogger<VmReadinessMonitor> _logger;
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan GuestExecWait = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan RecheckInterval = TimeSpan.FromSeconds(60);
 
     public VmReadinessMonitor(
         IVmManager vmManager,
@@ -93,8 +94,18 @@ public class VmReadinessMonitor : BackgroundService
 
         foreach (var service in vm.Services)
         {
-            if (service.Status == ServiceReadiness.Ready || service.Status == ServiceReadiness.TimedOut)
+            if (service.Status == ServiceReadiness.Ready)
                 continue;
+
+            // Self-healing: recheck TimedOut/Failed services at a slower interval
+            if (service.Status is ServiceReadiness.TimedOut or ServiceReadiness.Failed)
+            {
+                var sinceLastCheck = service.LastCheckAt.HasValue
+                    ? (DateTime.UtcNow - service.LastCheckAt.Value).TotalSeconds
+                    : double.MaxValue;
+                if (sinceLastCheck < RecheckInterval.TotalSeconds)
+                    continue;
+            }
 
             // Gate: non-System services wait for System to be Ready
             if (service.Name != "System" && !systemReady)
@@ -107,23 +118,26 @@ public class VmReadinessMonitor : BackgroundService
                 continue;
             }
 
-            // Check timeout — System counts from VM start; other services count from
-            // when System became Ready, since they're gated behind it.
-            var timeoutBase = service.Name == "System"
-                            ? (vm.StartedAt ?? vm.CreatedAt)
-                            : (systemService?.ReadyAt ?? vm.StartedAt ?? vm.CreatedAt);
-            var elapsed = (DateTime.UtcNow - timeoutBase).TotalSeconds;
-            if (elapsed > service.TimeoutSeconds)
+            // Check timeout — only applies to services not yet timed out.
+            // System counts from VM start; other services count from when System became Ready.
+            if (service.Status is not (ServiceReadiness.TimedOut or ServiceReadiness.Failed))
             {
-                if (service.Status != ServiceReadiness.TimedOut)
+                var timeoutBase = service.Name == "System"
+                    ? (vm.StartedAt ?? vm.CreatedAt)
+                    : (systemService?.ReadyAt ?? vm.StartedAt ?? vm.CreatedAt);
+                var elapsed = (DateTime.UtcNow - timeoutBase).TotalSeconds;
+                if (elapsed > service.TimeoutSeconds)
                 {
-                    service.Status = ServiceReadiness.TimedOut;
-                    service.LastCheckAt = DateTime.UtcNow;
-                    anyChanged = true;
-                    _logger.LogWarning("Service {Service} on VM {VmId} timed out after {Timeout}s",
-                        service.Name, vm.VmId, service.TimeoutSeconds);
+                    if (service.Status != ServiceReadiness.TimedOut)
+                    {
+                        service.Status = ServiceReadiness.TimedOut;
+                        service.LastCheckAt = DateTime.UtcNow;
+                        anyChanged = true;
+                        _logger.LogWarning("Service {Service} on VM {VmId} timed out after {Timeout}s",
+                            service.Name, vm.VmId, service.TimeoutSeconds);
+                    }
+                    continue;
                 }
-                continue;
             }
 
             // Execute the check
@@ -132,11 +146,20 @@ public class VmReadinessMonitor : BackgroundService
 
             if (success)
             {
+                if (previousStatus is ServiceReadiness.TimedOut or ServiceReadiness.Failed)
+                {
+                    _logger.LogInformation(
+                        "Service {Service} on VM {VmId} RECOVERED from {PreviousStatus} (port: {Port})",
+                        service.Name, vm.VmId, previousStatus, service.Port);
+                }
+                else
+                {
+                    _logger.LogInformation("Service {Service} on VM {VmId} is READY (port: {Port})",
+                        service.Name, vm.VmId, service.Port);
+                }
                 service.Status = ServiceReadiness.Ready;
                 service.ReadyAt = DateTime.UtcNow;
                 service.LastCheckAt = DateTime.UtcNow;
-                _logger.LogInformation("Service {Service} on VM {VmId} is READY (port: {Port})",
-                    service.Name, vm.VmId, service.Port);
 
                 // If System just became ready, allow other services to start checking
                 if (service.Name == "System") systemReady = true;
@@ -145,11 +168,15 @@ public class VmReadinessMonitor : BackgroundService
             {
                 service.Status = ServiceReadiness.Failed;
                 service.LastCheckAt = DateTime.UtcNow;
-                _logger.LogWarning("Service {Service} on VM {VmId} FAILED", service.Name, vm.VmId);
+                if (previousStatus != ServiceReadiness.Failed)
+                    _logger.LogWarning("Service {Service} on VM {VmId} FAILED", service.Name, vm.VmId);
             }
             else
             {
-                service.Status = ServiceReadiness.Checking;
+                // Don't downgrade TimedOut/Failed to Checking — keep the terminal status
+                // so the recheck interval continues to apply
+                if (previousStatus is not (ServiceReadiness.TimedOut or ServiceReadiness.Failed))
+                    service.Status = ServiceReadiness.Checking;
                 service.LastCheckAt = DateTime.UtcNow;
             }
 
