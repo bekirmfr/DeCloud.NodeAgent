@@ -31,6 +31,8 @@ public class GenericProxyController : ControllerBase
     private static readonly HashSet<int> InfrastructurePorts = new()
     {
         22,    // SSH
+        80,    // HTTP
+        443,   // HTTPS
         9999,  // Attestation agent
     };
 
