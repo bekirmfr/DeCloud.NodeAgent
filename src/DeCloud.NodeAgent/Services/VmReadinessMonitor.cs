@@ -226,7 +226,7 @@ public class VmReadinessMonitor : BackgroundService
 
             if (execResult.ExitCode != 0) return (false, false);
 
-            var execJson = JsonDocument.Parse(execResult.Output.Trim());
+            var execJson = JsonDocument.Parse(execResult.StandardOutput.Trim());
             var pid = execJson.RootElement.GetProperty("return").GetProperty("pid").GetInt64();
 
             // Step 2: Wait, then get exit status
@@ -239,7 +239,7 @@ public class VmReadinessMonitor : BackgroundService
 
             if (statusResult.ExitCode != 0) return (false, false);
 
-            var statusJson = JsonDocument.Parse(statusResult.Output.Trim());
+            var statusJson = JsonDocument.Parse(statusResult.StandardOutput.Trim());
             var ret = statusJson.RootElement.GetProperty("return");
 
             if (!ret.GetProperty("exited").GetBoolean())
