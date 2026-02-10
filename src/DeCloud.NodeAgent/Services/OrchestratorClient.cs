@@ -8,8 +8,10 @@ using Microsoft.Extensions.Options;
 using Orchestrator.Models;
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Reflection;
 using System.Text.Json;
+using System.Xml.Linq;
 
 namespace DeCloud.NodeAgent.Services;
 
@@ -570,7 +572,15 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 memoryBytes = v.MemoryBytes,
                 diskBytes = v.DiskBytes,
                 imageId = v.Name,  // Use name as imageId for now
-                startedAt = v.StartedAt.ToString("O")
+                startedAt = v.StartedAt.ToString("O"),
+                services = v.Services?.Select(s => new
+                {
+                    name = s.Name,
+                    port = s.Port,
+                    protocol = s.Protocol,
+                    status = s.Status,
+                    readyAt = s.ReadyAt?.ToString("O")
+                })
             }),
             cgnatInfo = heartbeat.CgnatInfo != null ? new
             {

@@ -413,7 +413,6 @@ public class CommandProcessorService : BackgroundService
             }
         }
 
-        // Default: at least a System service
         if (services.Count == 0)
         {
             services.Add(new VmServiceStatus

@@ -1440,6 +1440,11 @@ public class LibvirtVmManager : IVmManager
             }
 
             // =====================================================
+            // STEP 6.5: Ensure qemu-guest-agent is installed (required for readiness monitoring)
+            // =====================================================
+            cloudInitYaml = EnsureQemuGuestAgent(cloudInitYaml);
+
+            // =====================================================
             // STEP 7: Write user-data and meta-data files
             // =====================================================
             var userDataPath = Path.Combine(vmDir, "user-data");
@@ -1506,6 +1511,57 @@ public class LibvirtVmManager : IVmManager
             throw;
         }
     }
+
+    /// <summary>
+    /// Ensure qemu-guest-agent is installed and explicitly started in cloud-init.
+    /// Required for VmReadinessMonitor to probe service readiness via virtio channel.
+    /// Both packages: and runcmd: injection are needed because the systemd unit has
+    /// ConditionPathExists=/dev/virtio-ports/org.qemu.guest_agent.0 — if the virtio
+    /// device isn't ready at package install time, the service silently skips starting
+    /// and systemd won't retry.
+    /// </summary>
+    private static string EnsureQemuGuestAgent(string cloudInitYaml)
+    {
+        const string pkg = "qemu-guest-agent";
+        if (cloudInitYaml.Contains(pkg))
+            return cloudInitYaml;
+
+        var result = cloudInitYaml;
+
+        // 1. Inject into packages: section for early installation
+        var packagesIndex = result.IndexOf("\npackages:", StringComparison.Ordinal);
+        if (packagesIndex >= 0)
+        {
+            var lineEnd = result.IndexOf('\n', packagesIndex + 1);
+            if (lineEnd >= 0)
+                result = result.Insert(lineEnd + 1, $"  - {pkg}\n");
+        }
+        else
+        {
+            // No packages: section — inject one before runcmd:
+            var runcmdPos = result.IndexOf("\nruncmd:", StringComparison.Ordinal);
+            if (runcmdPos >= 0)
+                result = result.Insert(runcmdPos, $"\npackages:\n  - {pkg}\n");
+            else
+                result += $"\n\npackages:\n  - {pkg}\n";
+        }
+
+        // 2. Inject runcmd step to ensure the service is running after boot.
+        //    packages: installs early, but the systemd ConditionPathExists may fail
+        //    if the virtio device isn't ready yet. runcmd runs later when devices
+        //    are guaranteed available.
+        var runcmdIndex = result.IndexOf("\nruncmd:", StringComparison.Ordinal);
+        if (runcmdIndex >= 0)
+        {
+            var runcmdLineEnd = result.IndexOf('\n', runcmdIndex + 1);
+            if (runcmdLineEnd >= 0)
+                result = result.Insert(runcmdLineEnd + 1,
+                    "  - systemctl enable --now qemu-guest-agent || true\n");
+        }
+
+        return result;
+    }
+
 
     /// <summary>
     /// Merge custom cloud-init UserData with base configuration (hostname, password, SSH)
