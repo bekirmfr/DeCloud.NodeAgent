@@ -158,6 +158,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
                 template = await InjectGeneralExternalTemplatesAsync(template, ct);
                 break;
             case VmType.Dht:
+                template = await InjectDhtExternalTemplatesAsync(template, ct);
                 break;
             case VmType.Inference:
                 // Future VM types can have their own external templates if needed
@@ -298,6 +299,39 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             throw new InvalidOperationException(
                 "Failed to load relay VM templates. Ensure all template files exist in " +
                 $"{Path.Combine(_templateBasePath, "relay-vm")}/", ex);
+        }
+    }
+
+    /// <summary>
+    /// Load and inject external DHT VM template files (health check, ready callback).
+    /// Mirrors InjectRelayExternalTemplatesAsync pattern.
+    /// </summary>
+    private async Task<string> InjectDhtExternalTemplatesAsync(
+        string template,
+        CancellationToken ct)
+    {
+        _logger.LogInformation("Loading external DHT VM templates...");
+
+        try
+        {
+            var healthCheck = await LoadExternalTemplateAsync("dht-health-check.sh", "dht-vm", ct);
+            var notifyReady = await LoadExternalTemplateAsync("dht-notify-ready.sh", "dht-vm", ct);
+
+            var result = ReplaceWithIndentation(template, "__DHT_HEALTH_CHECK__", healthCheck);
+            result = ReplaceWithIndentation(result, "__DHT_NOTIFY_READY__", notifyReady);
+
+            _logger.LogInformation(
+                "Injected DHT external templates: health-check ({HealthSize} chars), notify-ready ({ReadySize} chars)",
+                healthCheck.Length, notifyReady.Length);
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load external DHT VM templates");
+            throw new InvalidOperationException(
+                "Failed to load DHT VM templates. Ensure all template files exist in " +
+                $"{Path.Combine(_templateBasePath, "dht-vm")}/", ex);
         }
     }
 
@@ -570,23 +604,68 @@ public class CloudInitTemplateService : ICloudInitTemplateService
         }
     }
 
-    private Task PopulateDhtVariablesAsync(
+    private async Task PopulateDhtVariablesAsync(
         CloudInitTemplateVariables variables,
         VmSpec spec,
         CancellationToken ct)
     {
-        // DHT-specific configuration
-        variables.Custom["DHT_PORT"] = "6881";
-        variables.Custom["DHT_STORAGE_PATH"] = "/var/lib/decloud-dht/storage";
-        variables.Custom["DHT_MAX_STORAGE_GB"] = "100";
+        // DHT libp2p configuration — ports and addresses come from orchestrator labels
+        variables.Custom["DHT_LISTEN_PORT"] = spec.Labels?.GetValueOrDefault("dht-listen-port", "4001") ?? "4001";
+        variables.Custom["DHT_API_PORT"] = spec.Labels?.GetValueOrDefault("dht-api-port", "5080") ?? "5080";
+        variables.Custom["DHT_ADVERTISE_IP"] = spec.Labels?.GetValueOrDefault("dht-advertise-ip") ?? "";
+        variables.Custom["DHT_BOOTSTRAP_PEERS"] = spec.Labels?.GetValueOrDefault("dht-bootstrap-peers") ?? "";
+        variables.Custom["DHT_REGION"] = spec.Labels?.GetValueOrDefault("node-region") ?? "default";
+
+        // Load architecture-specific DHT binary (pre-built during CI via build.sh)
+        var architecture = GetTargetArchitecture(spec);
+        var dhtBinaryB64 = await LoadDhtBinaryAsync(architecture, ct);
+        variables.Custom["DHT_NODE_BINARY_BASE64"] = dhtBinaryB64;
 
         _logger.LogInformation(
-            "Configured DHT variables for VM {VmId}: port={Port}, storage={Path}",
+            "Configured DHT variables for VM {VmId}: listenPort={ListenPort}, apiPort={ApiPort}, " +
+            "advertiseIp={AdvIP}, arch={Arch}, binarySize={BinaryKB}KB, bootstrapPeers={Peers}",
             spec.Id,
-            variables.Custom["DHT_PORT"],
-            variables.Custom["DHT_STORAGE_PATH"]);
+            variables.Custom["DHT_LISTEN_PORT"],
+            variables.Custom["DHT_API_PORT"],
+            variables.Custom["DHT_ADVERTISE_IP"],
+            architecture,
+            dhtBinaryB64.Length / 1024,
+            string.IsNullOrEmpty(variables.Custom["DHT_BOOTSTRAP_PEERS"]) ? "(none — first node)" : "present");
+    }
 
-        return Task.CompletedTask;
+    /// <summary>
+    /// Load the pre-built DHT binary (base64-encoded) from disk.
+    /// The .b64 files are built from Go source during CI/publish via dht-node-src/build.sh
+    /// and placed at: {_templateBasePath}/dht-vm/dht-node-{arch}.b64
+    /// </summary>
+    private async Task<string> LoadDhtBinaryAsync(string architecture, CancellationToken ct)
+    {
+        var fileName = $"dht-node-{architecture}.b64";
+        var filePath = Path.Combine(_templateBasePath, "dht-vm", fileName);
+
+        if (!File.Exists(filePath))
+        {
+            _logger.LogError(
+                "DHT binary not found at {Path}. " +
+                "Run 'bash CloudInit/Templates/dht-vm/dht-node-src/build.sh' to build it, " +
+                "or ensure it was built during CI/publish.",
+                filePath);
+            throw new FileNotFoundException(
+                $"DHT binary not found. Expected at: {filePath}. " +
+                "Build it with: bash CloudInit/Templates/dht-vm/dht-node-src/build.sh",
+                filePath);
+        }
+
+        var base64 = await File.ReadAllTextAsync(filePath, ct);
+
+        if (string.IsNullOrWhiteSpace(base64))
+            throw new InvalidOperationException($"DHT binary file is empty: {filePath}");
+
+        _logger.LogInformation(
+            "Loaded DHT binary: {Path} ({SizeKB}KB base64)",
+            filePath, base64.Length / 1024);
+
+        return base64.Trim();
     }
 
     private Task PopulateInferenceVariablesAsync(

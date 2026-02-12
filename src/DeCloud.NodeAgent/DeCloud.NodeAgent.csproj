@@ -18,7 +18,19 @@
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
 		</None>
+		<!-- Exclude Go source files and raw binaries from output (only .b64 files are needed) -->
+		<None Remove="CloudInit\Templates\dht-vm\dht-node-src\**" />
+		<Content Remove="CloudInit\Templates\dht-vm\dht-node-src\**" />
 	</ItemGroup>
+
+	<!-- Build DHT node binary from Go source during publish -->
+	<Target Name="BuildDhtNode" BeforeTargets="Publish" Condition="Exists('CloudInit/Templates/dht-vm/dht-node-src/main.go')">
+		<Message Importance="high" Text="Building DHT node binary from Go source..." />
+		<Exec Command="bash CloudInit/Templates/dht-vm/dht-node-src/build.sh"
+		      WorkingDirectory="$(MSBuildProjectDirectory)"
+		      ConsoleToMsBuild="true" />
+		<Message Importance="high" Text="DHT node binary build complete." />
+	</Target>
 
 	<ItemGroup>
 		<None Include="../../cli/**/*" Link="cli/%(RecursiveDir)%(Filename)%(Extension)" />
