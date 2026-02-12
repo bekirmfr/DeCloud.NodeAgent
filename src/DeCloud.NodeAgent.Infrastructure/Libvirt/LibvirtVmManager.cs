@@ -1390,6 +1390,22 @@ public class LibvirtVmManager : IVmManager
             }
 
             // =====================================================
+            // STEP 5.6: DHT VM metadata (from orchestrator labels)
+            // =====================================================
+            if (spec.VmType == VmType.Dht)
+            {
+                variables["__NODE_ID__"] = spec.Labels?.GetValueOrDefault("node-id")
+                                        ?? _nodeMetadata.NodeId;
+                variables["__TIMESTAMP__"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+                _logger.LogInformation(
+                    "VM {VmId}: Set DHT metadata - NodeId={NodeId}, AdvertiseIP={AdvIP}",
+                    spec.Id,
+                    variables["__NODE_ID__"],
+                    spec.Labels?.GetValueOrDefault("dht-advertise-ip") ?? "(from template)");
+            }
+
+            // =====================================================
             // STEP 6: Process template using CloudInitTemplateService
             // =====================================================
             string cloudInitYaml;

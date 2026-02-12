@@ -1,9 +1,11 @@
 #cloud-config
-
-# DeCloud DHT VM Configuration
-# For distributed hash table storage nodes
+# DeCloud DHT VM Cloud-Init Configuration
+# Runs a libp2p Kademlia DHT node for peer discovery,
+# key-value storage, and GossipSub event propagation.
+# Version: 3.0 (No Docker — direct binary via systemd)
 
 hostname: __HOSTNAME__
+manage_etc_hosts: true
 
 # Regenerate machine-id to prevent conflicts
 bootcmd:
@@ -15,7 +17,7 @@ disable_root: true
 
 users:
   - name: dht
-    groups: [docker, sudo]
+    groups: [sudo]
     sudo: ['ALL=(ALL) NOPASSWD:ALL']
     shell: /bin/bash
     lock_passwd: true
@@ -25,115 +27,150 @@ __SSH_AUTHORIZED_KEYS__
 
 ssh_pwauth: false
 
-# DHT-specific packages
+# =====================================================
+# SYSTEM PACKAGES
+# =====================================================
 packages:
   - qemu-guest-agent
-  - docker.io
-  - docker-compose
-  - python3
-  - python3-pip
-  - git
+  - curl
+  - jq
+  - net-tools
+  - openssl
 
-# DHT configuration files
+# =====================================================
+# SYSTEM CONFIGURATION
+# =====================================================
 write_files:
-  # DHT node configuration
-  - path: /etc/decloud-dht/config.json
+  # DHT binary (base64-encoded Go binary, decoded at boot)
+  - path: /opt/decloud-dht/dht-node.b64
+    permissions: '0644'
+    encoding: b64
+    content: __DHT_NODE_BINARY_BASE64__
+
+  # DHT environment file (read by systemd EnvironmentFile)
+  - path: /etc/decloud-dht/dht.env
+    permissions: '0644'
+    content: |
+      DHT_LISTEN_PORT=__DHT_LISTEN_PORT__
+      DHT_API_PORT=__DHT_API_PORT__
+      DHT_ADVERTISE_IP=__DHT_ADVERTISE_IP__
+      DHT_BOOTSTRAP_PEERS=__DHT_BOOTSTRAP_PEERS__
+      DHT_DATA_DIR=/var/lib/decloud-dht
+      DECLOUD_NODE_ID=__NODE_ID__
+      DECLOUD_REGION=__DHT_REGION__
+
+  # DHT metadata
+  - path: /etc/decloud/dht-metadata.json
     permissions: '0644'
     content: |
       {
-        "node_id": "__VM_ID__",
-        "node_name": "__VM_NAME__",
-        "dht_port": __DHT_PORT__,
-        "storage_path": "__DHT_STORAGE_PATH__",
-        "max_storage_gb": __DHT_MAX_STORAGE_GB__,
-        "bootstrap_nodes": [
-          "dht-bootstrap.decloud.io:6881"
-        ],
-        "enable_encryption": true,
-        "enable_replication": true,
-        "replication_factor": 3
+        "node_id": "__NODE_ID__",
+        "vm_id": "__VM_ID__",
+        "vm_name": "__VM_NAME__",
+        "region": "__DHT_REGION__",
+        "listen_port": __DHT_LISTEN_PORT__,
+        "api_port": __DHT_API_PORT__,
+        "advertise_ip": "__DHT_ADVERTISE_IP__",
+        "created_at": "__TIMESTAMP__",
+        "version": "3.0"
       }
 
-  # DHT systemd service
+  # DHT systemd service (runs binary directly, no Docker)
   - path: /etc/systemd/system/decloud-dht.service
     permissions: '0644'
     content: |
       [Unit]
-      Description=DeCloud DHT Node
-      After=network.target docker.service
-      Requires=docker.service
-      
+      Description=DeCloud DHT Node (libp2p Kademlia)
+      After=network-online.target
+      Wants=network-online.target
+
       [Service]
       Type=simple
       User=dht
-      WorkingDirectory=/opt/decloud-dht
-      ExecStart=/usr/bin/docker-compose up
-      ExecStop=/usr/bin/docker-compose down
+      EnvironmentFile=/etc/decloud-dht/dht.env
+      ExecStart=/usr/local/bin/dht-node
       Restart=always
-      RestartSec=10
-      
+      RestartSec=5
+
+      # Hardening
+      ProtectSystem=strict
+      ReadWritePaths=/var/lib/decloud-dht
+      ProtectHome=true
+      NoNewPrivileges=true
+
       [Install]
       WantedBy=multi-user.target
 
-  # Docker Compose for DHT node
-  - path: /opt/decloud-dht/docker-compose.yml
+  # DHT ready callback service (mirrors relay's decloud-relay-nat-callback pattern)
+  - path: /etc/systemd/system/decloud-dht-callback.service
     permissions: '0644'
-    owner: dht:dht
     content: |
-      version: '3.8'
-      
-      services:
-        dht-node:
-          image: decloud/dht-node:latest
-          container_name: dht-node-__VM_ID__
-          restart: unless-stopped
-          ports:
-            - "__DHT_PORT__:__DHT_PORT__/tcp"
-            - "__DHT_PORT__:__DHT_PORT__/udp"
-          volumes:
-            - dht-storage:__DHT_STORAGE_PATH__
-            - /etc/decloud-dht/config.json:/config/config.json:ro
-          environment:
-            - NODE_ID=__VM_ID__
-            - LOG_LEVEL=info
-          networks:
-            - dht-network
-      
-      volumes:
-        dht-storage:
-          driver: local
-      
-      networks:
-        dht-network:
-          driver: bridge
+      [Unit]
+      Description=DeCloud DHT Ready Callback
+      After=decloud-dht.service network-online.target
+      Wants=decloud-dht.service network-online.target
 
-# Runtime commands
+      [Service]
+      Type=oneshot
+      ExecStartPre=/bin/bash -c 'if [ -f /var/lib/decloud-dht/callback-complete ]; then exit 0; fi'
+      ExecStart=/usr/local/bin/dht-notify-ready.sh
+      RemainAfterExit=yes
+      StandardOutput=journal
+      StandardError=journal
+      Restart=on-failure
+      RestartSec=10s
+      StartLimitBurst=5
+      TimeoutStartSec=180s
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # Health check script (loaded from external template)
+  - path: /usr/local/bin/dht-health-check.sh
+    permissions: '0755'
+    content: |
+      __DHT_HEALTH_CHECK__
+
+  # Ready callback script (loaded from external template)
+  - path: /usr/local/bin/dht-notify-ready.sh
+    permissions: '0755'
+    content: |
+      __DHT_NOTIFY_READY__
+
+# =====================================================
+# RUNTIME COMMANDS
+# =====================================================
 runcmd:
-  # Start QEMU guest agent
+  # Enable and start QEMU guest agent
   - systemctl enable qemu-guest-agent
   - systemctl start qemu-guest-agent
-  
-  # Create DHT directories
+
+  # Create directories
   - mkdir -p /etc/decloud-dht
-  - mkdir -p __DHT_STORAGE_PATH__
+  - mkdir -p /etc/decloud
+  - mkdir -p /var/lib/decloud-dht
+  - mkdir -p /opt/decloud-dht
   - chown -R dht:dht /etc/decloud-dht
-  - chown -R dht:dht __DHT_STORAGE_PATH__
+  - chown -R dht:dht /var/lib/decloud-dht
   - chown -R dht:dht /opt/decloud-dht
-  
-  # Enable Docker
-  - systemctl enable docker
-  - systemctl start docker
-  - usermod -aG docker dht
-  
-  # Pull DHT node image
-  - docker pull decloud/dht-node:latest || true
-  
+
+  # Decode and install the DHT binary
+  - base64 -d /opt/decloud-dht/dht-node.b64 > /usr/local/bin/dht-node
+  - chmod 755 /usr/local/bin/dht-node
+  - rm -f /opt/decloud-dht/dht-node.b64
+
   # Start DHT service
   - systemctl daemon-reload
   - systemctl enable decloud-dht
   - systemctl start decloud-dht
-  
+
+  # Start ready callback service
+  - systemctl enable decloud-dht-callback
+  - systemctl start decloud-dht-callback
+
   # Log completion
-  - echo "DeCloud DHT node __VM_ID__ initialized" > /var/log/dht-bootstrap.log
+  - 'echo "DeCloud DHT node __VM_ID__ bootstrap complete at $(date)" >> /var/log/dht-bootstrap.log'
+  - 'echo "Region: __DHT_REGION__" >> /var/log/dht-bootstrap.log'
+  - 'echo "Advertise IP: __DHT_ADVERTISE_IP__" >> /var/log/dht-bootstrap.log'
 
 final_message: "DeCloud DHT Node __VM_NAME__ is ready!"
