@@ -4,6 +4,7 @@
 # 
 # Installs and configures the Node Agent with minimal dependencies:
 # - .NET 8 Runtime
+# - Go 1.23+ (for building DHT node binary)
 # - KVM/QEMU/libvirt for virtualization
 # - WireGuard for overlay networking
 # - SSH CA for certificate authentication
@@ -565,7 +566,75 @@ install_dotnet() {
     fi
     
     log_success ".NET 8 SDK installed: $DOTNET_VERSION"
-    
+
+    return 0
+}
+
+install_go() {
+    log_step "Installing Go (for DHT node binary build)..."
+
+    local GO_REQUIRED_MAJOR=1
+    local GO_REQUIRED_MINOR=23
+
+    # Check if already installed with sufficient version
+    if command -v go &> /dev/null; then
+        local GO_VERSION=$(go version 2>/dev/null | grep -oP 'go\K[0-9]+\.[0-9]+')
+        local GO_MAJOR=$(echo "$GO_VERSION" | cut -d. -f1)
+        local GO_MINOR=$(echo "$GO_VERSION" | cut -d. -f2)
+
+        if [ "$GO_MAJOR" -ge "$GO_REQUIRED_MAJOR" ] && [ "$GO_MINOR" -ge "$GO_REQUIRED_MINOR" ]; then
+            log_success "Go already installed: $(go version 2>/dev/null)"
+            return 0
+        else
+            log_warn "Go $GO_VERSION found, but need ${GO_REQUIRED_MAJOR}.${GO_REQUIRED_MINOR}+"
+            log_info "Upgrading Go..."
+        fi
+    fi
+
+    # Determine architecture
+    local ARCH=$(uname -m)
+    local GO_ARCH="amd64"
+    if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+        GO_ARCH="arm64"
+    fi
+
+    # Download and install latest Go 1.23.x
+    local GO_VERSION="1.23.7"
+    local GO_TAR="go${GO_VERSION}.linux-${GO_ARCH}.tar.gz"
+    local GO_URL="https://go.dev/dl/${GO_TAR}"
+
+    log_info "Downloading Go ${GO_VERSION} for ${GO_ARCH}..."
+
+    if ! wget -q "$GO_URL" -O "/tmp/${GO_TAR}" 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
+        log_error "Failed to download Go from ${GO_URL}"
+        return 1
+    fi
+
+    # Remove old Go installation if present
+    rm -rf /usr/local/go
+
+    # Extract to /usr/local
+    if ! tar -C /usr/local -xzf "/tmp/${GO_TAR}" 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
+        log_error "Failed to extract Go archive"
+        rm -f "/tmp/${GO_TAR}"
+        return 1
+    fi
+
+    rm -f "/tmp/${GO_TAR}"
+
+    # Ensure Go is in PATH
+    if ! grep -q '/usr/local/go/bin' /etc/profile.d/golang.sh 2>/dev/null; then
+        echo 'export PATH=$PATH:/usr/local/go/bin' > /etc/profile.d/golang.sh
+    fi
+    export PATH=$PATH:/usr/local/go/bin
+
+    # Verify
+    if ! command -v go &> /dev/null; then
+        log_error "Go command not found after installation"
+        return 1
+    fi
+
+    log_success "Go installed: $(go version 2>/dev/null)"
     return 0
 }
 
@@ -1774,6 +1843,7 @@ main() {
     # Install dependencies
     install_base_dependencies
     install_dotnet
+    install_go
     install_libvirt
 
     # ARM64 support
