@@ -1396,6 +1396,7 @@ public class LibvirtVmManager : IVmManager
             {
                 variables["__NODE_ID__"] = spec.Labels?.GetValueOrDefault("node-id")
                                         ?? _nodeMetadata.NodeId;
+                variables["__HOST_MACHINE_ID__"] = _nodeMetadata.MachineId;
                 variables["__TIMESTAMP__"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
                 _logger.LogInformation(
