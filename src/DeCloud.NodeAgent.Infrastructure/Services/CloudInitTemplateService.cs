@@ -635,8 +635,8 @@ public class CloudInitTemplateService : ICloudInitTemplateService
 
     /// <summary>
     /// Load the pre-built DHT binary (base64-encoded) from disk.
-    /// The .b64 files are built from Go source during CI/publish via dht-node-src/build.sh
-    /// and placed at: {_templateBasePath}/dht-vm/dht-node-{arch}.b64
+    /// If the .b64 file doesn't exist, attempts to build it from the Go source
+    /// included in the deployment (dht-node-src/build.sh).
     /// </summary>
     private async Task<string> LoadDhtBinaryAsync(string architecture, CancellationToken ct)
     {
@@ -645,14 +645,24 @@ public class CloudInitTemplateService : ICloudInitTemplateService
 
         if (!File.Exists(filePath))
         {
+            _logger.LogWarning(
+                "DHT binary not found at {Path} — attempting to build from source...",
+                filePath);
+
+            await BuildDhtBinaryFromSourceAsync(architecture, ct);
+        }
+
+        if (!File.Exists(filePath))
+        {
             _logger.LogError(
-                "DHT binary not found at {Path}. " +
-                "Run 'bash CloudInit/Templates/dht-vm/dht-node-src/build.sh' to build it, " +
-                "or ensure it was built during CI/publish.",
+                "DHT binary not found at {Path} after build attempt. " +
+                "Ensure Go 1.23+ is installed on this node, or pre-build with: " +
+                "bash CloudInit/Templates/dht-vm/dht-node-src/build.sh",
                 filePath);
             throw new FileNotFoundException(
-                $"DHT binary not found. Expected at: {filePath}. " +
-                "Build it with: bash CloudInit/Templates/dht-vm/dht-node-src/build.sh",
+                $"DHT binary not found at: {filePath}. " +
+                "Install Go 1.23+ and retry, or pre-build with: " +
+                "bash CloudInit/Templates/dht-vm/dht-node-src/build.sh",
                 filePath);
         }
 
@@ -666,6 +676,60 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             filePath, base64.Length / 1024);
 
         return base64.Trim();
+    }
+
+    /// <summary>
+    /// Build the DHT binary from Go source on the current node.
+    /// The Go source and build.sh are included in the deployment output.
+    /// Requires Go 1.23+ installed on the host.
+    /// </summary>
+    private async Task BuildDhtBinaryFromSourceAsync(string architecture, CancellationToken ct)
+    {
+        var buildScript = Path.Combine(_templateBasePath, "dht-vm", "dht-node-src", "build.sh");
+
+        if (!File.Exists(buildScript))
+        {
+            _logger.LogError(
+                "DHT build script not found at {Path}. " +
+                "The Go source files may not have been included in the deployment.",
+                buildScript);
+            return;
+        }
+
+        _logger.LogInformation(
+            "Building DHT binary for {Architecture} from Go source at {ScriptPath}...",
+            architecture, buildScript);
+
+        try
+        {
+            var result = await _executor.ExecuteAsync(
+                "bash",
+                $"{buildScript} {architecture}",
+                ct);
+
+            if (result.Success)
+            {
+                _logger.LogInformation(
+                    "DHT binary built successfully for {Architecture}",
+                    architecture);
+            }
+            else
+            {
+                _logger.LogError(
+                    "Failed to build DHT binary for {Architecture}. Exit code: {ExitCode}. " +
+                    "Stderr: {Error}. Ensure Go 1.23+ is installed (apt install golang-go or via https://go.dev/dl/)",
+                    architecture,
+                    result.ExitCode,
+                    result.StandardError);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Exception while building DHT binary for {Architecture}. " +
+                "Ensure Go 1.23+ is installed on this node.",
+                architecture);
+        }
     }
 
     private Task PopulateInferenceVariablesAsync(
