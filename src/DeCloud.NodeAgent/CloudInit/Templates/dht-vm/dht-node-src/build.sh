@@ -3,6 +3,8 @@
 # Build script for DeCloud DHT Node binary
 # Cross-compiles for amd64 and arm64, then base64-encodes the output.
 #
+# Self-bootstrapping: downloads Go automatically if not installed.
+#
 # Usage:
 #   ./build.sh              # Build for both architectures
 #   ./build.sh amd64        # Build for amd64 only
@@ -12,12 +14,11 @@
 #   ../dht-node-amd64.b64   (placed next to templates, not in source dir)
 #   ../dht-node-arm64.b64
 #
-# Requirements:
-#   - Go 1.23+ installed
-#   - Network access for initial dependency download (go mod tidy)
-#
 
 set -euo pipefail
+
+GO_VERSION="1.23.6"
+GO_MIN_VERSION="1.23"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUTPUT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -29,6 +30,86 @@ echo "=== DeCloud DHT Node Build ==="
 echo "Source: $SCRIPT_DIR"
 echo "Output: $OUTPUT_DIR"
 echo ""
+
+# =====================================================
+# Ensure Go is available (auto-install if missing)
+# =====================================================
+ensure_go() {
+    # Check if go is already in PATH and meets minimum version
+    if command -v go &>/dev/null; then
+        local current_version
+        current_version=$(go version | grep -oP 'go\K[0-9]+\.[0-9]+' | head -1)
+        if [ -n "$current_version" ]; then
+            local major minor
+            major=$(echo "$current_version" | cut -d. -f1)
+            minor=$(echo "$current_version" | cut -d. -f2)
+            local req_major req_minor
+            req_major=$(echo "$GO_MIN_VERSION" | cut -d. -f1)
+            req_minor=$(echo "$GO_MIN_VERSION" | cut -d. -f2)
+
+            if [ "$major" -gt "$req_major" ] || { [ "$major" -eq "$req_major" ] && [ "$minor" -ge "$req_minor" ]; }; then
+                echo "Using system Go: $(go version)"
+                return 0
+            fi
+            echo "System Go $current_version is too old (need $GO_MIN_VERSION+)"
+        fi
+    fi
+
+    # Check for previously downloaded Go in our local cache
+    local local_go="${SCRIPT_DIR}/.go-${GO_VERSION}/go/bin/go"
+    if [ -x "$local_go" ]; then
+        echo "Using cached Go at $local_go"
+        export GOROOT="${SCRIPT_DIR}/.go-${GO_VERSION}/go"
+        export PATH="${GOROOT}/bin:${PATH}"
+        return 0
+    fi
+
+    # Download Go
+    echo "Go not found — downloading Go ${GO_VERSION}..."
+
+    # Detect host architecture for the Go toolchain itself
+    local host_arch
+    host_arch=$(uname -m)
+    case "$host_arch" in
+        x86_64|amd64)  host_arch="amd64" ;;
+        aarch64|arm64) host_arch="arm64" ;;
+        *)
+            echo "ERROR: Unsupported host architecture: $host_arch"
+            exit 1
+            ;;
+    esac
+
+    local go_tarball="go${GO_VERSION}.linux-${host_arch}.tar.gz"
+    local go_url="https://go.dev/dl/${go_tarball}"
+    local download_dir="${SCRIPT_DIR}/.go-${GO_VERSION}"
+
+    mkdir -p "$download_dir"
+
+    echo "  Downloading: $go_url"
+    if command -v curl &>/dev/null; then
+        curl -fsSL "$go_url" -o "${download_dir}/${go_tarball}"
+    elif command -v wget &>/dev/null; then
+        wget -q "$go_url" -O "${download_dir}/${go_tarball}"
+    else
+        echo "ERROR: Neither curl nor wget found — cannot download Go"
+        exit 1
+    fi
+
+    echo "  Extracting..."
+    tar -xzf "${download_dir}/${go_tarball}" -C "$download_dir"
+    rm -f "${download_dir}/${go_tarball}"
+
+    export GOROOT="${download_dir}/go"
+    export PATH="${GOROOT}/bin:${PATH}"
+
+    echo "  Installed Go $(go version) at ${GOROOT}"
+}
+
+ensure_go
+
+# =====================================================
+# Build
+# =====================================================
 
 # Ensure dependencies are resolved
 if [ ! -f go.sum ]; then
@@ -63,5 +144,4 @@ for ARCH in $ARCHITECTURES; do
 done
 
 echo "=== Build complete ==="
-echo "Place the .b64 files alongside the cloud-init templates:"
 ls -lh "${OUTPUT_DIR}"/*.b64 2>/dev/null || echo "(no .b64 files found — build may have failed)"
