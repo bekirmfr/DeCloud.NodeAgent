@@ -18,18 +18,23 @@
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
 		</None>
-		<!-- Exclude Go source files and raw binaries from output (only .b64 files are needed) -->
-		<None Remove="CloudInit\Templates\dht-vm\dht-node-src\**" />
+		<!-- Exclude Go source from default Content item group (Web SDK auto-includes) -->
 		<Content Remove="CloudInit\Templates\dht-vm\dht-node-src\**" />
+		<!-- Include Go source in build/publish output so the binary can be built at runtime if missing -->
+		<None Include="CloudInit\Templates\dht-vm\dht-node-src\**">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+		</None>
 	</ItemGroup>
 
-	<!-- Build DHT node binary from Go source during publish -->
+	<!-- Build DHT node binary from Go source during publish (non-fatal: runtime fallback will build if needed) -->
 	<Target Name="BuildDhtNode" BeforeTargets="Publish" Condition="Exists('CloudInit/Templates/dht-vm/dht-node-src/main.go')">
 		<Message Importance="high" Text="Building DHT node binary from Go source..." />
 		<Exec Command="bash CloudInit/Templates/dht-vm/dht-node-src/build.sh"
 		      WorkingDirectory="$(MSBuildProjectDirectory)"
-		      ConsoleToMsBuild="true" />
-		<Message Importance="high" Text="DHT node binary build complete." />
+		      ConsoleToMsBuild="true"
+		      IgnoreExitCode="true" />
+		<Message Importance="high" Text="DHT node binary build attempted. If Go is not installed, the binary will be built at runtime on first DHT VM creation." />
 	</Target>
 
 	<ItemGroup>
