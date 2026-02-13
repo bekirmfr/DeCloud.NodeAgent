@@ -108,6 +108,18 @@ ensure_go() {
 ensure_go
 
 # =====================================================
+# Ensure Go environment is usable (critical for service execution)
+# When run by CommandExecutor/systemd, HOME/GOPATH/GOMODCACHE may not be set.
+# =====================================================
+export HOME="${HOME:-/tmp}"
+export GOPATH="${GOPATH:-${SCRIPT_DIR}/.gopath}"
+export GOMODCACHE="${GOMODCACHE:-${GOPATH}/pkg/mod}"
+export GOCACHE="${GOCACHE:-${SCRIPT_DIR}/.gocache}"
+mkdir -p "$GOPATH" "$GOMODCACHE" "$GOCACHE"
+
+echo "Go env: HOME=$HOME GOPATH=$GOPATH GOMODCACHE=$GOMODCACHE GOCACHE=$GOCACHE"
+
+# =====================================================
 # Build
 # =====================================================
 
