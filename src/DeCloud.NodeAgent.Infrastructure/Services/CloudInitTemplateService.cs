@@ -702,9 +702,13 @@ public class CloudInitTemplateService : ICloudInitTemplateService
 
         try
         {
+            // Go build with dependency download can take several minutes on first run
+            var buildTimeout = TimeSpan.FromMinutes(5);
+
             var result = await _executor.ExecuteAsync(
                 "bash",
                 $"{buildScript} {architecture}",
+                buildTimeout,
                 ct);
 
             if (result.Success)
