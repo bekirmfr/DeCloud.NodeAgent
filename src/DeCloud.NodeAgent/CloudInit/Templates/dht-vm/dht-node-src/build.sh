@@ -131,9 +131,9 @@ fi
 
 for ARCH in $ARCHITECTURES; do
     BINARY_NAME="dht-node-${ARCH}"
-    B64_NAME="${BINARY_NAME}.b64"
+    GZB64_NAME="${BINARY_NAME}.gz.b64"
     BINARY_PATH="${OUTPUT_DIR}/${BINARY_NAME}"
-    B64_PATH="${OUTPUT_DIR}/${B64_NAME}"
+    GZB64_PATH="${OUTPUT_DIR}/${GZB64_NAME}"
 
     echo "Building for linux/${ARCH}..."
 
@@ -143,12 +143,12 @@ for ARCH in $ARCHITECTURES; do
     BINARY_SIZE=$(stat -c%s "${BINARY_PATH}" 2>/dev/null || stat -f%z "${BINARY_PATH}" 2>/dev/null)
     echo "  Binary: ${BINARY_PATH} ($(( BINARY_SIZE / 1024 / 1024 ))MB)"
 
-    # Base64 encode
-    base64 -w0 "${BINARY_PATH}" > "${B64_PATH}"
-    B64_SIZE=$(stat -c%s "${B64_PATH}" 2>/dev/null || stat -f%z "${B64_PATH}" 2>/dev/null)
-    echo "  Base64: ${B64_PATH} ($(( B64_SIZE / 1024 / 1024 ))MB)"
+    # Gzip + base64 encode (cloud-init uses encoding: gz+b64 to decode)
+    gzip -9 -c "${BINARY_PATH}" | base64 -w0 > "${GZB64_PATH}"
+    GZB64_SIZE=$(stat -c%s "${GZB64_PATH}" 2>/dev/null || stat -f%z "${GZB64_PATH}" 2>/dev/null)
+    echo "  Gzip+Base64: ${GZB64_PATH} ($(( GZB64_SIZE / 1024 / 1024 ))MB, $(( GZB64_SIZE * 100 / BINARY_SIZE ))% of original)"
 
-    # Clean up raw binary (only the .b64 is needed at runtime)
+    # Clean up raw binary (only the .gz.b64 is needed at runtime)
     rm -f "${BINARY_PATH}"
 
     echo "  Done."
@@ -156,4 +156,4 @@ for ARCH in $ARCHITECTURES; do
 done
 
 echo "=== Build complete ==="
-ls -lh "${OUTPUT_DIR}"/*.b64 2>/dev/null || echo "(no .b64 files found — build may have failed)"
+ls -lh "${OUTPUT_DIR}"/*.gz.b64 2>/dev/null || echo "(no .gz.b64 files found — build may have failed)"
