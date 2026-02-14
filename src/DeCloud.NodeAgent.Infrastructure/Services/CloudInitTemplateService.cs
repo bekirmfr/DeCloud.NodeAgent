@@ -91,6 +91,7 @@ public class CloudInitTemplateVariables
 public class CloudInitTemplateService : ICloudInitTemplateService
 {
     private readonly ICommandExecutor _executor;
+    private readonly IVmManager _vmManager;
     private readonly ILogger<CloudInitTemplateService> _logger;
     private readonly string _templateBasePath;
 
@@ -101,9 +102,11 @@ public class CloudInitTemplateService : ICloudInitTemplateService
 
     public CloudInitTemplateService(
         ICommandExecutor executor,
+        IVmManager vmManager,
         ILogger<CloudInitTemplateService> logger)
     {
         _executor = executor;
+        _vmManager = vmManager;
         _logger = logger;
 
         // Templates are embedded in the NodeAgent assembly or loaded from disk
@@ -320,6 +323,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             var dashboardHtml = await LoadExternalTemplateAsync("dashboard.html", "dht-vm", ct);
             var dashboardCss = await LoadExternalTemplateAsync("dashboard.css", "dht-vm", ct);
             var dashboardJs = await LoadExternalTemplateAsync("dashboard.js", "dht-vm", ct);
+            var wgMeshEnroll = await LoadExternalTemplateAsync("wg-mesh-enroll.sh", "shared", ct);
 
             var result = ReplaceWithIndentation(template, "__DHT_HEALTH_CHECK__", healthCheck);
             result = ReplaceWithIndentation(result, "__DHT_NOTIFY_READY__", notifyReady);
@@ -327,6 +331,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             result = ReplaceWithIndentation(result, "__DHT_DASHBOARD_HTML__", dashboardHtml);
             result = ReplaceWithIndentation(result, "__DHT_DASHBOARD_CSS__", dashboardCss);
             result = ReplaceWithIndentation(result, "__DHT_DASHBOARD_JS__", dashboardJs);
+            result = ReplaceWithIndentation(result, "__WG_MESH_ENROLL__", wgMeshEnroll);
 
             _logger.LogInformation(
                 "Injected DHT external templates: health-check ({HealthSize} chars), notify-ready ({ReadySize} chars), " +
@@ -622,7 +627,6 @@ public class CloudInitTemplateService : ICloudInitTemplateService
         // DHT libp2p configuration — ports and addresses come from orchestrator labels
         variables.Custom["DHT_LISTEN_PORT"] = spec.Labels?.GetValueOrDefault("dht-listen-port", "4001") ?? "4001";
         variables.Custom["DHT_API_PORT"] = spec.Labels?.GetValueOrDefault("dht-api-port", "5080") ?? "5080";
-        variables.Custom["DHT_ADVERTISE_IP"] = spec.Labels?.GetValueOrDefault("dht-advertise-ip") ?? "";
         variables.Custom["DHT_BOOTSTRAP_PEERS"] = spec.Labels?.GetValueOrDefault("dht-bootstrap-peers") ?? "";
         variables.Custom["DHT_REGION"] = spec.Labels?.GetValueOrDefault("node-region") ?? "default";
 
@@ -631,16 +635,138 @@ public class CloudInitTemplateService : ICloudInitTemplateService
         var dhtBinaryGzB64 = await LoadDhtBinaryAsync(architecture, ct);
         variables.Custom["DHT_NODE_BINARY_GZ_BASE64"] = dhtBinaryGzB64;
 
+        // =====================================================
+        // WireGuard mesh variables — resolve from local relay VM
+        // =====================================================
+        // The DHT VM joins the relay's WireGuard mesh using the
+        // reusable wg-mesh-enroll.sh building block.
+        await PopulateWireGuardMeshVariablesAsync(variables, spec, ct);
+
         _logger.LogInformation(
             "Configured DHT variables for VM {VmId}: listenPort={ListenPort}, apiPort={ApiPort}, " +
-            "advertiseIp={AdvIP}, arch={Arch}, binarySize={BinaryKB}KB (gz+b64), bootstrapPeers={Peers}",
+            "tunnelIp={TunnelIp}, arch={Arch}, binarySize={BinaryKB}KB (gz+b64), bootstrapPeers={Peers}",
             spec.Id,
             variables.Custom["DHT_LISTEN_PORT"],
             variables.Custom["DHT_API_PORT"],
-            variables.Custom["DHT_ADVERTISE_IP"],
+            variables.Custom.GetValueOrDefault("WG_TUNNEL_IP", ""),
             architecture,
             dhtBinaryGzB64.Length / 1024,
             string.IsNullOrEmpty(variables.Custom["DHT_BOOTSTRAP_PEERS"]) ? "(none — first node)" : "present");
+    }
+
+    /// <summary>
+    /// Resolve WireGuard mesh variables from the local relay VM.
+    /// This is a generic building block — any VM type can use it
+    /// to join the relay's WireGuard network.
+    /// </summary>
+    private async Task PopulateWireGuardMeshVariablesAsync(
+        CloudInitTemplateVariables variables,
+        VmSpec spec,
+        CancellationToken ct)
+    {
+        // Allow explicit override via orchestrator labels
+        var tunnelIp = spec.Labels?.GetValueOrDefault("wg-tunnel-ip") ?? "";
+        var relayEndpoint = spec.Labels?.GetValueOrDefault("wg-relay-endpoint") ?? "";
+        var relayPubkey = spec.Labels?.GetValueOrDefault("wg-relay-pubkey") ?? "";
+        var relayApi = spec.Labels?.GetValueOrDefault("wg-relay-api") ?? "";
+
+        // Auto-resolve from local relay VM if not explicitly provided
+        if (string.IsNullOrEmpty(relayEndpoint) || string.IsNullOrEmpty(relayPubkey))
+        {
+            var relayInfo = await ResolveLocalRelayInfoAsync(ct);
+            if (relayInfo != null)
+            {
+                if (string.IsNullOrEmpty(relayEndpoint))
+                    relayEndpoint = $"{relayInfo.Value.Ip}:51820";
+                if (string.IsNullOrEmpty(relayPubkey))
+                    relayPubkey = relayInfo.Value.PublicKey;
+                if (string.IsNullOrEmpty(relayApi))
+                    relayApi = $"http://{relayInfo.Value.Ip}:8080";
+                if (string.IsNullOrEmpty(tunnelIp))
+                    tunnelIp = relayInfo.Value.DhtTunnelIp;
+
+                _logger.LogInformation(
+                    "Resolved relay WireGuard info: endpoint={Endpoint}, pubkey={PubKey}..., " +
+                    "tunnelIp={TunnelIp}",
+                    relayEndpoint,
+                    relayPubkey.Length > 12 ? relayPubkey[..12] : relayPubkey,
+                    tunnelIp);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "No relay VM found on this host — DHT VM will not have WireGuard mesh connectivity. " +
+                    "Provide wg-relay-endpoint, wg-relay-pubkey, and wg-tunnel-ip labels explicitly.");
+            }
+        }
+
+        variables.Custom["WG_TUNNEL_IP"] = tunnelIp;
+        variables.Custom["WG_RELAY_ENDPOINT"] = relayEndpoint;
+        variables.Custom["WG_RELAY_PUBKEY"] = relayPubkey;
+        variables.Custom["WG_RELAY_API"] = relayApi;
+    }
+
+    /// <summary>
+    /// Find the relay VM running on this host and extract its WireGuard info.
+    /// Returns null if no relay VM exists.
+    /// </summary>
+    private async Task<(string Ip, string PublicKey, string DhtTunnelIp)?> ResolveLocalRelayInfoAsync(
+        CancellationToken ct)
+    {
+        try
+        {
+            var allVms = await _vmManager.GetAllVmsAsync(ct);
+            var relayVm = allVms.FirstOrDefault(v =>
+                v.Spec.VmType == VmType.Relay &&
+                v.State is VmState.Running or VmState.Ready);
+
+            if (relayVm == null)
+                return null;
+
+            var relayIp = await _vmManager.GetVmIpAddressAsync(relayVm.VmId, ct);
+            if (string.IsNullOrEmpty(relayIp))
+                return null;
+
+            // Get relay's WireGuard public key via its API
+            var relayPubkey = "";
+            try
+            {
+                using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+                var response = await client.GetStringAsync(
+                    $"http://{relayIp}:8080/api/relay/status", ct);
+                var json = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(response);
+                if (json.TryGetProperty("public_key", out var pk))
+                    relayPubkey = pk.GetString() ?? "";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Could not fetch relay public key from {Ip} — trying disk fallback",
+                    relayIp);
+            }
+
+            // Fallback: read public key from relay VM's stored config
+            if (string.IsNullOrEmpty(relayPubkey))
+            {
+                var pubkeyPath = Path.Combine("/var/lib/decloud/vms", relayVm.VmId, "wg-pubkey");
+                if (File.Exists(pubkeyPath))
+                    relayPubkey = (await File.ReadAllTextAsync(pubkeyPath, ct)).Trim();
+            }
+
+            // Determine DHT tunnel IP: use .253 on the relay's subnet
+            // Relay address is 10.20.{subnet}.254, so DHT gets .253
+            var relaySubnet = relayVm.Spec.Labels?.GetValueOrDefault("relay-subnet") ?? "";
+            var dhtTunnelIp = !string.IsNullOrEmpty(relaySubnet)
+                ? $"10.20.{relaySubnet}.253"
+                : "";
+
+            return (relayIp, relayPubkey, dhtTunnelIp);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to resolve local relay VM info");
+            return null;
+        }
     }
 
     /// <summary>
