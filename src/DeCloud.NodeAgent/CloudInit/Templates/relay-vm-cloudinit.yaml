@@ -306,8 +306,8 @@ runcmd:
   - systemctl stop ufw || true
   - systemctl disable ufw || true
   
-  # Enable and start QEMU guest agent
-  - systemctl enable qemu-guest-agent
+  # Enable and start QEMU guest agent (static unit - systemctl enable fails silently)
+  - ln -sf /lib/systemd/system/qemu-guest-agent.service /etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service
   - systemctl start qemu-guest-agent
   
   # Start WireGuard manually first, then enable for boot
