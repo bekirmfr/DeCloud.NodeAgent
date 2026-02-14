@@ -137,6 +137,22 @@ write_files:
     content: |
       __DHT_NOTIFY_READY__
 
+  # Dashboard static files (loaded from external templates)
+  - path: /opt/decloud-dht/static/dashboard.html
+    permissions: '0644'
+    content: |
+      __DHT_DASHBOARD_HTML__
+
+  - path: /opt/decloud-dht/static/dashboard.css
+    permissions: '0644'
+    content: |
+      __DHT_DASHBOARD_CSS__
+
+  - path: /opt/decloud-dht/static/dashboard.js
+    permissions: '0644'
+    content: |
+      __DHT_DASHBOARD_JS__
+
 # =====================================================
 # RUNTIME COMMANDS
 # =====================================================
@@ -149,7 +165,7 @@ runcmd:
   - mkdir -p /etc/decloud-dht
   - mkdir -p /etc/decloud
   - mkdir -p /var/lib/decloud-dht
-  - mkdir -p /opt/decloud-dht
+  - mkdir -p /opt/decloud-dht/static
   - chown -R dht:dht /etc/decloud-dht
   - chown -R dht:dht /var/lib/decloud-dht
   - chown -R dht:dht /opt/decloud-dht
