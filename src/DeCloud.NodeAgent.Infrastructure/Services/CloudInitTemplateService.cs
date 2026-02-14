@@ -320,6 +320,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             var dashboardHtml = await LoadExternalTemplateAsync("dashboard.html", "dht-vm", ct);
             var dashboardCss = await LoadExternalTemplateAsync("dashboard.css", "dht-vm", ct);
             var dashboardJs = await LoadExternalTemplateAsync("dashboard.js", "dht-vm", ct);
+            var wgMeshEnroll = await LoadExternalTemplateAsync("wg-mesh-enroll.sh", "shared", ct);
 
             var result = ReplaceWithIndentation(template, "__DHT_HEALTH_CHECK__", healthCheck);
             result = ReplaceWithIndentation(result, "__DHT_NOTIFY_READY__", notifyReady);
@@ -327,12 +328,13 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             result = ReplaceWithIndentation(result, "__DHT_DASHBOARD_HTML__", dashboardHtml);
             result = ReplaceWithIndentation(result, "__DHT_DASHBOARD_CSS__", dashboardCss);
             result = ReplaceWithIndentation(result, "__DHT_DASHBOARD_JS__", dashboardJs);
+            result = ReplaceWithIndentation(result, "__WG_MESH_ENROLL__", wgMeshEnroll);
 
             _logger.LogInformation(
                 "Injected DHT external templates: health-check ({HealthSize} chars), notify-ready ({ReadySize} chars), " +
-                "dashboard-server ({DashPy} chars), dashboard ({DashHtml}+{DashCss}+{DashJs} chars)",
+                "dashboard-server ({DashPy} chars), dashboard ({DashHtml}+{DashCss}+{DashJs} chars), wg-enroll ({WgSize} chars)",
                 healthCheck.Length, notifyReady.Length, dashboardPy.Length,
-                dashboardHtml.Length, dashboardCss.Length, dashboardJs.Length);
+                dashboardHtml.Length, dashboardCss.Length, dashboardJs.Length, wgMeshEnroll.Length);
 
             return result;
         }
@@ -625,6 +627,28 @@ public class CloudInitTemplateService : ICloudInitTemplateService
         variables.Custom["DHT_ADVERTISE_IP"] = spec.Labels?.GetValueOrDefault("dht-advertise-ip") ?? "";
         variables.Custom["DHT_BOOTSTRAP_PEERS"] = spec.Labels?.GetValueOrDefault("dht-bootstrap-peers") ?? "";
         variables.Custom["DHT_REGION"] = spec.Labels?.GetValueOrDefault("node-region") ?? "default";
+
+        // WireGuard mesh enrollment variables (passed from orchestrator via labels)
+        variables.Custom["WG_RELAY_ENDPOINT"] = spec.Labels?.GetValueOrDefault("wg-relay-endpoint") ?? "";
+        variables.Custom["WG_RELAY_PUBKEY"] = spec.Labels?.GetValueOrDefault("wg-relay-pubkey") ?? "";
+        variables.Custom["WG_TUNNEL_IP"] = spec.Labels?.GetValueOrDefault("wg-tunnel-ip") ?? "";
+        variables.Custom["WG_RELAY_API"] = spec.Labels?.GetValueOrDefault("wg-relay-api") ?? "";
+
+        // Warn if WireGuard config is incomplete
+        if (string.IsNullOrEmpty(variables.Custom["WG_RELAY_ENDPOINT"]) ||
+            string.IsNullOrEmpty(variables.Custom["WG_RELAY_PUBKEY"]) ||
+            string.IsNullOrEmpty(variables.Custom["WG_TUNNEL_IP"]) ||
+            string.IsNullOrEmpty(variables.Custom["WG_RELAY_API"]))
+        {
+            _logger.LogWarning(
+                "DHT VM {VmId} has incomplete WireGuard mesh config — " +
+                "endpoint={Endpoint}, pubkey={PubKey}, tunnelIp={TunnelIp}, api={Api}",
+                spec.Id,
+                variables.Custom["WG_RELAY_ENDPOINT"],
+                variables.Custom["WG_RELAY_PUBKEY"] is { Length: > 12 } pk ? pk[..12] + "..." : "(empty)",
+                variables.Custom["WG_TUNNEL_IP"],
+                variables.Custom["WG_RELAY_API"]);
+        }
 
         // Load architecture-specific DHT binary (gzip+base64 encoded, pre-built via build.sh)
         var architecture = GetTargetArchitecture(spec);
