@@ -1368,6 +1368,20 @@ download_node_agent() {
         sleep 2
     fi
     
+    # Preserve DHT binary build cache across reinstalls.
+    # build.sh has hash-based idempotency but the cache files live inside
+    # the repo directory which gets deleted on re-clone.
+    local DHT_CACHE_DIR="/tmp/decloud-dht-build-cache"
+    local DHT_TEMPLATE_DIR="$INSTALL_DIR/DeCloud.NodeAgent/src/DeCloud.NodeAgent/CloudInit/Templates/dht-vm"
+    
+    if [ -d "$DHT_TEMPLATE_DIR" ]; then
+        mkdir -p "$DHT_CACHE_DIR"
+        # Back up hash file and pre-built binaries
+        cp -f "$DHT_TEMPLATE_DIR/.dht-node-source.sha256" "$DHT_CACHE_DIR/" 2>/dev/null || true
+        cp -f "$DHT_TEMPLATE_DIR"/dht-node-*.gz.b64 "$DHT_CACHE_DIR/" 2>/dev/null || true
+        log_info "Preserved DHT build cache"
+    fi
+    
     if [ -d "$INSTALL_DIR/DeCloud.NodeAgent" ]; then
         rm -rf "$INSTALL_DIR/DeCloud.NodeAgent"
     fi
@@ -1377,6 +1391,15 @@ download_node_agent() {
     
     cd DeCloud.NodeAgent
     COMMIT=$(git rev-parse --short HEAD)
+    
+    # Restore DHT build cache so build.sh can skip unchanged builds
+    local NEW_DHT_TEMPLATE_DIR="$INSTALL_DIR/DeCloud.NodeAgent/src/DeCloud.NodeAgent/CloudInit/Templates/dht-vm"
+    if [ -d "$DHT_CACHE_DIR" ] && [ -d "$NEW_DHT_TEMPLATE_DIR" ]; then
+        cp -f "$DHT_CACHE_DIR/.dht-node-source.sha256" "$NEW_DHT_TEMPLATE_DIR/" 2>/dev/null || true
+        cp -f "$DHT_CACHE_DIR"/dht-node-*.gz.b64 "$NEW_DHT_TEMPLATE_DIR/" 2>/dev/null || true
+        rm -rf "$DHT_CACHE_DIR"
+        log_info "Restored DHT build cache"
+    fi
     
     log_success "Code downloaded (commit: $COMMIT)"
 }
