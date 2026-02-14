@@ -335,6 +335,99 @@ func startAPIServer(port string, state *NodeState) {
 		})
 	})
 
+	mux.HandleFunc("/connect", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var payload struct {
+			Peers []string `json:"peers"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		if len(payload.Peers) == 0 {
+			http.Error(w, "no peers provided", http.StatusBadRequest)
+			return
+		}
+
+		results := make([]map[string]interface{}, 0, len(payload.Peers))
+		var connected int
+		for _, p := range payload.Peers {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+
+			ma, err := multiaddr.NewMultiaddr(p)
+			if err != nil {
+				results = append(results, map[string]interface{}{
+					"addr":  p,
+					"error": fmt.Sprintf("invalid multiaddr: %v", err),
+				})
+				continue
+			}
+
+			pi, err := peer.AddrInfoFromP2pAddr(ma)
+			if err != nil {
+				results = append(results, map[string]interface{}{
+					"addr":  p,
+					"error": fmt.Sprintf("invalid peer addr: %v", err),
+				})
+				continue
+			}
+
+			// Skip self
+			if pi.ID == state.host.ID() {
+				results = append(results, map[string]interface{}{
+					"addr":    p,
+					"skipped": "self",
+				})
+				continue
+			}
+
+			// Skip already-connected peers
+			if state.host.Network().Connectedness(pi.ID) == 1 { // Connected
+				results = append(results, map[string]interface{}{
+					"addr":      p,
+					"peerId":    pi.ID.String(),
+					"connected": true,
+					"skipped":   "already connected",
+				})
+				connected++
+				continue
+			}
+
+			if err := state.host.Connect(context.Background(), *pi); err != nil {
+				log.Printf("POST /connect: failed to connect to %s: %v", pi.ID.String()[:12], err)
+				results = append(results, map[string]interface{}{
+					"addr":      p,
+					"peerId":    pi.ID.String(),
+					"connected": false,
+					"error":     err.Error(),
+				})
+			} else {
+				log.Printf("POST /connect: connected to peer %s", pi.ID.String()[:12])
+				results = append(results, map[string]interface{}{
+					"addr":      p,
+					"peerId":    pi.ID.String(),
+					"connected": true,
+				})
+				connected++
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"results":   results,
+			"connected": connected,
+			"total":     len(payload.Peers),
+		})
+	})
+
 	mux.HandleFunc("/publish", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
