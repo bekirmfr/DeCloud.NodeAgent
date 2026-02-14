@@ -168,8 +168,8 @@ write_files:
 
 # Runtime commands
 runcmd:
-  # Start QEMU guest agent
-  - systemctl enable qemu-guest-agent
+  # Start QEMU guest agent (static unit - systemctl enable fails silently)
+  - ln -sf /lib/systemd/system/qemu-guest-agent.service /etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service
   - systemctl start qemu-guest-agent
   
   # Create inference directories
