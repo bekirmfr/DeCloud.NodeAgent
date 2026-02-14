@@ -98,36 +98,28 @@ public class DhtCallbackController : ControllerBase
                 return BadRequest(new { error = "VM has no System service" });
             }
 
-            // Idempotency: if already ready, just return success
-            if (systemService.Status == ServiceReadiness.Ready)
-            {
-                _logger.LogInformation(
-                    "DHT VM {VmId} already marked Ready (peer ID: {PeerId}) — idempotent",
-                    notification.VmId, notification.PeerId);
-
-                return Ok(new
-                {
-                    success = true,
-                    message = "DHT VM already ready (idempotent)",
-                    vmId = notification.VmId,
-                    peerId = notification.PeerId,
-                    alreadyReady = true
-                });
-            }
-
-            // Mark System service as Ready
+            // Always update StatusMessage with peer ID, even if VmReadinessMonitor
+            // already marked the service Ready via cloud-init check (race condition:
+            // cloud-init "done" fires before DHT binary reports peerId, monitor marks
+            // Ready with null StatusMessage, then this callback's old idempotency guard
+            // would short-circuit and the peerId was never captured).
             var previousStatus = systemService.Status;
+            var alreadyReady = systemService.Status == ServiceReadiness.Ready;
+
             systemService.Status = ServiceReadiness.Ready;
-            systemService.ReadyAt = DateTime.UtcNow;
-            systemService.LastCheckAt = DateTime.UtcNow;
             systemService.StatusMessage = $"peerId={notification.PeerId}";
+            systemService.LastCheckAt = DateTime.UtcNow;
+            if (!alreadyReady)
+                systemService.ReadyAt = DateTime.UtcNow;
 
             await _repository.SaveVmAsync(vm);
 
             _logger.LogInformation(
-                "DHT VM {VmId} System service marked Ready via callback " +
+                "DHT VM {VmId} System service {Action} via callback " +
                 "(was: {PreviousStatus}, peer ID: {PeerId})",
-                notification.VmId, previousStatus, notification.PeerId);
+                notification.VmId,
+                alreadyReady ? "updated peerId (was already Ready)" : "marked Ready",
+                previousStatus, notification.PeerId);
 
             // Store peer ID in VM directory for heartbeat reporting
             await StorePeerIdAsync(notification.VmId, notification.PeerId);
@@ -135,9 +127,12 @@ public class DhtCallbackController : ControllerBase
             return Ok(new
             {
                 success = true,
-                message = "DHT node registered successfully",
+                message = alreadyReady
+                    ? "DHT peer ID captured (service was already Ready)"
+                    : "DHT node registered successfully",
                 vmId = notification.VmId,
-                peerId = notification.PeerId
+                peerId = notification.PeerId,
+                alreadyReady
             });
         }
         catch (Exception ex)
