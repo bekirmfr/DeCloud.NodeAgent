@@ -23,6 +23,7 @@ packages:
   - iftop
   - net-tools
   - openssl
+  - iptables-persistent
 
 # =====================================================
 # SYSTEM CONFIGURATION
