@@ -2,7 +2,7 @@
 # DeCloud DHT VM Cloud-Init Configuration
 # Runs a libp2p Kademlia DHT node for peer discovery,
 # key-value storage, and GossipSub event propagation.
-# Version: 3.1 (Added dashboard server)
+# Version: 3.1 (Added dashboard server + nginx reverse proxy)
 
 hostname: __HOSTNAME__
 manage_etc_hosts: true
@@ -36,7 +36,7 @@ packages:
   - jq
   - net-tools
   - openssl
-  - iptables
+  - nginx
   - python3
 
 # =====================================================
@@ -77,6 +77,78 @@ write_files:
         "version": "3.1"
       }
 
+  # Nginx reverse proxy — port 80 → dashboard (8080) and DHT API
+  - path: /etc/nginx/sites-available/dht-proxy
+    permissions: '0644'
+    content: |
+      server {
+          listen 80 default_server;
+          listen [::]:80 default_server;
+
+          server_name _;
+
+          # Nginx health check (fast, no proxy)
+          location = /nginx-health {
+              return 200 "OK\n";
+              add_header Content-Type text/plain;
+          }
+
+          # Static dashboard assets → Python dashboard server
+          location /static/ {
+              proxy_pass http://127.0.0.1:8080;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_connect_timeout 5s;
+              proxy_read_timeout 10s;
+          }
+
+          # DHT API endpoints → Python dashboard server (proxies to Go binary)
+          location /health {
+              proxy_pass http://127.0.0.1:8080;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_connect_timeout 5s;
+              proxy_read_timeout 10s;
+          }
+
+          location /peers {
+              proxy_pass http://127.0.0.1:8080;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_connect_timeout 5s;
+              proxy_read_timeout 10s;
+          }
+
+          location /connect {
+              proxy_pass http://127.0.0.1:8080;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_connect_timeout 5s;
+              proxy_read_timeout 10s;
+          }
+
+          location /publish {
+              proxy_pass http://127.0.0.1:8080;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_connect_timeout 5s;
+              proxy_read_timeout 10s;
+          }
+
+          # Dashboard root → Python dashboard server
+          location = / {
+              proxy_pass http://127.0.0.1:8080;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_connect_timeout 5s;
+              proxy_read_timeout 10s;
+          }
+      }
+
   # DHT systemd service (runs binary directly, no Docker)
   - path: /etc/systemd/system/decloud-dht.service
     permissions: '0644'
@@ -103,7 +175,7 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
-  # Dashboard server (Python — serves UI and proxies to DHT API)
+  # Dashboard server (Python — serves UI and proxies API to Go binary)
   - path: /opt/decloud-dht/dht-dashboard.py
     permissions: '0755'
     content: |
@@ -115,8 +187,8 @@ write_files:
     content: |
       [Unit]
       Description=DeCloud DHT Dashboard Server
-      After=decloud-dht.service
-      Wants=decloud-dht.service
+      After=decloud-dht.service nginx.service
+      Wants=decloud-dht.service nginx.service
 
       [Service]
       Type=simple
@@ -190,6 +262,13 @@ runcmd:
   - ln -sf /lib/systemd/system/qemu-guest-agent.service /etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service
   - systemctl start qemu-guest-agent
 
+  # Configure and start Nginx
+  - ln -sf /etc/nginx/sites-available/dht-proxy /etc/nginx/sites-enabled/
+  - rm -f /etc/nginx/sites-enabled/default
+  - nginx -t
+  - systemctl enable nginx
+  - systemctl restart nginx
+
   # Create directories
   - mkdir -p /etc/decloud-dht
   - mkdir -p /etc/decloud
@@ -201,10 +280,6 @@ runcmd:
 
   # DHT binary is written directly to /usr/local/bin/dht-node by write_files
   # with gz+b64 encoding (cloud-init handles decompression and decoding)
-
-  # Redirect port 80 → dashboard server (8080) so ingress/subdomain access works
-  - iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080
-  - iptables -t nat -A OUTPUT -p tcp -o lo --dport 80 -j REDIRECT --to-port 8080
 
   # Start DHT service
   - systemctl daemon-reload
