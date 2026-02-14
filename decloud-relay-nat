@@ -34,9 +34,9 @@ fi
 clean_old_rules() {
     log "Cleaning old relay NAT rules..."
     
-    # Remove NAT PREROUTING rules for port 51820 (using line numbers)
+    # Remove NAT PREROUTING rules for relay ports (51820/udp + 8080/tcp)
     # This works regardless of interface specification or destination
-    local old_prerouting=$(iptables -t nat -L PREROUTING -n --line-numbers | grep "dpt:51820" | grep "DNAT" | awk '{print $1}' | sort -rn)
+    local old_prerouting=$(iptables -t nat -L PREROUTING -n --line-numbers | grep -E "dpt:(51820|8080)" | grep "DNAT" | awk '{print $1}' | sort -rn)
     if [ -n "$old_prerouting" ]; then
         for line in $old_prerouting; do
             log "  Removing old PREROUTING rule (line $line)"
@@ -47,7 +47,7 @@ clean_old_rules() {
     fi
     
     # Remove NAT POSTROUTING rules for relay VMs
-    local old_postrouting=$(iptables -t nat -L POSTROUTING -n --line-numbers | grep "51820.*192.168.122" | awk '{print $1}' | sort -rn)
+    local old_postrouting=$(iptables -t nat -L POSTROUTING -n --line-numbers | grep -E "(51820|8080).*192.168.122" | awk '{print $1}' | sort -rn)
     if [ -n "$old_postrouting" ]; then
         for line in $old_postrouting; do
             log "  Removing old POSTROUTING rule (line $line)"
@@ -57,8 +57,8 @@ clean_old_rules() {
         log "  No old POSTROUTING rules found"
     fi
     
-    # Remove FORWARD rules for port 51820 on 192.168.122.*
-    local old_forward=$(iptables -L FORWARD -n --line-numbers | grep "dpt:51820" | grep "192.168.122" | awk '{print $1}' | sort -rn)
+    # Remove FORWARD rules for relay ports on 192.168.122.*
+    local old_forward=$(iptables -L FORWARD -n --line-numbers | grep -E "dpt:(51820|8080)" | grep "192.168.122" | awk '{print $1}' | sort -rn)
     if [ -n "$old_forward" ]; then
         for line in $old_forward; do
             log "  Removing old FORWARD rule (line $line)"
@@ -68,10 +68,12 @@ clean_old_rules() {
         log "  No old FORWARD rules found"
     fi
     
-    # Clear connection tracking for port 51820
-    log "  Clearing connection tracking for port 51820"
+    # Clear connection tracking for relay ports
+    log "  Clearing connection tracking for relay ports"
     conntrack -D -p udp --dport 51820 2>/dev/null || true
     conntrack -D -p udp --sport 51820 2>/dev/null || true
+    conntrack -D -p tcp --dport 8080 2>/dev/null || true
+    conntrack -D -p tcp --sport 8080 2>/dev/null || true
     
     log "✓ Cleanup complete"
 }
@@ -103,11 +105,21 @@ add_rules() {
     #   - virbr0: same-host VMs (DHT VM on same node as relay)
     # WireGuard itself authenticates peers cryptographically.
     # =====================================================
+    
+    # 1a: UDP/51820 — WireGuard tunnel traffic
     if ! iptables -t nat -C PREROUTING -p udp --dport 51820 -j DNAT --to-destination "$vm_ip:51820" 2>/dev/null; then
         iptables -t nat -A PREROUTING -p udp --dport 51820 -j DNAT --to-destination "$vm_ip:51820"
-        log "  ✓ PREROUTING: *:51820 → $vm_ip:51820 (all interfaces)"
+        log "  ✓ PREROUTING: UDP *:51820 → $vm_ip:51820"
     else
-        log "  • PREROUTING rule already exists"
+        log "  • PREROUTING UDP/51820 rule already exists"
+    fi
+    
+    # 1b: TCP/8080 — Relay API (used by DHT VMs for WG mesh enrollment)
+    if ! iptables -t nat -C PREROUTING -p tcp --dport 8080 -j DNAT --to-destination "$vm_ip:8080" 2>/dev/null; then
+        iptables -t nat -A PREROUTING -p tcp --dport 8080 -j DNAT --to-destination "$vm_ip:8080"
+        log "  ✓ PREROUTING: TCP *:8080 → $vm_ip:8080"
+    else
+        log "  • PREROUTING TCP/8080 rule already exists"
     fi
     
     # =====================================================
@@ -115,19 +127,30 @@ add_rules() {
     # =====================================================
     if ! iptables -t nat -C POSTROUTING -o virbr0 -p udp -d "$vm_ip" --dport 51820 -j MASQUERADE 2>/dev/null; then
         iptables -t nat -A POSTROUTING -o virbr0 -p udp -d "$vm_ip" --dport 51820 -j MASQUERADE
-        log "  ✓ POSTROUTING: MASQUERADE for $vm_ip via virbr0"
+        log "  ✓ POSTROUTING: MASQUERADE UDP $vm_ip:51820"
     else
-        log "  • POSTROUTING rule already exists"
+        log "  • POSTROUTING UDP/51820 rule already exists"
+    fi
+    
+    if ! iptables -t nat -C POSTROUTING -o virbr0 -p tcp -d "$vm_ip" --dport 8080 -j MASQUERADE 2>/dev/null; then
+        iptables -t nat -A POSTROUTING -o virbr0 -p tcp -d "$vm_ip" --dport 8080 -j MASQUERADE
+        log "  ✓ POSTROUTING: MASQUERADE TCP $vm_ip:8080"
+    else
+        log "  • POSTROUTING TCP/8080 rule already exists"
     fi
     
     # =====================================================
     # STEP 3: FORWARD - Accept packets (at position 1)
     # =====================================================
-    # Remove existing rule first to avoid duplicates
+    # UDP/51820
     iptables -D FORWARD -p udp -d "$vm_ip" --dport 51820 -j ACCEPT 2>/dev/null || true
-    # Insert at position 1 (top of chain) to ensure priority
     iptables -I FORWARD 1 -p udp -d "$vm_ip" --dport 51820 -j ACCEPT
-    log "  ✓ FORWARD: ACCEPT UDP/$vm_ip:51820 (position 1)"
+    log "  ✓ FORWARD: ACCEPT UDP $vm_ip:51820 (position 1)"
+    
+    # TCP/8080
+    iptables -D FORWARD -p tcp -d "$vm_ip" --dport 8080 -j ACCEPT 2>/dev/null || true
+    iptables -I FORWARD 1 -p tcp -d "$vm_ip" --dport 8080 -j ACCEPT
+    log "  ✓ FORWARD: ACCEPT TCP $vm_ip:8080 (position 1)"
     
     # =====================================================
     # STEP 4: Enable IP forwarding
@@ -145,7 +168,7 @@ add_rules() {
         log "  • IP forwarding already enabled"
     fi
     
-    log "✓ NAT configured successfully for $vm_ip"
+    log "✓ NAT configured successfully for $vm_ip (UDP/51820 + TCP/8080)"
 }
 
 # =====================================================
@@ -161,21 +184,30 @@ remove_rules() {
     
     log "Removing NAT rules for relay VM: $vm_ip"
     
-    # Remove PREROUTING (try both with and without -i for backward compat)
+    # Remove UDP/51820 PREROUTING (try both with and without -i for backward compat)
     iptables -t nat -D PREROUTING -p udp --dport 51820 -j DNAT --to-destination "$vm_ip:51820" 2>/dev/null || \
         iptables -t nat -D PREROUTING -i eth0 -p udp --dport 51820 -j DNAT --to-destination "$vm_ip:51820" 2>/dev/null || \
-        log "  • PREROUTING rule not found"
+        log "  • PREROUTING UDP/51820 rule not found"
+    
+    # Remove TCP/8080 PREROUTING
+    iptables -t nat -D PREROUTING -p tcp --dport 8080 -j DNAT --to-destination "$vm_ip:8080" 2>/dev/null || \
+        log "  • PREROUTING TCP/8080 rule not found"
     
     # Remove POSTROUTING
     iptables -t nat -D POSTROUTING -o virbr0 -p udp -d "$vm_ip" --dport 51820 -j MASQUERADE 2>/dev/null || \
-        log "  • POSTROUTING rule not found"
+        log "  • POSTROUTING UDP/51820 rule not found"
+    iptables -t nat -D POSTROUTING -o virbr0 -p tcp -d "$vm_ip" --dport 8080 -j MASQUERADE 2>/dev/null || \
+        log "  • POSTROUTING TCP/8080 rule not found"
     
     # Remove FORWARD
     iptables -D FORWARD -p udp -d "$vm_ip" --dport 51820 -j ACCEPT 2>/dev/null || \
-        log "  • FORWARD rule not found"
+        log "  • FORWARD UDP/51820 rule not found"
+    iptables -D FORWARD -p tcp -d "$vm_ip" --dport 8080 -j ACCEPT 2>/dev/null || \
+        log "  • FORWARD TCP/8080 rule not found"
     
     # Clear connection tracking
     conntrack -D -p udp --dport 51820 2>/dev/null || true
+    conntrack -D -p tcp --dport 8080 2>/dev/null || true
     
     log "✓ NAT rules removed for $vm_ip"
 }
