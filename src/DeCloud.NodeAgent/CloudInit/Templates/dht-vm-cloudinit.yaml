@@ -23,7 +23,7 @@ users:
     lock_passwd: true
 
 # SSH key authentication for dht user
-__SSH_AUTHORIZED_KEYS__
+__SSH_AUTHORIZED_KEYS_BLOCK__
 
 ssh_pwauth: false
 
