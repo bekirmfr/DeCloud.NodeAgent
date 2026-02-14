@@ -316,13 +316,21 @@ public class CloudInitTemplateService : ICloudInitTemplateService
         {
             var healthCheck = await LoadExternalTemplateAsync("dht-health-check.sh", "dht-vm", ct);
             var notifyReady = await LoadExternalTemplateAsync("dht-notify-ready.sh", "dht-vm", ct);
+            var dashboardHtml = await LoadExternalTemplateAsync("dashboard.html", "dht-vm", ct);
+            var dashboardCss = await LoadExternalTemplateAsync("dashboard.css", "dht-vm", ct);
+            var dashboardJs = await LoadExternalTemplateAsync("dashboard.js", "dht-vm", ct);
 
             var result = ReplaceWithIndentation(template, "__DHT_HEALTH_CHECK__", healthCheck);
             result = ReplaceWithIndentation(result, "__DHT_NOTIFY_READY__", notifyReady);
+            result = ReplaceWithIndentation(result, "__DHT_DASHBOARD_HTML__", dashboardHtml);
+            result = ReplaceWithIndentation(result, "__DHT_DASHBOARD_CSS__", dashboardCss);
+            result = ReplaceWithIndentation(result, "__DHT_DASHBOARD_JS__", dashboardJs);
 
             _logger.LogInformation(
-                "Injected DHT external templates: health-check ({HealthSize} chars), notify-ready ({ReadySize} chars)",
-                healthCheck.Length, notifyReady.Length);
+                "Injected DHT external templates: health-check ({HealthSize} chars), notify-ready ({ReadySize} chars), " +
+                "dashboard ({DashHtml}+{DashCss}+{DashJs} chars)",
+                healthCheck.Length, notifyReady.Length,
+                dashboardHtml.Length, dashboardCss.Length, dashboardJs.Length);
 
             return result;
         }

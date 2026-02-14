@@ -296,9 +296,22 @@ func trackPeers(ctx context.Context, state *NodeState) {
 	}
 }
 
-// startAPIServer runs the HTTP health/status API.
+// startAPIServer runs the HTTP health/status API and dashboard.
 func startAPIServer(port string, state *NodeState) {
 	mux := http.NewServeMux()
+
+	// Serve dashboard at root
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFile(w, r, "/opt/decloud-dht/static/dashboard.html")
+	})
+
+	// Serve static assets
+	mux.Handle("/static/", http.StripPrefix("/static/",
+		http.FileServer(http.Dir("/opt/decloud-dht/static"))))
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		state.mu.RLock()

@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeCloud DHT Node - __VM_NAME__</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/dashboard.css">
+    <meta name="description" content="DeCloud DHT Node Dashboard">
+    <meta name="robots" content="noindex, nofollow">
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- Header -->
+        <header class="dashboard-header">
+            <div class="header-left">
+                <h1 class="dashboard-title">
+                    <span class="icon">&#x1f310;</span>
+                    DeCloud DHT Node
+                </h1>
+                <div class="relay-metadata">
+                    <span class="metadata-item">
+                        <span class="label">VM:</span>
+                        <span class="value" id="vm-id">__VM_ID__</span>
+                    </span>
+                    <span class="metadata-item">
+                        <span class="label">Region:</span>
+                        <span class="value">__DHT_REGION__</span>
+                    </span>
+                    <span class="metadata-item">
+                        <span class="label">Node:</span>
+                        <span class="value">__NODE_ID__</span>
+                    </span>
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="status-indicator">
+                    <span class="status-dot" id="overall-status"></span>
+                    <span class="status-text" id="status-text">Checking...</span>
+                </div>
+                <div class="last-update">
+                    Last update: <span id="last-update">Never</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Alert Banner -->
+        <div class="alert-banner" id="alert-banner" style="display: none;">
+            <span class="alert-icon">&#x26a0;&#xfe0f;</span>
+            <span class="alert-message" id="alert-message"></span>
+            <button class="alert-close" onclick="closeAlert()">x</button>
+        </div>
+
+        <!-- Main Content Grid -->
+        <div class="content-grid">
+            <!-- Node Identity -->
+            <section class="card">
+                <div class="card-header">
+                    <h2 class="card-title">&#x1f511; Node Identity</h2>
+                    <span class="card-badge" id="dht-mode">DHT Server</span>
+                </div>
+                <div class="card-body">
+                    <div class="wireguard-info">
+                        <div class="info-row">
+                            <span class="info-label">Peer ID:</span>
+                            <span class="info-value mono" id="peer-id">Loading...</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Status:</span>
+                            <span class="info-value" id="node-status">-</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Uptime:</span>
+                            <span class="info-value" id="uptime-value">-</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Listen Port:</span>
+                            <span class="info-value">__DHT_LISTEN_PORT__</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Advertise IP:</span>
+                            <span class="info-value" id="advertise-ip">__DHT_ADVERTISE_IP__</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Network Stats -->
+            <section class="card">
+                <div class="card-header">
+                    <h2 class="card-title">&#x1f4ca; Network Stats</h2>
+                </div>
+                <div class="card-body">
+                    <div class="metrics-grid">
+                        <div class="metric-item">
+                            <div class="metric-label">Connected Peers</div>
+                            <div class="metric-value" id="connected-peers">0</div>
+                        </div>
+                        <div class="metric-item">
+                            <div class="metric-label">Routing Table</div>
+                            <div class="metric-value" id="routing-table">0</div>
+                        </div>
+                        <div class="metric-item">
+                            <div class="metric-label">Addresses</div>
+                            <div class="metric-value" id="address-count">0</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Connected Peers -->
+            <section class="card">
+                <div class="card-header">
+                    <h2 class="card-title">&#x1f4e1; Connected Peers</h2>
+                    <span class="card-badge" id="peer-count-badge">0</span>
+                </div>
+                <div class="card-body">
+                    <div id="peers-list">
+                        <p style="text-align: center; color: var(--text-muted); padding: 2rem;">
+                            Loading...
+                        </p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Listen Addresses -->
+            <section class="card">
+                <div class="card-header">
+                    <h2 class="card-title">&#x1f50c; Listen Addresses</h2>
+                </div>
+                <div class="card-body">
+                    <div id="addresses-list">
+                        <p style="text-align: center; color: var(--text-muted); padding: 2rem;">
+                            Loading...
+                        </p>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- Footer -->
+        <footer class="dashboard-footer">
+            <div class="footer-content">
+                <span class="footer-text">DeCloud DHT Node v3.0</span>
+                <span class="footer-separator">&#x2022;</span>
+                <span class="footer-text" id="footer-peers">0 peers</span>
+                <span class="footer-separator">&#x2022;</span>
+                <span class="footer-text">Region: __DHT_REGION__</span>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loading-overlay">
+        <div class="loading-spinner"></div>
+        <div class="loading-text">Loading DHT dashboard...</div>
+    </div>
+
+    <script src="/static/dashboard.js"></script>
+</body>
+</html>
