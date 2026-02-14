@@ -261,6 +261,31 @@ class PeerCleanupThread(threading.Thread):
                     })
                     continue
                 
+                # Never remove mesh peers (DHT VMs, infrastructure peers).
+                # Mesh peers use high-octet IPs (.198-.253/32) in the relay subnet.
+                # They register via /api/relay/add-peer with keepalive, but may not
+                # generate enough traffic to maintain handshake freshness.
+                try:
+                    for aip in allowed_ips.split(','):
+                        aip = aip.strip()
+                        if '/32' in aip and aip.startswith('10.20.'):
+                            parts = aip.replace('/32', '').split('.')
+                            if len(parts) == 4:
+                                last_octet = int(parts[3])
+                                if last_octet >= 198:
+                                    kept.append({
+                                        'public_key': public_key[:16] + '...',
+                                        'allowed_ips': allowed_ips,
+                                        'reason': 'mesh_peer'
+                                    })
+                                    break
+                    else:
+                        pass  # fall through to age/handshake check
+                    if any(k.get('reason') == 'mesh_peer' and k['public_key'] == public_key[:16] + '...' for k in kept):
+                        continue
+                except (ValueError, IndexError):
+                    pass  # not a mesh peer, continue with normal cleanup
+                
                 # Check if peer is within grace period
                 peer_age = get_peer_age(public_key, current_time)
                 

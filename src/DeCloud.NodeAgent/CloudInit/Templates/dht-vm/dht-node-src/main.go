@@ -80,8 +80,10 @@ func main() {
 		extAddr := fmt.Sprintf("/ip4/%s/tcp/%s", cfg.AdvertiseIP, cfg.ListenPort)
 		extMA, err := multiaddr.NewMultiaddr(extAddr)
 		if err == nil {
+			// Only advertise the WG tunnel IP — don't expose unreachable
+			// libvirt bridge or localhost addresses to other peers.
 			opts = append(opts, libp2p.AddrsFactory(func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
-				return append(addrs, extMA)
+				return []multiaddr.Multiaddr{extMA}
 			}))
 		}
 	}
@@ -152,6 +154,11 @@ func main() {
 
 	// Start background peer counter
 	go trackPeers(ctx, state)
+
+	// Start bootstrap retry goroutine — handles the race condition where
+	// this node deployed before other DHT nodes' PeerIds were captured.
+	// Periodically reads dynamic-peers file for runtime peer injection.
+	go retryBootstrap(ctx, h, cfg)
 
 	// Start HTTP API server
 	go startAPIServer(cfg.APIPort, state)
@@ -292,6 +299,47 @@ func trackPeers(ctx context.Context, state *NodeState) {
 			state.mu.Lock()
 			state.connectedPeers = len(state.host.Network().Peers())
 			state.mu.Unlock()
+		}
+	}
+}
+
+// retryBootstrap periodically attempts to connect to peers when isolated.
+// Handles two scenarios:
+//  1. Bootstrap race: this node deployed before other DHT nodes' PeerIds were captured,
+//     so it booted with 0 bootstrap peers. Retry original list in case they come online.
+//  2. Dynamic peers: reads /var/lib/decloud-dht/dynamic-peers file for runtime injection.
+//     The node agent can write new peers to this file when the orchestrator discovers them.
+func retryBootstrap(ctx context.Context, h host.Host, cfg Config) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	dynamicPeersFile := filepath.Join(cfg.DataDir, "dynamic-peers")
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			currentPeers := len(h.Network().Peers())
+			if currentPeers > 0 {
+				continue // already connected, no retry needed
+			}
+
+			log.Println("No connected peers — attempting peer discovery...")
+
+			// Try original bootstrap peers
+			if cfg.BootstrapPeers != "" {
+				connectBootstrapPeers(ctx, h, cfg.BootstrapPeers)
+			}
+
+			// Try dynamic peers file (written by node agent)
+			if data, err := os.ReadFile(dynamicPeersFile); err == nil {
+				dynamicPeers := strings.TrimSpace(string(data))
+				if dynamicPeers != "" {
+					log.Printf("Found dynamic peers file with %d bytes", len(dynamicPeers))
+					connectBootstrapPeers(ctx, h, dynamicPeers)
+				}
+			}
 		}
 	}
 }
