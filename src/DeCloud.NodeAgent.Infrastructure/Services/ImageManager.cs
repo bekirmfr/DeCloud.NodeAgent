@@ -140,12 +140,17 @@ public class ImageManager : IImageManager
         var overlayPath = Path.Combine(vmDir, "disk.qcow2");
         var sizeGb = Math.Max(1, sizeBytes / 1024 / 1024 / 1024);
 
-        _logger.LogInformation("Creating overlay disk at {Path}, size {Size}GB, backing {Base}",
-            overlayPath, sizeGb, baseImagePath);
+        // Detect backing file format (raw, qcow2, etc.) instead of assuming qcow2.
+        // If the base image is raw but we pass -F qcow2, the overlay is corrupted
+        // and the guest filesystem appears as "unknown".
+        var backingFormat = await DetectImageFormatAsync(baseImagePath, ct);
+
+        _logger.LogInformation("Creating overlay disk at {Path}, size {Size}GB, backing {Base} (format: {Format})",
+            overlayPath, sizeGb, baseImagePath, backingFormat);
 
         // Create qcow2 overlay with backing file
         var result = await _executor.ExecuteAsync("qemu-img",
-            $"create -f qcow2 -F qcow2 -b {baseImagePath} {overlayPath} {sizeGb}G",
+            $"create -f qcow2 -F {backingFormat} -b {baseImagePath} {overlayPath} {sizeGb}G",
             TimeSpan.FromMinutes(5),
             ct);
 
@@ -155,6 +160,44 @@ public class ImageManager : IImageManager
         }
 
         return overlayPath;
+    }
+
+    /// <summary>
+    /// Detect the format of a disk image using qemu-img info.
+    /// Returns "qcow2", "raw", etc. Falls back to "qcow2" if detection fails.
+    /// </summary>
+    private async Task<string> DetectImageFormatAsync(string imagePath, CancellationToken ct)
+    {
+        try
+        {
+            var result = await _executor.ExecuteAsync("qemu-img",
+                $"info --output=json {imagePath}",
+                TimeSpan.FromSeconds(30),
+                ct);
+
+            if (result.Success)
+            {
+                // Parse JSON output to extract "format" field
+                using var doc = System.Text.Json.JsonDocument.Parse(result.StandardOutput);
+                if (doc.RootElement.TryGetProperty("format", out var formatElement))
+                {
+                    var format = formatElement.GetString();
+                    if (!string.IsNullOrEmpty(format))
+                    {
+                        _logger.LogDebug("Detected image format for {Path}: {Format}", imagePath, format);
+                        return format;
+                    }
+                }
+            }
+
+            _logger.LogWarning("Could not detect image format for {Path}, falling back to qcow2", imagePath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Exception detecting image format for {Path}, falling back to qcow2", imagePath);
+        }
+
+        return "qcow2";
     }
 
     public Task DeleteDiskAsync(string diskPath, CancellationToken ct = default)
