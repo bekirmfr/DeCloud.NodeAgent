@@ -175,8 +175,7 @@ write_files:
       [Unit]
       Description=DeCloud DHT Node (libp2p Kademlia)
       After=network-online.target wg-quick@wg-mesh.service
-      Wants=network-online.target
-      Requires=wg-quick@wg-mesh.service
+      Wants=network-online.target wg-quick@wg-mesh.service
 
       [Service]
       Type=simple
@@ -283,7 +282,8 @@ runcmd:
   - systemctl start qemu-guest-agent
 
   # WireGuard mesh enrollment — must happen before DHT starts
-  - source /etc/decloud/wg-mesh.env && bash /usr/local/bin/wg-mesh-enroll.sh
+  # Skip gracefully if relay config is missing (no relay found at deploy time)
+  - bash -c 'source /etc/decloud/wg-mesh.env && if [ -n "$WG_RELAY_ENDPOINT" ] && [ -n "$WG_RELAY_PUBKEY" ]; then bash /usr/local/bin/wg-mesh-enroll.sh; else echo "[wg-mesh] Skipping enrollment — no relay configured"; fi'
 
   # Configure and start Nginx
   - ln -sf /etc/nginx/sites-available/dht-proxy /etc/nginx/sites-enabled/
