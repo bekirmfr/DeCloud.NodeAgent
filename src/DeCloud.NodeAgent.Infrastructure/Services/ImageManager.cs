@@ -138,12 +138,24 @@ public class ImageManager : IImageManager
         Directory.CreateDirectory(vmDir);
 
         var overlayPath = Path.Combine(vmDir, "disk.qcow2");
-        var sizeGb = Math.Max(1, sizeBytes / 1024 / 1024 / 1024);
+        var requestedSizeGb = Math.Max(1, sizeBytes / 1024 / 1024 / 1024);
 
-        // Detect backing file format (raw, qcow2, etc.) instead of assuming qcow2.
-        // If the base image is raw but we pass -F qcow2, the overlay is corrupted
-        // and the guest filesystem appears as "unknown".
-        var backingFormat = await DetectImageFormatAsync(baseImagePath, ct);
+        // Detect backing file format and virtual size via a single qemu-img info call.
+        var (backingFormat, backingVirtualSize) = await GetBackingImageInfoAsync(baseImagePath, ct);
+
+        // The overlay must be at least as large as the backing image's virtual size,
+        // otherwise the partition table references blocks beyond the overlay boundary
+        // and the kernel drops to initramfs unable to mount root.
+        var backingSizeGb = (long)Math.Ceiling((double)backingVirtualSize / 1024 / 1024 / 1024);
+        var sizeGb = Math.Max(requestedSizeGb, backingSizeGb);
+
+        if (sizeGb > requestedSizeGb)
+        {
+            _logger.LogWarning(
+                "Overlay size {RequestedGB}GB is smaller than backing image virtual size {BackingGB}GB — " +
+                "increasing to {ActualGB}GB to prevent boot failure",
+                requestedSizeGb, backingSizeGb, sizeGb);
+        }
 
         _logger.LogInformation("Creating overlay disk at {Path}, size {Size}GB, backing {Base} (format: {Format})",
             overlayPath, sizeGb, baseImagePath, backingFormat);
@@ -163,11 +175,14 @@ public class ImageManager : IImageManager
     }
 
     /// <summary>
-    /// Detect the format of a disk image using qemu-img info.
-    /// Returns "qcow2", "raw", etc. Falls back to "qcow2" if detection fails.
+    /// Detect the format and virtual size of a disk image using qemu-img info.
+    /// Returns (format, virtualSizeBytes). Falls back to ("qcow2", 0) if detection fails.
     /// </summary>
-    private async Task<string> DetectImageFormatAsync(string imagePath, CancellationToken ct)
+    private async Task<(string Format, long VirtualSizeBytes)> GetBackingImageInfoAsync(string imagePath, CancellationToken ct)
     {
+        var format = "qcow2";
+        long virtualSize = 0;
+
         try
         {
             var result = await _executor.ExecuteAsync("qemu-img",
@@ -177,27 +192,32 @@ public class ImageManager : IImageManager
 
             if (result.Success)
             {
-                // Parse JSON output to extract "format" field
                 using var doc = System.Text.Json.JsonDocument.Parse(result.StandardOutput);
+
                 if (doc.RootElement.TryGetProperty("format", out var formatElement))
                 {
-                    var format = formatElement.GetString();
-                    if (!string.IsNullOrEmpty(format))
-                    {
-                        _logger.LogDebug("Detected image format for {Path}: {Format}", imagePath, format);
-                        return format;
-                    }
+                    var detected = formatElement.GetString();
+                    if (!string.IsNullOrEmpty(detected))
+                        format = detected;
                 }
+
+                if (doc.RootElement.TryGetProperty("virtual-size", out var sizeElement))
+                    virtualSize = sizeElement.GetInt64();
+
+                _logger.LogDebug("Backing image {Path}: format={Format}, virtual-size={Size}",
+                    imagePath, format, virtualSize);
+
+                return (format, virtualSize);
             }
 
-            _logger.LogWarning("Could not detect image format for {Path}, falling back to qcow2", imagePath);
+            _logger.LogWarning("Could not query image info for {Path}, falling back to defaults", imagePath);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Exception detecting image format for {Path}, falling back to qcow2", imagePath);
+            _logger.LogWarning(ex, "Exception querying image info for {Path}, falling back to defaults", imagePath);
         }
 
-        return "qcow2";
+        return (format, virtualSize);
     }
 
     public Task DeleteDiskAsync(string diskPath, CancellationToken ct = default)
