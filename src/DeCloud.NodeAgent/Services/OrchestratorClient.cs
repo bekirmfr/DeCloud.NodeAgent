@@ -579,6 +579,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                     port = s.Port,
                     protocol = s.Protocol,
                     status = s.Status,
+                    statusMessage = s.StatusMessage,
                     readyAt = s.ReadyAt?.ToString("O")
                 })
             }),

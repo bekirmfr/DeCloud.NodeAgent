@@ -180,6 +180,7 @@ public class HeartbeatService : BackgroundService
                             Port = s.Port,
                             Protocol = s.Protocol,
                             Status = s.Status.ToString(),
+                            StatusMessage = s.StatusMessage,
                             ReadyAt = s.ReadyAt
                         }).ToList() : null
                     });

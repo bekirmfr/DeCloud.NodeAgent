@@ -82,14 +82,40 @@ public class VmReadinessMonitor : BackgroundService
         var domainName = vm.VmId;
         bool anyChanged = false;
 
-        // Check if guest agent is responding first
+        // Evaluate timeouts BEFORE the guest agent gate so that services don't stay
+        // Pending forever when qemu-guest-agent never starts (e.g. missing package).
+        var systemService = vm.Services.FirstOrDefault(s => s.Name == "System");
+        foreach (var service in vm.Services)
+        {
+            if (service.Status is ServiceReadiness.Ready
+                or ServiceReadiness.TimedOut
+                or ServiceReadiness.Failed)
+                continue;
+
+            var timeoutBase = service.Name == "System"
+                ? (vm.StartedAt ?? vm.CreatedAt)
+                : (systemService?.ReadyAt ?? vm.StartedAt ?? vm.CreatedAt);
+            var elapsed = (DateTime.UtcNow - timeoutBase).TotalSeconds;
+            if (elapsed > service.TimeoutSeconds)
+            {
+                service.Status = ServiceReadiness.TimedOut;
+                service.LastCheckAt = DateTime.UtcNow;
+                anyChanged = true;
+                _logger.LogWarning(
+                    "Service {Service} on VM {VmId} timed out after {Timeout}s (guest agent may not be running)",
+                    service.Name, vm.VmId, service.TimeoutSeconds);
+            }
+        }
+
+        // Check if guest agent is responding — needed for active probing
         if (!await IsGuestAgentReady(domainName, ct))
         {
-            _logger.LogDebug("Guest agent not ready for VM {VmId}, skipping", vm.VmId);
+            _logger.LogDebug("Guest agent not ready for VM {VmId}, skipping active checks", vm.VmId);
+            if (anyChanged)
+                await _repository.SaveVmAsync(vm);
             return;
         }
 
-        var systemService = vm.Services.FirstOrDefault(s => s.Name == "System");
         bool systemReady = systemService?.Status == ServiceReadiness.Ready;
 
         foreach (var service in vm.Services)
@@ -116,28 +142,6 @@ public class VmReadinessMonitor : BackgroundService
                     anyChanged = true;
                 }
                 continue;
-            }
-
-            // Check timeout — only applies to services not yet timed out.
-            // System counts from VM start; other services count from when System became Ready.
-            if (service.Status is not (ServiceReadiness.TimedOut or ServiceReadiness.Failed))
-            {
-                var timeoutBase = service.Name == "System"
-                    ? (vm.StartedAt ?? vm.CreatedAt)
-                    : (systemService?.ReadyAt ?? vm.StartedAt ?? vm.CreatedAt);
-                var elapsed = (DateTime.UtcNow - timeoutBase).TotalSeconds;
-                if (elapsed > service.TimeoutSeconds)
-                {
-                    if (service.Status != ServiceReadiness.TimedOut)
-                    {
-                        service.Status = ServiceReadiness.TimedOut;
-                        service.LastCheckAt = DateTime.UtcNow;
-                        anyChanged = true;
-                        _logger.LogWarning("Service {Service} on VM {VmId} timed out after {Timeout}s",
-                            service.Name, vm.VmId, service.TimeoutSeconds);
-                    }
-                    continue;
-                }
             }
 
             // Execute the check
