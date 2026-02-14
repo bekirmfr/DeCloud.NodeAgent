@@ -256,6 +256,7 @@ public class LibvirtVmManager : IVmManager
             var vmDir = Path.Combine(_options.VmStoragePath, vmId);
             string? ownerId = null;
             string? vmName = null;
+            var vmType = VmType.General;
 
             var metadataPath = Path.Combine(vmDir, "metadata.json");
             if (File.Exists(metadataPath))
@@ -266,22 +267,31 @@ public class LibvirtVmManager : IVmManager
                         await File.ReadAllTextAsync(metadataPath, ct));
                     ownerId = metadata.RootElement.TryGetProperty("ownerId", out var t) ? t.GetString() : null;
                     vmName = metadata.RootElement.TryGetProperty("name", out var n) ? n.GetString() : null;
+
+                    if (metadata.RootElement.TryGetProperty("vmType", out var vt) &&
+                        Enum.TryParse<VmType>(vt.GetString(), ignoreCase: true, out var parsedType))
+                    {
+                        vmType = parsedType;
+                    }
                 }
                 catch { }
             }
 
+            var resolvedName = vmName ?? domain.Element("name")?.Value ?? vmId;
+
             var instance = new VmInstance
             {
                 VmId = vmId,
-                Name = vmName ?? domain.Element("name")?.Value ?? vmId,
+                Name = resolvedName,
                 Spec = new VmSpec
                 {
                     Id = vmId,
-                    Name = vmName ?? domain.Element("name")?.Value ?? vmId,
+                    Name = resolvedName,
                     VirtualCpuCores = vcpus,
                     MemoryBytes = memoryBytes,
                     DiskBytes = await GetDiskSizeAsync(diskPath, ct),
                     OwnerId = ownerId ?? "unknown",
+                    VmType = vmType,
                 },
                 State = state,
                 DiskPath = diskPath,
@@ -292,6 +302,71 @@ public class LibvirtVmManager : IVmManager
                     : DateTime.UtcNow,
                 StartedAt = state == VmState.Running ? DateTime.UtcNow : null
             };
+
+            // -----------------------------------------------------------------
+            // Recover services from SQLite if the DB record still exists.
+            // After a crash the in-memory dict is empty but the DB may be intact.
+            // -----------------------------------------------------------------
+            try
+            {
+                var dbVm = await _repository.LoadVmAsync(vmId);
+                if (dbVm?.Services.Count > 0)
+                {
+                    instance.Services = dbVm.Services;
+                    _logger.LogInformation(
+                        "Recovered {Count} service(s) from database for VM {VmId}",
+                        instance.Services.Count, vmId);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not load services from database for VM {VmId}", vmId);
+            }
+
+            // -----------------------------------------------------------------
+            // For DHT VMs: recover peer ID from the dht-peer-id file on disk.
+            // The DHT callback writes this file, and it survives crashes.
+            // Re-populate the System service StatusMessage so heartbeats report
+            // the peer ID without waiting for a callback that won't re-fire.
+            // -----------------------------------------------------------------
+            if (vmType == VmType.Dht)
+            {
+                var peerIdPath = Path.Combine(vmDir, "dht-peer-id");
+                if (File.Exists(peerIdPath))
+                {
+                    try
+                    {
+                        var peerId = (await File.ReadAllTextAsync(peerIdPath, ct)).Trim();
+                        if (!string.IsNullOrEmpty(peerId))
+                        {
+                            var systemService = instance.Services.FirstOrDefault(s => s.Name == "System");
+                            if (systemService == null)
+                            {
+                                systemService = new VmServiceStatus
+                                {
+                                    Name = "System",
+                                    CheckType = CheckType.CloudInitDone,
+                                    TimeoutSeconds = 300
+                                };
+                                instance.Services.Add(systemService);
+                            }
+
+                            systemService.Status = ServiceReadiness.Ready;
+                            systemService.StatusMessage = $"peerId={peerId}";
+                            systemService.ReadyAt ??= DateTime.UtcNow;
+                            systemService.LastCheckAt = DateTime.UtcNow;
+
+                            _logger.LogInformation(
+                                "Recovered DHT peer ID from disk for VM {VmId}: {PeerId}",
+                                vmId, peerId.Length > 16 ? peerId[..16] + "..." : peerId);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Could not read dht-peer-id for VM {VmId}", vmId);
+                    }
+                }
+            }
 
             return instance;
         }
@@ -661,6 +736,7 @@ public class LibvirtVmManager : IVmManager
             vmId = spec.Id,
             name = spec.Name,
             ownerId = spec.OwnerId,
+            vmType = spec.VmType.ToString(),
             createdAt = DateTime.UtcNow,
             virtualCpuCores = spec.VirtualCpuCores,
             memoryBytes = spec.MemoryBytes,
