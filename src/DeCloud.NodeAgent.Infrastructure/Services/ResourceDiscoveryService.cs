@@ -633,6 +633,9 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             var ipResult = await _executor.ExecuteAsync("hostname", "-I", ct);
             if (ipResult.Success)
                 info.PrivateIp = ipResult.StandardOutput.Trim().Split(' ').FirstOrDefault() ?? "";
+
+            // Discover network interfaces and link speeds from sysfs
+            await DiscoverLinuxNetworkInterfacesAsync(info, ct);
         }
 
         // Determine NAT type by comparing public and private IPs
@@ -669,6 +672,100 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         }
 
         return info;
+    }
+
+    /// <summary>
+    /// Discover Linux network interfaces and their link speeds from /sys/class/net.
+    /// Sets BandwidthBitsPerSecond to the fastest non-loopback interface speed.
+    /// </summary>
+    private async Task DiscoverLinuxNetworkInterfacesAsync(NetworkInfo info, CancellationToken ct)
+    {
+        try
+        {
+            // List network interfaces from /sys/class/net (excludes virtual/loopback by checking type)
+            var listResult = await _executor.ExecuteAsync("ls", "/sys/class/net", ct);
+            if (!listResult.Success)
+                return;
+
+            long maxSpeedBps = 0;
+
+            foreach (var iface in listResult.StandardOutput.Trim().Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var ifaceName = iface.Trim();
+
+                // Skip loopback and common virtual interfaces
+                if (ifaceName == "lo" || ifaceName.StartsWith("vnet") ||
+                    ifaceName.StartsWith("virbr") || ifaceName.StartsWith("docker") ||
+                    ifaceName.StartsWith("br-") || ifaceName.StartsWith("veth"))
+                    continue;
+
+                // Check if interface is up: read /sys/class/net/<iface>/operstate
+                var statePath = $"/sys/class/net/{ifaceName}/operstate";
+                var stateResult = await _executor.ExecuteAsync("cat", statePath, ct);
+                var isUp = stateResult.Success &&
+                           stateResult.StandardOutput.Trim().Equals("up", StringComparison.OrdinalIgnoreCase);
+
+                // Read link speed in Mbps from /sys/class/net/<iface>/speed
+                // Returns -1 if interface is down or speed is unknown
+                long speedMbps = 0;
+                var speedPath = $"/sys/class/net/{ifaceName}/speed";
+                var speedResult = await _executor.ExecuteAsync("cat", speedPath, ct);
+                if (speedResult.Success && long.TryParse(speedResult.StandardOutput.Trim(), out var parsedSpeed) && parsedSpeed > 0)
+                {
+                    speedMbps = parsedSpeed;
+                }
+
+                // Read MAC address
+                var macPath = $"/sys/class/net/{ifaceName}/address";
+                var macResult = await _executor.ExecuteAsync("cat", macPath, ct);
+                var mac = macResult.Success ? macResult.StandardOutput.Trim() : "";
+
+                // Read IP address for this interface
+                var addrResult = await _executor.ExecuteAsync(
+                    "ip", $"-4 -o addr show {ifaceName}", ct);
+                var ifaceIp = "";
+                if (addrResult.Success)
+                {
+                    // Format: "2: eth0    inet 192.168.1.5/24 brd ..."
+                    var match = Regex.Match(
+                        addrResult.StandardOutput, @"inet\s+(\d+\.\d+\.\d+\.\d+)");
+                    if (match.Success)
+                        ifaceIp = match.Groups[1].Value;
+                }
+
+                info.Interfaces.Add(new NetworkInterface
+                {
+                    Name = ifaceName,
+                    MacAddress = mac,
+                    IpAddress = ifaceIp,
+                    SpeedMbps = speedMbps,
+                    IsUp = isUp
+                });
+
+                if (isUp && speedMbps > 0)
+                {
+                    var speedBps = speedMbps * 1_000_000L;
+                    if (speedBps > maxSpeedBps)
+                        maxSpeedBps = speedBps;
+                }
+            }
+
+            if (maxSpeedBps > 0)
+            {
+                info.BandwidthBitsPerSecond = maxSpeedBps;
+                _logger.LogInformation(
+                    "Network bandwidth: {SpeedMbps} Mbps (from fastest active interface)",
+                    maxSpeedBps / 1_000_000);
+            }
+            else
+            {
+                _logger.LogWarning("Could not determine network bandwidth — no active interfaces with reported speed");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to discover Linux network interfaces");
+        }
     }
 
     /// <summary>
