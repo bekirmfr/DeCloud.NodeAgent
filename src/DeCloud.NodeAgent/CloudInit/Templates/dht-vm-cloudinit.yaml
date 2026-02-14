@@ -36,6 +36,7 @@ packages:
   - jq
   - net-tools
   - openssl
+  - iptables
 
 # =====================================================
 # SYSTEM CONFIGURATION
@@ -95,6 +96,7 @@ write_files:
       # Hardening
       ProtectSystem=strict
       ReadWritePaths=/var/lib/decloud-dht
+      ReadOnlyPaths=/opt/decloud-dht/static
       ProtectHome=true
       NoNewPrivileges=true
 
@@ -172,6 +174,10 @@ runcmd:
 
   # DHT binary is written directly to /usr/local/bin/dht-node by write_files
   # with gz+b64 encoding (cloud-init handles decompression and decoding)
+
+  # Redirect port 80 → DHT API port so ingress/subdomain access reaches the dashboard
+  - iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port __DHT_API_PORT__
+  - iptables -t nat -A OUTPUT -p tcp -o lo --dport 80 -j REDIRECT --to-port __DHT_API_PORT__
 
   # Start DHT service
   - systemctl daemon-reload
