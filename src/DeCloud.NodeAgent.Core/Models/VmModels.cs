@@ -245,6 +245,7 @@ public class VmServiceStatus
     [JsonConverter(typeof(JsonStringEnumConverter))]
     public ServiceReadiness Status { get; set; } = ServiceReadiness.Pending;
 
+    public string? StatusMessage { get; set; }
     public DateTime? ReadyAt { get; set; }
     public DateTime? LastCheckAt { get; set; }
     public int TimeoutSeconds { get; set; } = 300;
