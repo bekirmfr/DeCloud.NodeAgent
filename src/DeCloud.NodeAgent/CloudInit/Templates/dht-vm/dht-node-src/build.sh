@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-GO_VERSION="1.23.6"
+GO_VERSION="1.23.7"
 GO_MIN_VERSION="1.23"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -123,11 +123,10 @@ echo "Go env: HOME=$HOME GOPATH=$GOPATH GOMODCACHE=$GOMODCACHE GOCACHE=$GOCACHE"
 # Build
 # =====================================================
 
-# Ensure dependencies are resolved
-if [ ! -f go.sum ]; then
-    echo "Resolving Go dependencies..."
-    go mod tidy
-fi
+# Ensure dependencies are resolved (always run — Go version upgrades may
+# require go.sum updates even when the file already exists)
+echo "Resolving Go dependencies..."
+go mod tidy
 
 for ARCH in $ARCHITECTURES; do
     BINARY_NAME="dht-node-${ARCH}"
