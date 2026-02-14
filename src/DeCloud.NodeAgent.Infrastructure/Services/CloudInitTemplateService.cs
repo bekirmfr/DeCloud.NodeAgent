@@ -384,10 +384,16 @@ public class CloudInitTemplateService : ICloudInitTemplateService
         await _cacheLock.WaitAsync(ct);
         try
         {
+            // Cache key must include directory to avoid collisions between
+            // VM types with identically-named files (e.g., relay-vm/dashboard.html
+            // vs dht-vm/dashboard.html). Without this, whichever VM type is
+            // processed first poisons the cache for the other.
+            var cacheKey = $"{dirName}/{filename}";
+
             // Check cache first
-            if (_externalTemplateCache.TryGetValue(filename, out var cached))
+            if (_externalTemplateCache.TryGetValue(cacheKey, out var cached))
             {
-                _logger.LogDebug("Using cached external template: {FileName}", filename);
+                _logger.LogDebug("Using cached external template: {CacheKey}", cacheKey);
                 return cached;
             }
 
@@ -407,11 +413,11 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             var content = await File.ReadAllTextAsync(templatePath, ct);
 
             // Cache for future use
-            _externalTemplateCache[filename] = content;
+            _externalTemplateCache[cacheKey] = content;
 
             _logger.LogDebug(
-                "Loaded external template: {FileName} ({Length} chars)",
-                filename, content.Length);
+                "Loaded external template: {CacheKey} ({Length} chars)",
+                cacheKey, content.Length);
 
             return content;
         }
