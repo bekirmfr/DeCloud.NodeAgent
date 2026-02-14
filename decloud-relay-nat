@@ -98,10 +98,14 @@ add_rules() {
     
     # =====================================================
     # STEP 1: PREROUTING - DNAT incoming packets
+    # No interface filter (-i) — must match traffic from ALL interfaces:
+    #   - eth0: external WG peers (CGNAT nodes, remote DHT VMs)
+    #   - virbr0: same-host VMs (DHT VM on same node as relay)
+    # WireGuard itself authenticates peers cryptographically.
     # =====================================================
-    if ! iptables -t nat -C PREROUTING -i "$iface" -p udp --dport 51820 -j DNAT --to-destination "$vm_ip:51820" 2>/dev/null; then
-        iptables -t nat -A PREROUTING -i "$iface" -p udp --dport 51820 -j DNAT --to-destination "$vm_ip:51820"
-        log "  ✓ PREROUTING: $iface:51820 → $vm_ip:51820"
+    if ! iptables -t nat -C PREROUTING -p udp --dport 51820 -j DNAT --to-destination "$vm_ip:51820" 2>/dev/null; then
+        iptables -t nat -A PREROUTING -p udp --dport 51820 -j DNAT --to-destination "$vm_ip:51820"
+        log "  ✓ PREROUTING: *:51820 → $vm_ip:51820 (all interfaces)"
     else
         log "  • PREROUTING rule already exists"
     fi
@@ -157,8 +161,9 @@ remove_rules() {
     
     log "Removing NAT rules for relay VM: $vm_ip"
     
-    # Remove PREROUTING
+    # Remove PREROUTING (try both with and without -i for backward compat)
     iptables -t nat -D PREROUTING -p udp --dport 51820 -j DNAT --to-destination "$vm_ip:51820" 2>/dev/null || \
+        iptables -t nat -D PREROUTING -i eth0 -p udp --dport 51820 -j DNAT --to-destination "$vm_ip:51820" 2>/dev/null || \
         log "  • PREROUTING rule not found"
     
     # Remove POSTROUTING
@@ -315,7 +320,8 @@ test_connectivity() {
     
     # Test 3: NAT rule exists
     echo -n "NAT rule configured: "
-    if iptables -t nat -C PREROUTING -p udp --dport 51820 -j DNAT --to-destination "$vm_ip:51820" 2>/dev/null; then
+    if iptables -t nat -C PREROUTING -p udp --dport 51820 -j DNAT --to-destination "$vm_ip:51820" 2>/dev/null || \
+       iptables -t nat -C PREROUTING -i eth0 -p udp --dport 51820 -j DNAT --to-destination "$vm_ip:51820" 2>/dev/null; then
         echo "✓ Yes"
     else
         echo "✗ No"
