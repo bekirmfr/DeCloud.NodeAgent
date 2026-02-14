@@ -709,6 +709,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     /// <summary>
     /// Discover Linux network interfaces and their link speeds from /sys/class/net.
     /// Sets BandwidthBitsPerSecond to the fastest non-loopback interface speed.
+    /// Falls back to ethtool when sysfs speed is unavailable (common on VPS/virtio-net).
     /// </summary>
     private async Task DiscoverLinuxNetworkInterfacesAsync(NetworkInfo info, CancellationToken ct)
     {
@@ -720,6 +721,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                 return;
 
             long maxSpeedBps = 0;
+            bool hasActiveInterfaceWithoutSpeed = false;
 
             foreach (var iface in listResult.StandardOutput.Trim().Split('\n', StringSplitOptions.RemoveEmptyEntries))
             {
@@ -738,13 +740,19 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                            stateResult.StandardOutput.Trim().Equals("up", StringComparison.OrdinalIgnoreCase);
 
                 // Read link speed in Mbps from /sys/class/net/<iface>/speed
-                // Returns -1 if interface is down or speed is unknown
+                // Returns -1 if interface is down or speed is unknown (common on VPS/virtio-net)
                 long speedMbps = 0;
                 var speedPath = $"/sys/class/net/{ifaceName}/speed";
                 var speedResult = await _executor.ExecuteAsync("cat", speedPath, ct);
                 if (speedResult.Success && long.TryParse(speedResult.StandardOutput.Trim(), out var parsedSpeed) && parsedSpeed > 0)
                 {
                     speedMbps = parsedSpeed;
+                }
+
+                // Fallback: try ethtool when sysfs reports -1 or 0 (VPS/cloud instances)
+                if (speedMbps == 0 && isUp)
+                {
+                    speedMbps = await GetEthtoolSpeedAsync(ifaceName, ct);
                 }
 
                 // Read MAC address
@@ -780,6 +788,10 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                     if (speedBps > maxSpeedBps)
                         maxSpeedBps = speedBps;
                 }
+                else if (isUp && !string.IsNullOrEmpty(ifaceIp))
+                {
+                    hasActiveInterfaceWithoutSpeed = true;
+                }
             }
 
             if (maxSpeedBps > 0)
@@ -788,6 +800,24 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                 _logger.LogInformation(
                     "Network bandwidth: {SpeedMbps} Mbps (from fastest active interface)",
                     maxSpeedBps / 1_000_000);
+            }
+            else if (hasActiveInterfaceWithoutSpeed)
+            {
+                // VPS/cloud instances with virtio-net often don't report link speed.
+                // Use a conservative 1 Gbps default — virtually all modern servers
+                // have at least this, and it prevents null bandwidth from blocking
+                // orchestrator features like relay eligibility.
+                const long defaultBps = 1_000_000_000L; // 1 Gbps
+                info.BandwidthBitsPerSecond = defaultBps;
+
+                // Also update the first active interface that had no speed
+                var activeIface = info.Interfaces.FirstOrDefault(i => i.IsUp && i.SpeedMbps == 0);
+                if (activeIface != null)
+                    activeIface.SpeedMbps = 1000;
+
+                _logger.LogWarning(
+                    "Network interfaces do not report link speed (VPS/virtio-net). " +
+                    "Using conservative default: 1000 Mbps");
             }
             else
             {
@@ -798,6 +828,31 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         {
             _logger.LogWarning(ex, "Failed to discover Linux network interfaces");
         }
+    }
+
+    /// <summary>
+    /// Try to get interface speed via ethtool. Works on some VPS where sysfs doesn't.
+    /// Parses "Speed: 10000Mb/s" or similar from ethtool output.
+    /// </summary>
+    private async Task<long> GetEthtoolSpeedAsync(string ifaceName, CancellationToken ct)
+    {
+        try
+        {
+            var result = await _executor.ExecuteAsync("ethtool", ifaceName, ct);
+            if (!result.Success)
+                return 0;
+
+            // Parse "Speed: 1000Mb/s" or "Speed: 10000Mb/s"
+            var match = Regex.Match(result.StandardOutput, @"Speed:\s*(\d+)\s*Mb/s");
+            if (match.Success && long.TryParse(match.Groups[1].Value, out var speedMbps) && speedMbps > 0)
+            {
+                _logger.LogDebug("ethtool reports {Speed} Mbps for {Interface}", speedMbps, ifaceName);
+                return speedMbps;
+            }
+        }
+        catch { /* ethtool may not be installed */ }
+
+        return 0;
     }
 
     /// <summary>

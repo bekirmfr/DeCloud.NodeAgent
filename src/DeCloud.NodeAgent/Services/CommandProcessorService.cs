@@ -317,6 +317,24 @@ public class CommandProcessorService : BackgroundService
             Labels = labels
         };
 
+        // Defense-in-depth: reject duplicate system VMs (DHT/Relay) with the same name.
+        // The orchestrator's reconciliation loop can race and issue two CreateVm commands
+        // for the same role before the first one is acknowledged.
+        if (vmSpec.VmType is VmType.Dht or VmType.Relay)
+        {
+            var existingVms = await _vmManager.GetAllVmsAsync(ct);
+            var duplicate = existingVms.FirstOrDefault(v =>
+                v.Name == name && v.VmId != vmId &&
+                v.State is not (VmState.Deleted or VmState.Failed));
+            if (duplicate != null)
+            {
+                _logger.LogWarning(
+                    "Rejecting duplicate {VmType} VM {VmId} — a VM with the same name already exists: {ExistingVmId} (state: {State})",
+                    vmSpec.VmType, vmId, duplicate.VmId, duplicate.State);
+                return true; // Return true to ACK and prevent retry
+            }
+        }
+
         _logger.LogInformation(
             "Creating {VmType} type VM {VmId}: {VCpus} vCPUs, {MemoryMB}MB RAM, " +
             "{DiskGB}GB disk, image: {ImageUrl}, quality tier: {QualityTier}",
