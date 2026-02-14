@@ -616,31 +616,31 @@ public class CloudInitTemplateService : ICloudInitTemplateService
         variables.Custom["DHT_BOOTSTRAP_PEERS"] = spec.Labels?.GetValueOrDefault("dht-bootstrap-peers") ?? "";
         variables.Custom["DHT_REGION"] = spec.Labels?.GetValueOrDefault("node-region") ?? "default";
 
-        // Load architecture-specific DHT binary (pre-built during CI via build.sh)
+        // Load architecture-specific DHT binary (gzip+base64 encoded, pre-built via build.sh)
         var architecture = GetTargetArchitecture(spec);
-        var dhtBinaryB64 = await LoadDhtBinaryAsync(architecture, ct);
-        variables.Custom["DHT_NODE_BINARY_BASE64"] = dhtBinaryB64;
+        var dhtBinaryGzB64 = await LoadDhtBinaryAsync(architecture, ct);
+        variables.Custom["DHT_NODE_BINARY_GZ_BASE64"] = dhtBinaryGzB64;
 
         _logger.LogInformation(
             "Configured DHT variables for VM {VmId}: listenPort={ListenPort}, apiPort={ApiPort}, " +
-            "advertiseIp={AdvIP}, arch={Arch}, binarySize={BinaryKB}KB, bootstrapPeers={Peers}",
+            "advertiseIp={AdvIP}, arch={Arch}, binarySize={BinaryKB}KB (gz+b64), bootstrapPeers={Peers}",
             spec.Id,
             variables.Custom["DHT_LISTEN_PORT"],
             variables.Custom["DHT_API_PORT"],
             variables.Custom["DHT_ADVERTISE_IP"],
             architecture,
-            dhtBinaryB64.Length / 1024,
+            dhtBinaryGzB64.Length / 1024,
             string.IsNullOrEmpty(variables.Custom["DHT_BOOTSTRAP_PEERS"]) ? "(none — first node)" : "present");
     }
 
     /// <summary>
-    /// Load the pre-built DHT binary (base64-encoded) from disk.
-    /// If the .b64 file doesn't exist, attempts to build it from the Go source
+    /// Load the pre-built DHT binary (gzip+base64-encoded) from disk.
+    /// If the .gz.b64 file doesn't exist, attempts to build it from the Go source
     /// included in the deployment (dht-node-src/build.sh).
     /// </summary>
     private async Task<string> LoadDhtBinaryAsync(string architecture, CancellationToken ct)
     {
-        var fileName = $"dht-node-{architecture}.b64";
+        var fileName = $"dht-node-{architecture}.gz.b64";
         var filePath = Path.Combine(_templateBasePath, "dht-vm", fileName);
 
         if (!File.Exists(filePath))
@@ -666,16 +666,16 @@ public class CloudInitTemplateService : ICloudInitTemplateService
                 filePath);
         }
 
-        var base64 = await File.ReadAllTextAsync(filePath, ct);
+        var content = await File.ReadAllTextAsync(filePath, ct);
 
-        if (string.IsNullOrWhiteSpace(base64))
+        if (string.IsNullOrWhiteSpace(content))
             throw new InvalidOperationException($"DHT binary file is empty: {filePath}");
 
         _logger.LogInformation(
-            "Loaded DHT binary: {Path} ({SizeKB}KB base64)",
-            filePath, base64.Length / 1024);
+            "Loaded DHT binary: {Path} ({SizeKB}KB gz+b64)",
+            filePath, content.Length / 1024);
 
-        return base64.Trim();
+        return content.Trim();
     }
 
     /// <summary>

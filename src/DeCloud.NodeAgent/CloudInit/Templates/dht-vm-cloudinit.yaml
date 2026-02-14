@@ -41,11 +41,11 @@ packages:
 # SYSTEM CONFIGURATION
 # =====================================================
 write_files:
-  # DHT binary (base64-encoded Go binary, decoded at boot)
-  - path: /opt/decloud-dht/dht-node.b64
-    permissions: '0644'
-    encoding: b64
-    content: __DHT_NODE_BINARY_BASE64__
+  # DHT binary (gzip+base64-encoded Go binary, decoded by cloud-init at boot)
+  - path: /usr/local/bin/dht-node
+    permissions: '0755'
+    encoding: gz+b64
+    content: __DHT_NODE_BINARY_GZ_BASE64__
 
   # DHT environment file (read by systemd EnvironmentFile)
   - path: /etc/decloud-dht/dht.env
@@ -154,10 +154,8 @@ runcmd:
   - chown -R dht:dht /var/lib/decloud-dht
   - chown -R dht:dht /opt/decloud-dht
 
-  # Decode and install the DHT binary
-  - base64 -d /opt/decloud-dht/dht-node.b64 > /usr/local/bin/dht-node
-  - chmod 755 /usr/local/bin/dht-node
-  - rm -f /opt/decloud-dht/dht-node.b64
+  # DHT binary is written directly to /usr/local/bin/dht-node by write_files
+  # with gz+b64 encoding (cloud-init handles decompression and decoding)
 
   # Start DHT service
   - systemctl daemon-reload
