@@ -31,6 +31,7 @@ RELAY_CAPACITY = int("__RELAY_CAPACITY__")
 WIREGUARD_INTERFACE = "wg-relay-server"
 STATIC_DIR = "/opt/decloud-relay/static"
 LISTEN_PORT = 8080
+PEER_REGISTRY_PATH = "/etc/decloud/peer-registry.json"
 
 # ==================== Periodic Cleanup Configuration ====================
 CLEANUP_ENABLED = True                    # Enable/disable automatic cleanup
@@ -69,6 +70,46 @@ cleanup_stats = {
 # Track when peers were registered (public_key -> timestamp)
 peer_registration_times = {}
 peer_registration_lock = threading.Lock()
+
+# Persistent relay peer registry (public_key -> metadata)
+# Protected from stale cleanup — only removed via explicit API call
+relay_peer_registry = {}
+relay_peer_lock = threading.Lock()
+
+
+def load_peer_registry():
+    """Load relay peer registry from persistent JSON file"""
+    global relay_peer_registry
+    try:
+        if os.path.exists(PEER_REGISTRY_PATH):
+            with open(PEER_REGISTRY_PATH, 'r') as f:
+                data = json.load(f)
+            relay_peer_registry = data.get('relay_peers', {})
+            logger.info(f"📂 Loaded {len(relay_peer_registry)} relay peers from registry")
+        else:
+            relay_peer_registry = {}
+            logger.info("📂 No existing peer registry found, starting fresh")
+    except Exception as e:
+        logger.error(f"Error loading peer registry: {e}")
+        relay_peer_registry = {}
+
+
+def save_peer_registry():
+    """Save relay peer registry to persistent JSON file"""
+    try:
+        os.makedirs(os.path.dirname(PEER_REGISTRY_PATH), exist_ok=True)
+        data = {'relay_peers': relay_peer_registry}
+        with open(PEER_REGISTRY_PATH, 'w') as f:
+            json.dump(data, f, indent=2)
+        logger.debug(f"💾 Saved {len(relay_peer_registry)} relay peers to registry")
+    except Exception as e:
+        logger.error(f"Error saving peer registry: {e}")
+
+
+def is_relay_peer(public_key):
+    """Check if a peer is a registered relay peer"""
+    with relay_peer_lock:
+        return public_key in relay_peer_registry
 
 # ==================== Helper Functions ====================
 
@@ -208,6 +249,15 @@ class PeerCleanupThread(threading.Thread):
                         'public_key': public_key[:16] + '...',
                         'allowed_ips': allowed_ips,
                         'reason': 'orchestrator'
+                    })
+                    continue
+                
+                # Never remove relay peers (persistent, managed via API)
+                if is_relay_peer(public_key):
+                    kept.append({
+                        'public_key': public_key[:16] + '...',
+                        'allowed_ips': allowed_ips,
+                        'reason': 'relay_peer'
                     })
                     continue
                 
@@ -380,6 +430,8 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             self.send_json_response(status)
         elif path == '/api/relay/cleanup/stats':
             self.get_cleanup_stats()
+        elif path == '/api/relay/relay-peers':
+            self.get_relay_peers()
         elif path == '/' or path == '/index.html':
             self.serve_dashboard()
         elif path.startswith('/static/'):
@@ -398,6 +450,10 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             self.add_cgnat_peer()
         elif path == '/api/relay/remove-peer':
             self.remove_cgnat_peer()
+        elif path == '/api/relay/add-relay-peer':
+            self.add_relay_peer()
+        elif path == '/api/relay/remove-relay-peer':
+            self.remove_relay_peer()
         elif path == '/api/relay/cleanup':
             self.manual_cleanup()
         elif path == '/api/relay/add-port-forward':
@@ -560,6 +616,236 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             logger.error(f"Add peer error: {e}", exc_info=True)
             self.send_error_response(500, 'Internal Error', str(e))
     
+    def add_relay_peer(self):
+        """
+        Add another relay as WireGuard peer (persistent, protected from cleanup).
+        Called by orchestrator during cross-peering.
+        """
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length == 0:
+                self.send_error_response(400, 'Bad Request', 'Request body is empty')
+                return
+            
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode('utf-8'))
+            
+            # Validate required fields
+            required_fields = ['public_key', 'endpoint', 'allowed_ips', 'relay_id']
+            missing_fields = [f for f in required_fields if f not in data]
+            
+            if missing_fields:
+                self.send_error_response(
+                    400,
+                    'Missing Required Fields',
+                    f"Missing fields: {', '.join(missing_fields)}"
+                )
+                return
+            
+            public_key = data['public_key']
+            endpoint = data['endpoint']
+            allowed_ips = data['allowed_ips']
+            relay_id = data['relay_id']
+            
+            # Validate allowed_ips is a /24 subnet
+            if '/24' not in allowed_ips:
+                self.send_error_response(
+                    400,
+                    'Invalid AllowedIPs',
+                    'Relay peers must use /24 subnet (e.g., 10.20.2.0/24)'
+                )
+                return
+            
+            # Validate subnet is in 10.20.x.0/24 range
+            if not allowed_ips.startswith('10.20.'):
+                self.send_error_response(
+                    400,
+                    'Invalid Subnet',
+                    'Relay subnet must be in 10.20.0.0/16 range'
+                )
+                return
+            
+            # Add peer with persistent keepalive (relay-to-relay needs bidirectional)
+            cmd = [
+                'wg', 'set', WIREGUARD_INTERFACE,
+                'peer', public_key,
+                'endpoint', endpoint,
+                'allowed-ips', allowed_ips,
+                'persistent-keepalive', '25'
+            ]
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            
+            if result.returncode != 0:
+                logger.error(f"Failed to add relay peer: {result.stderr}")
+                self.send_error_response(
+                    500,
+                    'Failed to Add Relay Peer',
+                    result.stderr or 'Unknown error'
+                )
+                return
+            
+            # Save WireGuard configuration
+            try:
+                subprocess.run(
+                    ['wg-quick', 'save', WIREGUARD_INTERFACE],
+                    capture_output=True,
+                    timeout=5
+                )
+            except Exception as e:
+                logger.warning(f"Failed to save WireGuard config: {e}")
+            
+            # Register in persistent relay peer registry
+            with relay_peer_lock:
+                relay_peer_registry[public_key] = {
+                    'endpoint': endpoint,
+                    'allowed_ips': allowed_ips,
+                    'relay_id': relay_id,
+                    'added_at': int(time.time())
+                }
+                save_peer_registry()
+            
+            # Also track registration time for grace period
+            record_peer_registration(public_key)
+            
+            logger.info(
+                f"✅ Added relay peer: {public_key[:16]}... "
+                f"(relay: {relay_id}, subnet: {allowed_ips}, endpoint: {endpoint})"
+            )
+            
+            self.send_json_response({
+                'success': True,
+                'peer_public_key': public_key[:16] + '...',
+                'relay_id': relay_id,
+                'allowed_ips': allowed_ips,
+                'endpoint': endpoint,
+                'peer_type': 'relay'
+            })
+            
+        except json.JSONDecodeError as e:
+            self.send_error_response(400, 'Invalid JSON', str(e))
+        except subprocess.TimeoutExpired:
+            self.send_error_response(504, 'Command Timeout', 'WireGuard command timed out')
+        except Exception as e:
+            logger.error(f"Add relay peer error: {e}", exc_info=True)
+            self.send_error_response(500, 'Internal Error', str(e))
+    
+    def remove_relay_peer(self):
+        """Remove a relay peer from WireGuard and the persistent registry"""
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length == 0:
+                self.send_error_response(400, 'Bad Request', 'Request body is empty')
+                return
+            
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode('utf-8'))
+            
+            if 'public_key' not in data:
+                self.send_error_response(400, 'Missing Field', 'public_key is required')
+                return
+            
+            public_key = data['public_key']
+            
+            # Check if peer exists in relay registry
+            with relay_peer_lock:
+                if public_key not in relay_peer_registry:
+                    self.send_error_response(
+                        404,
+                        'Relay Peer Not Found',
+                        'Public key not found in relay peer registry'
+                    )
+                    return
+            
+            # Remove from WireGuard
+            result = subprocess.run(
+                ['wg', 'set', WIREGUARD_INTERFACE, 'peer', public_key, 'remove'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            
+            if result.returncode != 0:
+                logger.error(f"Failed to remove relay peer: {result.stderr}")
+                self.send_error_response(
+                    500,
+                    'Failed to Remove Relay Peer',
+                    result.stderr or 'Unknown error'
+                )
+                return
+            
+            # Save WireGuard configuration
+            try:
+                subprocess.run(
+                    ['wg-quick', 'save', WIREGUARD_INTERFACE],
+                    capture_output=True,
+                    timeout=5
+                )
+            except Exception as e:
+                logger.warning(f"Failed to save WireGuard config: {e}")
+            
+            # Remove from persistent registry
+            relay_id = 'unknown'
+            with relay_peer_lock:
+                entry = relay_peer_registry.pop(public_key, None)
+                if entry:
+                    relay_id = entry.get('relay_id', 'unknown')
+                save_peer_registry()
+            
+            # Clean up registration tracking
+            with peer_registration_lock:
+                peer_registration_times.pop(public_key, None)
+            
+            logger.info(
+                f"✅ Removed relay peer: {public_key[:16]}... (relay: {relay_id})"
+            )
+            
+            self.send_json_response({
+                'success': True,
+                'peer_public_key': public_key[:16] + '...',
+                'relay_id': relay_id
+            })
+            
+        except json.JSONDecodeError as e:
+            self.send_error_response(400, 'Invalid JSON', str(e))
+        except subprocess.TimeoutExpired:
+            self.send_error_response(504, 'Command Timeout', 'WireGuard command timed out')
+        except Exception as e:
+            logger.error(f"Remove relay peer error: {e}", exc_info=True)
+            self.send_error_response(500, 'Internal Error', str(e))
+    
+    def get_relay_peers(self):
+        """Get all registered relay peers with their status"""
+        try:
+            current_time = int(time.time())
+            peers = []
+            
+            with relay_peer_lock:
+                for pub_key, info in relay_peer_registry.items():
+                    peers.append({
+                        'public_key': pub_key[:16] + '...',
+                        'relay_id': info.get('relay_id', 'unknown'),
+                        'endpoint': info.get('endpoint', ''),
+                        'allowed_ips': info.get('allowed_ips', ''),
+                        'added_at': info.get('added_at', 0),
+                        'age_seconds': current_time - info.get('added_at', current_time)
+                    })
+            
+            self.send_json_response({
+                'relay_id': RELAY_ID,
+                'relay_peer_count': len(peers),
+                'relay_peers': peers
+            })
+            
+        except Exception as e:
+            logger.error(f"Get relay peers error: {e}", exc_info=True)
+            self.send_error_response(500, 'Internal Error', str(e))
+    
     def remove_cgnat_peer(self):
         """Remove CGNAT node peer"""
         try:
@@ -668,6 +954,15 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                         'public_key': public_key[:16] + '...',
                         'allowed_ips': allowed_ips,
                         'reason': 'orchestrator'
+                    })
+                    continue
+                
+                # Never remove relay peers (persistent, managed via API)
+                if is_relay_peer(public_key):
+                    kept.append({
+                        'public_key': public_key[:16] + '...',
+                        'allowed_ips': allowed_ips,
+                        'reason': 'relay_peer'
                     })
                     continue
                 
@@ -1165,6 +1460,9 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
 # ==================== Server Startup ====================
 def main():
     """Start the relay API server with background cleanup"""
+    
+    # Load persistent relay peer registry
+    load_peer_registry()
     
     if not os.path.exists(STATIC_DIR):
         logger.error(f"Static directory not found: {STATIC_DIR}")

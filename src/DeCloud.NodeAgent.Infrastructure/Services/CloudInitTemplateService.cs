@@ -778,4 +778,152 @@ public class CloudInitTemplateService : ICloudInitTemplateService
 
         return new string(bytes.Select(b => chars[b % chars.Length]).ToArray());
     }
+
+    /// <summary>
+    /// Read and parse a WireGuard config file from the host filesystem.
+    /// Used as CGNAT fallback when no local relay VM is available —
+    /// reads /etc/wireguard/wg-relay.conf to discover relay info.
+    /// </summary>
+    /// <param name="configFileName">Config file name (e.g., "wg-relay.conf")</param>
+    /// <param name="ct">Cancellation token</param>
+    /// <returns>Parsed config or null if file doesn't exist / can't be parsed</returns>
+    public async Task<HostWireGuardConfig?> ReadHostWireGuardConfigAsync(
+        string configFileName, CancellationToken ct)
+    {
+        var configPath = $"/etc/wireguard/{configFileName}";
+
+        try
+        {
+            // Read the config file via shell command (runs as root on the node agent host)
+            var result = await _executor.ExecuteAsync("cat", configPath, ct);
+
+            if (!result.Success)
+            {
+                _logger.LogDebug(
+                    "WireGuard config not found at {Path}: {Error}",
+                    configPath, result.StandardError);
+                return null;
+            }
+
+            var configText = result.StandardOutput;
+            if (string.IsNullOrWhiteSpace(configText))
+            {
+                _logger.LogWarning("WireGuard config at {Path} is empty", configPath);
+                return null;
+            }
+
+            return ParseWireGuardConfig(configText, configPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error reading WireGuard config from {Path}", configPath);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Parse a standard WireGuard config file format to extract relay info.
+    /// 
+    /// Expected format:
+    ///   [Interface]
+    ///   Address = 10.20.1.2/24
+    ///   PrivateKey = ...
+    ///
+    ///   [Peer]
+    ///   PublicKey = ...
+    ///   Endpoint = 1.2.3.4:51820
+    ///   AllowedIPs = 10.20.1.0/24
+    /// </summary>
+    private HostWireGuardConfig? ParseWireGuardConfig(string configText, string sourcePath)
+    {
+        var config = new HostWireGuardConfig();
+
+        // Parse Address from [Interface] section (e.g., "10.20.1.2/24")
+        var addressMatch = Regex.Match(configText,
+            @"Address\s*=\s*(\d+\.\d+\.\d+\.\d+)/(\d+)",
+            RegexOptions.Multiline);
+
+        if (addressMatch.Success)
+        {
+            config.TunnelIp = addressMatch.Groups[1].Value;
+
+            // Extract subnet number from 10.20.X.Y
+            var ipParts = config.TunnelIp.Split('.');
+            if (ipParts.Length == 4 && ipParts[0] == "10" && ipParts[1] == "20")
+            {
+                config.Subnet = ipParts[2];
+            }
+        }
+
+        // Parse PublicKey from [Peer] section 
+        var pubKeyMatch = Regex.Match(configText,
+            @"\[Peer\][\s\S]*?PublicKey\s*=\s*([A-Za-z0-9+/=]+)",
+            RegexOptions.Multiline);
+
+        if (pubKeyMatch.Success)
+        {
+            config.PublicKey = pubKeyMatch.Groups[1].Value.Trim();
+        }
+
+        // Parse Endpoint from [Peer] section
+        var endpointMatch = Regex.Match(configText,
+            @"\[Peer\][\s\S]*?Endpoint\s*=\s*([^\s]+)",
+            RegexOptions.Multiline);
+
+        if (endpointMatch.Success)
+        {
+            config.Endpoint = endpointMatch.Groups[1].Value.Trim();
+
+            // Extract relay IP from endpoint (ip:port)
+            var colonIdx = config.Endpoint.LastIndexOf(':');
+            if (colonIdx > 0)
+            {
+                config.RelayIp = config.Endpoint.Substring(0, colonIdx);
+            }
+        }
+
+        // Validate we got the essential fields
+        if (string.IsNullOrEmpty(config.Endpoint) ||
+            string.IsNullOrEmpty(config.PublicKey) ||
+            string.IsNullOrEmpty(config.TunnelIp))
+        {
+            _logger.LogWarning(
+                "WireGuard config at {Path} is incomplete — " +
+                "Endpoint={Endpoint}, PublicKey={PubKey}, TunnelIp={TunnelIp}",
+                sourcePath,
+                config.Endpoint ?? "(missing)",
+                config.PublicKey != null ? config.PublicKey[..Math.Min(12, config.PublicKey.Length)] + "..." : "(missing)",
+                config.TunnelIp ?? "(missing)");
+            return null;
+        }
+
+        _logger.LogInformation(
+            "Parsed WireGuard config from {Path}: endpoint={Endpoint}, " +
+            "tunnelIp={TunnelIp}, subnet={Subnet}",
+            sourcePath, config.Endpoint, config.TunnelIp, config.Subnet);
+
+        return config;
+    }
+}
+
+/// <summary>
+/// Parsed host WireGuard configuration from /etc/wireguard/*.conf.
+/// Used for CGNAT fallback relay info resolution.
+/// </summary>
+public class HostWireGuardConfig
+{
+    /// <summary>Relay's WireGuard endpoint (ip:port)</summary>
+    public string? Endpoint { get; set; }
+
+    /// <summary>Relay's WireGuard public key</summary>
+    public string? PublicKey { get; set; }
+
+    /// <summary>This host's tunnel IP (e.g., "10.20.1.2")</summary>
+    public string? TunnelIp { get; set; }
+
+    /// <summary>Relay IP extracted from Endpoint</summary>
+    public string? RelayIp { get; set; }
+
+    /// <summary>Subnet number (e.g., "1" from 10.20.1.0/24)</summary>
+    public string? Subnet { get; set; }
 }
