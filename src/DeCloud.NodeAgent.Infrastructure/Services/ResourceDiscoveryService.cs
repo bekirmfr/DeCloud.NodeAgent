@@ -614,18 +614,50 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             if (ipResult.Success)
                 info.PrivateIp = ipResult.StandardOutput.Trim();
 
-            var ifResult = await _executor.ExecuteAsync("powershell",
-                "-NoProfile -Command \"Get-NetAdapter | Where-Object Status -eq 'Up' | Select-Object -First 1 Name, MacAddress, LinkSpeed | ConvertTo-Json\"",
+            // Query all active adapters with link speeds (.Speed returns bps as long)
+            var speedResult = await _executor.ExecuteAsync("powershell",
+                "-NoProfile -Command \"Get-NetAdapter | Where-Object Status -eq 'Up' | Select-Object Name, MacAddress, @{N='SpeedBps';E={$_.Speed}} | ConvertTo-Json\"",
                 ct);
-            if (ifResult.Success && !string.IsNullOrWhiteSpace(ifResult.StandardOutput))
+
+            if (speedResult.Success && !string.IsNullOrWhiteSpace(speedResult.StandardOutput))
             {
-                info.Interfaces.Add(new NetworkInterface
+                long maxSpeedBps = 0;
+                var adapters = SplitJsonArray(speedResult.StandardOutput);
+
+                // Handle single adapter (PowerShell returns object, not array)
+                if (adapters.Count == 0 && speedResult.StandardOutput.TrimStart().StartsWith("{"))
+                    adapters.Add(speedResult.StandardOutput);
+
+                foreach (var adapter in adapters)
                 {
-                    Name = ExtractJsonValue(ifResult.StandardOutput, "Name") ?? "Ethernet",
-                    MacAddress = ExtractJsonValue(ifResult.StandardOutput, "MacAddress") ?? "",
-                    IpAddress = info.PrivateIp,
-                    IsUp = true
-                });
+                    var name = ExtractJsonValue(adapter, "Name") ?? "Ethernet";
+                    var mac = ExtractJsonValue(adapter, "MacAddress") ?? "";
+                    var speedBpsStr = ExtractJsonValue(adapter, "SpeedBps");
+                    long speedBps = 0;
+
+                    if (!string.IsNullOrEmpty(speedBpsStr))
+                        long.TryParse(speedBpsStr, out speedBps);
+
+                    info.Interfaces.Add(new NetworkInterface
+                    {
+                        Name = name,
+                        MacAddress = mac,
+                        IpAddress = info.PrivateIp,
+                        SpeedMbps = speedBps / 1_000_000,
+                        IsUp = true
+                    });
+
+                    if (speedBps > maxSpeedBps)
+                        maxSpeedBps = speedBps;
+                }
+
+                if (maxSpeedBps > 0)
+                {
+                    info.BandwidthBitsPerSecond = maxSpeedBps;
+                    _logger.LogInformation(
+                        "Network bandwidth: {SpeedMbps} Mbps (from fastest active adapter)",
+                        maxSpeedBps / 1_000_000);
+                }
             }
         }
         else
