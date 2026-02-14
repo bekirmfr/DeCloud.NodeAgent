@@ -3,6 +3,7 @@
 *.gz.b64
 dht-node-amd64
 dht-node-arm64
+.dht-node-source.sha256
 # Auto-downloaded Go toolchain and caches (build.sh self-bootstrapping)
 dht-node-src/.go-*
 dht-node-src/.gopath
