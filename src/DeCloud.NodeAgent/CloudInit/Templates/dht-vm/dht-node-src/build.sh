@@ -120,6 +120,31 @@ mkdir -p "$GOPATH" "$GOMODCACHE" "$GOCACHE"
 echo "Go env: HOME=$HOME GOPATH=$GOPATH GOMODCACHE=$GOMODCACHE GOCACHE=$GOCACHE"
 
 # =====================================================
+# Source hash (detect stale binaries)
+# =====================================================
+SOURCE_HASH=$(find "$SCRIPT_DIR" -name '*.go' -o -name 'go.mod' -o -name 'go.sum' | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
+HASH_FILE="${OUTPUT_DIR}/.dht-node-source.sha256"
+
+echo "Source hash: ${SOURCE_HASH}"
+
+if [ -f "$HASH_FILE" ] && [ "$(cat "$HASH_FILE" 2>/dev/null)" = "$SOURCE_HASH" ]; then
+    # Check if all requested binaries exist
+    ALL_EXIST=true
+    for ARCH in $ARCHITECTURES; do
+        if [ ! -f "${OUTPUT_DIR}/dht-node-${ARCH}.gz.b64" ]; then
+            ALL_EXIST=false
+            break
+        fi
+    done
+
+    if [ "$ALL_EXIST" = true ]; then
+        echo "Source unchanged and binaries exist — skipping build."
+        ls -lh "${OUTPUT_DIR}"/*.gz.b64 2>/dev/null
+        exit 0
+    fi
+fi
+
+# =====================================================
 # Build
 # =====================================================
 
@@ -153,6 +178,10 @@ for ARCH in $ARCHITECTURES; do
     echo "  Done."
     echo ""
 done
+
+# Save source hash so we can detect stale binaries next time
+echo "$SOURCE_HASH" > "$HASH_FILE"
+echo "Saved source hash to ${HASH_FILE}"
 
 echo "=== Build complete ==="
 ls -lh "${OUTPUT_DIR}"/*.gz.b64 2>/dev/null || echo "(no .gz.b64 files found — build may have failed)"

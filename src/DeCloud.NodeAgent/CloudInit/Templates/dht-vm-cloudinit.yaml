@@ -2,7 +2,7 @@
 # DeCloud DHT VM Cloud-Init Configuration
 # Runs a libp2p Kademlia DHT node for peer discovery,
 # key-value storage, and GossipSub event propagation.
-# Version: 3.0 (No Docker — direct binary via systemd)
+# Version: 3.1 (Added dashboard server)
 
 hostname: __HOSTNAME__
 manage_etc_hosts: true
@@ -37,6 +37,7 @@ packages:
   - net-tools
   - openssl
   - iptables
+  - python3
 
 # =====================================================
 # SYSTEM CONFIGURATION
@@ -73,7 +74,7 @@ write_files:
         "api_port": __DHT_API_PORT__,
         "advertise_ip": "__DHT_ADVERTISE_IP__",
         "created_at": "__TIMESTAMP__",
-        "version": "3.0"
+        "version": "3.1"
       }
 
   # DHT systemd service (runs binary directly, no Docker)
@@ -96,9 +97,35 @@ write_files:
       # Hardening
       ProtectSystem=strict
       ReadWritePaths=/var/lib/decloud-dht
-      ReadOnlyPaths=/opt/decloud-dht/static
       ProtectHome=true
       NoNewPrivileges=true
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # Dashboard server (Python — serves UI and proxies to DHT API)
+  - path: /opt/decloud-dht/dht-dashboard.py
+    permissions: '0755'
+    content: |
+      __DHT_DASHBOARD_PY__
+
+  # Dashboard systemd service
+  - path: /etc/systemd/system/decloud-dht-dashboard.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=DeCloud DHT Dashboard Server
+      After=decloud-dht.service
+      Wants=decloud-dht.service
+
+      [Service]
+      Type=simple
+      EnvironmentFile=/etc/decloud-dht/dht.env
+      ExecStart=/usr/bin/python3 /opt/decloud-dht/dht-dashboard.py
+      Restart=always
+      RestartSec=5
+      StandardOutput=journal
+      StandardError=journal
 
       [Install]
       WantedBy=multi-user.target
@@ -175,14 +202,18 @@ runcmd:
   # DHT binary is written directly to /usr/local/bin/dht-node by write_files
   # with gz+b64 encoding (cloud-init handles decompression and decoding)
 
-  # Redirect port 80 → DHT API port so ingress/subdomain access reaches the dashboard
-  - iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port __DHT_API_PORT__
-  - iptables -t nat -A OUTPUT -p tcp -o lo --dport 80 -j REDIRECT --to-port __DHT_API_PORT__
+  # Redirect port 80 → dashboard server (8080) so ingress/subdomain access works
+  - iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080
+  - iptables -t nat -A OUTPUT -p tcp -o lo --dport 80 -j REDIRECT --to-port 8080
 
   # Start DHT service
   - systemctl daemon-reload
   - systemctl enable decloud-dht
   - systemctl start decloud-dht
+
+  # Start dashboard server (after DHT is up)
+  - systemctl enable decloud-dht-dashboard
+  - systemctl start decloud-dht-dashboard
 
   # Start ready callback service
   - systemctl enable decloud-dht-callback
