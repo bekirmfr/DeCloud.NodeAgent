@@ -24,6 +24,20 @@ LOG_TAG="wg-mesh-enroll"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$LOG_TAG] $*" | tee -a /var/log/wg-mesh-enroll.log; }
 log_err() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$LOG_TAG] ERROR: $*" | tee -a /var/log/wg-mesh-enroll.log >&2; }
 
+# ==================== Source Environment ====================
+# Load WG mesh config from env file (cloud-init writes this).
+# The runcmd may not export vars to child processes, so we source here.
+ENV_FILE="/etc/decloud/wg-mesh.env"
+if [ -f "$ENV_FILE" ]; then
+    set -a  # auto-export all sourced vars
+    source "$ENV_FILE"
+    set +a
+    log "Loaded environment from $ENV_FILE"
+else
+    log_err "Environment file not found: $ENV_FILE"
+    exit 1
+fi
+
 # ==================== Validate Config ====================
 WG_INTERFACE="${WG_INTERFACE:-wg-mesh}"
 WG_DESCRIPTION="${WG_DESCRIPTION:-vm-peer}"
@@ -73,6 +87,12 @@ log "Wrote WireGuard config to /etc/wireguard/${WG_INTERFACE}.conf"
 # ==================== Register with Relay API ====================
 # The relay needs to know our public key and allowed IPs so it routes
 # traffic to us through the mesh.
+#
+# The relay API (port 8080) runs inside the relay VM. From this VM,
+# port 8080 on the relay's public IP may not be reachable (only WireGuard
+# UDP/51820 is NAT-forwarded from the host). So we first try the NodeAgent
+# proxy on the host (reachable via virbr0 default gateway on port 5100),
+# then fall back to the direct relay API URL.
 
 REGISTER_PAYLOAD=$(cat <<EOF
 {
@@ -83,36 +103,74 @@ REGISTER_PAYLOAD=$(cat <<EOF
 EOF
 )
 
-log "Registering with relay API at ${WG_RELAY_API}/api/relay/add-peer..."
+# Discover NodeAgent on host via default gateway (virbr0)
+GATEWAY=$(ip route | awk '/default/ {print $3; exit}')
+NODEAGENT_API="http://${GATEWAY}:5100"
 
-MAX_RETRIES=10
-RETRY_DELAY=5
+REGISTERED=false
 
-for attempt in $(seq 1 $MAX_RETRIES); do
-    RESPONSE=$(curl -s -w "\n%{http_code}" \
-        -X POST \
-        -H "Content-Type: application/json" \
-        -d "${REGISTER_PAYLOAD}" \
-        "${WG_RELAY_API}/api/relay/add-peer" \
-        --connect-timeout 5 \
-        --max-time 10 \
-        2>/dev/null || true)
+# Strategy 1: Try NodeAgent proxy (host can reach relay VM on bridge network)
+if [ -n "$GATEWAY" ]; then
+    log "Trying NodeAgent proxy at ${NODEAGENT_API}/api/relay/wg-mesh-enroll..."
 
-    HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-    BODY=$(echo "$RESPONSE" | head -n -1)
+    for attempt in $(seq 1 3); do
+        RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "${REGISTER_PAYLOAD}" \
+            "${NODEAGENT_API}/api/relay/wg-mesh-enroll" \
+            --connect-timeout 5 \
+            --max-time 10 \
+            2>/dev/null || true)
 
-    if [ "$HTTP_CODE" = "200" ]; then
-        log "Successfully registered with relay (attempt $attempt)"
-        break
-    elif [ "$attempt" -eq "$MAX_RETRIES" ]; then
-        log_err "Failed to register with relay after $MAX_RETRIES attempts (HTTP $HTTP_CODE)"
-        log_err "Response: $BODY"
-        log "Continuing anyway — WireGuard may still work if relay adds us manually"
-    else
-        log "Registration attempt $attempt failed (HTTP $HTTP_CODE), retrying in ${RETRY_DELAY}s..."
-        sleep $RETRY_DELAY
-    fi
-done
+        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+        BODY=$(echo "$RESPONSE" | head -n -1)
+
+        if [ "$HTTP_CODE" = "200" ]; then
+            log "Successfully registered via NodeAgent proxy (attempt $attempt)"
+            REGISTERED=true
+            break
+        else
+            log "NodeAgent proxy attempt $attempt failed (HTTP $HTTP_CODE)"
+            sleep 2
+        fi
+    done
+fi
+
+# Strategy 2: Fall back to direct relay API
+if [ "$REGISTERED" = "false" ]; then
+    log "Trying direct relay API at ${WG_RELAY_API}/api/relay/add-peer..."
+
+    MAX_RETRIES=10
+    RETRY_DELAY=5
+
+    for attempt in $(seq 1 $MAX_RETRIES); do
+        RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "${REGISTER_PAYLOAD}" \
+            "${WG_RELAY_API}/api/relay/add-peer" \
+            --connect-timeout 5 \
+            --max-time 10 \
+            2>/dev/null || true)
+
+        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+        BODY=$(echo "$RESPONSE" | head -n -1)
+
+        if [ "$HTTP_CODE" = "200" ]; then
+            log "Successfully registered with relay directly (attempt $attempt)"
+            REGISTERED=true
+            break
+        elif [ "$attempt" -eq "$MAX_RETRIES" ]; then
+            log_err "Failed to register with relay after $MAX_RETRIES attempts (HTTP $HTTP_CODE)"
+            log_err "Response: $BODY"
+            log "Continuing anyway — WireGuard may still work if relay adds us manually"
+        else
+            log "Direct registration attempt $attempt failed (HTTP $HTTP_CODE), retrying in ${RETRY_DELAY}s..."
+            sleep $RETRY_DELAY
+        fi
+    done
+fi
 
 # ==================== Start WireGuard Interface ====================
 log "Starting WireGuard interface ${WG_INTERFACE}..."
