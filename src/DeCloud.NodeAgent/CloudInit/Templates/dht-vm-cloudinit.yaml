@@ -312,8 +312,9 @@ runcmd:
   - systemctl start qemu-guest-agent
 
   # WireGuard mesh enrollment — must happen before DHT starts
-  # Skip gracefully if relay config is missing (no relay found at deploy time)
-  - bash -c 'source /etc/decloud/wg-mesh.env && if [ -n "$WG_RELAY_ENDPOINT" ] && [ -n "$WG_RELAY_PUBKEY" ]; then bash /usr/local/bin/wg-mesh-enroll.sh; else echo "[wg-mesh] Skipping enrollment — no relay configured"; fi'
+  # The enrollment script sources /etc/decloud/wg-mesh.env itself.
+  # Skip gracefully if relay config is missing (no relay found at deploy time).
+  - bash -c 'set -a && source /etc/decloud/wg-mesh.env && set +a && if [ -n "$WG_RELAY_ENDPOINT" ] && [ -n "$WG_RELAY_PUBKEY" ]; then /usr/local/bin/wg-mesh-enroll.sh; else echo "[wg-mesh] Skipping enrollment — no relay configured"; fi'
 
   # Configure and start Nginx
   - ln -sf /etc/nginx/sites-available/dht-proxy /etc/nginx/sites-enabled/
