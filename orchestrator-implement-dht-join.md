@@ -266,6 +266,25 @@ Remove the bootstrap peer deferral guard (lines 144-167 approximately). This blo
 
 The removed block is the one that calls `_dhtNodeService.GetPendingPeerIdCountAsync(excludeNodeId: node.Id)` and returns early if pending > 0 and existing peers == 0. This deferral is now counterproductive because DHT VMs should deploy immediately and self-heal via polling.
 
+### 5. Modify: `src/Orchestrator/Services/DhtNodeService.cs` — Remove `GetPendingPeerIdCountAsync`
+
+With the deferral guard removed, `GetPendingPeerIdCountAsync` is dead code (no callers remain). Remove it from both the interface and the implementation.
+
+**5a.** Remove from `IDhtNodeService` interface (around line 24-29):
+
+```csharp
+    // DELETE THIS:
+    Task<int> GetPendingPeerIdCountAsync(string? excludeNodeId = null);
+```
+
+**5b.** Remove the entire `GetPendingPeerIdCountAsync` method implementation (around lines 235-273). This is the block starting with:
+
+```csharp
+    public async Task<int> GetPendingPeerIdCountAsync(string? excludeNodeId = null)
+```
+
+Delete all the way through its closing brace.
+
 ## How It All Connects
 
 ```
@@ -313,4 +332,5 @@ After implementing, verify:
 3. PeerId is registered immediately on first successful `/api/dht/join` call
 4. Bootstrap peers are returned from `GetBootstrapPeersAsync(excludeNodeId)`
 5. The deferral guard in `SystemVmReconciliationService.TryDeployAsync` is removed
-6. Build succeeds with `dotnet build`
+6. `GetPendingPeerIdCountAsync` is removed from `IDhtNodeService` interface and `DhtNodeService` implementation (dead code)
+7. Build succeeds with `dotnet build`
