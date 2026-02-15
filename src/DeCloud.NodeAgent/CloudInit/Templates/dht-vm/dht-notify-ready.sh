@@ -1,13 +1,17 @@
 #!/bin/bash
 #
-# DeCloud DHT Node Ready Callback
-# Version: 1.0
+# DeCloud DHT Node Ready Callback (NodeAgent)
+# Version: 1.1
 #
-# Runs on DHT VM boot to:
-# 1. Wait for the DHT binary to start and report its peer ID
-# 2. Notify the node agent with the peer ID so it can report it to the orchestrator
+# BACKUP PATH: Notifies the NodeAgent of the DHT peer ID so it can
+# include it in heartbeat reports. This is a secondary registration path.
 #
-# This mirrors the relay's notify-nat-ready.sh pattern.
+# PRIMARY PATH: dht-bootstrap-poll.sh registers the peerId directly
+# with the orchestrator via POST /api/dht/join (relay callback pattern).
+#
+# This callback is kept for:
+# - Heartbeat reporting (NodeAgent needs peerId in VM service StatusMessage)
+# - Backward compatibility if orchestrator /api/dht/join is not yet deployed
 #
 
 set -e

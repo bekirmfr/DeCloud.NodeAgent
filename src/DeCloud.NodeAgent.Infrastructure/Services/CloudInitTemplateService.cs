@@ -316,6 +316,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
         {
             var healthCheck = await LoadExternalTemplateAsync("dht-health-check.sh", "dht-vm", ct);
             var notifyReady = await LoadExternalTemplateAsync("dht-notify-ready.sh", "dht-vm", ct);
+            var bootstrapPoll = await LoadExternalTemplateAsync("dht-bootstrap-poll.sh", "dht-vm", ct);
             var dashboardPy = await LoadExternalTemplateAsync("dht-dashboard.py", "dht-vm", ct);
             var dashboardHtml = await LoadExternalTemplateAsync("dashboard.html", "dht-vm", ct);
             var dashboardCss = await LoadExternalTemplateAsync("dashboard.css", "dht-vm", ct);
@@ -324,6 +325,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
 
             var result = ReplaceWithIndentation(template, "__DHT_HEALTH_CHECK__", healthCheck);
             result = ReplaceWithIndentation(result, "__DHT_NOTIFY_READY__", notifyReady);
+            result = ReplaceWithIndentation(result, "__DHT_BOOTSTRAP_POLL__", bootstrapPoll);
             result = ReplaceWithIndentation(result, "__DHT_DASHBOARD_PY__", dashboardPy);
             result = ReplaceWithIndentation(result, "__DHT_DASHBOARD_HTML__", dashboardHtml);
             result = ReplaceWithIndentation(result, "__DHT_DASHBOARD_CSS__", dashboardCss);
@@ -332,8 +334,9 @@ public class CloudInitTemplateService : ICloudInitTemplateService
 
             _logger.LogInformation(
                 "Injected DHT external templates: health-check ({HealthSize} chars), notify-ready ({ReadySize} chars), " +
-                "dashboard-server ({DashPy} chars), dashboard ({DashHtml}+{DashCss}+{DashJs} chars), wg-enroll ({WgSize} chars)",
-                healthCheck.Length, notifyReady.Length, dashboardPy.Length,
+                "bootstrap-poll ({PollSize} chars), dashboard-server ({DashPy} chars), " +
+                "dashboard ({DashHtml}+{DashCss}+{DashJs} chars), wg-enroll ({WgSize} chars)",
+                healthCheck.Length, notifyReady.Length, bootstrapPoll.Length, dashboardPy.Length,
                 dashboardHtml.Length, dashboardCss.Length, dashboardJs.Length, wgMeshEnroll.Length);
 
             return result;
@@ -656,6 +659,21 @@ public class CloudInitTemplateService : ICloudInitTemplateService
                 variables.Custom["WG_RELAY_API"]);
         }
 
+        // Bootstrap poll: orchestrator URL and auth token (relay callback pattern).
+        // The orchestrator passes the auth token via labels when deploying the DHT VM.
+        // The DHT VM uses it to compute HMAC(auth_token, nodeId:vmId) for direct
+        // orchestrator authentication — same pattern as relay's notify-orchestrator.sh
+        // uses HMAC(wireguard_private_key, nodeId:vmId).
+        variables.Custom["DHT_AUTH_TOKEN"] = spec.Labels?.GetValueOrDefault("dht-auth-token") ?? "";
+
+        if (string.IsNullOrEmpty(variables.Custom["DHT_AUTH_TOKEN"]))
+        {
+            _logger.LogWarning(
+                "DHT VM {VmId} has no dht-auth-token label — " +
+                "bootstrap poll service will not be able to authenticate with orchestrator",
+                spec.Id);
+        }
+
         // Load architecture-specific DHT binary (gzip+base64 encoded, pre-built via build.sh)
         var architecture = GetTargetArchitecture(spec);
         var dhtBinaryGzB64 = await LoadDhtBinaryAsync(architecture, ct);
@@ -663,14 +681,16 @@ public class CloudInitTemplateService : ICloudInitTemplateService
 
         _logger.LogInformation(
             "Configured DHT variables for VM {VmId}: listenPort={ListenPort}, apiPort={ApiPort}, " +
-            "advertiseIp={AdvIP}, arch={Arch}, binarySize={BinaryKB}KB (gz+b64), bootstrapPeers={Peers}",
+            "advertiseIp={AdvIP}, arch={Arch}, binarySize={BinaryKB}KB (gz+b64), " +
+            "bootstrapPeers={Peers}, authToken={HasToken}",
             spec.Id,
             variables.Custom["DHT_LISTEN_PORT"],
             variables.Custom["DHT_API_PORT"],
             variables.Custom["DHT_ADVERTISE_IP"],
             architecture,
             dhtBinaryGzB64.Length / 1024,
-            string.IsNullOrEmpty(variables.Custom["DHT_BOOTSTRAP_PEERS"]) ? "(none — first node)" : "present");
+            string.IsNullOrEmpty(variables.Custom["DHT_BOOTSTRAP_PEERS"]) ? "(none — first node)" : "present",
+            string.IsNullOrEmpty(variables.Custom["DHT_AUTH_TOKEN"]) ? "missing" : "present");
     }
 
     /// <summary>
