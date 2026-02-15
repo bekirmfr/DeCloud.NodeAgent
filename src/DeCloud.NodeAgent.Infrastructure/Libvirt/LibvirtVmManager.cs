@@ -1475,11 +1475,16 @@ public class LibvirtVmManager : IVmManager
                 variables["__HOST_MACHINE_ID__"] = _nodeMetadata.MachineId;
                 variables["__TIMESTAMP__"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
+                // Orchestrator URL for direct DHT→orchestrator bootstrap polling
+                // (same pattern as relay VMs use for notify-orchestrator.sh)
+                variables["__ORCHESTRATOR_URL__"] = _nodeMetadata.OrchestratorUrl;
+
                 _logger.LogInformation(
-                    "VM {VmId}: Set DHT metadata - NodeId={NodeId}, AdvertiseIP={AdvIP}",
+                    "VM {VmId}: Set DHT metadata - NodeId={NodeId}, AdvertiseIP={AdvIP}, OrchestratorUrl={Url}",
                     spec.Id,
                     variables["__NODE_ID__"],
-                    spec.Labels?.GetValueOrDefault("dht-advertise-ip") ?? "(from template)");
+                    spec.Labels?.GetValueOrDefault("dht-advertise-ip") ?? "(from template)",
+                    _nodeMetadata.OrchestratorUrl);
             }
 
             // =====================================================
