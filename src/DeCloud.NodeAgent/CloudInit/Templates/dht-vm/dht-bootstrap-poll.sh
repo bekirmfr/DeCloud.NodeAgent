@@ -32,6 +32,7 @@ NODE_ID="__NODE_ID__"
 VM_ID="__VM_ID__"
 AUTH_TOKEN="__DHT_AUTH_TOKEN__"
 API_PORT="__DHT_API_PORT__"
+API_TOKEN="__DHT_API_TOKEN__"
 
 POLL_INTERVAL_ISOLATED=15    # seconds between polls when no peers
 POLL_INTERVAL_CONNECTED=300  # seconds between polls when connected (maintenance)
@@ -138,6 +139,7 @@ while true; do
             # Inject peers via DHT binary's POST /connect endpoint
             CONNECT_RESULT=$(curl -X POST "http://127.0.0.1:${API_PORT}/connect" \
                 -H "Content-Type: application/json" \
+                -H "Authorization: Bearer $API_TOKEN" \
                 -d "{\"peers\": $PEERS_JSON}" \
                 --max-time 10 \
                 -s \
