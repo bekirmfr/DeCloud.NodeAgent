@@ -127,7 +127,7 @@ Examples:
   Network of 1,000 nodes averaging 1 TB each → 50 TB aggregate block store
 ```
 
-The block store on each node holds **replicated block chunks from OTHER nodes' VMs** — not the node's own data. A node's own VM snapshots are distributed to other nodes' block stores by the orchestrator.
+The block store on each node holds **replicated overlay chunks from OTHER nodes' VMs** — not the node's own data. A node's own VM overlay blocks are distributed to other nodes' block stores by the orchestrator via lazysync.
 
 ### 3.2 Deployment Flow
 
@@ -266,7 +266,7 @@ POST /api/blockstore/replicate
   Auth:     Internal (orchestrator → node agent → block store VM)
   Response: { success, queued: count, estimatedBytes }
   Purpose:  Orchestrator directs a node to fetch and pin specific blocks.
-            Used for snapshot replication and migration pre-staging.
+            Used for lazysync replication and migration pre-staging.
 
 GET /api/blockstore/locate/{cid}
   Response: { cid, providers: [{ nodeId, peerId, multiaddr,
@@ -293,7 +293,7 @@ GET /api/blockstore/manifest/{vmId}
 
 GET /api/blockstore/stats
   Response: { totalNodes, totalCapacity, totalUsed, totalBlocks,
-              avgReplication, snapshotCount, totalSnapshotBytes }
+              avgReplication, manifestCount, totalReplicatedBytes }
   Purpose:  Network-wide storage metrics
 ```
 
@@ -480,7 +480,7 @@ POST /dag
                blocks: { "cid": "<base64 bytes>", ... } }
   → { rootCid: "bafk...", blockCount: N, totalBytes: M, stored: true }
   Note: Stores a Merkle DAG manifest + referenced blocks atomically.
-        Used for VM snapshot manifests and delta manifests.
+        Used for VM overlay manifests.
 
 GET  /dag/{cid}
   → { rootCid, manifest: { type, vmId, chunks: [...] },
@@ -584,23 +584,33 @@ Add `VmType.BlockStore` handling in `HandleCreateVmAsync`:
 
 #### DAG / Manifest Structure
 
-A DAG manifest describes the complete current state of a VM's disk — a single evolving document where chunk CIDs are replaced in-place as the lazysync daemon detects dirty blocks. There is no full/delta distinction. Just one manifest per VM that evolves over time:
+A DAG manifest describes the current state of a VM's **overlay disk only** — not the full virtual disk. VMs use a qcow2 backing chain: a read-only base image (shared, downloadable from the image registry) plus a per-VM writable overlay that captures all writes. The base image and cloud-init configuration are reconstructible artifacts — only the overlay carries unique state.
+
+The manifest is a single evolving document where chunk CIDs are replaced in-place as the lazysync daemon detects dirty blocks. There is no full/delta distinction. Just one manifest per VM that evolves over time:
 
 ```json
 {
-  "type": "vm-disk",
+  "type": "vm-overlay",
   "vmId": "vm-abc123",
   "version": 47,
   "timestamp": "2026-02-16T12:05:00Z",
-  "diskSizeBytes": 107374182400,
+  "baseImageId": "debian-12-generic",
+  "baseImageHash": "sha256:a1b2c3...",
+  "overlayVirtualSizeBytes": 107374182400,
   "blockSizeBytes": 1048576,
   "chunks": [
     { "offset": 0,       "cid": "bafk...aaa" },
-    { "offset": 1048576, "cid": "bafk...ggg" },
-    { "offset": 2097152, "cid": "bafk...ccc" }
+    { "offset": 3145728, "cid": "bafk...ggg" },
+    { "offset": 8388608, "cid": "bafk...ccc" }
   ]
 }
 ```
+
+**Key properties:**
+- **`type: "vm-overlay"`** — not `vm-disk`. This manifest represents the overlay layer only.
+- **`baseImageId` + `baseImageHash`** — identifies the backing image. The target node downloads this from the image registry (or from block store peers that have it cached). The orchestrator knows the URL.
+- **Sparse chunks** — only offsets with allocated clusters appear. A 100 GB virtual disk with 3 GB of overlay writes has ~3,000 chunks, not 100,000. Offsets not in the manifest read through to the base image.
+- Cloud-init ISO is not in the manifest — the orchestrator regenerates it from the VM's labels during migration.
 
 The `version` field is a monotonically increasing integer, incremented on each lazysync cycle that produces changes. When the lazysync daemon detects dirty blocks, it:
 1. Reads the dirty chunks (crash-consistent via QEMU incremental backup)
@@ -616,7 +626,7 @@ The orchestrator tracks two versions per VM:
 
 Blocks referenced by `confirmedVersion` are never GC'd. Blocks only referenced by older versions are fair game. This eliminates delta chains, delta consolidation, and the full/delta manifest type distinction entirely.
 
-Content addressing provides automatic deduplication: if a VM has 100 GB disk but only 20 GB of unique changing data, the actual block store consumption is ~20 GB (times replication factor). Unchanged blocks share the same CID and are never re-stored or re-transferred.
+Content addressing provides automatic deduplication: if two VMs use the same base image and write the same packages, those overlay chunks share the same CID and are stored once. Unchanged overlay chunks across lazysync cycles share the same CID and are never re-stored or re-transferred.
 
 #### Bitswap Integration
 
@@ -683,10 +693,19 @@ This is the **primary use case** for the block store — not a future feature.
 
 ### 6.1 Lazysync Model — Continuous Dirty Block Replication
 
-Instead of periodic snapshots with delta chains, every user VM has its disk **continuously replicated** via a background lazysync process. There are no "snapshot events." Dirty disk chunks flow to the block store network as they change, and a single evolving manifest per VM tracks the current state.
+Every user VM has its **overlay disk continuously replicated** via a background lazysync process. There are no "snapshot events." Dirty overlay chunks flow to the block store network as they change, and a single evolving manifest per VM tracks the current overlay state.
+
+Lazysync replicates **only the overlay** — the qcow2 layer that captures writes on top of the read-only base image. The base image (a standard OS image like `debian-12-generic`) is a well-known artifact the orchestrator can re-fetch from the image registry during migration. The cloud-init ISO is regenerated from the VM's labels. Only the overlay carries unique, irreplaceable state.
 
 ```
-Node A runs VM-1 (100 GB disk):
+Node A runs VM-1 (100 GB virtual disk):
+
+  Disk structure:
+    base image:   debian-12-generic.qcow2  (read-only, shared, ~2 GB)
+    overlay:      disk.qcow2               (writable, per-VM, sparse)
+    cloud-init:   cloud-init.iso           (regenerable from labels)
+
+  Only disk.qcow2 (the overlay) is replicated via lazysync.
 
 Background lazysync daemon (runs on the node agent, cycles every ~5 minutes):
 
@@ -694,7 +713,7 @@ Background lazysync daemon (runs on the node agent, cycles every ~5 minutes):
 
   1. QEMU incremental backup via QMP:
      → drive-backup sync=incremental
-     → Exports dirty blocks since last sync cycle
+     → Exports dirty overlay blocks since last sync cycle
      → Crash-consistent: QEMU uses copy-on-write for blocks
        written during export — VM is NOT paused
      → QEMU's Changed Block Tracking (CBT) via persistent dirty
@@ -730,11 +749,12 @@ Background lazysync daemon (runs on the node agent, cycles every ~5 minutes):
 ```
 
 **What this eliminates:**
-- No "full snapshot" events — the first sync seeds the entire disk, subsequent syncs only push dirty blocks
+- No full-disk replication — only overlay writes are tracked and replicated
+- No "full snapshot" events — the first sync seeds allocated overlay clusters, subsequent syncs only push dirty blocks
 - No "delta" manifests — there's one manifest per VM, chunks get replaced in-place
 - No delta chains to traverse during reconstruction
 - No delta consolidation — nothing to consolidate
-- No snapshot-type field — just `vm-disk` manifests with monotonically increasing version numbers
+- No snapshot-type field — just `vm-overlay` manifests with monotonically increasing version numbers
 
 **Recovery point:** If lazysync runs every 5 minutes and replication takes ~2 minutes, the recovery point is typically 5-7 minutes behind live state. This is crash-consistent (QEMU guarantees this) — the same guarantees as traditional hypervisor crash recovery.
 
@@ -744,19 +764,34 @@ Background lazysync daemon (runs on the node agent, cycles every ~5 minutes):
 
 ### 6.1.1 Initial Seeding
 
-When a VM is first created (or first enrolled in lazysync), the entire disk must be pushed to the block store. This is the one-time "full sync":
+When a VM is first enrolled in lazysync, the **allocated clusters of its overlay** must be pushed to the block store. Because the overlay is sparse (qcow2 only allocates clusters that have been written to), and the base image is excluded, initial seeding is dramatically smaller than the virtual disk size:
 
 ```
-First lazysync cycle for a new VM:
-  100 GB disk → 100,000 chunks → CIDs → push all to block store → replicate
-  This takes time (minutes to hours depending on network)
-  Until confirmed: VM has no migration safety net
+VM with 100 GB virtual disk, freshly booted:
+  Base image:      ~2 GB  (debian-12-generic — NOT replicated, downloadable)
+  Overlay writes:  ~500 MB (cloud-init setup, package installs, config)
+  Allocated overlay clusters: ~500 chunks (1 MB each)
 
-Subsequent cycles:
-  Only dirty blocks → typically small → fast replication
+  Initial seed: 500 MB → push to block store → replicate to 3 nodes
+  Time: seconds to minutes, not hours
+
+VM with 100 GB virtual disk, mature workload:
+  Base image:      ~2 GB  (NOT replicated)
+  Overlay writes:  ~5-15 GB (application data, logs, databases)
+  Allocated overlay clusters: ~5,000-15,000 chunks
+
+  Initial seed: 5-15 GB → push to block store → replicate
+  Time: minutes, depending on network
+
+The lazysync daemon uses `qemu-img map` to discover which clusters
+in the overlay are allocated (vs. reading through to the base image).
+Only allocated clusters are chunked and replicated — zero/unallocated
+regions are not included in the manifest.
 ```
 
 The orchestrator tracks seeding state. VMs with `confirmedVersion == 0` are flagged as "unprotected" in the dashboard. Seeding is rate-limited to avoid saturating the node's block store VM or network.
+
+Compare this to full-disk seeding: a 100 GB disk would require 100,000 chunks regardless of actual usage. Overlay-only seeding typically handles 1-10% of that volume.
 
 ### 6.1.2 QEMU Integration
 
@@ -821,27 +856,50 @@ For each VM on Node A:
      block_locality:  how many of the VM's blocks does this node
                       already have in its block store? (rank)
      available_resources: enough CPU/RAM/disk headroom? (filter)
+     base_image_cached: does the node already have the base image? (bonus)
 
      score = block_locality_ratio * weight_locality
            + resource_headroom * weight_resources
+           + base_image_local * weight_image_cache
 
   4. Select best candidate node (highest score that passes all filters)
 
-  5. Fetch missing blocks:
-     Candidate node's block store already has most blocks (pinned replicas).
-     Remaining blocks are fetched via bitswap from other replica nodes.
-     This is fast — most data is already local.
+  5. Reconstruct VM disk on target node:
 
-  6. Reconstruct VM disk from manifest:
-     Read manifest → assemble chunks in offset order → write disk image
-     No delta chain to apply — the manifest IS the complete state.
+     a) Base image — ensure available:
+        The manifest contains baseImageId + baseImageHash.
+        If the target node's image cache already has it → done (common case,
+        many VMs share the same base image like debian-12-generic).
+        If not → download from image registry (same path as normal VM creation).
 
-  7. Boot VM on new node.
+     b) Overlay — assemble from block store:
+        Target node's block store already has most overlay blocks (pinned replicas).
+        Remaining blocks are fetched via bitswap from other replica nodes.
+        Write overlay chunks at their manifest offsets into a new qcow2 file
+        with backing file = base image path.
+
+     c) Cloud-init ISO — regenerate:
+        Orchestrator has all the VM's labels and configuration.
+        Node agent renders cloud-init template from labels (same as initial
+        VM creation). Generate new ISO.
+
+     d) Assemble VM directory:
+        /var/lib/decloud/vms/{vmId}/
+        ├── disk.qcow2       (overlay, reconstructed from manifest blocks)
+        ├── cloud-init.iso   (regenerated from labels)
+        ├── domain.xml       (generated from VmSpec)
+        └── metadata.json    (from orchestrator)
+
+  6. Boot VM on new node.
      VM resumes from confirmed manifest state.
      (~5-7 minutes of state lost since last confirmed lazysync)
 ```
 
-Reconstruction is simpler than the snapshot + delta model: just read chunks from the manifest in order. No chain traversal, no patching deltas on top.
+Reconstruction is fast because:
+- **Base image**: likely already cached on the target node (shared across VMs of the same type). If not, it's a single download of a well-known artifact, not a block-by-block fetch.
+- **Overlay**: only the allocated clusters — typically 1-10% of the virtual disk size. Most blocks are already local (pinned replicas from placement-aware replication).
+- **Cloud-init**: regenerated in milliseconds from labels. Zero network transfer.
+- **No chain traversal**: the manifest IS the complete overlay state. Read chunks, write file, done.
 
 ### 6.3 Placement-Aware Replication
 
@@ -892,24 +950,29 @@ Pin lifecycle example:
 
 ### 6.5 Storage Budget Under the 5% Duty
 
-The 5% cap constrains how many VM manifests a node can hold replicas of. The orchestrator must balance this:
+The 5% cap constrains how many VM manifests a node can hold replicas of. With overlay-only replication, the effective cost per VM is dramatically lower than the virtual disk size:
 
 ```
 Node B has 50 GB block store (5% of 1 TB):
 
 Currently pinned:
-  VM-1 manifest: 8 GB  (100 GB disk, but only 8 GB unique blocks after dedup)
-  VM-3 manifest: 12 GB
-  VM-7 manifest: 3 GB
-  Total pinned:  23 GB
-  Free:          27 GB
+  VM-1 overlay: 3 GB  (100 GB virtual disk, but overlay is only 3 GB)
+  VM-3 overlay: 8 GB  (200 GB virtual disk, database workload)
+  VM-7 overlay: 500 MB (50 GB virtual disk, freshly deployed web server)
+  Total pinned: 11.5 GB
+  Free:         38.5 GB
 
-Orchestrator knows Node B can accept ~27 GB more replica data.
-When placing new manifest replicas, Node B is a candidate if it
-has enough headroom and meets the VM's scheduling requirements.
+Compare to full-disk replication:
+  VM-1 would cost ~20 GB (deduped), VM-3 ~40 GB, VM-7 ~5 GB
+  Total: 65 GB — exceeds the 50 GB budget!
+  With overlay-only: 11.5 GB — 77% reduction
+
+Orchestrator knows Node B can accept ~38.5 GB more replica data.
+A single node's 50 GB block store can hold overlay replicas for
+dozens of VMs instead of 2-3 VMs under full-disk replication.
 ```
 
-Content addressing is critical here — deduplication means the effective cost of storing a VM's blocks is much less than the raw disk size. A 100 GB VM disk with mostly static content (OS, libraries) might only have 5-10 GB of unique blocks. And with lazysync, each cycle only adds the genuinely new blocks — unchanged chunks share the same CID and cost nothing.
+Content addressing still provides deduplication on top of overlay-only savings: if two VMs install the same packages on the same base image, those overlay chunks share the same CID. And with lazysync, each cycle only adds the genuinely new blocks — unchanged chunks share the same CID and cost nothing.
 
 ---
 
@@ -918,10 +981,10 @@ Content addressing is critical here — deduplication means the effective cost o
 ### Phase A: Orchestrator — Core Block Store
 
 1. **BlockStoreVmSpec.cs** — Resource specification (5% duty, 512 MB RAM)
-2. **BlockStoreInfo** on Node.cs — Model for tracking state (including PinnedSnapshotRootCids)
+2. **BlockStoreInfo** on Node.cs — Model for tracking state (including PinnedManifestRootCids)
 3. **VmType.BlockStore** — Add to enum
-4. **IBlockStoreService / BlockStoreService** — Deployment, replication, snapshot lifecycle, migration planning
-5. **BlockStoreController.cs** — `/join`, `/announce`, `/replicate`, `/locate`, `/snapshot`, `/stats`
+4. **IBlockStoreService / BlockStoreService** — Deployment, replication, manifest lifecycle, migration planning
+5. **BlockStoreController.cs** — `/join`, `/announce`, `/replicate`, `/locate`, `/manifest`, `/stats`
 6. **SystemVmLabelSchema** — Add required labels
 7. **ObligationEligibility** — Uncomment BlockStore eligibility, lower RAM threshold to 2 GB
 8. **SystemVmReconciliationService** — Wire up deployment method
@@ -951,12 +1014,12 @@ Content addressing is critical here — deduplication means the effective cost o
 ### Phase D: Lazysync & Migration
 
 25. **LazysyncManager** in orchestrator — manifest version tracking, confirmed vs current, pin lifecycle
-26. **Lazysync daemon** on node agent — QEMU QMP integration (dirty bitmaps, incremental backup), chunking, block push, manifest update cycle
-27. **Initial seeding** — full disk sync on first enrollment, progress tracking, rate limiting
+26. **Lazysync daemon** on node agent — QEMU QMP integration (dirty bitmaps, incremental backup), overlay chunking via `qemu-img map` for sparse cluster discovery, block push, manifest update cycle
+27. **Initial overlay seeding** — push allocated overlay clusters on first enrollment, progress tracking, rate limiting
 28. **Placement-aware replication** — SelectReplicaNodesAsync with scheduling affinity
-29. **Migration planner** — PlanMigrationAsync with block locality scoring
-30. **Disk reconstruction** — assemble VM disk from confirmed manifest (flat chunk assembly, no delta chain)
-31. **End-to-end migration test** — simulate node failure, verify VM rescheduling from confirmed manifest
+29. **Migration planner** — PlanMigrationAsync with block locality scoring + base image cache awareness
+30. **Disk reconstruction** — ensure base image available (cache or download) + assemble overlay from confirmed manifest + regenerate cloud-init ISO from labels
+31. **End-to-end migration test** — simulate node failure, verify VM rescheduling from confirmed manifest (base image + overlay + cloud-init)
 
 ---
 
@@ -1019,13 +1082,13 @@ LevelDB is only used for metadata (pin state, access times, stats).
 - Knows every VM's scheduling requirements
 - Can place replicas on nodes that could host the VM (migration readiness)
 - Can enforce failure domain diversity
-- Can track replication factor per snapshot
+- Can track replication factor per manifest
 Bitswap is the transfer mechanism; the orchestrator is the placement brain.
 
 ### Decision 6: Orchestrator-coordinated GC via pin lifecycle
 **Why:** With the 5% duty model, local GC decisions are dangerous — a node might evict blocks that are the last replica. Instead:
 - The orchestrator explicitly pins blocks it wants retained
-- The orchestrator unpins old snapshots only after confirming new ones are replicated
+- The orchestrator unpins old manifest blocks only after confirming new versions are replicated
 - Local GC only evicts unpinned blocks (safe by construction)
 - No distributed consensus needed — the orchestrator is the single source of truth for pin state
 
@@ -1035,7 +1098,7 @@ Bitswap is the transfer mechanism; the orchestrator is the placement brain.
 - Integrity verification is built-in
 - Future IPFS interop
 - Industry standard format
-- Critical for snapshot efficiency: unchanged disk blocks across snapshots share the same CID
+- Critical for lazysync efficiency: unchanged overlay blocks across cycles share the same CID and are never re-transferred
 
 ### Decision 8: DAG manifests from day one (not bolted on later)
 **Why:** VM disk state is a structured collection of blocks, not a flat blob. Supporting DAG manifests in the initial design means:
@@ -1054,6 +1117,14 @@ Bitswap is the transfer mechanism; the orchestrator is the placement brain.
 - **Simpler reconstruction**: read manifest, assemble chunks in offset order. No delta patching
 - **QEMU native support**: QEMU's Changed Block Tracking (persistent dirty bitmaps, since 4.0+) and incremental backup provide crash-consistent dirty block exports without pausing the VM. This is the same mechanism that powers live migration in traditional hypervisors
 
+### Decision 10: Overlay-only replication (not full disk)
+**Why:** VMs use a qcow2 backing chain: a read-only base image (shared, downloadable) plus a per-VM writable overlay. The base image and cloud-init ISO are reconstructible artifacts. Only the overlay carries unique state. Replicating the overlay only instead of the full virtual disk provides:
+- **Dramatically smaller seeding**: a freshly booted 100 GB VM has ~500 MB of overlay writes, not 100 GB. Initial seed completes in seconds instead of hours
+- **Lower storage cost**: overlay-only replicas are typically 1-10% of virtual disk size. A node's 5% block store budget can hold replicas for dozens of VMs instead of 2-3
+- **Faster migration**: reconstruct = download base image (likely already cached) + assemble overlay (small, mostly local) + regenerate cloud-init (milliseconds). Base images are shared across VMs of the same type — a node running 10 Debian VMs downloads the base image once
+- **Sparse manifest**: only allocated overlay clusters appear in the manifest. `qemu-img map` discovers allocation without reading the full virtual disk
+- **Natural fit with qcow2**: QEMU already tracks dirty blocks at the overlay level. The dirty bitmap covers overlay writes only — base image reads are invisible to CBT
+
 ---
 
 ## 10. Risk Assessment
@@ -1067,10 +1138,11 @@ Bitswap is the transfer mechanism; the orchestrator is the placement brain.
 | Stale provider records | Failed retrievals | TTL on records, periodic re-announcement |
 | DHT dependency | Can't discover peers without DHT | Bootstrap poll as fallback, direct peer list |
 | 5% budget exceeded | Node disk pressure | Orchestrator tracks capacity, hard limit on pins |
-| Manifest too large for 5% | Can't replicate large VMs | Dedup reduces effective size; spread across many nodes |
+| Overlay too large for 5% | Can't replicate heavy-write VMs | Overlay-only is typically 1-10% of virtual disk; dedup further reduces; spread across many nodes |
 | High write-rate VM | Lazysync generates heavy replication traffic | Rate limiting per VM; adaptive cycle interval (slower for hot VMs); write coalescing reduces effective dirty block count |
 | QEMU CBT compatibility | Older QEMU lacks persistent dirty bitmaps | Require QEMU ≥4.0; fallback to full re-scan if bitmap lost (rare) |
-| Initial seeding slow | VM unprotected during first full sync | Track seeding progress; prioritize seeding for new VMs; rate-limit to avoid saturating network |
+| Initial seeding slow | VM unprotected during first sync | Overlay-only seeding is typically 500 MB–15 GB (not 100 GB); completes in minutes; track progress; prioritize new VMs |
+| Base image unavailable during migration | Can't reconstruct VM disk | Base images cached on most nodes; image registry as fallback; block store can distribute base images as pinned blocks |
 | Manifest version drift | Confirmed version lags far behind current | Alert when gap exceeds threshold; orchestrator can throttle lazysync cycle until replication catches up |
 | Orchestrator unavailable | Can't coordinate replication | Existing pins persist; GC won't evict pinned blocks; lazysync continues locally, queues manifest registrations for when orchestrator returns |
 
@@ -1088,7 +1160,7 @@ Bitswap is the transfer mechanism; the orchestrator is the placement brain.
 - Self-healing redeploys on VM failure
 
 ### Phase D (Lazysync & Migration)
-- Lazysync daemon continuously replicates dirty blocks for all running VMs
+- Lazysync daemon continuously replicates dirty overlay blocks for all running VMs
 - Lazysync cycle completes within configured interval (~5 minutes) under normal load
 - QEMU incremental backup produces crash-consistent dirty block exports without VM pause
 - Confirmed manifest version stays within 2 versions of current (replication keeps up)
@@ -1096,6 +1168,7 @@ Bitswap is the transfer mechanism; the orchestrator is the placement brain.
 - Replicas are placed on scheduling-compatible nodes (migration readiness)
 - When a node goes offline, its VMs are rescheduled to a new node
 - Migration selects nodes with highest block locality (minimal transfer)
-- VM disk reconstruction from confirmed manifest completes successfully (flat chunk assembly)
-- Initial seeding of new VMs completes and reaches confirmed state
+- VM disk reconstruction from confirmed manifest completes successfully (base image + overlay assembly + cloud-init regeneration)
+- Initial overlay seeding of new VMs completes within minutes (not hours)
 - Recovery point objective: ≤10 minutes of data loss under normal conditions
+- Overlay-only replication keeps per-VM storage cost at 1-10% of virtual disk size
