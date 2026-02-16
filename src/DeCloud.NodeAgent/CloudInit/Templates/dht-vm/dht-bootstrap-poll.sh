@@ -32,7 +32,13 @@ NODE_ID="__NODE_ID__"
 VM_ID="__VM_ID__"
 AUTH_TOKEN="__DHT_AUTH_TOKEN__"
 API_PORT="__DHT_API_PORT__"
-API_TOKEN="__DHT_API_TOKEN__"
+
+# DHT_API_TOKEN is generated at boot by cloud-init (openssl rand)
+# and appended to dht.env. Source it to pick up the token.
+if [ -f /etc/decloud-dht/dht.env ]; then
+    API_TOKEN=$(grep -oP '^DHT_API_TOKEN=\K.*' /etc/decloud-dht/dht.env || true)
+fi
+API_TOKEN="${API_TOKEN:-}"
 
 POLL_INTERVAL_ISOLATED=15    # seconds between polls when no peers
 POLL_INTERVAL_CONNECTED=300  # seconds between polls when connected (maintenance)
