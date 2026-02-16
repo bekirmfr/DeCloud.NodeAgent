@@ -11,17 +11,17 @@
 
 The Block Store system VM creates the **distributed storage backbone** for the DeCloud network. Every node with ≥100 GB storage contributes **5% of its total storage** as a network duty — forming a collective, content-addressed storage medium across the platform.
 
-The primary purpose is **VM resilience and live migration**. When a node goes offline, its VMs can be rescheduled to another node because VM snapshots and deltas are already replicated across the block store network. No single node failure causes data loss.
+The primary purpose is **VM resilience and live migration**. When a node goes offline, its VMs can be rescheduled to another node because VM disk state is continuously replicated across the block store network via **lazysync** — a background process that streams dirty disk chunks to the network as they change. No single node failure causes data loss.
 
 Each Block Store VM:
 
-1. **Stores replicated blocks** — Holds content-addressed chunks of OTHER nodes' VM snapshots and deltas
+1. **Stores replicated blocks** — Holds content-addressed chunks of OTHER nodes' VM disk state
 2. **Announces blocks** — Publishes provider records to the DHT ("I have block X")
 3. **Transfers blocks** — Serves blocks to other nodes via libp2p bitswap protocol
 4. **Accepts replication commands** — Orchestrator directs which blocks to fetch and pin
 5. **Garbage collects** — Removes unpinned blocks under orchestrator coordination
 
-This enables VM snapshot distribution, live migration on node failure, template image distribution, and eventually a full decentralized filesystem — all without centralized cloud storage.
+This enables continuous VM disk replication, live migration on node failure, template image distribution, and eventually a full decentralized filesystem — all without centralized cloud storage.
 
 ---
 
@@ -34,16 +34,15 @@ This enables VM snapshot distribution, live migration on node failure, template 
 │  │ BlockStoreService     │  │ BlockStoreController              │ │
 │  │ - DeployBlockStoreVm  │  │ POST /api/blockstore/join         │ │
 │  │ - PlaceReplicas()     │  │ POST /api/blockstore/announce     │ │
-│  │ - TriggerSnapshot()   │  │ POST /api/blockstore/replicate    │ │
-│  │ - ScheduleMigration() │  │ GET  /api/blockstore/locate/{cid} │ │
-│  └──────────────────────┘  │ POST /api/blockstore/snapshot      │ │
-│                              │ GET  /api/blockstore/stats         │ │
-│  ┌──────────────────────┐  └───────────────────────────────────┘ │
-│  │ SnapshotManager       │                                        │
-│  │ - Snapshot chains      │  Node.BlockStoreInfo:                 │
-│  │ - Delta consolidation  │  { VmId, PeerId, Capacity,           │
-│  │ - Replication tracking │    Used, Status, PinnedSnapshots }    │
-│  │ - Pin/unpin lifecycle  │                                        │
+│  │ - ScheduleMigration() │  │ POST /api/blockstore/replicate    │ │
+│  └──────────────────────┘  │ GET  /api/blockstore/locate/{cid} │ │
+│                              │ POST /api/blockstore/manifest      │ │
+│  ┌──────────────────────┐  │ GET  /api/blockstore/stats         │ │
+│  │ LazysyncManager       │  └───────────────────────────────────┘ │
+│  │ - Dirty block tracking │                                        │
+│  │ - Manifest versioning  │  Node.BlockStoreInfo:                 │
+│  │ - Replication tracking │  { VmId, PeerId, Capacity,           │
+│  │ - Pin/unpin lifecycle  │    Used, Status, PinnedManifests }    │
 │  └──────────────────────┘                                        │
 └───────────────────┬──────────────────────────────────────────────┘
                     │ CreateVm command (labels)
@@ -221,12 +220,13 @@ public interface IBlockStoreService
     // Replication & placement
     Task ReplicateBlocksAsync(string targetNodeId, List<string> cids, bool pin, CancellationToken ct = default);
     Task UnpinBlocksAsync(string targetNodeId, List<string> cids, CancellationToken ct = default);
-    Task<List<ReplicationTarget>> SelectReplicaNodesAsync(string snapshotRootCid, int replicationFactor,
+    Task<List<ReplicationTarget>> SelectReplicaNodesAsync(string manifestRootCid, int replicationFactor,
         VmSchedulingRequirements? affinityHint = null, string? excludeNodeId = null);
 
-    // Snapshot lifecycle
-    Task<SnapshotRecord> RegisterSnapshotAsync(string vmId, string rootCid, SnapshotType type, CancellationToken ct = default);
-    Task ConsolidateDeltasAsync(string vmId, CancellationToken ct = default);
+    // Lazysync manifest lifecycle
+    Task<ManifestRecord> RegisterManifestAsync(string vmId, string rootCid, int version,
+        List<string> changedBlockCids, long totalBytes, CancellationToken ct = default);
+    Task ConfirmManifestReplicatedAsync(string vmId, int version, CancellationToken ct = default);
 
     // Migration support
     Task<MigrationPlan> PlanMigrationAsync(string vmId, List<string> candidateNodeIds, CancellationToken ct = default);
@@ -242,7 +242,7 @@ Key responsibilities:
 - Generate auth token + labels, deploy VM via VmService
 - Store `BlockStoreInfo` on Node model
 - **Placement-aware replication**: select target nodes considering failure domains, node capabilities (CPU, RAM, GPU, region), and VM scheduling requirements so replicas land on nodes that could host the VM if migration is needed
-- **Snapshot lifecycle**: register snapshots, track delta chains, trigger consolidation
+- **Manifest lifecycle**: register evolving manifests from lazysync, track confirmed vs current version, GC blocks unreferenced by any confirmed manifest
 - **Migration planning**: given a VM to migrate, rank candidate nodes by block locality (how many blocks they already have) combined with scheduling fit
 
 #### NEW: `src/Orchestrator/Controllers/BlockStoreController.cs`
@@ -275,18 +275,21 @@ GET /api/blockstore/locate/{cid}
   Purpose:  Find which nodes have a specific block. Includes node capabilities
             so the caller (or orchestrator) can make placement-aware decisions.
 
-POST /api/blockstore/snapshot
-  Request:  { vmId, rootCid, type: "full"|"delta", parentCid?, blockCount, totalBytes }
+POST /api/blockstore/manifest
+  Request:  { vmId, rootCid, version, changedBlockCids: ["bafk..."], totalBytes }
   Auth:     Internal
-  Response: { success, snapshotId, replicationPlan: [{ nodeId, cidsToPin }] }
-  Purpose:  Register a new VM snapshot. Orchestrator records the snapshot chain
-            and returns a replication plan (which nodes should pin which blocks).
+  Response: { success, manifestVersion, replicationPlan: [{ nodeId, cidsToPin }] }
+  Purpose:  Register an updated VM manifest from a lazysync cycle.
+            Orchestrator records the new manifest version and returns a
+            replication plan for the changed blocks only.
 
-GET /api/blockstore/snapshot/{vmId}
-  Response: { vmId, currentSnapshot: { rootCid, timestamp, type },
-              deltaChain: [{ rootCid, parentCid, timestamp, dirtyBlocks }],
-              replicationStatus: { targetFactor: 3, actual: { cid: [nodeIds] } } }
-  Purpose:  Query snapshot chain and replication status for a VM.
+GET /api/blockstore/manifest/{vmId}
+  Response: { vmId, currentVersion, confirmedVersion, confirmedRootCid,
+              timestamp, replicationStatus: { targetFactor: 3,
+              confirmedOnNodes: [nodeIds] } }
+  Purpose:  Query manifest version and replication status for a VM.
+            confirmedVersion = latest version fully replicated on ≥N target nodes.
+            currentVersion = latest version (may be partially replicated).
 
 GET /api/blockstore/stats
   Response: { totalNodes, totalCapacity, totalUsed, totalBlocks,
@@ -309,7 +312,7 @@ public class BlockStoreInfo
     public long UsedBytes { get; set; }                 // Currently used
     public int BlockCount { get; set; }                 // Local blocks
     public int PinnedBlockCount { get; set; }           // Pinned (won't GC)
-    public List<string> PinnedSnapshotRootCids { get; set; } = [];  // Snapshot DAGs pinned on this node
+    public List<string> PinnedManifestRootCids { get; set; } = [];  // VM manifest DAGs pinned on this node
     public BlockStoreStatus Status { get; set; } = BlockStoreStatus.Initializing;
     public DateTime? LastHealthCheck { get; set; }
 }
@@ -581,43 +584,39 @@ Add `VmType.BlockStore` handling in `HandleCreateVmAsync`:
 
 #### DAG / Manifest Structure
 
-A DAG manifest describes a structured collection of blocks — primarily VM snapshots:
+A DAG manifest describes the complete current state of a VM's disk — a single evolving document where chunk CIDs are replaced in-place as the lazysync daemon detects dirty blocks. There is no full/delta distinction. Just one manifest per VM that evolves over time:
 
 ```json
 {
-  "type": "vm-snapshot",
+  "type": "vm-disk",
   "vmId": "vm-abc123",
-  "timestamp": "2026-02-16T10:30:00Z",
-  "snapshotType": "full",
-  "parentCid": null,
+  "version": 47,
+  "timestamp": "2026-02-16T12:05:00Z",
   "diskSizeBytes": 107374182400,
   "blockSizeBytes": 1048576,
   "chunks": [
     { "offset": 0,       "cid": "bafk...aaa" },
-    { "offset": 1048576, "cid": "bafk...bbb" },
+    { "offset": 1048576, "cid": "bafk...ggg" },
     { "offset": 2097152, "cid": "bafk...ccc" }
   ]
 }
 ```
 
-For delta snapshots, only changed chunks are included:
+The `version` field is a monotonically increasing integer, incremented on each lazysync cycle that produces changes. When the lazysync daemon detects dirty blocks, it:
+1. Reads the dirty chunks (crash-consistent via QEMU incremental backup)
+2. Hashes each chunk → CIDv1
+3. Replaces the corresponding offset's CID in the manifest (if it actually changed)
+4. Increments version
+5. Pushes only the new blocks to the block store
+6. Registers the updated manifest with the orchestrator
 
-```json
-{
-  "type": "vm-snapshot",
-  "vmId": "vm-abc123",
-  "timestamp": "2026-02-16T12:00:00Z",
-  "snapshotType": "delta",
-  "parentCid": "bafk...root-of-full-snapshot",
-  "dirtyChunkCount": 42,
-  "chunks": [
-    { "offset": 3145728,  "cid": "bafk...ddd" },
-    { "offset": 17825792, "cid": "bafk...eee" }
-  ]
-}
-```
+The orchestrator tracks two versions per VM:
+- **currentVersion**: latest manifest registered (may be partially replicated)
+- **confirmedVersion**: latest manifest where ALL referenced blocks are verified replicated on ≥N target nodes
 
-Content addressing provides automatic deduplication: if a VM has 100 GB disk but only 20 GB of unique changing data across snapshots, the actual block store consumption is ~20 GB (times replication factor). Unchanged blocks share the same CID and are never re-stored or re-transferred.
+Blocks referenced by `confirmedVersion` are never GC'd. Blocks only referenced by older versions are fair game. This eliminates delta chains, delta consolidation, and the full/delta manifest type distinction entirely.
+
+Content addressing provides automatic deduplication: if a VM has 100 GB disk but only 20 GB of unique changing data, the actual block store consumption is ~20 GB (times replication factor). Unchanged blocks share the same CID and are never re-stored or re-transferred.
 
 #### Bitswap Integration
 
@@ -678,38 +677,130 @@ No min/max caps needed — the 100 GB eligibility threshold ensures the smallest
 
 ---
 
-## 6. VM Snapshots & Migration
+## 6. VM Disk Replication & Migration (Lazysync)
 
 This is the **primary use case** for the block store — not a future feature.
 
-### 6.1 Snapshot Model
+### 6.1 Lazysync Model — Continuous Dirty Block Replication
 
-Every user VM has its disk continuously snapshotted and distributed across the block store network. When a node goes offline, the VM can be rescheduled to another node because its disk state is already replicated.
+Instead of periodic snapshots with delta chains, every user VM has its disk **continuously replicated** via a background lazysync process. There are no "snapshot events." Dirty disk chunks flow to the block store network as they change, and a single evolving manifest per VM tracks the current state.
 
 ```
 Node A runs VM-1 (100 GB disk):
 
-1. Periodic snapshot (e.g., every 6 hours):
-   VM-1 disk → chunk into 1 MB blocks → CIDv1 per block
-   → DAG manifest (root CID referencing all chunk CIDs)
-   → Orchestrator registers snapshot: POST /api/blockstore/snapshot
+Background lazysync daemon (runs on the node agent, cycles every ~5 minutes):
 
-2. Between snapshots — deltas (e.g., every 30 minutes):
-   Dirty blocks since last snapshot → chunk → CIDs
-   → Delta manifest (references parent snapshot, only changed offsets)
-   → Orchestrator registers delta
+  For each running VM on this node:
 
-3. Orchestrator replication:
-   For full snapshot + deltas:
-   → Select 3 target nodes (placement-aware, see 6.3)
-   → POST /api/blockstore/replicate to each target
-   → Target nodes fetch blocks via bitswap from Node A's block store
-   → Target nodes pin the blocks (won't GC)
+  1. QEMU incremental backup via QMP:
+     → drive-backup sync=incremental
+     → Exports dirty blocks since last sync cycle
+     → Crash-consistent: QEMU uses copy-on-write for blocks
+       written during export — VM is NOT paused
+     → QEMU's Changed Block Tracking (CBT) via persistent dirty
+       bitmaps tracks which blocks have been written (since 4.0+)
 
-4. Delta consolidation (e.g., weekly):
-   When delta chain grows long → trigger new full snapshot
-   → Orchestrator unpins old snapshot + deltas on target nodes
-   → Old blocks become GC candidates
+  2. Chunk the exported dirty data into 1 MB blocks → CIDv1 per block
+
+  3. Compare each chunk's CID against current manifest:
+     → Skip any block whose CID matches (written but not actually changed)
+     → Only genuinely new/changed blocks proceed
+
+  4. Push new blocks to Node A's local block store VM:
+     → POST /blocks for each new block
+     → Block store announces provider records to DHT
+
+  5. Update manifest in-place:
+     → manifest.chunks[offset] = newCID for each changed offset
+     → manifest.version++
+     → manifest.timestamp = now
+
+  6. Register updated manifest with orchestrator:
+     → POST /api/blockstore/manifest { vmId, rootCid, version,
+         changedBlockCids, totalBytes }
+     → Orchestrator returns replication plan for changed blocks only
+
+  7. Orchestrator replicates changed blocks:
+     → POST /api/blockstore/replicate to each target node
+     → Target nodes fetch new blocks via bitswap from Node A
+     → Target nodes update their pinned manifest copy
+     → When all targets confirm → orchestrator advances confirmedVersion
+
+  8. Reset QEMU dirty bitmap for next cycle
+```
+
+**What this eliminates:**
+- No "full snapshot" events — the first sync seeds the entire disk, subsequent syncs only push dirty blocks
+- No "delta" manifests — there's one manifest per VM, chunks get replaced in-place
+- No delta chains to traverse during reconstruction
+- No delta consolidation — nothing to consolidate
+- No snapshot-type field — just `vm-disk` manifests with monotonically increasing version numbers
+
+**Recovery point:** If lazysync runs every 5 minutes and replication takes ~2 minutes, the recovery point is typically 5-7 minutes behind live state. This is crash-consistent (QEMU guarantees this) — the same guarantees as traditional hypervisor crash recovery.
+
+**Write coalescing:** If a VM writes the same chunk 100 times between lazysync cycles, only the final state is replicated. The intermediate writes are invisible — only the net change per cycle matters.
+
+**Bandwidth:** A VM writing 1 GB/hour generates ~17 MB per 5-minute cycle. This trickles out continuously rather than bursting during snapshot events.
+
+### 6.1.1 Initial Seeding
+
+When a VM is first created (or first enrolled in lazysync), the entire disk must be pushed to the block store. This is the one-time "full sync":
+
+```
+First lazysync cycle for a new VM:
+  100 GB disk → 100,000 chunks → CIDs → push all to block store → replicate
+  This takes time (minutes to hours depending on network)
+  Until confirmed: VM has no migration safety net
+
+Subsequent cycles:
+  Only dirty blocks → typically small → fast replication
+```
+
+The orchestrator tracks seeding state. VMs with `confirmedVersion == 0` are flagged as "unprotected" in the dashboard. Seeding is rate-limited to avoid saturating the node's block store VM or network.
+
+### 6.1.2 QEMU Integration
+
+The lazysync daemon requires integration with the hypervisor layer via QEMU's QMP (QEMU Machine Protocol):
+
+```
+QEMU QMP commands used:
+
+1. block-dirty-bitmap-add
+   → Creates a persistent dirty bitmap on the VM's drive
+   → Called once when a VM is enrolled in lazysync
+
+2. drive-backup sync=incremental bitmap=lazysync-N
+   → Exports dirty blocks to a temp file (crash-consistent)
+   → VM continues running — QEMU handles CoW internally
+   → Returns the dirty regions for chunking
+
+3. block-dirty-bitmap-clear
+   → Resets the bitmap after successful export
+   → Called after blocks are confirmed pushed to block store
+```
+
+The node agent already manages VMs via libvirt/QEMU and has access to QMP sockets. The lazysync daemon runs as a background service on the node agent, cycling through running VMs on a configurable interval.
+
+### 6.1.3 Manifest Versioning & Consistency
+
+The orchestrator tracks manifest versions to ensure replication consistency:
+
+```
+Manifest v1: [chunk0=A, chunk1=B, chunk2=C]  → fully replicated (confirmed)
+Lazysync: chunk1 changed → CID D
+Manifest v2: [chunk0=A, chunk1=D, chunk2=C]  → replicating...
+Lazysync: chunk2 changed → CID E
+Manifest v3: [chunk0=A, chunk1=D, chunk2=E]  → pending
+
+Orchestrator state for this VM:
+  currentVersion:   3   (latest registered)
+  confirmedVersion: 1   (latest where all blocks verified on ≥3 nodes)
+
+Rules:
+  - Blocks referenced by confirmedVersion are NEVER GC'd
+  - Blocks only referenced by versions < confirmedVersion are GC candidates
+  - If replication of v2 completes before v3 is registered → confirmedVersion advances to 2
+  - Recovery always uses confirmedVersion's manifest
 ```
 
 ### 6.2 Migration on Node Failure
@@ -721,8 +812,9 @@ For each VM on Node A:
   1. Orchestrator retrieves VM's scheduling requirements
      (CPU, RAM, GPU, region, affinity rules, etc.)
 
-  2. Orchestrator retrieves VM's latest snapshot chain
-     (root CID + delta CIDs + all referenced block CIDs)
+  2. Orchestrator retrieves VM's confirmedVersion manifest
+     (root CID + all referenced block CIDs — a single flat manifest,
+      no delta chain to walk)
 
   3. For each candidate node, compute migration score:
      scheduling_fit:  does the node meet VM's requirements? (filter)
@@ -740,13 +832,16 @@ For each VM on Node A:
      Remaining blocks are fetched via bitswap from other replica nodes.
      This is fast — most data is already local.
 
-  6. Reconstruct VM disk from snapshot manifest:
-     Read DAG manifest → assemble chunks in order → write disk image
-     Apply delta chain on top (if any deltas since last full snapshot)
+  6. Reconstruct VM disk from manifest:
+     Read manifest → assemble chunks in offset order → write disk image
+     No delta chain to apply — the manifest IS the complete state.
 
   7. Boot VM on new node.
-     VM resumes from last snapshot + delta state.
+     VM resumes from confirmed manifest state.
+     (~5-7 minutes of state lost since last confirmed lazysync)
 ```
+
+Reconstruction is simpler than the snapshot + delta model: just read chunks from the manifest in order. No chain traversal, no patching deltas on top.
 
 ### 6.3 Placement-Aware Replication
 
@@ -777,8 +872,9 @@ Garbage collection is **orchestrator-coordinated** through the pin mechanism:
 
 ```
 Orchestrator owns the pin lifecycle:
-  1. New snapshot registered → orchestrator pins blocks on target nodes
-  2. New full snapshot verified replicated → orchestrator unpins old snapshot chain
+  1. New manifest version registered → orchestrator pins changed blocks on target nodes
+  2. New manifest version confirmed replicated → orchestrator unpins blocks from
+     previous version that are no longer referenced by any confirmed manifest
   3. Unpinned blocks become local GC candidates
   4. Node's block store runs GC: evicts unpinned blocks via LRU
      - GC triggers at 85% capacity
@@ -786,28 +882,34 @@ Orchestrator owns the pin lifecycle:
 
 A node never decides "is this block safe to delete?" — it only follows pins.
 If the orchestrator unpinned it, it's fair game for GC.
+
+Pin lifecycle example:
+  confirmedVersion v1: chunks [A, B, C] → all pinned on target nodes
+  confirmedVersion v2: chunks [A, D, C] → block D pinned, block B unpinned
+  Block B has no other references → GC candidate
+  Block A and C unchanged → still pinned, zero cost for this transition
 ```
 
 ### 6.5 Storage Budget Under the 5% Duty
 
-The 5% cap constrains how many VM snapshots a node can hold replicas of. The orchestrator must balance this:
+The 5% cap constrains how many VM manifests a node can hold replicas of. The orchestrator must balance this:
 
 ```
 Node B has 50 GB block store (5% of 1 TB):
 
 Currently pinned:
-  VM-1 snapshot: 8 GB  (100 GB disk, but only 8 GB unique blocks after dedup)
-  VM-3 snapshot: 12 GB
-  VM-7 deltas:   2 GB
-  Total pinned:  22 GB
-  Free:          28 GB
+  VM-1 manifest: 8 GB  (100 GB disk, but only 8 GB unique blocks after dedup)
+  VM-3 manifest: 12 GB
+  VM-7 manifest: 3 GB
+  Total pinned:  23 GB
+  Free:          27 GB
 
-Orchestrator knows Node B can accept ~28 GB more replica data.
-When placing new snapshot replicas, Node B is a candidate if it
+Orchestrator knows Node B can accept ~27 GB more replica data.
+When placing new manifest replicas, Node B is a candidate if it
 has enough headroom and meets the VM's scheduling requirements.
 ```
 
-Content addressing is critical here — deduplication means the effective cost of storing a VM snapshot is much less than the raw disk size. A 100 GB VM disk with mostly static content (OS, libraries) might only have 5-10 GB of unique blocks.
+Content addressing is critical here — deduplication means the effective cost of storing a VM's blocks is much less than the raw disk size. A 100 GB VM disk with mostly static content (OS, libraries) might only have 5-10 GB of unique blocks. And with lazysync, each cycle only adds the genuinely new blocks — unchanged chunks share the same CID and cost nothing.
 
 ---
 
@@ -846,27 +948,28 @@ Content addressing is critical here — deduplication means the effective cost o
 23. Test GC with orchestrator-driven pin/unpin
 24. Test self-healing (reconciliation redeploy)
 
-### Phase D: Snapshot & Migration
+### Phase D: Lazysync & Migration
 
-25. **SnapshotManager** in orchestrator — snapshot chain tracking, delta consolidation
-26. **Snapshot trigger integration** — periodic snapshots + delta capture for user VMs
-27. **Placement-aware replication** — SelectReplicaNodesAsync with scheduling affinity
-28. **Migration planner** — PlanMigrationAsync with block locality scoring
-29. **Disk reconstruction** — assemble VM disk from snapshot manifest + delta chain
-30. **End-to-end migration test** — simulate node failure, verify VM rescheduling
+25. **LazysyncManager** in orchestrator — manifest version tracking, confirmed vs current, pin lifecycle
+26. **Lazysync daemon** on node agent — QEMU QMP integration (dirty bitmaps, incremental backup), chunking, block push, manifest update cycle
+27. **Initial seeding** — full disk sync on first enrollment, progress tracking, rate limiting
+28. **Placement-aware replication** — SelectReplicaNodesAsync with scheduling affinity
+29. **Migration planner** — PlanMigrationAsync with block locality scoring
+30. **Disk reconstruction** — assemble VM disk from confirmed manifest (flat chunk assembly, no delta chain)
+31. **End-to-end migration test** — simulate node failure, verify VM rescheduling from confirmed manifest
 
 ---
 
 ## 8. How This Connects to Future Features
 
 ### Built-In (Phase A-D)
-- **VM snapshot distribution** — Core feature, not optional
+- **Continuous VM disk replication (lazysync)** — Core feature, not optional
 - **Live migration on node failure** — Core feature, the primary purpose of the block store
 - **Template image distribution** — Distribute base images via block store (dedup across nodes)
 
 ### Near-Term Extensions
 - **On-demand VM migration** — User-initiated, not just failure-driven
-- **Distributed backups** — Scheduled backup policies per VM
+- **Point-in-time recovery** — Retain historical manifest versions for rollback (keep N confirmed manifests instead of GC'ing immediately)
 - **Content delivery** — Serve static content from nearest block store node
 - **User file storage** — Simple put/get API for users to store data persistently
 
@@ -935,11 +1038,21 @@ Bitswap is the transfer mechanism; the orchestrator is the placement brain.
 - Critical for snapshot efficiency: unchanged disk blocks across snapshots share the same CID
 
 ### Decision 8: DAG manifests from day one (not bolted on later)
-**Why:** VM snapshots are structured collections of blocks, not flat blobs. Supporting DAG manifests in the initial design means:
-- Snapshot/delta chain representation is clean and native
+**Why:** VM disk state is a structured collection of blocks, not a flat blob. Supporting DAG manifests in the initial design means:
+- The single evolving manifest per VM is clean and native
 - The block store understands "pin this DAG" (manifest + all referenced blocks)
 - Future features (large file storage, directory trees) get DAG support for free
 - Avoids painful migration from flat-block-only to DAG-aware later
+
+### Decision 9: Lazysync over periodic snapshots + delta chains
+**Why:** The traditional approach of periodic full snapshots with delta chains between them has inherent complexity: delta chains that need consolidation, snapshot events that create I/O bursts, two different manifest types, and recovery requiring chain traversal. Lazysync replaces this with a simpler model:
+- **No snapshot events**: dirty blocks trickle out continuously in the background. A VM writing 1 GB/hour generates ~17 MB per 5-minute cycle — easily absorbed
+- **No delta chains**: there's one manifest per VM. Chunk CIDs are replaced in-place. No chain to walk, no consolidation
+- **Better recovery point**: ~5-7 minutes vs 30+ minutes with periodic deltas
+- **Simpler GC**: blocks become unreferenced when their manifest slot is updated. Track "is this block referenced by any confirmed manifest?" — if not, GC it
+- **Natural write coalescing**: if a chunk is written 100 times between cycles, only the final state is replicated
+- **Simpler reconstruction**: read manifest, assemble chunks in offset order. No delta patching
+- **QEMU native support**: QEMU's Changed Block Tracking (persistent dirty bitmaps, since 4.0+) and incremental backup provide crash-consistent dirty block exports without pausing the VM. This is the same mechanism that powers live migration in traditional hypervisors
 
 ---
 
@@ -954,9 +1067,12 @@ Bitswap is the transfer mechanism; the orchestrator is the placement brain.
 | Stale provider records | Failed retrievals | TTL on records, periodic re-announcement |
 | DHT dependency | Can't discover peers without DHT | Bootstrap poll as fallback, direct peer list |
 | 5% budget exceeded | Node disk pressure | Orchestrator tracks capacity, hard limit on pins |
-| Snapshot too large for 5% | Can't replicate large VMs | Dedup reduces effective size; spread across many nodes |
-| Delta chain too long | Slow reconstruction | Periodic consolidation (configurable, e.g., weekly) |
-| Orchestrator unavailable | Can't coordinate replication | Existing pins persist; GC won't evict pinned blocks; resume when orchestrator returns |
+| Manifest too large for 5% | Can't replicate large VMs | Dedup reduces effective size; spread across many nodes |
+| High write-rate VM | Lazysync generates heavy replication traffic | Rate limiting per VM; adaptive cycle interval (slower for hot VMs); write coalescing reduces effective dirty block count |
+| QEMU CBT compatibility | Older QEMU lacks persistent dirty bitmaps | Require QEMU ≥4.0; fallback to full re-scan if bitmap lost (rare) |
+| Initial seeding slow | VM unprotected during first full sync | Track seeding progress; prioritize seeding for new VMs; rate-limit to avoid saturating network |
+| Manifest version drift | Confirmed version lags far behind current | Alert when gap exceeds threshold; orchestrator can throttle lazysync cycle until replication catches up |
+| Orchestrator unavailable | Can't coordinate replication | Existing pins persist; GC won't evict pinned blocks; lazysync continues locally, queues manifest registrations for when orchestrator returns |
 
 ---
 
@@ -971,11 +1087,15 @@ Bitswap is the transfer mechanism; the orchestrator is the placement brain.
 - Bootstrap polling discovers peers within 60 seconds
 - Self-healing redeploys on VM failure
 
-### Phase D (Snapshots & Migration)
-- VM snapshots are created and distributed within configured intervals
-- Replication factor of 3 is maintained for all active snapshots
+### Phase D (Lazysync & Migration)
+- Lazysync daemon continuously replicates dirty blocks for all running VMs
+- Lazysync cycle completes within configured interval (~5 minutes) under normal load
+- QEMU incremental backup produces crash-consistent dirty block exports without VM pause
+- Confirmed manifest version stays within 2 versions of current (replication keeps up)
+- Replication factor of 3 is maintained for all confirmed manifests
 - Replicas are placed on scheduling-compatible nodes (migration readiness)
 - When a node goes offline, its VMs are rescheduled to a new node
 - Migration selects nodes with highest block locality (minimal transfer)
-- VM disk reconstruction from snapshot + delta chain completes successfully
-- Delta consolidation keeps chain length bounded
+- VM disk reconstruction from confirmed manifest completes successfully (flat chunk assembly)
+- Initial seeding of new VMs completes and reaches confirmed state
+- Recovery point objective: ≤10 minutes of data loss under normal conditions
