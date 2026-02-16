@@ -69,7 +69,7 @@ This enables continuous VM disk replication, live migration on node failure, tem
 │  │    GET  /health                                                │ │
 │  │    POST /blocks         (put block → returns CID)              │ │
 │  │    GET  /blocks/{cid}   (get block)                            │ │
-│  │    DELETE /blocks/{cid} (unpin block)                          │ │
+│  │    DELETE /blocks/{cid} (delete block)                          │ │
 │  │    GET  /blocks         (list local blocks)                    │ │
 │  │    POST /dag            (put manifest + blocks atomically)     │ │
 │  │    GET  /dag/{cid}      (resolve DAG, return manifest)        │ │
@@ -466,11 +466,11 @@ GET  /blocks/{cid}
   Note: If not local, attempts bitswap retrieval from network
 
 DELETE /blocks/{cid}
-  → { cid, unpinned: true, deleted: true }
+  → { cid, deleted: true }
 
 GET  /blocks
   Query: ?offset=0&limit=100
-  → { blocks: [{ cid, size, pinned, createdAt }], total: 1234 }
+  → { blocks: [{ cid, size, lastAccess, createdAt }], total: 1234 }
 
 POST /dag
   Body: JSON { manifest: { type, vmId?, parentCid?, chunks: [{ offset, cid }] },
@@ -487,7 +487,7 @@ GET  /dag/{cid}
 
 GET  /stats
   → { capacityBytes, usedBytes, usagePercent, blockCount,
-      pinnedCount, connectedPeers, bitswapSent, bitswapReceived }
+      connectedPeers, bitswapSent, bitswapReceived }
 
 POST /gc
   → { freedBytes, freedBlocks, remainingBytes }
@@ -610,7 +610,7 @@ The `version` field is a monotonically increasing integer, incremented on each l
 
 The orchestrator tracks two versions per VM:
 - **currentVersion**: latest manifest registered (may be partially replicated)
-- **confirmedVersion**: latest manifest where ALL referenced blocks are verified replicated on ≥N target nodes
+- **confirmedVersion**: latest manifest where ALL referenced blocks have ≥N providers in the DHT (verified by audit loop)
 
 Blocks referenced by a current manifest naturally maintain high provider counts (nodes keep re-announcing them, and they get recent bitswap access which protects them from LRU eviction). Blocks no longer in any current manifest stop being re-announced, their provider records expire, and they naturally disappear via LRU GC. This eliminates delta chains, delta consolidation, and the full/delta manifest type distinction entirely.
 
@@ -1015,7 +1015,7 @@ Content addressing still provides deduplication on top of overlay-only savings: 
 ### Phase A: Orchestrator — Core Block Store
 
 1. **BlockStoreVmSpec.cs** — Resource specification (5% duty, 512 MB RAM)
-2. **BlockStoreInfo** on Node.cs — Model for tracking state (including PinnedManifestRootCids)
+2. **BlockStoreInfo** on Node.cs — Model for tracking state (capacity, usage, status)
 3. **VmType.BlockStore** — Add to enum
 4. **IBlockStoreService / BlockStoreService** — Deployment, manifest lifecycle, replication audit, migration planning
 5. **BlockStoreController.cs** — `/join`, `/announce`, `/locate`, `/manifest`, `/audit`, `/stats`
@@ -1042,7 +1042,7 @@ Content addressing still provides deduplication on top of overlay-only savings: 
 20. Build Go binary, encode as gzip+base64
 21. Test deployment on single node
 22. Test multi-node block exchange via bitswap
-23. Test GC with orchestrator-driven pin/unpin
+23. Test local LRU GC (eviction under capacity pressure, provider record withdrawal)
 24. Test self-healing (reconciliation redeploy)
 
 ### Phase D: Lazysync & Migration
@@ -1108,7 +1108,7 @@ Using a standard protocol also opens the door to IPFS interop later.
 - Easy to backup/restore (cp -r)
 - Good for large blocks (no LSM tree overhead)
 - Proven by IPFS Kubo for years
-LevelDB is only used for metadata (pin state, access times, stats).
+LevelDB is only used for metadata (access times, block index, stats).
 
 ### Decision 5: DHT-native scatter replication (not orchestrator-directed placement)
 **Why:** Decoupling replication from scheduling creates a simpler, more resilient system:
@@ -1193,7 +1193,7 @@ LevelDB is only used for metadata (pin state, access times, stats).
 - 5% storage allocation is enforced — no node exceeds its duty
 - Blocks survive node restart (persistent FlatFS)
 - Cross-node block retrieval works via bitswap
-- GC respects pins — pinned blocks are never evicted
+- Local LRU GC works correctly — evicts least-recently-used blocks, enforces 5% budget
 - Bootstrap polling discovers peers within 60 seconds
 - Self-healing redeploys on VM failure
 
