@@ -987,9 +987,11 @@ Self-healing example:
 GC lifecycle example:
   confirmedVersion v1: chunks [A, B, C] → all have ≥N providers
   confirmedVersion v2: chunks [A, D, C] → chunk D propagates, reaches ≥N
-  Chunk B is no longer in any current manifest → nodes stop re-announcing
-  Provider records for B expire (TTL) → B naturally disappears
-  No explicit "unpin" command needed
+  Chunk B is no longer fetched via bitswap (no VM references it)
+  → low access frequency → becomes LRU candidate → evicted during GC
+  → provider records for B expire after eviction (TTL) → B disappears
+  Block store nodes don't track manifests — eviction drives expiry,
+  not manifest awareness. No explicit "unpin" command needed
 ```
 
 ### 6.5 Storage Budget Under the 5% Duty
@@ -1046,13 +1048,16 @@ Receiving block store nodes (subscribed to topic via DHT mesh):
 
 Durable fallback (handles missed GossipSub messages):
 
-  Block store nodes periodically scan DHT for provider records near their
-  peer ID (neighborhood scan). Any blocks they're close to but don't yet
-  have are added to the bitswap want list. This catches:
+  GossipSub is the primary mechanism. The natural lazysync refresh cycle
+  (every ~5 minutes) is the fallback: each cycle re-announces all current
+  blocks via Provide() and re-publishes new-block messages to GossipSub.
+  A node that missed a message will see the same CIDs again on the next
+  cycle. This catches:
   - Blocks announced while the node was offline
   - Blocks from before the node joined the network
   - GossipSub messages lost due to network partition
-  Scan frequency: every 5-10 minutes (configurable)
+  With 10-20+ providers per block, one node not yet having a block is
+  irrelevant to durability — it will catch up within one or two cycles.
 ```
 
 **Adaptive XOR threshold:** Nodes don't use a fixed distance cutoff. Instead, the threshold adapts to local capacity:
