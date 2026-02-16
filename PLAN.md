@@ -18,10 +18,10 @@ Each Block Store VM:
 1. **Stores replicated blocks** — Holds content-addressed chunks of OTHER nodes' VM disk state
 2. **Announces blocks** — Publishes provider records to the DHT ("I have block X")
 3. **Transfers blocks** — Serves blocks to other nodes via libp2p bitswap protocol
-4. **Accepts replication commands** — Orchestrator directs which blocks to fetch and pin
-5. **Garbage collects** — Removes unpinned blocks under orchestrator coordination
+4. **Pulls blocks autonomously** — Nodes close to a block's CID in Kademlia XOR space pull and store it via bitswap, with no orchestrator direction
+5. **Garbage collects** — Local LRU eviction within the 5% budget; orchestrator audits provider counts
 
-This enables continuous VM disk replication, live migration on node failure, template image distribution, and eventually a full decentralized filesystem — all without centralized cloud storage.
+This enables continuous VM disk replication, live migration on node failure, template image distribution, and eventually a full decentralized filesystem — all without centralized cloud storage. Replication is fully decentralized via Kademlia's natural scatter properties; the orchestrator acts as an auditor, not a coordinator.
 
 ---
 
@@ -33,17 +33,16 @@ This enables continuous VM disk replication, live migration on node failure, tem
 │  ┌──────────────────────┐  ┌───────────────────────────────────┐ │
 │  │ BlockStoreService     │  │ BlockStoreController              │ │
 │  │ - DeployBlockStoreVm  │  │ POST /api/blockstore/join         │ │
-│  │ - PlaceReplicas()     │  │ POST /api/blockstore/announce     │ │
-│  │ - ScheduleMigration() │  │ POST /api/blockstore/replicate    │ │
-│  └──────────────────────┘  │ GET  /api/blockstore/locate/{cid} │ │
-│                              │ POST /api/blockstore/manifest      │ │
+│  │ - ScheduleMigration() │  │ POST /api/blockstore/announce     │ │
+│  │ - AuditReplication()  │  │ GET  /api/blockstore/locate/{cid} │ │
+│  └──────────────────────┘  │ POST /api/blockstore/manifest      │ │
+│                              │ GET  /api/blockstore/audit/{vmId}  │ │
 │  ┌──────────────────────┐  │ GET  /api/blockstore/stats         │ │
 │  │ LazysyncManager       │  └───────────────────────────────────┘ │
-│  │ - Dirty block tracking │                                        │
-│  │ - Manifest versioning  │  Node.BlockStoreInfo:                 │
-│  │ - Replication tracking │  { VmId, PeerId, Capacity,           │
-│  │ - Pin/unpin lifecycle  │    Used, Status, PinnedManifests }    │
-│  └──────────────────────┘                                        │
+│  │ - Manifest versioning  │                                        │
+│  │ - Version audit        │  Node.BlockStoreInfo:                 │
+│  │ - Provider count check │  { VmId, PeerId, Capacity,           │
+│  └──────────────────────┘    Used, Status }                      │
 └───────────────────┬──────────────────────────────────────────────┘
                     │ CreateVm command (labels)
                     ▼
@@ -75,8 +74,7 @@ This enables continuous VM disk replication, live migration on node failure, tem
 │  │    POST /dag            (put manifest + blocks atomically)     │ │
 │  │    GET  /dag/{cid}      (resolve DAG, return manifest)        │ │
 │  │    GET  /stats          (storage usage stats)                  │ │
-│  │    POST /pin/{cid}      (pin block, prevent GC)               │ │
-│  │    POST /gc             (run garbage collection)               │ │
+│  │    POST /gc             (run garbage collection, LRU eviction) │ │
 │  └──────────────────────────────────────────────────────────────┘ │
 │                                                                    │
 │  ┌──────────────┐  ┌──────────────────┐  ┌───────────────────┐   │
@@ -96,8 +94,9 @@ The Block Store VM does **not** run its own DHT. Instead, it:
 2. Uses **libp2p bitswap** for block exchange between block store peers
 3. Uses the **DHT's provider records** to announce "I have CID X" (via the DHT's Kademlia routing)
 4. Discovers other block store peers through the DHT network
+5. **Pulls blocks autonomously** — when provider records appear for CIDs close to this node in Kademlia XOR space, the block store fetches and stores them via bitswap
 
-This keeps the DHT VM lightweight (just routing + discovery) while the Block Store VM handles heavy storage I/O.
+This keeps the DHT VM lightweight (just routing + discovery) while the Block Store VM handles heavy storage I/O. The DHT's Kademlia routing naturally scatters blocks across the network — no central coordinator decides which node stores which block.
 
 ---
 
@@ -127,7 +126,7 @@ Examples:
   Network of 1,000 nodes averaging 1 TB each → 50 TB aggregate block store
 ```
 
-The block store on each node holds **replicated overlay chunks from OTHER nodes' VMs** — not the node's own data. A node's own VM overlay blocks are distributed to other nodes' block stores by the orchestrator via lazysync.
+The block store on each node holds **replicated overlay chunks from OTHER nodes' VMs** — not the node's own data. A node's own VM overlay blocks are pushed to its local block store by lazysync, then scatter across the network via Kademlia's natural propagation.
 
 ### 3.2 Deployment Flow
 
@@ -217,16 +216,12 @@ public interface IBlockStoreService
     Task<string?> DeployBlockStoreVmAsync(Node node, IVmService vmService, CancellationToken ct = default);
     Task<List<string>> GetBootstrapPeersAsync(string? excludeNodeId = null);
 
-    // Replication & placement
-    Task ReplicateBlocksAsync(string targetNodeId, List<string> cids, bool pin, CancellationToken ct = default);
-    Task UnpinBlocksAsync(string targetNodeId, List<string> cids, CancellationToken ct = default);
-    Task<List<ReplicationTarget>> SelectReplicaNodesAsync(string manifestRootCid, int replicationFactor,
-        VmSchedulingRequirements? affinityHint = null, string? excludeNodeId = null);
-
     // Lazysync manifest lifecycle
     Task<ManifestRecord> RegisterManifestAsync(string vmId, string rootCid, int version,
         List<string> changedBlockCids, long totalBytes, CancellationToken ct = default);
-    Task ConfirmManifestReplicatedAsync(string vmId, int version, CancellationToken ct = default);
+
+    // Replication audit (not coordination — the DHT handles replication)
+    Task<ReplicationAudit> AuditManifestReplicationAsync(string vmId, int version, CancellationToken ct = default);
 
     // Migration support
     Task<MigrationPlan> PlanMigrationAsync(string vmId, List<string> candidateNodeIds, CancellationToken ct = default);
@@ -241,9 +236,9 @@ Key responsibilities:
 - Resolve WireGuard mesh labels (reuse DhtNodeService pattern)
 - Generate auth token + labels, deploy VM via VmService
 - Store `BlockStoreInfo` on Node model
-- **Placement-aware replication**: select target nodes considering failure domains, node capabilities (CPU, RAM, GPU, region), and VM scheduling requirements so replicas land on nodes that could host the VM if migration is needed
-- **Manifest lifecycle**: register evolving manifests from lazysync, track confirmed vs current version, GC blocks unreferenced by any confirmed manifest
-- **Migration planning**: given a VM to migrate, rank candidate nodes by block locality (how many blocks they already have) combined with scheduling fit
+- **Manifest lifecycle**: register evolving manifests from lazysync, track confirmed vs current version
+- **Replication audit**: query the DHT for provider counts per chunk CID; advance `confirmedVersion` when all chunks in a manifest version have ≥N providers. The orchestrator does not direct replication — Kademlia handles scatter natively
+- **Migration planning**: given a VM to migrate, rank candidate nodes by scheduling fit (CPU, RAM, GPU, region, affinity) and resource headroom. Block locality is not a factor — the target node fetches overlay blocks via bitswap from scattered providers
 
 #### NEW: `src/Orchestrator/Controllers/BlockStoreController.cs`
 
@@ -259,37 +254,39 @@ POST /api/blockstore/announce
   Request:  { nodeId, vmId, cids: ["bafk..."], action: "add"|"remove" }
   Auth:     X-BlockStore-Token
   Response: { success, recorded: count }
-  Purpose:  Batch announce/withdraw CIDs (orchestrator maintains global index)
-
-POST /api/blockstore/replicate
-  Request:  { targetNodeId, cids: ["bafk..."], pin: true, priority: "normal"|"urgent" }
-  Auth:     Internal (orchestrator → node agent → block store VM)
-  Response: { success, queued: count, estimatedBytes }
-  Purpose:  Orchestrator directs a node to fetch and pin specific blocks.
-            Used for lazysync replication and migration pre-staging.
+  Purpose:  Batch announce/withdraw CIDs (orchestrator maintains secondary index;
+            the DHT is the primary source of truth for provider records)
 
 GET /api/blockstore/locate/{cid}
-  Response: { cid, providers: [{ nodeId, peerId, multiaddr,
-              nodeCapabilities: { vcpus, ramBytes, gpus, region } }],
+  Response: { cid, providers: [{ nodeId, peerId, multiaddr }],
               replication: count }
-  Purpose:  Find which nodes have a specific block. Includes node capabilities
-            so the caller (or orchestrator) can make placement-aware decisions.
+  Purpose:  Find which nodes have a specific block. Queries the DHT's
+            provider records. Used for audit and diagnostics.
 
 POST /api/blockstore/manifest
   Request:  { vmId, rootCid, version, changedBlockCids: ["bafk..."], totalBytes }
   Auth:     Internal
-  Response: { success, manifestVersion, replicationPlan: [{ nodeId, cidsToPin }] }
+  Response: { success, manifestVersion }
   Purpose:  Register an updated VM manifest from a lazysync cycle.
-            Orchestrator records the new manifest version and returns a
-            replication plan for the changed blocks only.
+            Orchestrator records the new version. No replication plan is
+            returned — blocks replicate via Kademlia scatter autonomously.
 
 GET /api/blockstore/manifest/{vmId}
   Response: { vmId, currentVersion, confirmedVersion, confirmedRootCid,
               timestamp, replicationStatus: { targetFactor: 3,
-              confirmedOnNodes: [nodeIds] } }
+              providerCounts: { "bafk...": 12, ... } } }
   Purpose:  Query manifest version and replication status for a VM.
-            confirmedVersion = latest version fully replicated on ≥N target nodes.
-            currentVersion = latest version (may be partially replicated).
+            confirmedVersion = latest version where ALL chunks have ≥N
+            providers in the DHT.
+            currentVersion = latest registered (may still be propagating).
+
+GET /api/blockstore/audit/{vmId}
+  Response: { vmId, version, totalChunks, chunksWithSufficientProviders,
+              underReplicatedChunks: [{ cid, providerCount }] }
+  Purpose:  Detailed replication health for a specific VM's manifest.
+            Queries FindProviders for each chunk CID. Used by the
+            orchestrator's background audit loop to advance confirmedVersion
+            and detect under-replication.
 
 GET /api/blockstore/stats
   Response: { totalNodes, totalCapacity, totalUsed, totalBlocks,
@@ -310,9 +307,7 @@ public class BlockStoreInfo
     public int ApiPort { get; set; } = 5090;
     public long CapacityBytes { get; set; }             // Allocated storage (5% of node)
     public long UsedBytes { get; set; }                 // Currently used
-    public int BlockCount { get; set; }                 // Local blocks
-    public int PinnedBlockCount { get; set; }           // Pinned (won't GC)
-    public List<string> PinnedManifestRootCids { get; set; } = [];  // VM manifest DAGs pinned on this node
+    public int BlockCount { get; set; }                 // Local blocks stored (determined by Kademlia proximity)
     public BlockStoreStatus Status { get; set; } = BlockStoreStatus.Initializing;
     public DateTime? LastHealthCheck { get; set; }
 }
@@ -321,6 +316,8 @@ public enum BlockStoreStatus { Initializing, Active, Degraded, Full, Offline }
 ```
 
 Add `BlockStoreInfo? BlockStoreInfo` property to the Node class.
+
+Note: Nodes no longer receive pinning commands from the orchestrator. Which blocks a node stores is determined by Kademlia XOR proximity — nodes pull and serve blocks whose CIDs are close to their peer ID in XOR space. GC is local LRU eviction within the 5% budget.
 
 #### MODIFY: `src/Orchestrator/Models/VirtualMachine.cs`
 
@@ -447,8 +444,8 @@ Features:
 2. Bitswap client+server for block exchange
 3. FlatFS backend for block storage (content-addressed flat files)
 4. Storage quota enforcement (refuse writes when full)
-5. Pinning system (pinned blocks survive GC)
-6. Garbage collection (LRU eviction of unpinned blocks)
+5. Garbage collection (LRU eviction within 5% budget)
+6. Autonomous block pulling (fetch blocks close to peer ID in Kademlia XOR space)
 7. Localhost HTTP API on port 5090
 8. Provider record announcement via DHT connection
 ```
@@ -492,16 +489,10 @@ GET  /stats
   → { capacityBytes, usedBytes, usagePercent, blockCount,
       pinnedCount, connectedPeers, bitswapSent, bitswapReceived }
 
-POST /pin/{cid}
-  → { cid, pinned: true }
-  Note: If cid is a DAG root, pins the manifest AND all referenced blocks.
-
-DELETE /pin/{cid}
-  → { cid, pinned: false }
-
 POST /gc
   → { freedBytes, freedBlocks, remainingBytes }
-  Note: Only evicts unpinned blocks. Orchestrator controls what is pinned.
+  Note: Evicts least-recently-used blocks. Local LRU eviction —
+        no orchestrator coordination needed.
 
 POST /connect
   Body: { peers: ["/ip4/.../p2p/..."] }
@@ -541,7 +532,6 @@ Add `VmType.BlockStore` handling in `HandleCreateVmAsync`:
 │   └── QM/
 │       └── ...
 ├── dags/                  # DAG manifests (JSON, indexed by root CID)
-├── pins.json              # List of pinned CIDs (including DAG roots)
 ├── dynamic-peers          # Runtime peer injection (same as DHT)
 └── datastore/             # LevelDB for metadata (block index, stats)
 ```
@@ -554,8 +544,6 @@ Add `VmType.BlockStore` handling in `HandleCreateVmAsync`:
    → Write to FlatFS
    → Announce provider record to DHT (via connected DHT node)
    → Return CID
-   Note: Blocks are NOT auto-pinned. The orchestrator explicitly pins
-         what it wants retained. Unpinned blocks are GC candidates.
 
 2. GET /blocks/{cid}
    → Check local FlatFS
@@ -564,7 +552,6 @@ Add `VmType.BlockStore` handling in `HandleCreateVmAsync`:
    → Return bytes or 404
 
 3. DELETE /blocks/{cid}
-   → Remove pin if pinned
    → Delete from FlatFS
    → Withdraw provider record from DHT
 
@@ -574,12 +561,13 @@ Add `VmType.BlockStore` handling in `HandleCreateVmAsync`:
    → Manifest root CID = SHA-256 of manifest JSON
    → Return root CID
 
-5. GC (orchestrator-coordinated)
-   → Find unpinned blocks (orchestrator controls pin lifecycle)
-   → Sort by last access time (LRU)
-   → Delete until usage is under 85% of capacity
+5. GC (local LRU eviction)
+   → Sort blocks by last access time (LRU)
+   → Delete least-recently-used blocks until usage is under 85% of capacity
    → Hard refuse writes at 95% capacity
    → Withdraw provider records for deleted blocks
+   → Kademlia naturally re-replicates if provider count drops —
+     other close nodes discover the gap and pull from remaining providers
 ```
 
 #### DAG / Manifest Structure
@@ -624,7 +612,7 @@ The orchestrator tracks two versions per VM:
 - **currentVersion**: latest manifest registered (may be partially replicated)
 - **confirmedVersion**: latest manifest where ALL referenced blocks are verified replicated on ≥N target nodes
 
-Blocks referenced by `confirmedVersion` are never GC'd. Blocks only referenced by older versions are fair game. This eliminates delta chains, delta consolidation, and the full/delta manifest type distinction entirely.
+Blocks referenced by a current manifest naturally maintain high provider counts (nodes keep re-announcing them, and they get recent bitswap access which protects them from LRU eviction). Blocks no longer in any current manifest stop being re-announced, their provider records expire, and they naturally disappear via LRU GC. This eliminates delta chains, delta consolidation, and the full/delta manifest type distinction entirely.
 
 Content addressing provides automatic deduplication: if two VMs use the same base image and write the same packages, those overlay chunks share the same CID and are stored once. Unchanged overlay chunks across lazysync cycles share the same CID and are never re-stored or re-transferred.
 
@@ -639,7 +627,7 @@ The Go binary connects to other Block Store peers via libp2p and uses the bitswa
 bswap := bitswap.New(ctx, network, blockstore)
 ```
 
-Bitswap is the **transfer mechanism** — the orchestrator decides **what** to replicate and **where**, then issues `POST /api/blockstore/replicate` commands. The target node's block store binary uses bitswap to pull the requested blocks from the network.
+Bitswap is both the **transfer mechanism** and the **replication mechanism**. When a block is announced to the DHT, nodes close to the block's CID in Kademlia XOR space discover the provider record and pull it via bitswap autonomously. No orchestrator commands are needed — the DHT's natural properties scatter blocks across the network.
 
 #### DHT Provider Records
 
@@ -737,15 +725,23 @@ Background lazysync daemon (runs on the node agent, cycles every ~5 minutes):
   6. Register updated manifest with orchestrator:
      → POST /api/blockstore/manifest { vmId, rootCid, version,
          changedBlockCids, totalBytes }
-     → Orchestrator returns replication plan for changed blocks only
+     → Orchestrator records the new version (no replication plan returned)
 
-  7. Orchestrator replicates changed blocks:
-     → POST /api/blockstore/replicate to each target node
-     → Target nodes fetch new blocks via bitswap from Node A
-     → Target nodes update their pinned manifest copy
-     → When all targets confirm → orchestrator advances confirmedVersion
+  7. Blocks replicate via Kademlia scatter (autonomous, no orchestrator action):
+     → Block store announced provider records in step 4
+     → Nodes close to each block's CID in Kademlia XOR space discover
+       the provider records and pull the blocks via bitswap
+     → This happens naturally and continuously — not triggered by the orchestrator
+     → Blocks scatter across many nodes (not limited to scheduling-eligible ones)
 
-  8. Reset QEMU dirty bitmap for next cycle
+  8. Orchestrator audits replication asynchronously:
+     → Background audit loop queries DHT: FindProviders(chunkCid)
+       for each chunk in the latest manifest
+     → When all chunks have ≥N providers → advance confirmedVersion
+     → Under-replicated chunks are flagged but NOT actively pushed —
+       Kademlia's re-publication handles recovery naturally
+
+  9. Reset QEMU dirty bitmap for next cycle
 ```
 
 **What this eliminates:**
@@ -772,7 +768,7 @@ VM with 100 GB virtual disk, freshly booted:
   Overlay writes:  ~500 MB (cloud-init setup, package installs, config)
   Allocated overlay clusters: ~500 chunks (1 MB each)
 
-  Initial seed: 500 MB → push to block store → replicate to 3 nodes
+  Initial seed: 500 MB → push to block store → Kademlia scatters to network
   Time: seconds to minutes, not hours
 
 VM with 100 GB virtual disk, mature workload:
@@ -780,7 +776,7 @@ VM with 100 GB virtual disk, mature workload:
   Overlay writes:  ~5-15 GB (application data, logs, databases)
   Allocated overlay clusters: ~5,000-15,000 chunks
 
-  Initial seed: 5-15 GB → push to block store → replicate
+  Initial seed: 5-15 GB → push to block store → Kademlia scatters
   Time: minutes, depending on network
 
 The lazysync daemon uses `qemu-img map` to discover which clusters
@@ -789,7 +785,7 @@ Only allocated clusters are chunked and replicated — zero/unallocated
 regions are not included in the manifest.
 ```
 
-The orchestrator tracks seeding state. VMs with `confirmedVersion == 0` are flagged as "unprotected" in the dashboard. Seeding is rate-limited to avoid saturating the node's block store VM or network.
+The orchestrator tracks seeding state via its audit loop. VMs with `confirmedVersion == 0` (no chunks have ≥N providers yet) are flagged as "unprotected" in the dashboard. Seeding is rate-limited to avoid saturating the node's block store VM or network.
 
 Compare this to full-disk seeding: a 100 GB disk would require 100,000 chunks regardless of actual usage. Overlay-only seeding typically handles 1-10% of that volume.
 
@@ -818,23 +814,25 @@ The node agent already manages VMs via libvirt/QEMU and has access to QMP socket
 
 ### 6.1.3 Manifest Versioning & Consistency
 
-The orchestrator tracks manifest versions to ensure replication consistency:
+The orchestrator tracks manifest versions and audits replication via DHT provider counts:
 
 ```
-Manifest v1: [chunk0=A, chunk1=B, chunk2=C]  → fully replicated (confirmed)
+Manifest v1: [chunk0=A, chunk1=B, chunk2=C]  → all chunks have ≥N providers (confirmed)
 Lazysync: chunk1 changed → CID D
-Manifest v2: [chunk0=A, chunk1=D, chunk2=C]  → replicating...
+Manifest v2: [chunk0=A, chunk1=D, chunk2=C]  → chunk D propagating via Kademlia...
 Lazysync: chunk2 changed → CID E
-Manifest v3: [chunk0=A, chunk1=D, chunk2=E]  → pending
+Manifest v3: [chunk0=A, chunk1=D, chunk2=E]  → chunk E propagating...
 
 Orchestrator state for this VM:
   currentVersion:   3   (latest registered)
-  confirmedVersion: 1   (latest where all blocks verified on ≥3 nodes)
+  confirmedVersion: 1   (latest where ALL chunks have ≥N providers in DHT)
 
 Rules:
-  - Blocks referenced by confirmedVersion are NEVER GC'd
-  - Blocks only referenced by versions < confirmedVersion are GC candidates
-  - If replication of v2 completes before v3 is registered → confirmedVersion advances to 2
+  - confirmedVersion advances when the audit loop verifies provider counts
+  - Old blocks (e.g., chunk B from v1) naturally lose providers as nodes
+    GC them via LRU eviction — no explicit "unpin" needed
+  - If v2's chunks all reach ≥N providers before v3 is registered →
+    confirmedVersion advances to 2
   - Recovery always uses confirmedVersion's manifest
 ```
 
@@ -851,16 +849,18 @@ For each VM on Node A:
      (root CID + all referenced block CIDs — a single flat manifest,
       no delta chain to walk)
 
-  3. For each candidate node, compute migration score:
-     scheduling_fit:  does the node meet VM's requirements? (filter)
-     block_locality:  how many of the VM's blocks does this node
-                      already have in its block store? (rank)
+  3. For each candidate node, evaluate:
+     scheduling_fit:      does the node meet VM's requirements? (filter)
      available_resources: enough CPU/RAM/disk headroom? (filter)
-     base_image_cached: does the node already have the base image? (bonus)
+     base_image_cached:  does the node already have the base image? (bonus)
 
-     score = block_locality_ratio * weight_locality
-           + resource_headroom * weight_resources
+     score = resource_headroom * weight_resources
            + base_image_local * weight_image_cache
+
+     Block locality is NOT a factor. Overlay blocks are scattered across
+     many nodes via Kademlia — the target fetches them via bitswap from
+     wherever they exist. With N scattered providers per block, the
+     fetch fans out massively and parallelizes well.
 
   4. Select best candidate node (highest score that passes all filters)
 
@@ -872,9 +872,10 @@ For each VM on Node A:
         many VMs share the same base image like debian-12-generic).
         If not → download from image registry (same path as normal VM creation).
 
-     b) Overlay — assemble from block store:
-        Target node's block store already has most overlay blocks (pinned replicas).
-        Remaining blocks are fetched via bitswap from other replica nodes.
+     b) Overlay — assemble from block store network:
+        Target node requests each chunk CID via bitswap.
+        Bitswap parallelizes across all providers — blocks are scattered
+        across many nodes, so the fetch is inherently distributed.
         Write overlay chunks at their manifest offsets into a new qcow2 file
         with backing file = base image path.
 
@@ -897,55 +898,88 @@ For each VM on Node A:
 
 Reconstruction is fast because:
 - **Base image**: likely already cached on the target node (shared across VMs of the same type). If not, it's a single download of a well-known artifact, not a block-by-block fetch.
-- **Overlay**: only the allocated clusters — typically 1-10% of the virtual disk size. Most blocks are already local (pinned replicas from placement-aware replication).
+- **Overlay**: only the allocated clusters — typically 1-10% of the virtual disk size. Blocks are scattered across many providers — bitswap fetches from the closest/fastest ones in parallel. More providers = faster reconstruction than pulling from 3 pre-selected replicas.
 - **Cloud-init**: regenerated in milliseconds from labels. Zero network transfer.
 - **No chain traversal**: the manifest IS the complete overlay state. Read chunks, write file, done.
 
-### 6.3 Placement-Aware Replication
+### 6.3 DHT-Native Scatter Replication
 
-The orchestrator doesn't replicate randomly. It places replicas on nodes that:
+Replication is **decoupled from placement**. These are independent concerns:
 
-1. **Are in different failure domains** — different racks, availability zones, or regions. If all 3 replicas are on the same rack and the rack loses power, the data is gone.
+- **Replication = durability.** Scatter blocks as widely as possible across the network.
+- **Scheduling = placement.** The orchestrator picks an eligible node when migration is needed.
 
-2. **Could plausibly host the VM** — meet the VM's scheduling requirements (enough CPU, RAM, right GPU type, acceptable region). This way, when migration is needed, a candidate node already has the data locally. No transfer needed during the emergency.
-
-3. **Have block store capacity available** — the 5% allocation must not be exceeded. The orchestrator tracks each node's `UsedBytes` vs `CapacityBytes`.
+The block store does NOT replicate to specific "target nodes." Instead, Kademlia's XOR metric naturally scatters blocks across the network. Every node with a block store (≥100 GB storage) participates in replication regardless of its scheduling capabilities.
 
 ```
 Example: VM-1 requires 4 vCPUs, 8 GB RAM, us-east region
 
-Orchestrator selects replica nodes:
-  Node B: us-east, 8 cores, 32 GB RAM, 40 GB block store free  ✓
-  Node C: us-east, 16 cores, 64 GB RAM, 90 GB block store free ✓
-  Node D: eu-west, 4 cores, 16 GB RAM, 25 GB block store free  ✓ (different region = failure domain diversity)
+Lazysync pushes overlay blocks to Node A's local block store.
+Block store announces provider records to the DHT.
+Kademlia naturally scatters blocks to the K closest nodes in XOR space:
 
-NOT selected:
-  Node E: us-east, 2 cores, 4 GB RAM  ✗ (can't host VM-1, too small)
-  Node F: us-east, same rack as Node B  ✗ (same failure domain)
+  Node B: us-east, 8 cores, 32 GB RAM     ← could host VM-1
+  Node C: ap-south, 2 cores, 4 GB RAM     ← can't host VM-1, CAN store its blocks
+  Node D: eu-west, 16 cores, 64 GB RAM    ← could host VM-1
+  Node E: us-east, 1 core, 2 GB RAM       ← Raspberry Pi, CAN store blocks
+  Node F: eu-west, 4 cores, 8 GB RAM      ← could host VM-1
+  ...12 more nodes scattered across regions
+
+Durability: blocks survive even if an entire region goes down.
+Candidate pool: ALL nodes with storage contribute, not just scheduling-eligible ones.
+Migration: orchestrator picks from {B, D, F, ...} based on scheduling fit.
+           Target fetches overlay via bitswap from {B, C, D, E, F, ...} in parallel.
 ```
 
-### 6.4 GC and Pin Lifecycle
+**Why this is better than placement-aware replication:**
 
-Garbage collection is **orchestrator-coordinated** through the pin mechanism:
+1. **Larger replication pool** — A 2-core Raspberry Pi can store chunks for a 16-core GPU VM. This expands the candidate pool dramatically compared to restricting replicas to scheduling-eligible nodes.
+
+2. **Better durability** — Kademlia's XOR metric distributes blocks across the ID space, which is statistically independent of geographic or failure domain clustering. More diverse placement = more resilient.
+
+3. **Simpler replication logic** — No scheduling requirements evaluation in the replication path. No failure domain reasoning. The block store only asks: "Am I close to this CID in XOR space? Do I have room?"
+
+4. **Faster migration** — With N scattered providers (potentially 10-20+ nodes), bitswap parallelizes the fetch across many sources. Placement-aware replication with 3 pre-selected replicas means 3 sources. Scatter gives you many more.
+
+5. **No coupling** — Storage and compute are independent concerns. A node's replication duty doesn't depend on what VMs it could run.
+
+### 6.4 GC — Local LRU + Orchestrator Audit
+
+Garbage collection is **fully local** — each node manages its own 5% budget. The orchestrator **audits** replication health but does not control what individual nodes store or evict.
 
 ```
-Orchestrator owns the pin lifecycle:
-  1. New manifest version registered → orchestrator pins changed blocks on target nodes
-  2. New manifest version confirmed replicated → orchestrator unpins blocks from
-     previous version that are no longer referenced by any confirmed manifest
-  3. Unpinned blocks become local GC candidates
-  4. Node's block store runs GC: evicts unpinned blocks via LRU
-     - GC triggers at 85% capacity
-     - Hard refuse new writes at 95% capacity
+Local GC (runs on each block store node):
+  1. Nodes store blocks they're close to in Kademlia XOR space
+  2. When usage approaches 85% of capacity → trigger LRU eviction
+  3. Evict least-recently-accessed blocks first
+  4. Hard refuse new writes at 95% capacity
+  5. Withdraw provider records for evicted blocks from DHT
+  6. Recently-accessed blocks (served via bitswap) naturally survive GC
 
-A node never decides "is this block safe to delete?" — it only follows pins.
-If the orchestrator unpinned it, it's fair game for GC.
+Orchestrator audit (background loop):
+  1. For each VM with confirmedVersion < currentVersion:
+     → Query DHT FindProviders for each chunk CID in latest manifest
+     → If ALL chunks have ≥N providers → advance confirmedVersion
+  2. If a chunk's provider count drops below threshold:
+     → Flag as under-replicated in dashboard
+     → Kademlia's natural re-publication handles recovery:
+       remaining providers re-announce, nearby nodes pull the block
+     → In rare cases of persistent under-replication, orchestrator
+       can publish a "re-replicate" hint via the DHT (fallback, not normal path)
 
-Pin lifecycle example:
-  confirmedVersion v1: chunks [A, B, C] → all pinned on target nodes
-  confirmedVersion v2: chunks [A, D, C] → block D pinned, block B unpinned
-  Block B has no other references → GC candidate
-  Block A and C unchanged → still pinned, zero cost for this transition
+Self-healing example:
+  Chunk B has 15 providers. 3 nodes go offline → 12 providers remain.
+  Kademlia provider record TTL expires for the 3 offline nodes.
+  Remaining 12 providers re-announce. Nearby nodes in XOR space
+  that don't yet have the block discover it and pull via bitswap.
+  Provider count recovers to ~15 without any orchestrator intervention.
+
+GC lifecycle example:
+  confirmedVersion v1: chunks [A, B, C] → all have ≥N providers
+  confirmedVersion v2: chunks [A, D, C] → chunk D propagates, reaches ≥N
+  Chunk B is no longer in any current manifest → nodes stop re-announcing
+  Provider records for B expire (TTL) → B naturally disappears
+  No explicit "unpin" command needed
 ```
 
 ### 6.5 Storage Budget Under the 5% Duty
@@ -955,21 +989,21 @@ The 5% cap constrains how many VM manifests a node can hold replicas of. With ov
 ```
 Node B has 50 GB block store (5% of 1 TB):
 
-Currently pinned:
-  VM-1 overlay: 3 GB  (100 GB virtual disk, but overlay is only 3 GB)
-  VM-3 overlay: 8 GB  (200 GB virtual disk, database workload)
-  VM-7 overlay: 500 MB (50 GB virtual disk, freshly deployed web server)
-  Total pinned: 11.5 GB
-  Free:         38.5 GB
+Currently stored (determined by Kademlia XOR proximity):
+  Scattered chunks from many VMs: ~12 GB total
+  (Node B doesn't know or care which VMs these chunks belong to —
+   it simply stores blocks it's close to in XOR space)
+  Free: 38 GB
 
 Compare to full-disk replication:
-  VM-1 would cost ~20 GB (deduped), VM-3 ~40 GB, VM-7 ~5 GB
-  Total: 65 GB — exceeds the 50 GB budget!
-  With overlay-only: 11.5 GB — 77% reduction
+  A single VM's full disk could consume 20-40 GB of Node B's budget.
+  With overlay-only: scattered chunks from dozens of VMs fit easily.
 
-Orchestrator knows Node B can accept ~38.5 GB more replica data.
-A single node's 50 GB block store can hold overlay replicas for
-dozens of VMs instead of 2-3 VMs under full-disk replication.
+Each node manages its own budget locally via LRU eviction.
+The aggregate across all nodes provides massive redundancy:
+  1,000 nodes × 50 GB average = 50 TB aggregate block store
+  A VM with 3 GB overlay replicated to ~15 nodes = 45 GB total
+  That's 0.09% of the network's capacity per VM.
 ```
 
 Content addressing still provides deduplication on top of overlay-only savings: if two VMs install the same packages on the same base image, those overlay chunks share the same CID. And with lazysync, each cycle only adds the genuinely new blocks — unchanged chunks share the same CID and cost nothing.
@@ -983,8 +1017,8 @@ Content addressing still provides deduplication on top of overlay-only savings: 
 1. **BlockStoreVmSpec.cs** — Resource specification (5% duty, 512 MB RAM)
 2. **BlockStoreInfo** on Node.cs — Model for tracking state (including PinnedManifestRootCids)
 3. **VmType.BlockStore** — Add to enum
-4. **IBlockStoreService / BlockStoreService** — Deployment, replication, manifest lifecycle, migration planning
-5. **BlockStoreController.cs** — `/join`, `/announce`, `/replicate`, `/locate`, `/manifest`, `/stats`
+4. **IBlockStoreService / BlockStoreService** — Deployment, manifest lifecycle, replication audit, migration planning
+5. **BlockStoreController.cs** — `/join`, `/announce`, `/locate`, `/manifest`, `/audit`, `/stats`
 6. **SystemVmLabelSchema** — Add required labels
 7. **ObligationEligibility** — Uncomment BlockStore eligibility, lower RAM threshold to 2 GB
 8. **SystemVmReconciliationService** — Wire up deployment method
@@ -1013,13 +1047,13 @@ Content addressing still provides deduplication on top of overlay-only savings: 
 
 ### Phase D: Lazysync & Migration
 
-25. **LazysyncManager** in orchestrator — manifest version tracking, confirmed vs current, pin lifecycle
+25. **LazysyncManager** in orchestrator — manifest version tracking, confirmed vs current, provider count audit loop
 26. **Lazysync daemon** on node agent — QEMU QMP integration (dirty bitmaps, incremental backup), overlay chunking via `qemu-img map` for sparse cluster discovery, block push, manifest update cycle
 27. **Initial overlay seeding** — push allocated overlay clusters on first enrollment, progress tracking, rate limiting
-28. **Placement-aware replication** — SelectReplicaNodesAsync with scheduling affinity
-29. **Migration planner** — PlanMigrationAsync with block locality scoring + base image cache awareness
-30. **Disk reconstruction** — ensure base image available (cache or download) + assemble overlay from confirmed manifest + regenerate cloud-init ISO from labels
-31. **End-to-end migration test** — simulate node failure, verify VM rescheduling from confirmed manifest (base image + overlay + cloud-init)
+28. **Kademlia scatter replication** — block store nodes autonomously pull blocks close to their peer ID in XOR space; verify propagation via provider count audit
+29. **Migration planner** — PlanMigrationAsync with scheduling fit + resource headroom (no block locality scoring — target fetches via bitswap)
+30. **Disk reconstruction** — ensure base image available (cache or download) + fetch overlay from scattered providers via bitswap + regenerate cloud-init ISO from labels
+31. **End-to-end migration test** — simulate node failure, verify VM rescheduling from confirmed manifest (base image + overlay from bitswap + cloud-init)
 
 ---
 
@@ -1076,21 +1110,23 @@ Using a standard protocol also opens the door to IPFS interop later.
 - Proven by IPFS Kubo for years
 LevelDB is only used for metadata (pin state, access times, stats).
 
-### Decision 5: Orchestrator-driven replication (not organic gossip)
-**Why:** With a constrained 5% budget per node, replication can't be random. The orchestrator:
-- Knows every node's capabilities, capacity, and current load
-- Knows every VM's scheduling requirements
-- Can place replicas on nodes that could host the VM (migration readiness)
-- Can enforce failure domain diversity
-- Can track replication factor per manifest
-Bitswap is the transfer mechanism; the orchestrator is the placement brain.
+### Decision 5: DHT-native scatter replication (not orchestrator-directed placement)
+**Why:** Decoupling replication from scheduling creates a simpler, more resilient system:
+- **Storage ≠ compute**: a 2-core node can store chunks for a 16-core VM. Restricting replicas to scheduling-eligible nodes wastes the storage capacity of smaller nodes and shrinks the replication pool
+- **Kademlia XOR scatter is free**: the DHT's mathematical properties naturally distribute blocks across the network with high diversity. No placement logic needed
+- **Larger replication pool = better durability**: blocks land on 10-20+ nodes scattered across the ID space, not 3 pre-selected "placement-aware" targets. An entire region can go offline without data loss
+- **Faster migration**: bitswap fetches from many scattered providers in parallel, not 3 specific replicas
+- **Simpler**: no `SelectReplicaNodesAsync`, no failure domain reasoning in the replication path, no `/replicate` commands. The block store just participates in Kademlia — blocks flow to where they belong
+- The orchestrator's role reduces to **auditing** (checking provider counts) and **scheduling** (picking migration targets based on compute fit). Bitswap is both the transfer and replication mechanism
 
-### Decision 6: Orchestrator-coordinated GC via pin lifecycle
-**Why:** With the 5% duty model, local GC decisions are dangerous — a node might evict blocks that are the last replica. Instead:
-- The orchestrator explicitly pins blocks it wants retained
-- The orchestrator unpins old manifest blocks only after confirming new versions are replicated
-- Local GC only evicts unpinned blocks (safe by construction)
-- No distributed consensus needed — the orchestrator is the single source of truth for pin state
+### Decision 6: Local LRU GC + orchestrator audit (not orchestrator-coordinated pinning)
+**Why:** With scatter replication across many nodes, local GC is safe:
+- Blocks have 10-20+ providers scattered across the network. One node evicting a block via LRU has negligible impact on durability
+- Kademlia's provider record re-publication naturally recovers from provider loss — nearby nodes discover the gap and pull from remaining providers
+- No orchestrator pin/unpin lifecycle needed. Nodes manage their own 5% budget via LRU eviction
+- Old blocks (no longer in any current manifest) naturally disappear: nodes stop re-announcing → provider records expire (TTL) → blocks become GC candidates everywhere
+- The orchestrator audits provider counts and advances `confirmedVersion` — this is a read-only check, not a coordination step
+- In the rare case of persistent under-replication, the orchestrator can publish a "re-replicate" hint — but this is a fallback, not the normal path
 
 ### Decision 7: Content-addressed with CIDv1
 **Why:** Using IPFS-compatible CIDs (Content IDentifiers) means:
@@ -1134,17 +1170,19 @@ Bitswap is the transfer mechanism; the orchestrator is the placement brain.
 | Large Go binary size | Slow VM boot | Gzip+base64 encoding, ~5-8 MB compressed |
 | Storage quota enforcement | Disk full crashes | Hard refuse writes at 95%, GC trigger at 85% |
 | Bitswap flood | Network saturation | Rate limiting per peer, bandwidth caps |
-| Block loss (all replicas offline) | VM cannot migrate | Min replication factor 3, failure domain diversity |
-| Stale provider records | Failed retrievals | TTL on records, periodic re-announcement |
+| Block loss (all providers offline) | VM cannot migrate | Kademlia scatter ensures 10-20+ providers per block across diverse nodes; entire region can fail without data loss |
+| Stale provider records | Failed retrievals | TTL on records, periodic re-announcement; Kademlia republishes automatically |
 | DHT dependency | Can't discover peers without DHT | Bootstrap poll as fallback, direct peer list |
-| 5% budget exceeded | Node disk pressure | Orchestrator tracks capacity, hard limit on pins |
-| Overlay too large for 5% | Can't replicate heavy-write VMs | Overlay-only is typically 1-10% of virtual disk; dedup further reduces; spread across many nodes |
+| 5% budget exceeded | Node disk pressure | Local LRU eviction enforces budget; hard refuse at 95% |
+| Overlay too large for 5% | Can't replicate heavy-write VMs | Overlay-only is typically 1-10% of virtual disk; dedup further reduces; scatter spreads cost across many nodes |
 | High write-rate VM | Lazysync generates heavy replication traffic | Rate limiting per VM; adaptive cycle interval (slower for hot VMs); write coalescing reduces effective dirty block count |
 | QEMU CBT compatibility | Older QEMU lacks persistent dirty bitmaps | Require QEMU ≥4.0; fallback to full re-scan if bitmap lost (rare) |
 | Initial seeding slow | VM unprotected during first sync | Overlay-only seeding is typically 500 MB–15 GB (not 100 GB); completes in minutes; track progress; prioritize new VMs |
-| Base image unavailable during migration | Can't reconstruct VM disk | Base images cached on most nodes; image registry as fallback; block store can distribute base images as pinned blocks |
-| Manifest version drift | Confirmed version lags far behind current | Alert when gap exceeds threshold; orchestrator can throttle lazysync cycle until replication catches up |
-| Orchestrator unavailable | Can't coordinate replication | Existing pins persist; GC won't evict pinned blocks; lazysync continues locally, queues manifest registrations for when orchestrator returns |
+| Base image unavailable during migration | Can't reconstruct VM disk | Base images cached on most nodes; image registry as fallback; block store can distribute base images via bitswap |
+| Manifest version drift | Confirmed version lags far behind current | Alert when gap exceeds threshold; orchestrator can throttle lazysync cycle until Kademlia propagation catches up |
+| Orchestrator unavailable | Audit pauses, confirmedVersion stalls | Replication continues autonomously via Kademlia — blocks still scatter and providers re-announce. Lazysync continues locally, queues manifest registrations. Only confirmedVersion advancement pauses |
+| Kademlia hot spots | Blocks cluster on certain nodes | XOR metric statistically distributes evenly; LRU eviction naturally sheds excess; large network dilutes any clustering |
+| Over-replication waste | Blocks replicate to more nodes than needed | Benign — extra replicas improve durability and migration speed. LRU GC naturally trims excess as nodes fill up |
 
 ---
 
@@ -1163,12 +1201,13 @@ Bitswap is the transfer mechanism; the orchestrator is the placement brain.
 - Lazysync daemon continuously replicates dirty overlay blocks for all running VMs
 - Lazysync cycle completes within configured interval (~5 minutes) under normal load
 - QEMU incremental backup produces crash-consistent dirty block exports without VM pause
-- Confirmed manifest version stays within 2 versions of current (replication keeps up)
-- Replication factor of 3 is maintained for all confirmed manifests
-- Replicas are placed on scheduling-compatible nodes (migration readiness)
-- When a node goes offline, its VMs are rescheduled to a new node
-- Migration selects nodes with highest block locality (minimal transfer)
-- VM disk reconstruction from confirmed manifest completes successfully (base image + overlay assembly + cloud-init regeneration)
+- Confirmed manifest version stays within 2 versions of current (Kademlia scatter keeps up)
+- All chunks in confirmed manifests have ≥N providers in the DHT (verified by audit loop)
+- Blocks scatter across the network via Kademlia XOR proximity — no orchestrator-directed placement
+- When a node goes offline, its VMs are rescheduled to a scheduling-eligible node
+- Migration target selected by scheduling fit + resource headroom (bitswap fetches overlay from scattered providers)
+- VM disk reconstruction from confirmed manifest completes successfully (base image + overlay via bitswap + cloud-init regeneration)
 - Initial overlay seeding of new VMs completes within minutes (not hours)
 - Recovery point objective: ≤10 minutes of data loss under normal conditions
 - Overlay-only replication keeps per-VM storage cost at 1-10% of virtual disk size
+- Self-healing: provider count recovers autonomously when nodes leave/rejoin the network
