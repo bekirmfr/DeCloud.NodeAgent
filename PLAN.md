@@ -94,7 +94,9 @@ The Block Store VM does **not** run its own DHT. Instead, it:
 2. Uses **libp2p bitswap** for block exchange between block store peers
 3. Uses the **DHT's provider records** to announce "I have CID X" (via the DHT's Kademlia routing)
 4. Discovers other block store peers through the DHT network
-5. **Pulls blocks autonomously** — when provider records appear for CIDs close to this node in Kademlia XOR space, the block store fetches and stores them via bitswap
+5. **Subscribes to GossipSub** topic `decloud/blockstore/new-blocks` for near-instant notification of new blocks
+6. **Pulls blocks autonomously** — evaluates XOR distance to announced CIDs, pulls via bitswap if close enough (adaptive threshold based on local capacity)
+7. **Queries DHT proximity** — uses `GET /proximity/{cid}` on the co-located DHT VM for neighborhood scans and diagnostics
 
 This keeps the DHT VM lightweight (just routing + discovery) while the Block Store VM handles heavy storage I/O. The DHT's Kademlia routing naturally scatters blocks across the network — no central coordinator decides which node stores which block.
 
@@ -273,9 +275,10 @@ POST /api/blockstore/manifest
 
 GET /api/blockstore/manifest/{vmId}
   Response: { vmId, currentVersion, confirmedVersion, confirmedRootCid,
-              timestamp, replicationStatus: { targetFactor: 3,
-              providerCounts: { "bafk...": 12, ... } } }
+              timestamp, replicationFactor: 3,
+              replicationStatus: { providerCounts: { "bafk...": 12, ... } } }
   Purpose:  Query manifest version and replication status for a VM.
+            replicationFactor = per-VM configurable N (default 3, 0 = ephemeral).
             confirmedVersion = latest version where ALL chunks have ≥N
             providers in the DHT.
             currentVersion = latest registered (may still be propagating).
@@ -445,9 +448,11 @@ Features:
 3. FlatFS backend for block storage (content-addressed flat files)
 4. Storage quota enforcement (refuse writes when full)
 5. Garbage collection (LRU eviction within 5% budget)
-6. Autonomous block pulling (fetch blocks close to peer ID in Kademlia XOR space)
-7. Localhost HTTP API on port 5090
-8. Provider record announcement via DHT connection
+6. GossipSub subscription (`decloud/blockstore/new-blocks`) for near-instant block discovery
+7. Adaptive XOR threshold pull logic (closer distance + more free space → more aggressive pulling)
+8. Periodic DHT neighborhood scan (durable fallback for missed GossipSub messages)
+9. Localhost HTTP API on port 5090
+10. Provider record announcement via DHT connection
 ```
 
 **HTTP API (localhost only, port 5090):**
@@ -580,6 +585,7 @@ The manifest is a single evolving document where chunk CIDs are replaced in-plac
 {
   "type": "vm-overlay",
   "vmId": "vm-abc123",
+  "replicationFactor": 3,
   "version": 47,
   "timestamp": "2026-02-16T12:05:00Z",
   "baseImageId": "debian-12-generic",
@@ -627,7 +633,7 @@ The Go binary connects to other Block Store peers via libp2p and uses the bitswa
 bswap := bitswap.New(ctx, network, blockstore)
 ```
 
-Bitswap is both the **transfer mechanism** and the **replication mechanism**. When a block is announced to the DHT, nodes close to the block's CID in Kademlia XOR space discover the provider record and pull it via bitswap autonomously. No orchestrator commands are needed — the DHT's natural properties scatter blocks across the network.
+Bitswap is the **transfer mechanism**; GossipSub + Kademlia provide the **discovery mechanism**. When a new block is pushed to a block store, the source publishes the CID to the `decloud/blockstore/new-blocks` GossipSub topic. Block store nodes that are close to the CID in Kademlia XOR space (and have capacity) add it to their bitswap want list and pull it automatically. For nodes that missed the GossipSub message, periodic DHT neighborhood scans serve as the durable fallback. No orchestrator commands are needed — blocks scatter across the network autonomously.
 
 #### DHT Provider Records
 
@@ -716,6 +722,8 @@ Background lazysync daemon (runs on the node agent, cycles every ~5 minutes):
   4. Push new blocks to Node A's local block store VM:
      → POST /blocks for each new block
      → Block store announces provider records to DHT
+     → Block store publishes new CIDs to GossipSub topic
+       "decloud/blockstore/new-blocks" (fast notification path)
 
   5. Update manifest in-place:
      → manifest.chunks[offset] = newCID for each changed offset
@@ -728,11 +736,13 @@ Background lazysync daemon (runs on the node agent, cycles every ~5 minutes):
      → Orchestrator records the new version (no replication plan returned)
 
   7. Blocks replicate via Kademlia scatter (autonomous, no orchestrator action):
-     → Block store announced provider records in step 4
-     → Nodes close to each block's CID in Kademlia XOR space discover
-       the provider records and pull the blocks via bitswap
-     → This happens naturally and continuously — not triggered by the orchestrator
+     → Block store announced provider records + GossipSub notification in step 4
+     → Other block store nodes receive GossipSub message with new CIDs
+     → Each receiving node computes XOR distance: distance(myPeerId, cid)
+     → If close enough (adaptive threshold based on local free space) → pull via bitswap
      → Blocks scatter across many nodes (not limited to scheduling-eligible ones)
+     → GossipSub is the fast path; DHT provider records are the durable fallback
+       for nodes that missed the GossipSub message (offline, network partition)
 
   8. Orchestrator audits replication asynchronously:
      → Background audit loop queries DHT: FindProviders(chunkCid)
@@ -1008,6 +1018,171 @@ The aggregate across all nodes provides massive redundancy:
 
 Content addressing still provides deduplication on top of overlay-only savings: if two VMs install the same packages on the same base image, those overlay chunks share the same CID. And with lazysync, each cycle only adds the genuinely new blocks — unchanged chunks share the same CID and cost nothing.
 
+### 6.6 GossipSub Propagation Mechanism
+
+Standard Kademlia provider records tell you "who has block X" but don't trigger replication. Provider records are passive — they answer queries, not push notifications. The block store needs an active propagation mechanism to achieve scatter.
+
+The block store uses **GossipSub** (already deployed on every DHT VM) as the fast notification path, with DHT provider records as the durable fallback:
+
+```
+Source block store (after lazysync pushes new blocks):
+
+  1. Store block in FlatFS, compute CID
+  2. Announce Provide(cid) to DHT (standard provider record)
+  3. Publish to GossipSub topic "decloud/blockstore/new-blocks":
+     { cid, size, sourcePeerId }
+
+Receiving block store nodes (subscribed to topic via DHT mesh):
+
+  1. Receive GossipSub message
+  2. Compute XOR distance: distance(myPeerId, cid)
+  3. Evaluate pull decision:
+     - Am I close enough?  (adaptive threshold — see below)
+     - Do I have capacity?  (5% budget check)
+     - Do I already have this block?  (dedup check)
+  4. If yes → add to bitswap want list → pull from source via bitswap
+  5. After storing → announce Provide(cid) to DHT (now I'm also a provider)
+  6. If no → ignore (some other node closer in XOR space will take it)
+
+Durable fallback (handles missed GossipSub messages):
+
+  Block store nodes periodically scan DHT for provider records near their
+  peer ID (neighborhood scan). Any blocks they're close to but don't yet
+  have are added to the bitswap want list. This catches:
+  - Blocks announced while the node was offline
+  - Blocks from before the node joined the network
+  - GossipSub messages lost due to network partition
+  Scan frequency: every 5-10 minutes (configurable)
+```
+
+**Adaptive XOR threshold:** Nodes don't use a fixed distance cutoff. Instead, the threshold adapts to local capacity:
+
+```
+threshold = base_distance × capacity_multiplier
+
+capacity_multiplier:
+  - usage < 50%:  1.5  (aggressive — pull blocks from a wider range)
+  - usage 50-75%: 1.0  (standard — pull nearby blocks only)
+  - usage 75-85%: 0.5  (conservative — only very close blocks)
+  - usage > 85%:  0.0  (GC mode — stop pulling, start evicting)
+
+This self-balances: nodes with more free space absorb more blocks.
+Nodes near capacity stop pulling and shed load via LRU eviction.
+No central coordination needed.
+```
+
+The block store binary subscribes to the GossipSub topic through its libp2p connection to the DHT network. It already connects to the DHT for provider records — subscribing to a topic is one additional call.
+
+### 6.7 Replication Factor (Per-VM Configurable)
+
+The replication factor N determines the **minimum provider count** required for `confirmedVersion` to advance. N is set per VM, ties directly to pricing, and defaults to 3.
+
+```
+N=0  Ephemeral VM. Lazysync does NOT run. No overlay blocks are pushed
+     to the block store. If the node dies, the VM is gone. Zero bandwidth,
+     zero block store cost. Cheapest tier.
+
+N=1  Minimal durability. Lazysync runs. Blocks push to local block store
+     and scatter via Kademlia. Orchestrator confirms when ≥1 remote provider
+     exists. Survives single node failure.
+
+N=3  Standard durability (default). Orchestrator waits for ≥3 providers in
+     the DHT before advancing confirmedVersion. Kademlia scatter typically
+     produces 10-20+ providers, but confirmed status requires 3.
+
+N=5+ Premium durability. Higher confirmation threshold. Greater confidence
+     that blocks are widely scattered before the version is considered safe.
+```
+
+**N is a confirmation threshold, not a replication target.** Kademlia scatter is passive — blocks end up on however many nodes are close in XOR space. N determines when the orchestrator considers the data "safe enough" to advance `confirmedVersion` and allow recovery from that version. Even N=3 VMs typically have blocks on 10-20+ nodes.
+
+**Cost model:** The primary cost lever is N=0 vs N>0 — whether lazysync runs at all. Once lazysync runs, the incremental cost of N=3 vs N=5 is minimal (slightly longer wait for confirmation). The real cost is bandwidth (lazysync pushes blocks) and block store capacity consumed across the network.
+
+The replication factor is stored on the VM model in the orchestrator and included in the manifest registration:
+
+```
+POST /api/blockstore/manifest
+  Request: { vmId, rootCid, version, changedBlockCids, totalBytes }
+
+  Orchestrator looks up VM's replicationFactor (N).
+  If N == 0 → reject (lazysync shouldn't be running for ephemeral VMs)
+  Otherwise → record version, audit loop checks for ≥N providers
+```
+
+### 6.8 Source-Offline Before Scatter (Alerting)
+
+There is an unavoidable window between "block pushed to local block store" and "block pulled by other nodes via Kademlia scatter." If the source node goes offline during this window, blocks with only 1 provider (the source) are lost.
+
+```
+Timeline:
+  T+0:  Lazysync pushes blocks to local block store
+  T+1s: Provider records announced to DHT + GossipSub notification
+  T+5s: First remote node pulls via bitswap (2 providers now)
+  T+30s: Several remote nodes have pulled (5+ providers)
+  T+2m: Kademlia scatter stabilizes (~15 providers)
+
+If the source node dies at T+3s:
+  - Blocks with 2 providers survive (the one remote node that pulled)
+  - Blocks with 1 provider (source only) are lost
+  - The VM's overlay is partially recoverable
+```
+
+The orchestrator handles this via alerting, not prevention:
+
+```
+Node A goes offline. Orchestrator detects failure.
+
+For each VM on Node A with replicationFactor > 0:
+
+  Case 1: confirmedVersion == 0 (never confirmed)
+    → Alert: "VM-X has replication enabled but no confirmed replicas.
+       Data may be lost. The VM cannot be migrated."
+    → Dashboard status: UNRECOVERABLE
+
+  Case 2: confirmedVersion > 0 but < currentVersion
+    → Alert: "VM-X will recover from confirmed version N.
+       Approximately M minutes of recent state may be lost."
+    → Proceed with migration from confirmed manifest
+    → Dashboard status: RECOVERING (partial data loss)
+
+  Case 3: confirmedVersion == currentVersion (fully caught up)
+    → No data loss. Proceed with migration normally.
+    → Dashboard status: MIGRATING
+
+  Case 4: replicationFactor == 0 (ephemeral)
+    → VM is gone. No alert about data loss (user opted in).
+    → Dashboard status: LOST (ephemeral)
+```
+
+This is the honest approach: the scatter window is small (seconds to minutes) and cannot be eliminated without synchronous replication (which would add latency to every write). The mitigation is visibility — the orchestrator tracks the gap between `currentVersion` and `confirmedVersion` and alerts when it matters.
+
+### 6.9 DHT Proximity Endpoint
+
+The block store binary needs to evaluate its position in Kademlia XOR space relative to a given CID. The block store has its own persistent peer ID and can compute `xor(myPeerId, cid)` locally — this is a trivial bitwise operation.
+
+However, for diagnostics, debugging, and the periodic neighborhood scan, the **DHT VM exposes a proximity endpoint**:
+
+```
+GET /proximity/{cid}
+  → {
+      distance: "0x1a3f...",          // XOR distance from this DHT node's peer ID
+      closerKnownPeers: 7,            // how many peers in the routing table are closer
+      estimatedRank: 8,               // approximate position (1 = closest known peer)
+      kValue: 20                       // Kademlia K parameter
+    }
+
+  Purpose: Allows the block store to make informed pull decisions
+  beyond simple XOR distance. "Am I in the K closest?" is more useful
+  than "what is my raw distance?" for deciding whether to store a block.
+```
+
+For the **normal fast path** (GossipSub announce → pull decision), the block store uses local XOR distance + adaptive threshold (Section 6.6). The DHT proximity endpoint is used for:
+- Periodic neighborhood scan (durable fallback)
+- Diagnostic queries ("why did/didn't this node store block X?")
+- Dashboard visualization of block distribution
+
+This endpoint is added to the DHT VM's existing localhost HTTP API (port 5080), alongside `/health`, `/peers`, `/connect`, and `/publish`.
+
 ---
 
 ## 7. Implementation Order
@@ -1029,7 +1204,7 @@ Content addressing still provides deduplication on top of overlay-only savings: 
 
 11. **VmType.BlockStore** — Add to enum
 12. **blockstore-vm-cloudinit.yaml** — Cloud-init template
-13. **blockstore-node Go binary** — Core storage engine with DAG/manifest support
+13. **blockstore-node Go binary** — Core storage engine with DAG/manifest support, GossipSub subscription for `decloud/blockstore/new-blocks`, adaptive XOR threshold pull logic
 14. **blockstore-bootstrap-poll.sh** — Orchestrator peer discovery
 15. **blockstore-notify-ready.sh** — Callback to NodeAgent
 16. **blockstore-health-check.sh** — Health monitoring
@@ -1047,13 +1222,15 @@ Content addressing still provides deduplication on top of overlay-only savings: 
 
 ### Phase D: Lazysync & Migration
 
-25. **LazysyncManager** in orchestrator — manifest version tracking, confirmed vs current, provider count audit loop
-26. **Lazysync daemon** on node agent — QEMU QMP integration (dirty bitmaps, incremental backup), overlay chunking via `qemu-img map` for sparse cluster discovery, block push, manifest update cycle
+25. **LazysyncManager** in orchestrator — manifest version tracking, confirmed vs current, provider count audit loop, per-VM replication factor N
+26. **Lazysync daemon** on node agent — QEMU QMP integration (dirty bitmaps, incremental backup), overlay chunking via `qemu-img map` for sparse cluster discovery, block push, manifest update cycle. Skip VMs with replicationFactor=0 (ephemeral)
 27. **Initial overlay seeding** — push allocated overlay clusters on first enrollment, progress tracking, rate limiting
-28. **Kademlia scatter replication** — block store nodes autonomously pull blocks close to their peer ID in XOR space; verify propagation via provider count audit
-29. **Migration planner** — PlanMigrationAsync with scheduling fit + resource headroom (no block locality scoring — target fetches via bitswap)
-30. **Disk reconstruction** — ensure base image available (cache or download) + fetch overlay from scattered providers via bitswap + regenerate cloud-init ISO from labels
-31. **End-to-end migration test** — simulate node failure, verify VM rescheduling from confirmed manifest (base image + overlay from bitswap + cloud-init)
+28. **GossipSub scatter propagation** — block store publishes new CIDs to `decloud/blockstore/new-blocks` topic; receiving nodes evaluate XOR distance with adaptive threshold; pull via bitswap if close enough
+29. **DHT proximity endpoint** — `GET /proximity/{cid}` on DHT VM for neighborhood scan and diagnostics
+30. **Migration planner** — PlanMigrationAsync with scheduling fit + resource headroom (no block locality scoring — target fetches via bitswap)
+31. **Source-offline alerting** — detect under-replicated VMs on node failure (confirmedVersion=0 → UNRECOVERABLE, confirmedVersion < current → partial data loss, replicationFactor=0 → LOST ephemeral)
+32. **Disk reconstruction** — ensure base image available (cache or download) + fetch overlay from scattered providers via bitswap + regenerate cloud-init ISO from labels
+33. **End-to-end migration test** — simulate node failure, verify VM rescheduling from confirmed manifest (base image + overlay from bitswap + cloud-init)
 
 ---
 
@@ -1161,6 +1338,22 @@ LevelDB is only used for metadata (access times, block index, stats).
 - **Sparse manifest**: only allocated overlay clusters appear in the manifest. `qemu-img map` discovers allocation without reading the full virtual disk
 - **Natural fit with qcow2**: QEMU already tracks dirty blocks at the overlay level. The dirty bitmap covers overlay writes only — base image reads are invisible to CBT
 
+### Decision 11: GossipSub fast path + DHT durable fallback (not pure Kademlia)
+**Why:** Standard Kademlia provider records are passive — they answer queries but don't push notifications. Waiting for periodic DHT scans to discover new blocks would add minutes of latency to replication. GossipSub provides near-instant notification:
+- Source block store publishes new CIDs to `decloud/blockstore/new-blocks` topic
+- All subscribed block store nodes receive the notification in seconds
+- Nodes evaluate XOR distance locally and pull if close enough
+- GossipSub is ephemeral (missed messages are lost), so the DHT serves as the durable fallback: periodic neighborhood scans catch anything missed
+- This dual-path approach gives both speed (GossipSub) and reliability (DHT provider records)
+
+### Decision 12: Per-VM configurable replication factor (not fixed network-wide)
+**Why:** Different workloads have different durability requirements and cost tolerances:
+- N=0 (ephemeral): development VMs, CI runners — no replication cost
+- N=3 (default): production workloads — standard durability
+- N=5+ (premium): databases, stateful services — higher confidence
+- The cost lever is primarily N=0 vs N>0 (whether lazysync runs at all). Once running, incremental cost of higher N is minimal — Kademlia scatters to many nodes regardless, N just sets the confirmation threshold
+- Ties directly to pricing tiers without complicating the replication mechanism
+
 ---
 
 ## 10. Risk Assessment
@@ -1183,6 +1376,9 @@ LevelDB is only used for metadata (access times, block index, stats).
 | Orchestrator unavailable | Audit pauses, confirmedVersion stalls | Replication continues autonomously via Kademlia — blocks still scatter and providers re-announce. Lazysync continues locally, queues manifest registrations. Only confirmedVersion advancement pauses |
 | Kademlia hot spots | Blocks cluster on certain nodes | XOR metric statistically distributes evenly; LRU eviction naturally sheds excess; large network dilutes any clustering |
 | Over-replication waste | Blocks replicate to more nodes than needed | Benign — extra replicas improve durability and migration speed. LRU GC naturally trims excess as nodes fill up |
+| Source offline before scatter | Blocks lost if only provider dies | GossipSub + bitswap propagation completes in seconds; window is small. Orchestrator alerts on confirmedVersion=0 + node failure. Cannot be fully eliminated without synchronous replication |
+| GossipSub message loss | Blocks fail to propagate to nearby nodes | DHT provider records serve as durable fallback; periodic neighborhood scan catches missed blocks within 5-10 minutes |
+| Ephemeral VM data loss (N=0) | User loses all VM state on node failure | By design — user explicitly chose N=0. Dashboard shows ephemeral status. No alert on node failure |
 
 ---
 
@@ -1193,9 +1389,12 @@ LevelDB is only used for metadata (access times, block index, stats).
 - 5% storage allocation is enforced — no node exceeds its duty
 - Blocks survive node restart (persistent FlatFS)
 - Cross-node block retrieval works via bitswap
+- GossipSub propagation delivers new block notifications to subscribed nodes within seconds
+- Adaptive XOR threshold correctly adjusts pull behavior based on local capacity
 - Local LRU GC works correctly — evicts least-recently-used blocks, enforces 5% budget
 - Bootstrap polling discovers peers within 60 seconds
 - Self-healing redeploys on VM failure
+- DHT proximity endpoint returns accurate distance and rank estimates
 
 ### Phase D (Lazysync & Migration)
 - Lazysync daemon continuously replicates dirty overlay blocks for all running VMs
@@ -1211,3 +1410,5 @@ LevelDB is only used for metadata (access times, block index, stats).
 - Recovery point objective: ≤10 minutes of data loss under normal conditions
 - Overlay-only replication keeps per-VM storage cost at 1-10% of virtual disk size
 - Self-healing: provider count recovers autonomously when nodes leave/rejoin the network
+- Per-VM replication factor (N) correctly enforced: N=0 skips lazysync, N=3+ requires provider count confirmation
+- Source-offline alerting correctly classifies VMs as UNRECOVERABLE / RECOVERING / MIGRATING / LOST based on confirmedVersion and replicationFactor
