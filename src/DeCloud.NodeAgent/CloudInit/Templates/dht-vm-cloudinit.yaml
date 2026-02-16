@@ -322,11 +322,6 @@ runcmd:
   # DHT binary is written directly to /usr/local/bin/dht-node by write_files
   # with gz+b64 encoding (cloud-init handles decompression and decoding)
 
-  # Generate API token for DHT binary's mutating HTTP endpoints (/connect, /publish).
-  # Purely VM-internal: the Go binary and dht-bootstrap-poll.sh both read it from dht.env.
-  # Generated at boot so no external system needs to store or verify it.
-  - bash -c 'echo "DHT_API_TOKEN=$(openssl rand -base64 32)" >> /etc/decloud-dht/dht.env'
-
   # Start DHT service
   - systemctl daemon-reload
   - systemctl enable decloud-dht

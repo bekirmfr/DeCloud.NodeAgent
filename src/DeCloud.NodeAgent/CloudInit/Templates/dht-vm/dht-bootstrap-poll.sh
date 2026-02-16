@@ -33,13 +33,6 @@ VM_ID="__VM_ID__"
 AUTH_TOKEN="__DHT_AUTH_TOKEN__"
 API_PORT="__DHT_API_PORT__"
 
-# DHT_API_TOKEN is generated at boot by cloud-init (openssl rand)
-# and appended to dht.env. Source it to pick up the token.
-if [ -f /etc/decloud-dht/dht.env ]; then
-    API_TOKEN=$(grep -oP '^DHT_API_TOKEN=\K.*' /etc/decloud-dht/dht.env || true)
-fi
-API_TOKEN="${API_TOKEN:-}"
-
 POLL_INTERVAL_ISOLATED=15    # seconds between polls when no peers
 POLL_INTERVAL_CONNECTED=300  # seconds between polls when connected (maintenance)
 MAX_CONNECT_FAILURES=0       # track consecutive orchestrator failures
@@ -142,10 +135,9 @@ while true; do
             # Build JSON array for POST /connect
             PEERS_JSON=$(echo "$BODY" | jq -c '.bootstrapPeers' 2>/dev/null)
 
-            # Inject peers via DHT binary's POST /connect endpoint
+            # Inject peers via DHT binary's POST /connect endpoint (localhost-only)
             CONNECT_RESULT=$(curl -X POST "http://127.0.0.1:${API_PORT}/connect" \
                 -H "Content-Type: application/json" \
-                -H "Authorization: Bearer $API_TOKEN" \
                 -d "{\"peers\": $PEERS_JSON}" \
                 --max-time 10 \
                 -s \

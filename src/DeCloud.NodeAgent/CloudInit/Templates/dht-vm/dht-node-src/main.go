@@ -35,7 +35,6 @@ const (
 type Config struct {
 	ListenPort     string
 	APIPort        string
-	APIToken       string
 	AdvertiseIP    string
 	BootstrapPeers string
 	DataDir        string
@@ -175,8 +174,8 @@ func main() {
 	// Periodically reads dynamic-peers file for runtime peer injection.
 	go retryBootstrap(ctx, h, cfg)
 
-	// Start HTTP API server (localhost-only, token-protected mutating endpoints)
-	go startAPIServer(cfg.APIPort, state, cfg.APIToken)
+	// Start HTTP API server (localhost-only — no external access)
+	go startAPIServer(cfg.APIPort, state)
 
 	log.Printf("DHT node is ready (peer ID: %s)", h.ID())
 
@@ -198,7 +197,6 @@ func loadConfig() Config {
 	return Config{
 		ListenPort:     envOrDefault("DHT_LISTEN_PORT", "4001"),
 		APIPort:        envOrDefault("DHT_API_PORT", "5080"),
-		APIToken:       os.Getenv("DHT_API_TOKEN"),
 		AdvertiseIP:    os.Getenv("DHT_ADVERTISE_IP"),
 		BootstrapPeers: os.Getenv("DHT_BOOTSTRAP_PEERS"),
 		DataDir:        envOrDefault("DHT_DATA_DIR", "/var/lib/decloud-dht"),
@@ -360,46 +358,14 @@ func retryBootstrap(ctx context.Context, h host.Host, cfg Config) {
 	}
 }
 
-// requireToken returns an HTTP middleware that rejects requests without a valid
-// Bearer token. Used on mutating endpoints (/connect, /publish) to prevent
-// unauthorized peer injection or event publishing from compromised mesh peers.
-// Read-only endpoints (/health, /peers) remain open for monitoring.
-func requireToken(token string, next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if token == "" {
-			// No token configured — allow (backwards-compatible)
-			next(w, r)
-			return
-		}
-
-		auth := r.Header.Get("Authorization")
-		if auth == "" {
-			http.Error(w, `{"error":"missing Authorization header"}`, http.StatusUnauthorized)
-			return
-		}
-
-		const prefix = "Bearer "
-		if len(auth) < len(prefix) || auth[:len(prefix)] != prefix {
-			http.Error(w, `{"error":"invalid Authorization header format"}`, http.StatusUnauthorized)
-			return
-		}
-
-		if auth[len(prefix):] != token {
-			http.Error(w, `{"error":"invalid token"}`, http.StatusForbidden)
-			return
-		}
-
-		next(w, r)
-	}
-}
-
 // startAPIServer runs the HTTP health/status API.
-// Binds to 127.0.0.1 only — the nginx reverse proxy and dht-bootstrap-poll.sh
-// access it locally. External peers communicate via the libp2p TCP port, not HTTP.
-func startAPIServer(port string, state *NodeState, apiToken string) {
+// Binds to 127.0.0.1 only — only localhost processes (dashboard, bootstrap-poll,
+// health checks) can reach it. External peers communicate via the libp2p TCP
+// port, not HTTP. No auth needed: if an attacker has code execution inside this
+// system VM, they already have access to the identity key and can kill the process.
+func startAPIServer(port string, state *NodeState) {
 	mux := http.NewServeMux()
 
-	// Read-only endpoints — no auth required (used by health checks, dashboard)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		state.mu.RLock()
 		defer state.mu.RUnlock()
@@ -435,9 +401,7 @@ func startAPIServer(port string, state *NodeState, apiToken string) {
 		})
 	})
 
-	// Mutating endpoints — require Bearer token to prevent unauthorized
-	// peer injection or event publishing from compromised mesh peers.
-	mux.HandleFunc("/connect", requireToken(apiToken, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/connect", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
@@ -528,9 +492,9 @@ func startAPIServer(port string, state *NodeState, apiToken string) {
 			"connected": connected,
 			"total":     len(payload.Peers),
 		})
-	}))
+	})
 
-	mux.HandleFunc("/publish", requireToken(apiToken, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/publish", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
@@ -555,7 +519,7 @@ func startAPIServer(port string, state *NodeState, apiToken string) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "published"})
-	}))
+	})
 
 	addr := fmt.Sprintf("127.0.0.1:%s", port)
 	log.Printf("HTTP API listening on %s", addr)
