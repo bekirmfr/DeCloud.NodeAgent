@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	leveldb "github.com/ipfs/go-ds-leveldb"
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
@@ -34,6 +35,7 @@ const (
 type Config struct {
 	ListenPort     string
 	APIPort        string
+	APIToken       string
 	AdvertiseIP    string
 	BootstrapPeers string
 	DataDir        string
@@ -80,8 +82,10 @@ func main() {
 		extAddr := fmt.Sprintf("/ip4/%s/tcp/%s", cfg.AdvertiseIP, cfg.ListenPort)
 		extMA, err := multiaddr.NewMultiaddr(extAddr)
 		if err == nil {
+			// Only advertise the WG tunnel IP — don't expose unreachable
+			// libvirt bridge or localhost addresses to other peers.
 			opts = append(opts, libp2p.AddrsFactory(func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
-				return append(addrs, extMA)
+				return []multiaddr.Multiaddr{extMA}
 			}))
 		}
 	}
@@ -97,11 +101,24 @@ func main() {
 		log.Printf("Listening on: %s/p2p/%s", addr, h.ID())
 	}
 
+	// Initialize persistent LevelDB datastore for DHT key-value records.
+	// Pure Go (syndtr/goleveldb) — works with CGO_ENABLED=0 cross-compilation.
+	dhtDatastorePath := filepath.Join(cfg.DataDir, "datastore")
+	if err := os.MkdirAll(dhtDatastorePath, 0o700); err != nil {
+		log.Fatalf("Failed to create DHT datastore directory: %v", err)
+	}
+	dhtDS, err := leveldb.NewDatastore(dhtDatastorePath, nil)
+	if err != nil {
+		log.Fatalf("Failed to open LevelDB datastore: %v", err)
+	}
+	defer dhtDS.Close()
+	log.Printf("Opened persistent datastore at %s", dhtDatastorePath)
+
 	// Initialize Kademlia DHT in server mode
 	kadDHT, err := dht.New(ctx, h,
 		dht.Mode(dht.ModeServer),
 		dht.ProtocolPrefix(protocolPrefix),
-		dht.Datastore(nil), // in-memory datastore
+		dht.Datastore(dhtDS),
 	)
 	if err != nil {
 		log.Fatalf("Failed to create DHT: %v", err)
@@ -153,8 +170,13 @@ func main() {
 	// Start background peer counter
 	go trackPeers(ctx, state)
 
-	// Start HTTP API server
-	go startAPIServer(cfg.APIPort, state)
+	// Start bootstrap retry goroutine — handles the race condition where
+	// this node deployed before other DHT nodes' PeerIds were captured.
+	// Periodically reads dynamic-peers file for runtime peer injection.
+	go retryBootstrap(ctx, h, cfg)
+
+	// Start HTTP API server (localhost-only, token-protected mutating endpoints)
+	go startAPIServer(cfg.APIPort, state, cfg.APIToken)
 
 	log.Printf("DHT node is ready (peer ID: %s)", h.ID())
 
@@ -176,6 +198,7 @@ func loadConfig() Config {
 	return Config{
 		ListenPort:     envOrDefault("DHT_LISTEN_PORT", "4001"),
 		APIPort:        envOrDefault("DHT_API_PORT", "5080"),
+		APIToken:       os.Getenv("DHT_API_TOKEN"),
 		AdvertiseIP:    os.Getenv("DHT_ADVERTISE_IP"),
 		BootstrapPeers: os.Getenv("DHT_BOOTSTRAP_PEERS"),
 		DataDir:        envOrDefault("DHT_DATA_DIR", "/var/lib/decloud-dht"),
@@ -296,10 +319,87 @@ func trackPeers(ctx context.Context, state *NodeState) {
 	}
 }
 
+// retryBootstrap periodically attempts to connect to peers when isolated.
+// Handles two scenarios:
+//  1. Bootstrap race: this node deployed before other DHT nodes' PeerIds were captured,
+//     so it booted with 0 bootstrap peers. Retry original list in case they come online.
+//  2. Dynamic peers: reads /var/lib/decloud-dht/dynamic-peers file for runtime injection.
+//     The node agent can write new peers to this file when the orchestrator discovers them.
+func retryBootstrap(ctx context.Context, h host.Host, cfg Config) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	dynamicPeersFile := filepath.Join(cfg.DataDir, "dynamic-peers")
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			currentPeers := len(h.Network().Peers())
+			if currentPeers > 0 {
+				continue // already connected, no retry needed
+			}
+
+			log.Println("No connected peers — attempting peer discovery...")
+
+			// Try original bootstrap peers
+			if cfg.BootstrapPeers != "" {
+				connectBootstrapPeers(ctx, h, cfg.BootstrapPeers)
+			}
+
+			// Try dynamic peers file (written by node agent)
+			if data, err := os.ReadFile(dynamicPeersFile); err == nil {
+				dynamicPeers := strings.TrimSpace(string(data))
+				if dynamicPeers != "" {
+					log.Printf("Found dynamic peers file with %d bytes", len(dynamicPeers))
+					connectBootstrapPeers(ctx, h, dynamicPeers)
+				}
+			}
+		}
+	}
+}
+
+// requireToken returns an HTTP middleware that rejects requests without a valid
+// Bearer token. Used on mutating endpoints (/connect, /publish) to prevent
+// unauthorized peer injection or event publishing from compromised mesh peers.
+// Read-only endpoints (/health, /peers) remain open for monitoring.
+func requireToken(token string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if token == "" {
+			// No token configured — allow (backwards-compatible)
+			next(w, r)
+			return
+		}
+
+		auth := r.Header.Get("Authorization")
+		if auth == "" {
+			http.Error(w, `{"error":"missing Authorization header"}`, http.StatusUnauthorized)
+			return
+		}
+
+		const prefix = "Bearer "
+		if len(auth) < len(prefix) || auth[:len(prefix)] != prefix {
+			http.Error(w, `{"error":"invalid Authorization header format"}`, http.StatusUnauthorized)
+			return
+		}
+
+		if auth[len(prefix):] != token {
+			http.Error(w, `{"error":"invalid token"}`, http.StatusForbidden)
+			return
+		}
+
+		next(w, r)
+	}
+}
+
 // startAPIServer runs the HTTP health/status API.
-func startAPIServer(port string, state *NodeState) {
+// Binds to 127.0.0.1 only — the nginx reverse proxy and dht-bootstrap-poll.sh
+// access it locally. External peers communicate via the libp2p TCP port, not HTTP.
+func startAPIServer(port string, state *NodeState, apiToken string) {
 	mux := http.NewServeMux()
 
+	// Read-only endpoints — no auth required (used by health checks, dashboard)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		state.mu.RLock()
 		defer state.mu.RUnlock()
@@ -335,7 +435,9 @@ func startAPIServer(port string, state *NodeState) {
 		})
 	})
 
-	mux.HandleFunc("/connect", func(w http.ResponseWriter, r *http.Request) {
+	// Mutating endpoints — require Bearer token to prevent unauthorized
+	// peer injection or event publishing from compromised mesh peers.
+	mux.HandleFunc("/connect", requireToken(apiToken, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
@@ -426,9 +528,9 @@ func startAPIServer(port string, state *NodeState) {
 			"connected": connected,
 			"total":     len(payload.Peers),
 		})
-	})
+	}))
 
-	mux.HandleFunc("/publish", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/publish", requireToken(apiToken, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
@@ -453,9 +555,9 @@ func startAPIServer(port string, state *NodeState) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "published"})
-	})
+	}))
 
-	addr := fmt.Sprintf("0.0.0.0:%s", port)
+	addr := fmt.Sprintf("127.0.0.1:%s", port)
 	log.Printf("HTTP API listening on %s", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("HTTP API server failed: %v", err)

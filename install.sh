@@ -1368,6 +1368,20 @@ download_node_agent() {
         sleep 2
     fi
     
+    # Preserve DHT binary build cache across reinstalls.
+    # build.sh has hash-based idempotency but the cache files live inside
+    # the repo directory which gets deleted on re-clone.
+    local DHT_CACHE_DIR="/tmp/decloud-dht-build-cache"
+    local DHT_TEMPLATE_DIR="$INSTALL_DIR/DeCloud.NodeAgent/src/DeCloud.NodeAgent/CloudInit/Templates/dht-vm"
+    
+    if [ -d "$DHT_TEMPLATE_DIR" ]; then
+        mkdir -p "$DHT_CACHE_DIR"
+        # Back up hash file and pre-built binaries
+        cp -f "$DHT_TEMPLATE_DIR/.dht-node-source.sha256" "$DHT_CACHE_DIR/" 2>/dev/null || true
+        cp -f "$DHT_TEMPLATE_DIR"/dht-node-*.gz.b64 "$DHT_CACHE_DIR/" 2>/dev/null || true
+        log_info "Preserved DHT build cache"
+    fi
+    
     if [ -d "$INSTALL_DIR/DeCloud.NodeAgent" ]; then
         rm -rf "$INSTALL_DIR/DeCloud.NodeAgent"
     fi
@@ -1378,7 +1392,50 @@ download_node_agent() {
     cd DeCloud.NodeAgent
     COMMIT=$(git rev-parse --short HEAD)
     
+    # Restore DHT build cache so build.sh can skip unchanged builds
+    local NEW_DHT_TEMPLATE_DIR="$INSTALL_DIR/DeCloud.NodeAgent/src/DeCloud.NodeAgent/CloudInit/Templates/dht-vm"
+    if [ -d "$DHT_CACHE_DIR" ] && [ -d "$NEW_DHT_TEMPLATE_DIR" ]; then
+        cp -f "$DHT_CACHE_DIR/.dht-node-source.sha256" "$NEW_DHT_TEMPLATE_DIR/" 2>/dev/null || true
+        cp -f "$DHT_CACHE_DIR"/dht-node-*.gz.b64 "$NEW_DHT_TEMPLATE_DIR/" 2>/dev/null || true
+        rm -rf "$DHT_CACHE_DIR"
+        log_info "Restored DHT build cache"
+    fi
+    
     log_success "Code downloaded (commit: $COMMIT)"
+}
+
+build_dht_binary() {
+    log_step "Building DHT node binary from source..."
+
+    local DHT_SRC="$INSTALL_DIR/DeCloud.NodeAgent/src/DeCloud.NodeAgent/CloudInit/Templates/dht-vm/dht-node-src"
+    local BUILD_SCRIPT="$DHT_SRC/build.sh"
+
+    if [ ! -f "$BUILD_SCRIPT" ]; then
+        log_warn "DHT build script not found at $BUILD_SCRIPT — skipping"
+        log_info "Pre-compiled binaries in the repo will be used instead"
+        return 0
+    fi
+
+    # Detect host architecture to only build what's needed
+    local HOST_ARCH
+    HOST_ARCH=$(uname -m)
+    case "$HOST_ARCH" in
+        x86_64|amd64) HOST_ARCH="amd64" ;;
+        aarch64|arm64) HOST_ARCH="arm64" ;;
+        *)
+            log_warn "Unknown architecture $HOST_ARCH — building both"
+            HOST_ARCH=""
+            ;;
+    esac
+
+    log_info "Building DHT binary for ${HOST_ARCH:-all architectures}..."
+
+    if bash "$BUILD_SCRIPT" $HOST_ARCH 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
+        log_success "DHT binary built from source (hash-checked)"
+    else
+        log_warn "DHT binary build failed — pre-compiled binaries will be used"
+        log_info "This is not fatal; the existing .gz.b64 files will still work"
+    fi
 }
 
 # Fixed build_node_agent function for install.sh
@@ -1871,6 +1928,7 @@ main() {
     install_decloud_docs
     install_relay_nat_support
 
+    build_dht_binary
     build_node_agent
     create_configuration
     create_systemd_service

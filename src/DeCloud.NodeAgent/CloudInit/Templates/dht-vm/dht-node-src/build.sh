@@ -55,11 +55,12 @@ ensure_go() {
         fi
     fi
 
-    # Check for previously downloaded Go in our local cache
-    local local_go="${SCRIPT_DIR}/.go-${GO_VERSION}/go/bin/go"
+    # Check for previously downloaded Go in persistent cache
+    # Using /opt instead of inside the repo dir (which gets wiped on reinstall)
+    local local_go="/opt/decloud-go/go-${GO_VERSION}/go/bin/go"
     if [ -x "$local_go" ]; then
         echo "Using cached Go at $local_go"
-        export GOROOT="${SCRIPT_DIR}/.go-${GO_VERSION}/go"
+        export GOROOT="/opt/decloud-go/go-${GO_VERSION}/go"
         export PATH="${GOROOT}/bin:${PATH}"
         return 0
     fi
@@ -81,7 +82,7 @@ ensure_go() {
 
     local go_tarball="go${GO_VERSION}.linux-${host_arch}.tar.gz"
     local go_url="https://go.dev/dl/${go_tarball}"
-    local download_dir="${SCRIPT_DIR}/.go-${GO_VERSION}"
+    local download_dir="/opt/decloud-go/go-${GO_VERSION}"
 
     mkdir -p "$download_dir"
 

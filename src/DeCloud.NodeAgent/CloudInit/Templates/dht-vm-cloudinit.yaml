@@ -2,7 +2,7 @@
 # DeCloud DHT VM Cloud-Init Configuration
 # Runs a libp2p Kademlia DHT node for peer discovery,
 # key-value storage, and GossipSub event propagation.
-# Version: 4.0 (WireGuard mesh connectivity — no port forwarding)
+# Version: 5.0 (direct orchestrator bootstrap polling)
 
 hostname: __HOSTNAME__
 manage_etc_hosts: true
@@ -40,6 +40,8 @@ packages:
   - wireguard
   - wireguard-tools
   - python3
+  - wireguard
+  - wireguard-tools
 
 # =====================================================
 # SYSTEM CONFIGURATION
@@ -63,6 +65,23 @@ write_files:
       DHT_DATA_DIR=/var/lib/decloud-dht
       DECLOUD_NODE_ID=__NODE_ID__
       DECLOUD_REGION=__DHT_REGION__
+
+  # WireGuard mesh enrollment environment variables
+  - path: /etc/decloud/wg-mesh.env
+    permissions: '0600'
+    content: |
+      WG_RELAY_ENDPOINT=__WG_RELAY_ENDPOINT__
+      WG_RELAY_PUBKEY=__WG_RELAY_PUBKEY__
+      WG_TUNNEL_IP=__WG_TUNNEL_IP__
+      WG_RELAY_API=__WG_RELAY_API__
+      WG_INTERFACE=wg-mesh
+      WG_DESCRIPTION=dht-__VM_ID__
+
+  # WireGuard mesh enrollment script (building block)
+  - path: /usr/local/bin/wg-mesh-enroll.sh
+    permissions: '0755'
+    content: |
+      __WG_MESH_ENROLL__
 
   # DHT metadata
   - path: /etc/decloud/dht-metadata.json
@@ -143,21 +162,8 @@ write_files:
               proxy_read_timeout 10s;
           }
 
-          location /connect {
-              proxy_pass http://127.0.0.1:8080;
-              proxy_set_header Host $host;
-              proxy_set_header X-Real-IP $remote_addr;
-              proxy_connect_timeout 5s;
-              proxy_read_timeout 10s;
-          }
-
-          location /publish {
-              proxy_pass http://127.0.0.1:8080;
-              proxy_set_header Host $host;
-              proxy_set_header X-Real-IP $remote_addr;
-              proxy_connect_timeout 5s;
-              proxy_read_timeout 10s;
-          }
+          # /connect and /publish are internal-only (token-protected,
+          # localhost-bound on the Go binary). Not exposed via nginx.
 
           # Dashboard root → Python dashboard server
           location = / {
@@ -248,6 +254,27 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
+  # Bootstrap poll service — polls orchestrator for peers while isolated
+  # Long-lived service (not oneshot like the callback above)
+  - path: /etc/systemd/system/decloud-dht-bootstrap-poll.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=DeCloud DHT Bootstrap Peer Polling
+      After=decloud-dht.service network-online.target
+      Wants=decloud-dht.service network-online.target
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/local/bin/dht-bootstrap-poll.sh
+      Restart=always
+      RestartSec=15
+      StandardOutput=journal
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
+
   # Health check script (loaded from external template)
   - path: /usr/local/bin/dht-health-check.sh
     permissions: '0755'
@@ -255,10 +282,19 @@ write_files:
       __DHT_HEALTH_CHECK__
 
   # Ready callback script (loaded from external template)
+  # Kept as backup path — notifies NodeAgent of peerId for heartbeat reporting.
+  # Primary peerId registration now happens via dht-bootstrap-poll → orchestrator.
   - path: /usr/local/bin/dht-notify-ready.sh
     permissions: '0755'
     content: |
       __DHT_NOTIFY_READY__
+
+  # Bootstrap poll script (loaded from external template)
+  # Polls orchestrator directly for bootstrap peers (relay callback pattern)
+  - path: /usr/local/bin/dht-bootstrap-poll.sh
+    permissions: '0755'
+    content: |
+      __DHT_BOOTSTRAP_POLL__
 
   # Dashboard static files (loaded from external templates)
   - path: /opt/decloud-dht/static/dashboard.html
@@ -283,6 +319,11 @@ runcmd:
   # Enable and start QEMU guest agent (static unit - systemctl enable fails silently)
   - ln -sf /lib/systemd/system/qemu-guest-agent.service /etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service
   - systemctl start qemu-guest-agent
+
+  # WireGuard mesh enrollment — must happen before DHT starts
+  # The enrollment script sources /etc/decloud/wg-mesh.env itself.
+  # Skip gracefully if relay config is missing (no relay found at deploy time).
+  - bash -c 'set -a && source /etc/decloud/wg-mesh.env && set +a && if [ -n "$WG_RELAY_ENDPOINT" ] && [ -n "$WG_RELAY_PUBKEY" ]; then /usr/local/bin/wg-mesh-enroll.sh; else echo "[wg-mesh] Skipping enrollment — no relay configured"; fi'
 
   # Configure and start Nginx
   - ln -sf /etc/nginx/sites-available/dht-proxy /etc/nginx/sites-enabled/
@@ -323,9 +364,13 @@ runcmd:
   - systemctl enable decloud-dht-dashboard
   - systemctl start decloud-dht-dashboard
 
-  # Start ready callback service
+  # Start ready callback service (backup — notifies NodeAgent)
   - systemctl enable decloud-dht-callback
   - systemctl start decloud-dht-callback
+
+  # Start bootstrap poll service (primary — talks to orchestrator directly)
+  - systemctl enable decloud-dht-bootstrap-poll
+  - systemctl start decloud-dht-bootstrap-poll
 
   # Log completion
   - 'echo "DeCloud DHT node __VM_ID__ bootstrap complete at $(date)" >> /var/log/dht-bootstrap.log'

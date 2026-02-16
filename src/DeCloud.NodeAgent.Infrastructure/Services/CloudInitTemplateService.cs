@@ -319,6 +319,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
         {
             var healthCheck = await LoadExternalTemplateAsync("dht-health-check.sh", "dht-vm", ct);
             var notifyReady = await LoadExternalTemplateAsync("dht-notify-ready.sh", "dht-vm", ct);
+            var bootstrapPoll = await LoadExternalTemplateAsync("dht-bootstrap-poll.sh", "dht-vm", ct);
             var dashboardPy = await LoadExternalTemplateAsync("dht-dashboard.py", "dht-vm", ct);
             var dashboardHtml = await LoadExternalTemplateAsync("dashboard.html", "dht-vm", ct);
             var dashboardCss = await LoadExternalTemplateAsync("dashboard.css", "dht-vm", ct);
@@ -327,6 +328,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
 
             var result = ReplaceWithIndentation(template, "__DHT_HEALTH_CHECK__", healthCheck);
             result = ReplaceWithIndentation(result, "__DHT_NOTIFY_READY__", notifyReady);
+            result = ReplaceWithIndentation(result, "__DHT_BOOTSTRAP_POLL__", bootstrapPoll);
             result = ReplaceWithIndentation(result, "__DHT_DASHBOARD_PY__", dashboardPy);
             result = ReplaceWithIndentation(result, "__DHT_DASHBOARD_HTML__", dashboardHtml);
             result = ReplaceWithIndentation(result, "__DHT_DASHBOARD_CSS__", dashboardCss);
@@ -335,9 +337,10 @@ public class CloudInitTemplateService : ICloudInitTemplateService
 
             _logger.LogInformation(
                 "Injected DHT external templates: health-check ({HealthSize} chars), notify-ready ({ReadySize} chars), " +
-                "dashboard-server ({DashPy} chars), dashboard ({DashHtml}+{DashCss}+{DashJs} chars)",
-                healthCheck.Length, notifyReady.Length, dashboardPy.Length,
-                dashboardHtml.Length, dashboardCss.Length, dashboardJs.Length);
+                "bootstrap-poll ({PollSize} chars), dashboard-server ({DashPy} chars), " +
+                "dashboard ({DashHtml}+{DashCss}+{DashJs} chars), wg-enroll ({WgSize} chars)",
+                healthCheck.Length, notifyReady.Length, bootstrapPoll.Length, dashboardPy.Length,
+                dashboardHtml.Length, dashboardCss.Length, dashboardJs.Length, wgMeshEnroll.Length);
 
             return result;
         }
@@ -387,10 +390,16 @@ public class CloudInitTemplateService : ICloudInitTemplateService
         await _cacheLock.WaitAsync(ct);
         try
         {
+            // Cache key must include directory to avoid collisions between
+            // VM types with identically-named files (e.g., relay-vm/dashboard.html
+            // vs dht-vm/dashboard.html). Without this, whichever VM type is
+            // processed first poisons the cache for the other.
+            var cacheKey = $"{dirName}/{filename}";
+
             // Check cache first
-            if (_externalTemplateCache.TryGetValue(filename, out var cached))
+            if (_externalTemplateCache.TryGetValue(cacheKey, out var cached))
             {
-                _logger.LogDebug("Using cached external template: {FileName}", filename);
+                _logger.LogDebug("Using cached external template: {CacheKey}", cacheKey);
                 return cached;
             }
 
@@ -410,11 +419,11 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             var content = await File.ReadAllTextAsync(templatePath, ct);
 
             // Cache for future use
-            _externalTemplateCache[filename] = content;
+            _externalTemplateCache[cacheKey] = content;
 
             _logger.LogDebug(
-                "Loaded external template: {FileName} ({Length} chars)",
-                filename, content.Length);
+                "Loaded external template: {CacheKey} ({Length} chars)",
+                cacheKey, content.Length);
 
             return content;
         }
@@ -630,6 +639,44 @@ public class CloudInitTemplateService : ICloudInitTemplateService
         variables.Custom["DHT_BOOTSTRAP_PEERS"] = spec.Labels?.GetValueOrDefault("dht-bootstrap-peers") ?? "";
         variables.Custom["DHT_REGION"] = spec.Labels?.GetValueOrDefault("node-region") ?? "default";
 
+        // WireGuard mesh enrollment variables (passed from orchestrator via labels)
+        variables.Custom["WG_RELAY_ENDPOINT"] = spec.Labels?.GetValueOrDefault("wg-relay-endpoint") ?? "";
+        variables.Custom["WG_RELAY_PUBKEY"] = spec.Labels?.GetValueOrDefault("wg-relay-pubkey") ?? "";
+        variables.Custom["WG_TUNNEL_IP"] = spec.Labels?.GetValueOrDefault("wg-tunnel-ip") ?? "";
+        variables.Custom["WG_RELAY_API"] = spec.Labels?.GetValueOrDefault("wg-relay-api") ?? "";
+
+        // Warn if WireGuard config is incomplete
+        if (string.IsNullOrEmpty(variables.Custom["WG_RELAY_ENDPOINT"]) ||
+            string.IsNullOrEmpty(variables.Custom["WG_RELAY_PUBKEY"]) ||
+            string.IsNullOrEmpty(variables.Custom["WG_TUNNEL_IP"]) ||
+            string.IsNullOrEmpty(variables.Custom["WG_RELAY_API"]))
+        {
+            _logger.LogWarning(
+                "DHT VM {VmId} has incomplete WireGuard mesh config — " +
+                "endpoint={Endpoint}, pubkey={PubKey}, tunnelIp={TunnelIp}, api={Api}",
+                spec.Id,
+                variables.Custom["WG_RELAY_ENDPOINT"],
+                variables.Custom["WG_RELAY_PUBKEY"] is { Length: > 12 } pk ? pk[..12] + "..." : "(empty)",
+                variables.Custom["WG_TUNNEL_IP"],
+                variables.Custom["WG_RELAY_API"]);
+        }
+
+        // Bootstrap poll: orchestrator URL and auth token (relay callback pattern).
+        // The orchestrator passes the auth token via labels when deploying the DHT VM.
+        // The DHT VM uses it to compute HMAC(auth_token, nodeId:vmId) for direct
+        // orchestrator authentication — same pattern as relay's notify-orchestrator.sh
+        // uses HMAC(wireguard_private_key, nodeId:vmId).
+        variables.Custom["DHT_AUTH_TOKEN"] = spec.Labels?.GetValueOrDefault("dht-auth-token") ?? "";
+        variables.Custom["DHT_API_TOKEN"] = spec.Labels?.GetValueOrDefault("dht-api-token") ?? "";
+
+        if (string.IsNullOrEmpty(variables.Custom["DHT_AUTH_TOKEN"]))
+        {
+            _logger.LogWarning(
+                "DHT VM {VmId} has no dht-auth-token label — " +
+                "bootstrap poll service will not be able to authenticate with orchestrator",
+                spec.Id);
+        }
+
         // Load architecture-specific DHT binary (gzip+base64 encoded, pre-built via build.sh)
         var architecture = GetTargetArchitecture(spec);
         var dhtBinaryGzB64 = await LoadDhtBinaryAsync(architecture, ct);
@@ -644,14 +691,16 @@ public class CloudInitTemplateService : ICloudInitTemplateService
 
         _logger.LogInformation(
             "Configured DHT variables for VM {VmId}: listenPort={ListenPort}, apiPort={ApiPort}, " +
-            "tunnelIp={TunnelIp}, arch={Arch}, binarySize={BinaryKB}KB (gz+b64), bootstrapPeers={Peers}",
+            "advertiseIp={AdvIP}, arch={Arch}, binarySize={BinaryKB}KB (gz+b64), " +
+            "bootstrapPeers={Peers}, authToken={HasToken}",
             spec.Id,
             variables.Custom["DHT_LISTEN_PORT"],
             variables.Custom["DHT_API_PORT"],
             variables.Custom.GetValueOrDefault("WG_TUNNEL_IP", ""),
             architecture,
             dhtBinaryGzB64.Length / 1024,
-            string.IsNullOrEmpty(variables.Custom["DHT_BOOTSTRAP_PEERS"]) ? "(none — first node)" : "present");
+            string.IsNullOrEmpty(variables.Custom["DHT_BOOTSTRAP_PEERS"]) ? "(none — first node)" : "present",
+            string.IsNullOrEmpty(variables.Custom["DHT_AUTH_TOKEN"]) ? "missing" : "present");
     }
 
     /// <summary>
@@ -904,4 +953,152 @@ public class CloudInitTemplateService : ICloudInitTemplateService
 
         return new string(bytes.Select(b => chars[b % chars.Length]).ToArray());
     }
+
+    /// <summary>
+    /// Read and parse a WireGuard config file from the host filesystem.
+    /// Used as CGNAT fallback when no local relay VM is available —
+    /// reads /etc/wireguard/wg-relay.conf to discover relay info.
+    /// </summary>
+    /// <param name="configFileName">Config file name (e.g., "wg-relay.conf")</param>
+    /// <param name="ct">Cancellation token</param>
+    /// <returns>Parsed config or null if file doesn't exist / can't be parsed</returns>
+    public async Task<HostWireGuardConfig?> ReadHostWireGuardConfigAsync(
+        string configFileName, CancellationToken ct)
+    {
+        var configPath = $"/etc/wireguard/{configFileName}";
+
+        try
+        {
+            // Read the config file via shell command (runs as root on the node agent host)
+            var result = await _executor.ExecuteAsync("cat", configPath, ct);
+
+            if (!result.Success)
+            {
+                _logger.LogDebug(
+                    "WireGuard config not found at {Path}: {Error}",
+                    configPath, result.StandardError);
+                return null;
+            }
+
+            var configText = result.StandardOutput;
+            if (string.IsNullOrWhiteSpace(configText))
+            {
+                _logger.LogWarning("WireGuard config at {Path} is empty", configPath);
+                return null;
+            }
+
+            return ParseWireGuardConfig(configText, configPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error reading WireGuard config from {Path}", configPath);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Parse a standard WireGuard config file format to extract relay info.
+    /// 
+    /// Expected format:
+    ///   [Interface]
+    ///   Address = 10.20.1.2/24
+    ///   PrivateKey = ...
+    ///
+    ///   [Peer]
+    ///   PublicKey = ...
+    ///   Endpoint = 1.2.3.4:51820
+    ///   AllowedIPs = 10.20.1.0/24
+    /// </summary>
+    private HostWireGuardConfig? ParseWireGuardConfig(string configText, string sourcePath)
+    {
+        var config = new HostWireGuardConfig();
+
+        // Parse Address from [Interface] section (e.g., "10.20.1.2/24")
+        var addressMatch = Regex.Match(configText,
+            @"Address\s*=\s*(\d+\.\d+\.\d+\.\d+)/(\d+)",
+            RegexOptions.Multiline);
+
+        if (addressMatch.Success)
+        {
+            config.TunnelIp = addressMatch.Groups[1].Value;
+
+            // Extract subnet number from 10.20.X.Y
+            var ipParts = config.TunnelIp.Split('.');
+            if (ipParts.Length == 4 && ipParts[0] == "10" && ipParts[1] == "20")
+            {
+                config.Subnet = ipParts[2];
+            }
+        }
+
+        // Parse PublicKey from [Peer] section 
+        var pubKeyMatch = Regex.Match(configText,
+            @"\[Peer\][\s\S]*?PublicKey\s*=\s*([A-Za-z0-9+/=]+)",
+            RegexOptions.Multiline);
+
+        if (pubKeyMatch.Success)
+        {
+            config.PublicKey = pubKeyMatch.Groups[1].Value.Trim();
+        }
+
+        // Parse Endpoint from [Peer] section
+        var endpointMatch = Regex.Match(configText,
+            @"\[Peer\][\s\S]*?Endpoint\s*=\s*([^\s]+)",
+            RegexOptions.Multiline);
+
+        if (endpointMatch.Success)
+        {
+            config.Endpoint = endpointMatch.Groups[1].Value.Trim();
+
+            // Extract relay IP from endpoint (ip:port)
+            var colonIdx = config.Endpoint.LastIndexOf(':');
+            if (colonIdx > 0)
+            {
+                config.RelayIp = config.Endpoint.Substring(0, colonIdx);
+            }
+        }
+
+        // Validate we got the essential fields
+        if (string.IsNullOrEmpty(config.Endpoint) ||
+            string.IsNullOrEmpty(config.PublicKey) ||
+            string.IsNullOrEmpty(config.TunnelIp))
+        {
+            _logger.LogWarning(
+                "WireGuard config at {Path} is incomplete — " +
+                "Endpoint={Endpoint}, PublicKey={PubKey}, TunnelIp={TunnelIp}",
+                sourcePath,
+                config.Endpoint ?? "(missing)",
+                config.PublicKey != null ? config.PublicKey[..Math.Min(12, config.PublicKey.Length)] + "..." : "(missing)",
+                config.TunnelIp ?? "(missing)");
+            return null;
+        }
+
+        _logger.LogInformation(
+            "Parsed WireGuard config from {Path}: endpoint={Endpoint}, " +
+            "tunnelIp={TunnelIp}, subnet={Subnet}",
+            sourcePath, config.Endpoint, config.TunnelIp, config.Subnet);
+
+        return config;
+    }
+}
+
+/// <summary>
+/// Parsed host WireGuard configuration from /etc/wireguard/*.conf.
+/// Used for CGNAT fallback relay info resolution.
+/// </summary>
+public class HostWireGuardConfig
+{
+    /// <summary>Relay's WireGuard endpoint (ip:port)</summary>
+    public string? Endpoint { get; set; }
+
+    /// <summary>Relay's WireGuard public key</summary>
+    public string? PublicKey { get; set; }
+
+    /// <summary>This host's tunnel IP (e.g., "10.20.1.2")</summary>
+    public string? TunnelIp { get; set; }
+
+    /// <summary>Relay IP extracted from Endpoint</summary>
+    public string? RelayIp { get; set; }
+
+    /// <summary>Subnet number (e.g., "1" from 10.20.1.0/24)</summary>
+    public string? Subnet { get; set; }
 }
