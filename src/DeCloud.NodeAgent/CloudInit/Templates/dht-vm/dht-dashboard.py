@@ -22,8 +22,10 @@ DHT_API_PORT = int(os.environ.get("DHT_API_PORT", "__DHT_API_PORT__"))
 STATIC_DIR = "/opt/decloud-dht/static"
 LISTEN_PORT = 8080
 
-# API endpoints to proxy to the Go binary
-PROXY_PATHS = {"/health", "/peers", "/connect", "/publish"}
+# API endpoints to proxy to the Go binary (read-only only).
+# Mutating endpoints (/connect, /publish) are not exposed — they require
+# a Bearer token and are only called by internal services (dht-bootstrap-poll.sh).
+PROXY_PATHS = {"/health", "/peers"}
 
 # ==================== Logging ====================
 logging.basicConfig(

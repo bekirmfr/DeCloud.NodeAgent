@@ -665,6 +665,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
         // orchestrator authentication — same pattern as relay's notify-orchestrator.sh
         // uses HMAC(wireguard_private_key, nodeId:vmId).
         variables.Custom["DHT_AUTH_TOKEN"] = spec.Labels?.GetValueOrDefault("dht-auth-token") ?? "";
+        variables.Custom["DHT_API_TOKEN"] = spec.Labels?.GetValueOrDefault("dht-api-token") ?? "";
 
         if (string.IsNullOrEmpty(variables.Custom["DHT_AUTH_TOKEN"]))
         {
