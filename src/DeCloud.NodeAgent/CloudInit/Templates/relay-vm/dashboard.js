@@ -1,17 +1,12 @@
 ﻿/**
  * DeCloud Relay VM Dashboard - JavaScript
- * Version: 1.1.0 - FIXED & ENHANCED
- * 
- * FIXES:
- * - Changed /api/relay/system → /api/relay/status (correct endpoint)
- * - Added better error handling
- * - Enhanced peer display with full public keys
- * 
- * ENHANCEMENTS:
- * - Grace period awareness
- * - Stale peer detection
- * - Better status indicators
- * - Improved metrics display
+ * Version: 2.0.0 - PEER CLASSIFICATION
+ *
+ * CHANGES v2.0.0:
+ * - Peers grouped by type: CGNAT nodes, system VMs, relay peers
+ * - Capacity counts only CGNAT node peers (system VMs excluded)
+ * - System VMs grouped under parent node in dashboard
+ * - Relay host infrastructure section for local system VMs
  */
 
 // ==================== Configuration ====================
@@ -20,15 +15,16 @@ const CONFIG = {
     relayName: '__VM_NAME__',
     relayRegion: '__RELAY_REGION__',
     relayCapacity: parseInt('__RELAY_CAPACITY__'),
+    nodeId: '__NODE_ID__',  // Relay host's node ID
 
     // Update intervals
     refreshInterval: 10000,  // 10 seconds
     quickRefreshInterval: 5000,  // 5 seconds for critical checks
 
-    // API endpoints - FIXED!
+    // API endpoints
     api: {
         wireguard: '/api/relay/wireguard',
-        status: '/api/relay/status',  // ✅ FIXED: was /api/relay/system
+        status: '/api/relay/status',
         cleanupStats: '/api/relay/cleanup/stats'
     },
 
@@ -53,13 +49,15 @@ const state = {
 
     // Data caches
     wireguardData: null,
-    statusData: null,  // ✅ FIXED: was systemData
+    statusData: null,
     cleanupStats: null,
 
     // Connection states
     orchestratorStatus: 'checking',
     hostStatus: 'checking',
     cgnatNodes: [],
+    systemVms: [],
+    hostSystemVms: [],
 
     // Metrics
     totalRx: 0,
@@ -68,8 +66,8 @@ const state = {
 
 // ==================== Initialization ====================
 document.addEventListener('DOMContentLoaded', () => {
-    console.log('🚀 DeCloud Relay Dashboard initializing...');
-    console.log(`   Version: 1.1.0 (FIXED & ENHANCED)`);
+    console.log('DeCloud Relay Dashboard initializing...');
+    console.log(`   Version: 2.0.0 (PEER CLASSIFICATION)`);
     console.log(`   Relay ID: ${CONFIG.relayId}`);
     console.log(`   Region: ${CONFIG.relayRegion}`);
     console.log(`   Capacity: ${CONFIG.relayCapacity} nodes`);
@@ -363,8 +361,12 @@ function renderHostConnection() {
                     <span class="detail-value">${memoryPercent.toFixed(1)}%</span>
                 </div>
                 <div class="detail-item">
-                    <span class="detail-label">Relay Status:</span>
-                    <span class="detail-value">${state.statusData.current_load || 0} / ${state.statusData.max_capacity || 10} nodes</span>
+                    <span class="detail-label">CGNAT Nodes:</span>
+                    <span class="detail-value">${state.statusData.cgnat_node_count ?? state.statusData.current_load ?? 0} / ${state.statusData.max_capacity || 10}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">System VMs:</span>
+                    <span class="detail-value">${state.statusData.system_vm_count ?? 0} (total peers: ${state.statusData.total_peers ?? '?'})</span>
                 </div>
                 <div class="detail-item">
                     <span class="detail-label">Cleanup:</span>
@@ -376,7 +378,9 @@ function renderHostConnection() {
 }
 
 /**
- * Render CGNAT nodes list
+ * Render peers grouped by classification:
+ * - CGNAT nodes (with their child system VMs nested underneath)
+ * - Relay host infrastructure (host's own system VMs)
  */
 function renderCGNATNodes() {
     if (!state.wireguardData) return;
@@ -384,78 +388,213 @@ function renderCGNATNodes() {
     const peers = state.wireguardData.peers || [];
     const now = Date.now() / 1000;
 
-    // Filter CGNAT nodes (exclude orchestrator)
-    const cgnatPeers = peers.filter(p =>
-        !(p.allowed_ips && p.allowed_ips.includes('10.20.0.1'))
-    );
+    // Classify peers using server-provided peer_type field
+    const cgnatPeers = peers.filter(p => p.peer_type === 'cgnat-node');
+    const systemVmPeers = peers.filter(p => p.peer_type === 'system-vm');
+    const orchestratorPeer = peers.find(p => p.peer_type === 'orchestrator' ||
+        (p.allowed_ips && p.allowed_ips.includes('10.20.0.1')));
+
+    // Group system VMs by parent_node_id
+    const systemVmsByParent = {};
+    systemVmPeers.forEach(p => {
+        const parent = p.parent_node_id || 'unknown';
+        if (!systemVmsByParent[parent]) systemVmsByParent[parent] = [];
+        systemVmsByParent[parent].push(p);
+    });
+
+    // Separate host system VMs from CGNAT node system VMs
+    const hostVms = systemVmsByParent[CONFIG.nodeId] || [];
+    delete systemVmsByParent[CONFIG.nodeId];
 
     state.cgnatNodes = cgnatPeers;
+    state.systemVms = systemVmPeers;
+    state.hostSystemVms = hostVms;
 
-    // Update count
-    document.getElementById('cgnat-count').textContent = cgnatPeers.length;
-    document.getElementById('cgnat-capacity').textContent = `${cgnatPeers.length} / ${CONFIG.relayCapacity}`;
+    // Use cgnat_node_count from API (accurate, classification-based)
+    const cgnatCount = state.wireguardData.cgnat_node_count ?? cgnatPeers.length;
+    const systemVmCount = state.wireguardData.system_vm_count ?? systemVmPeers.length;
 
-    // Render list
+    // Update count badges
+    document.getElementById('cgnat-count').textContent = cgnatCount;
+    document.getElementById('cgnat-capacity').textContent = `${cgnatCount} / ${CONFIG.relayCapacity}`;
+
+    // Render CGNAT nodes list
     const container = document.getElementById('cgnat-list');
+    let html = '';
 
-    if (cgnatPeers.length === 0) {
-        container.innerHTML = '<p style="text-align: center; color: var(--text-muted); padding: 2rem;">No CGNAT nodes connected</p>';
-        return;
+    // -- Relay Host Infrastructure section --
+    if (hostVms.length > 0) {
+        html += `<div class="peer-group-header">Relay Host Infrastructure</div>`;
+        html += hostVms.map(vm => renderSystemVmCard(vm, now)).join('');
     }
 
-    container.innerHTML = cgnatPeers.map((peer, index) => {
-        const handshakeAge = peer.latest_handshake > 0
-            ? now - peer.latest_handshake
-            : Infinity;
-
-        let statusClass = 'online';
-        let statusText = 'Active';
-
-        if (handshakeAge === Infinity) {
-            statusClass = 'warning';
-            statusText = 'No Handshake';
-        } else if (handshakeAge > CONFIG.thresholds.handshakeStale) {
-            statusClass = 'warning';
-            statusText = 'Stale';
-        } else if (handshakeAge < CONFIG.thresholds.handshakeGracePeriod) {
-            statusClass = 'checking';
-            statusText = 'New (Grace Period)';
+    // -- CGNAT Nodes section --
+    if (cgnatPeers.length === 0 && hostVms.length === 0) {
+        html = '<p style="text-align: center; color: var(--text-muted); padding: 2rem;">No CGNAT nodes connected</p>';
+    } else {
+        if (cgnatPeers.length > 0) {
+            html += `<div class="peer-group-header">CGNAT Nodes (${cgnatCount}/${CONFIG.relayCapacity})</div>`;
         }
 
-        return `
-            <div class="node-card ${statusClass}">
-                <div class="node-header">
-                    <div class="node-info">
-                        <div class="node-name">CGNAT Node ${index + 1}</div>
-                        <div class="node-id">${peer.allowed_ips || 'Unknown'}</div>
-                    </div>
-                    <span class="status-badge ${statusClass}">${statusText}</span>
-                </div>
-                <div class="node-details">
-                    <div class="detail-item">
-                        <span class="detail-label">Endpoint:</span>
-                        <span class="detail-value">${peer.endpoint || 'Pending'}</span>
-                    </div>
-                    <div class="detail-item">
-                        <span class="detail-label">Last Handshake:</span>
-                        <span class="detail-value">${formatHandshake(handshakeAge)}</span>
-                    </div>
-                    <div class="detail-item">
-                        <span class="detail-label">Transfer:</span>
-                        <span class="detail-value">↓ ${formatBytes(peer.rx_bytes)} / ↑ ${formatBytes(peer.tx_bytes)}</span>
-                    </div>
-                    <div class="detail-item">
-                        <span class="detail-label">Public Key:</span>
-                        <span class="detail-value mono" title="${peer.public_key}">${truncateKey(peer.public_key)}</span>
-                    </div>
-                </div>
-            </div>
-        `;
-    }).join('');
+        cgnatPeers.forEach((peer, index) => {
+            html += renderCgnatNodeCard(peer, index, now);
+
+            // Find and nest child system VMs for this CGNAT node
+            // Match by checking if any system VM's parent_node_id appears in
+            // the remaining systemVmsByParent groups. We identify the parent
+            // by checking the CGNAT node's tunnel IP subnet match.
+            const childVms = findChildSystemVms(peer, systemVmsByParent);
+            if (childVms.length > 0) {
+                html += `<div class="nested-vms">`;
+                html += childVms.map(vm => renderSystemVmCard(vm, now)).join('');
+                html += `</div>`;
+            }
+        });
+
+        // Any remaining ungrouped system VMs (parent not matched to a CGNAT peer)
+        const remainingVms = Object.values(systemVmsByParent).flat();
+        if (remainingVms.length > 0) {
+            html += `<div class="peer-group-header">System VMs (ungrouped)</div>`;
+            html += remainingVms.map(vm => renderSystemVmCard(vm, now)).join('');
+        }
+    }
+
+    container.innerHTML = html;
 
     // Update totals
     state.totalRx = peers.reduce((sum, p) => sum + (p.rx_bytes || 0), 0);
     state.totalTx = peers.reduce((sum, p) => sum + (p.tx_bytes || 0), 0);
+}
+
+/**
+ * Find system VMs that are children of a CGNAT node peer.
+ * Matches by parent_node_id stored in system VM metadata.
+ * Removes matched VMs from the systemVmsByParent map.
+ */
+function findChildSystemVms(cgnatPeer, systemVmsByParent) {
+    // Try matching by description — orchestrator sets CGNAT node description like
+    // "CGNAT node <name> (<id>)". The system VM's parent_node_id is the node ID.
+    // We scan all remaining groups and check if any parent makes sense.
+    const children = [];
+
+    for (const [parentId, vms] of Object.entries(systemVmsByParent)) {
+        if (!parentId || parentId === 'unknown') continue;
+
+        // Heuristic: CGNAT peer and its system VMs share the same subnet
+        // e.g., CGNAT node at 10.20.1.3 and its DHT VM at 10.20.1.203
+        const cgnatSubnet = extractSubnet(cgnatPeer.allowed_ips);
+        const vmSubnet = vms.length > 0 ? extractSubnet(vms[0].allowed_ips) : null;
+
+        if (cgnatSubnet && vmSubnet && cgnatSubnet === vmSubnet) {
+            children.push(...vms);
+            delete systemVmsByParent[parentId];
+            break;
+        }
+    }
+
+    return children;
+}
+
+/**
+ * Extract subnet (first 3 octets) from allowed_ips like "10.20.1.3/32"
+ */
+function extractSubnet(allowedIps) {
+    if (!allowedIps) return null;
+    const ip = allowedIps.split('/')[0].split(',')[0].trim();
+    const parts = ip.split('.');
+    if (parts.length === 4) return `${parts[0]}.${parts[1]}.${parts[2]}`;
+    return null;
+}
+
+/**
+ * Render a single CGNAT node card
+ */
+function renderCgnatNodeCard(peer, index, now) {
+    const handshakeAge = peer.latest_handshake > 0
+        ? now - peer.latest_handshake
+        : Infinity;
+
+    let statusClass = 'online';
+    let statusText = 'Active';
+
+    if (handshakeAge === Infinity) {
+        statusClass = 'warning';
+        statusText = 'No Handshake';
+    } else if (handshakeAge > CONFIG.thresholds.handshakeStale) {
+        statusClass = 'warning';
+        statusText = 'Stale';
+    } else if (handshakeAge < CONFIG.thresholds.handshakeGracePeriod) {
+        statusClass = 'checking';
+        statusText = 'New (Grace Period)';
+    }
+
+    return `
+        <div class="node-card ${statusClass}">
+            <div class="node-header">
+                <div class="node-info">
+                    <div class="node-name">CGNAT Node ${index + 1}</div>
+                    <div class="node-id">${peer.allowed_ips || 'Unknown'}</div>
+                </div>
+                <span class="status-badge ${statusClass}">${statusText}</span>
+            </div>
+            <div class="node-details">
+                <div class="detail-item">
+                    <span class="detail-label">Endpoint:</span>
+                    <span class="detail-value">${peer.endpoint || 'Pending'}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">Last Handshake:</span>
+                    <span class="detail-value">${formatHandshake(handshakeAge)}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">Transfer:</span>
+                    <span class="detail-value">${'\\u2193'} ${formatBytes(peer.rx_bytes)} / ${'\\u2191'} ${formatBytes(peer.tx_bytes)}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">Public Key:</span>
+                    <span class="detail-value mono" title="${peer.public_key}">${truncateKey(peer.public_key)}</span>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+/**
+ * Render a system VM card (compact, nested under parent node)
+ */
+function renderSystemVmCard(peer, now) {
+    const handshakeAge = peer.latest_handshake > 0
+        ? now - peer.latest_handshake
+        : Infinity;
+
+    const isActive = handshakeAge < CONFIG.thresholds.handshakeWarning;
+    const statusClass = isActive ? 'online' : (handshakeAge === Infinity ? 'checking' : 'warning');
+    const statusText = isActive ? 'Active' : (handshakeAge === Infinity ? 'Connecting' : 'Stale');
+    const desc = peer.description || 'System VM';
+    const vmType = desc.toLowerCase().includes('dht') ? 'DHT' :
+                   desc.toLowerCase().includes('block') ? 'BlockStore' : 'System';
+
+    return `
+        <div class="node-card ${statusClass} system-vm-card">
+            <div class="node-header">
+                <div class="node-info">
+                    <div class="node-name">${vmType} VM</div>
+                    <div class="node-id">${peer.allowed_ips || 'Unknown'}</div>
+                </div>
+                <span class="status-badge ${statusClass} small">${statusText}</span>
+            </div>
+            <div class="node-details compact">
+                <div class="detail-item">
+                    <span class="detail-label">Handshake:</span>
+                    <span class="detail-value">${formatHandshake(handshakeAge)}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-label">Transfer:</span>
+                    <span class="detail-value">${'\\u2193'} ${formatBytes(peer.rx_bytes)} / ${'\\u2191'} ${formatBytes(peer.tx_bytes)}</span>
+                </div>
+            </div>
+        </div>
+    `;
 }
 
 /**
@@ -493,11 +632,13 @@ function renderWireGuardStatus() {
     if (!state.wireguardData) return;
 
     const data = state.wireguardData;
+    const cgnatCount = data.cgnat_node_count ?? 0;
+    const systemVmCount = data.system_vm_count ?? 0;
 
     document.getElementById('wg-interface').textContent = data.interface || 'wg-relay-server';
-    document.getElementById('wg-peers').textContent = data.peer_count || 0;
+    document.getElementById('wg-peers').textContent = `${data.peer_count || 0} (${cgnatCount} nodes, ${systemVmCount} VMs)`;
     document.getElementById('wg-capacity').textContent = data.max_capacity || CONFIG.relayCapacity;
-    document.getElementById('wg-available').textContent = data.available_slots || 0;
+    document.getElementById('wg-available').textContent = data.available_slots ?? 0;
 }
 
 /**
@@ -683,7 +824,7 @@ function hideLoadingOverlay() {
  */
 window.debugState = function () {
     console.log('=== Dashboard State ===');
-    console.log('Version: 1.1.0 (FIXED)');
+    console.log('Version: 2.0.0 (PEER CLASSIFICATION)');
     console.log('Initialized:', state.initialized);
     console.log('Last Update:', state.lastUpdate);
     console.log('Update Count:', state.updateCount);
@@ -706,4 +847,4 @@ window.forceUpdate = function () {
 };
 
 // Log initialization
-console.log('✓ Dashboard script loaded (v1.1.0 - FIXED)');
+console.log('Dashboard script loaded (v2.0.0 - PEER CLASSIFICATION)');

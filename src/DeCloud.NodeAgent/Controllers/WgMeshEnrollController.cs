@@ -101,7 +101,9 @@ public class WgMeshEnrollController : ControllerBase
             {
                 public_key = request.PublicKey,
                 allowed_ips = request.AllowedIps,
-                description = request.Description ?? "mesh-peer"
+                description = request.Description ?? "mesh-peer",
+                peer_type = request.PeerType ?? "system-vm",
+                parent_node_id = request.ParentNodeId ?? ""
             };
 
             var json = JsonSerializer.Serialize(payload);
@@ -213,5 +215,11 @@ public record WgMeshEnrollRequest(
     string AllowedIps,
 
     [property: System.Text.Json.Serialization.JsonPropertyName("description")]
-    string? Description
+    string? Description,
+
+    [property: System.Text.Json.Serialization.JsonPropertyName("peer_type")]
+    string? PeerType = null,
+
+    [property: System.Text.Json.Serialization.JsonPropertyName("parent_node_id")]
+    string? ParentNodeId = null
 );
