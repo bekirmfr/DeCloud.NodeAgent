@@ -766,7 +766,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             var allVms = await _vmManager.GetAllVmsAsync(ct);
             var relayVm = allVms.FirstOrDefault(v =>
                 v.Spec.VmType == VmType.Relay &&
-                v.State is VmState.Running or VmState.Ready);
+                v.State is VmState.Running);
 
             if (relayVm == null)
                 return null;
