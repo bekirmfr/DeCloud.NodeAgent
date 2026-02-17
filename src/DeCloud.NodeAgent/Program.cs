@@ -353,9 +353,10 @@ app.Run();
 // =====================================================
 /// <summary>
 /// Background service that initializes the VM Manager on startup.
-/// This ensures VMs are loaded from the SQLite database before processing begins.
+/// Uses BackgroundService (not IHostedService) so startup is non-blocking —
+/// Kestrel binds the port immediately while VM reconciliation runs in the background.
 /// </summary>
-public class VmManagerInitializationService : IHostedService
+public class VmManagerInitializationService : BackgroundService
 {
     private readonly LibvirtVmManager _vmManager;
     private readonly ILogger<VmManagerInitializationService> _logger;
@@ -368,35 +369,28 @@ public class VmManagerInitializationService : IHostedService
         _logger = logger;
     }
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Initializing VM Manager and loading state from database...");
 
         try
         {
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
             cts.CancelAfter(TimeSpan.FromSeconds(60));
 
             await _vmManager.InitializeAsync(cts.Token);
-            _logger.LogInformation("✓ VM Manager initialization complete");
+            _logger.LogInformation("VM Manager initialization complete");
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
         {
             _logger.LogWarning(
                 "VM Manager initialization timed out after 60s — " +
-                "continuing startup without full reconciliation. " +
+                "continuing without full reconciliation. " +
                 "Check libvirt connectivity (virsh list --all).");
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to initialize VM Manager");
-            // Don't throw - allow service to start even if initialization fails
         }
-    }
-
-    public Task StopAsync(CancellationToken cancellationToken)
-    {
-        _logger.LogInformation("VM Manager shutdown");
-        return Task.CompletedTask;
     }
 }
