@@ -1,16 +1,17 @@
 ﻿#!/usr/bin/env python3
 """
 DeCloud Relay VM Management API
-Version: 2.1.0 - IMPROVED
+Version: 3.0.0 - PEER CLASSIFICATION
 
 Provides REST API for relay monitoring, CGNAT peer management,
 and serves the dashboard interface.
 
-IMPROVEMENTS v2.1.0:
-- Added peer age tracking to prevent premature cleanup of new peers
-- Unified stale threshold across background and manual cleanup
-- Aligned with orchestrator 30-second grace period
-- Better logging for peer lifecycle events
+IMPROVEMENTS v3.0.0:
+- Peer classification: each peer has a type (cgnat-node, system-vm, relay-peer, orchestrator)
+- Capacity counts only cgnat-node peers (system VMs don't consume capacity)
+- Peers grouped by parent_node_id for dashboard display
+- Persistent peer metadata registry (survives restarts)
+- Backward-compatible: peers without type default to cgnat-node
 """
 
 import json
@@ -28,10 +29,12 @@ RELAY_ID = "__VM_ID__"
 RELAY_NAME = "__VM_NAME__"
 RELAY_REGION = "__RELAY_REGION__"
 RELAY_CAPACITY = int("__RELAY_CAPACITY__")
+NODE_ID = "__NODE_ID__"  # Relay host's node ID (for detecting host system VMs)
 WIREGUARD_INTERFACE = "wg-relay-server"
 STATIC_DIR = "/opt/decloud-relay/static"
 LISTEN_PORT = 8080
 PEER_REGISTRY_PATH = "/etc/decloud/peer-registry.json"
+PEER_METADATA_PATH = "/etc/decloud/peer-metadata.json"
 
 # ==================== Periodic Cleanup Configuration ====================
 CLEANUP_ENABLED = True                    # Enable/disable automatic cleanup
@@ -76,6 +79,18 @@ peer_registration_lock = threading.Lock()
 relay_peer_registry = {}
 relay_peer_lock = threading.Lock()
 
+# Peer metadata registry (public_key -> {peer_type, parent_node_id, ...})
+# Tracks classification for ALL peers (cgnat-node, system-vm, relay-peer)
+# Persisted to disk so capacity counting survives restarts.
+#
+# peer_type values:
+#   "cgnat-node"  — CGNAT node agent (counts toward capacity)
+#   "system-vm"   — DHT/BlockStore VM belonging to a node (does NOT count)
+#   "relay-peer"  — cross-peer relay (does NOT count)
+#   "orchestrator" — pre-configured orchestrator peer (does NOT count)
+peer_metadata = {}
+peer_metadata_lock = threading.Lock()
+
 
 def load_peer_registry():
     """Load relay peer registry from persistent JSON file"""
@@ -85,10 +100,10 @@ def load_peer_registry():
             with open(PEER_REGISTRY_PATH, 'r') as f:
                 data = json.load(f)
             relay_peer_registry = data.get('relay_peers', {})
-            logger.info(f"📂 Loaded {len(relay_peer_registry)} relay peers from registry")
+            logger.info(f"Loaded {len(relay_peer_registry)} relay peers from registry")
         else:
             relay_peer_registry = {}
-            logger.info("📂 No existing peer registry found, starting fresh")
+            logger.info("No existing peer registry found, starting fresh")
     except Exception as e:
         logger.error(f"Error loading peer registry: {e}")
         relay_peer_registry = {}
@@ -101,9 +116,166 @@ def save_peer_registry():
         data = {'relay_peers': relay_peer_registry}
         with open(PEER_REGISTRY_PATH, 'w') as f:
             json.dump(data, f, indent=2)
-        logger.debug(f"💾 Saved {len(relay_peer_registry)} relay peers to registry")
+        logger.debug(f"Saved {len(relay_peer_registry)} relay peers to registry")
     except Exception as e:
         logger.error(f"Error saving peer registry: {e}")
+
+
+def load_peer_metadata():
+    """Load peer metadata registry from persistent JSON file"""
+    global peer_metadata
+    try:
+        if os.path.exists(PEER_METADATA_PATH):
+            with open(PEER_METADATA_PATH, 'r') as f:
+                peer_metadata = json.load(f)
+            logger.info(f"Loaded {len(peer_metadata)} peer metadata entries")
+        else:
+            peer_metadata = {}
+            logger.info("No existing peer metadata found, starting fresh")
+    except Exception as e:
+        logger.error(f"Error loading peer metadata: {e}")
+        peer_metadata = {}
+
+
+def save_peer_metadata():
+    """Save peer metadata registry to persistent JSON file"""
+    try:
+        os.makedirs(os.path.dirname(PEER_METADATA_PATH), exist_ok=True)
+        with open(PEER_METADATA_PATH, 'w') as f:
+            json.dump(peer_metadata, f, indent=2)
+        logger.debug(f"Saved {len(peer_metadata)} peer metadata entries")
+    except Exception as e:
+        logger.error(f"Error saving peer metadata: {e}")
+
+
+def set_peer_metadata(public_key, peer_type, parent_node_id=None, description=None):
+    """Store classification metadata for a peer"""
+    with peer_metadata_lock:
+        peer_metadata[public_key] = {
+            'peer_type': peer_type,
+            'parent_node_id': parent_node_id,
+            'description': description,
+            'registered_at': int(time.time())
+        }
+        save_peer_metadata()
+
+
+def get_peer_metadata(public_key):
+    """Get classification metadata for a peer, or None"""
+    with peer_metadata_lock:
+        return peer_metadata.get(public_key)
+
+
+def remove_peer_metadata(public_key):
+    """Remove classification metadata for a peer"""
+    with peer_metadata_lock:
+        if public_key in peer_metadata:
+            del peer_metadata[public_key]
+            save_peer_metadata()
+
+
+def classify_peer(public_key, allowed_ips):
+    """
+    Classify a peer using metadata registry, falling back to IP heuristic.
+    Returns (peer_type, parent_node_id).
+    """
+    # Check explicit metadata first
+    meta = get_peer_metadata(public_key)
+    if meta:
+        return meta.get('peer_type', 'cgnat-node'), meta.get('parent_node_id')
+
+    # Check relay peer registry
+    if is_relay_peer(public_key):
+        return 'relay-peer', None
+
+    # Orchestrator peer
+    if ORCHESTRATOR_IP in (allowed_ips or ''):
+        return 'orchestrator', None
+
+    # IP heuristic fallback for legacy peers without metadata:
+    # .198-.253 in 10.20.x.x/32 = mesh/system-vm peers
+    try:
+        for aip in (allowed_ips or '').split(','):
+            aip = aip.strip()
+            if '/32' in aip and aip.startswith('10.20.'):
+                parts = aip.replace('/32', '').split('.')
+                if len(parts) == 4:
+                    last_octet = int(parts[3])
+                    if last_octet >= 198:
+                        return 'system-vm', None
+    except (ValueError, IndexError):
+        pass
+
+    # Default: CGNAT node
+    return 'cgnat-node', None
+
+
+def get_capacity_counts():
+    """
+    Calculate capacity using peer classification.
+    Only cgnat-node peers count toward capacity.
+    Returns dict with counts by type and grouped nodes.
+    """
+    try:
+        result = subprocess.run(
+            ['wg', 'show', WIREGUARD_INTERFACE, 'dump'],
+            capture_output=True, text=True, timeout=5
+        )
+
+        if result.returncode != 0:
+            return {
+                'cgnat_node_count': 0,
+                'system_vm_count': 0,
+                'relay_peer_count': 0,
+                'total_peer_count': 0,
+                'node_groups': {}
+            }
+
+        lines = result.stdout.strip().split('\n')
+        counts = {'cgnat-node': 0, 'system-vm': 0, 'relay-peer': 0, 'orchestrator': 0}
+        node_groups = {}  # parent_node_id -> list of system-vm info
+
+        for line in lines[1:]:
+            if not line.strip():
+                continue
+            fields = line.split('\t')
+            if len(fields) < 7:
+                continue
+
+            public_key = fields[0]
+            allowed_ips = fields[3]
+            peer_type, parent_node_id = classify_peer(public_key, allowed_ips)
+            counts[peer_type] = counts.get(peer_type, 0) + 1
+
+            if peer_type == 'system-vm' and parent_node_id:
+                if parent_node_id not in node_groups:
+                    node_groups[parent_node_id] = []
+                meta = get_peer_metadata(public_key) or {}
+                node_groups[parent_node_id].append({
+                    'public_key': public_key[:16] + '...',
+                    'allowed_ips': allowed_ips,
+                    'description': meta.get('description', ''),
+                    'is_host': parent_node_id == NODE_ID
+                })
+
+        return {
+            'cgnat_node_count': counts.get('cgnat-node', 0),
+            'system_vm_count': counts.get('system-vm', 0),
+            'relay_peer_count': counts.get('relay-peer', 0),
+            'orchestrator_count': counts.get('orchestrator', 0),
+            'total_peer_count': sum(counts.values()),
+            'node_groups': node_groups
+        }
+
+    except Exception as e:
+        logger.error(f"Error calculating capacity counts: {e}")
+        return {
+            'cgnat_node_count': 0,
+            'system_vm_count': 0,
+            'relay_peer_count': 0,
+            'total_peer_count': 0,
+            'node_groups': {}
+        }
 
 
 def is_relay_peer(public_key):
@@ -261,31 +433,17 @@ class PeerCleanupThread(threading.Thread):
                     })
                     continue
                 
-                # Never remove mesh peers (DHT VMs, infrastructure peers).
-                # Mesh peers use high-octet IPs (.198-.253/32) in the relay subnet.
-                # They register via /api/relay/add-peer with keepalive, but may not
-                # generate enough traffic to maintain handshake freshness.
-                try:
-                    for aip in allowed_ips.split(','):
-                        aip = aip.strip()
-                        if '/32' in aip and aip.startswith('10.20.'):
-                            parts = aip.replace('/32', '').split('.')
-                            if len(parts) == 4:
-                                last_octet = int(parts[3])
-                                if last_octet >= 198:
-                                    kept.append({
-                                        'public_key': public_key[:16] + '...',
-                                        'allowed_ips': allowed_ips,
-                                        'reason': 'mesh_peer'
-                                    })
-                                    break
-                    else:
-                        pass  # fall through to age/handshake check
-                    if any(k.get('reason') == 'mesh_peer' and k['public_key'] == public_key[:16] + '...' for k in kept):
-                        continue
-                except (ValueError, IndexError):
-                    pass  # not a mesh peer, continue with normal cleanup
-                
+                # Never remove system-vm peers (DHT VMs, BlockStore VMs).
+                # They may not generate enough traffic to maintain handshake freshness.
+                peer_type, _ = classify_peer(public_key, allowed_ips)
+                if peer_type == 'system-vm':
+                    kept.append({
+                        'public_key': public_key[:16] + '...',
+                        'allowed_ips': allowed_ips,
+                        'reason': 'system_vm'
+                    })
+                    continue
+
                 # Check if peer is within grace period
                 peer_age = get_peer_age(public_key, current_time)
                 
@@ -326,8 +484,9 @@ class PeerCleanupThread(threading.Thread):
                             'handshake': handshake_status,
                             'peer_age_seconds': int(peer_age) if peer_age != float('inf') else 'unknown'
                         })
+                        remove_peer_metadata(public_key)
                         logger.info(
-                            f"🗑️  Removed stale peer: {public_key[:16]}... "
+                            f"Removed stale peer: {public_key[:16]}... "
                             f"({allowed_ips}, handshake: {handshake_status}, peer age: {peer_age:.0f}s)"
                         )
                     else:
@@ -520,8 +679,11 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 'relay_name': RELAY_NAME,
                 'region': RELAY_REGION,
                 'max_capacity': RELAY_CAPACITY,
-                'current_load': wg_status.get('peer_count', 0),
+                'current_load': wg_status.get('cgnat_node_count', 0),
                 'available_slots': wg_status.get('available_slots', RELAY_CAPACITY),
+                'total_peers': wg_status.get('peer_count', 0),
+                'cgnat_node_count': wg_status.get('cgnat_node_count', 0),
+                'system_vm_count': wg_status.get('system_vm_count', 0),
                 'uptime_seconds': uptime_seconds,
                 'cpu_percent': cpu_percent,
                 'memory_percent': memory_percent,
@@ -555,22 +717,26 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
     
     def add_cgnat_peer(self):
         """
-        Add CGNAT node as WireGuard peer
-        Records registration timestamp for grace period tracking
+        Add a WireGuard peer (CGNAT node or system VM).
+        Records registration timestamp for grace period tracking.
+
+        Optional fields for peer classification:
+          - peer_type: "cgnat-node" (default) or "system-vm"
+          - parent_node_id: node ID that owns this peer (for grouping system VMs)
         """
         try:
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length == 0:
                 self.send_error_response(400, 'Bad Request', 'Request body is empty')
                 return
-            
+
             body = self.rfile.read(content_length)
             data = json.loads(body.decode('utf-8'))
-            
+
             # Validate required fields
             required_fields = ['public_key', 'allowed_ips']
             missing_fields = [f for f in required_fields if f not in data]
-            
+
             if missing_fields:
                 self.send_error_response(
                     400,
@@ -578,22 +744,28 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                     f"Missing fields: {', '.join(missing_fields)}"
                 )
                 return
-            
+
             public_key = data['public_key']
-            
+
             # Build wg set command
             cmd = [
                 'wg', 'set', WIREGUARD_INTERFACE,
                 'peer', public_key,
                 'allowed-ips', data['allowed_ips']
             ]
-            
+
             # Add optional persistent keepalive
             if 'persistent_keepalive' in data:
                 cmd.extend(['persistent-keepalive', str(data['persistent_keepalive'])])
-            
+
             description = data.get('description', 'CGNAT Node')
-            
+            peer_type = data.get('peer_type', 'cgnat-node')
+            parent_node_id = data.get('parent_node_id')
+
+            # Validate peer_type
+            if peer_type not in ('cgnat-node', 'system-vm'):
+                peer_type = 'cgnat-node'
+
             # Execute command
             result = subprocess.run(
                 cmd,
@@ -601,7 +773,7 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 text=True,
                 timeout=5
             )
-            
+
             if result.returncode != 0:
                 logger.error(f"Failed to add peer: {result.stderr}")
                 self.send_error_response(
@@ -610,7 +782,7 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                     result.stderr or 'Unknown error'
                 )
                 return
-            
+
             # Save configuration
             try:
                 subprocess.run(
@@ -620,19 +792,26 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 )
             except Exception as e:
                 logger.warning(f"Failed to save WireGuard config: {e}")
-            
+
             # Record peer registration timestamp
             record_peer_registration(public_key)
-            
-            logger.info(f"✅ Added CGNAT peer: {public_key[:16]}... ({description})")
-            
+
+            # Store peer classification metadata
+            set_peer_metadata(public_key, peer_type, parent_node_id, description)
+
+            type_label = "system-vm" if peer_type == "system-vm" else "CGNAT"
+            parent_label = f" (parent: {parent_node_id})" if parent_node_id else ""
+            logger.info(f"Added {type_label} peer: {public_key[:16]}... ({description}){parent_label}")
+
             self.send_json_response({
                 'success': True,
                 'peer_public_key': public_key[:16] + '...',
                 'allowed_ips': data['allowed_ips'],
-                'description': description
+                'description': description,
+                'peer_type': peer_type,
+                'parent_node_id': parent_node_id
             })
-            
+
         except json.JSONDecodeError as e:
             self.send_error_response(400, 'Invalid JSON', str(e))
         except subprocess.TimeoutExpired:
@@ -734,9 +913,10 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                     'added_at': int(time.time())
                 }
                 save_peer_registry()
-            
-            # Also track registration time for grace period
+
+            # Also track registration time and classification metadata
             record_peer_registration(public_key)
+            set_peer_metadata(public_key, 'relay-peer', description=f"relay-{relay_id}")
             
             logger.info(
                 f"✅ Added relay peer: {public_key[:16]}... "
@@ -821,10 +1001,11 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 if entry:
                     relay_id = entry.get('relay_id', 'unknown')
                 save_peer_registry()
-            
-            # Clean up registration tracking
+
+            # Clean up registration tracking and metadata
             with peer_registration_lock:
                 peer_registration_times.pop(public_key, None)
+            remove_peer_metadata(public_key)
             
             logger.info(
                 f"✅ Removed relay peer: {public_key[:16]}... (relay: {relay_id})"
@@ -915,18 +1096,20 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 logger.warning(f"Failed to save WireGuard config: {e}")
             
-            # Clean up registration tracking
+            # Clean up registration tracking and metadata
             with peer_registration_lock:
                 if public_key in peer_registration_times:
                     del peer_registration_times[public_key]
-            
-            logger.info(f"✅ Removed CGNAT peer: {public_key[:16]}...")
-            
+
+            remove_peer_metadata(public_key)
+
+            logger.info(f"Removed peer: {public_key[:16]}...")
+
             self.send_json_response({
                 'success': True,
                 'peer_public_key': public_key[:16] + '...'
             })
-            
+
         except json.JSONDecodeError as e:
             self.send_error_response(400, 'Invalid JSON', str(e))
         except subprocess.TimeoutExpired:
@@ -990,8 +1173,18 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                         'reason': 'relay_peer'
                     })
                     continue
-                
-                # ✅ NEW: Check grace period
+
+                # Never remove system-vm peers (DHT VMs, BlockStore VMs)
+                peer_type, _ = classify_peer(public_key, allowed_ips)
+                if peer_type == 'system-vm':
+                    kept.append({
+                        'public_key': public_key[:16] + '...',
+                        'allowed_ips': allowed_ips,
+                        'reason': 'system_vm'
+                    })
+                    continue
+
+                # Check grace period
                 peer_age = get_peer_age(public_key, current_time)
                 
                 if peer_age < PEER_REGISTRATION_GRACE_PERIOD:
@@ -1025,7 +1218,8 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                             'allowed_ips': allowed_ips,
                             'handshake': handshake_status
                         })
-                        logger.info(f"🗑️  Removed stale peer: {public_key[:16]}... ({allowed_ips})")
+                        remove_peer_metadata(public_key)
+                        logger.info(f"Removed stale peer: {public_key[:16]}... ({allowed_ips})")
                     else:
                         logger.error(f"Failed to remove peer {public_key[:16]}...: {remove_result.stderr}")
                 else:
@@ -1335,7 +1529,7 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
     
 
     def get_wireguard_status(self):
-        """Get WireGuard interface status"""
+        """Get WireGuard interface status with peer classification"""
         try:
             result = subprocess.run(
                 ['wg', 'show', WIREGUARD_INTERFACE, 'dump'],
@@ -1343,7 +1537,7 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 text=True,
                 timeout=5
             )
-        
+
             if result.returncode != 0:
                 logger.error(f"wg show failed: {result.stderr}")
                 return {
@@ -1351,39 +1545,55 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                     'relay_id': RELAY_ID,
                     'region': RELAY_REGION,
                     'peer_count': 0,
+                    'cgnat_node_count': 0,
+                    'system_vm_count': 0,
                     'max_capacity': RELAY_CAPACITY,
                     'available_slots': RELAY_CAPACITY,
                     'peers': []
                 }
-        
+
             lines = result.stdout.strip().split('\n')
             peers = []
-        
+
             for line in lines[1:]:
                 if not line.strip():
                     continue
-                
+
                 fields = line.split('\t')
                 if len(fields) >= 7:
+                    public_key = fields[0]
+                    allowed_ips = fields[3]
+                    peer_type, parent_node_id = classify_peer(public_key, allowed_ips)
+                    meta = get_peer_metadata(public_key)
+
                     peers.append({
-                        'public_key': fields[0],  # Full key, not truncated!
+                        'public_key': public_key,
                         'endpoint': fields[2] if fields[2] != '(none)' else None,
-                        'allowed_ips': fields[3],
+                        'allowed_ips': allowed_ips,
                         'latest_handshake': int(fields[4]) if fields[4] and fields[4] != '0' else 0,
                         'rx_bytes': int(fields[5]) if fields[5] else 0,
-                        'tx_bytes': int(fields[6]) if fields[6] else 0
+                        'tx_bytes': int(fields[6]) if fields[6] else 0,
+                        'peer_type': peer_type,
+                        'parent_node_id': parent_node_id,
+                        'description': meta.get('description', '') if meta else ''
                     })
-        
+
+            # Count by type — only cgnat-node counts toward capacity
+            cgnat_count = sum(1 for p in peers if p['peer_type'] == 'cgnat-node')
+            system_vm_count = sum(1 for p in peers if p['peer_type'] == 'system-vm')
+
             return {
                 'interface': WIREGUARD_INTERFACE,
                 'relay_id': RELAY_ID,
                 'region': RELAY_REGION,
                 'peer_count': len(peers),
+                'cgnat_node_count': cgnat_count,
+                'system_vm_count': system_vm_count,
                 'max_capacity': RELAY_CAPACITY,
-                'available_slots': max(0, RELAY_CAPACITY - len(peers)),
+                'available_slots': max(0, RELAY_CAPACITY - cgnat_count),
                 'peers': peers
             }
-        
+
         except Exception as e:
             logger.error(f"Error getting WireGuard status: {e}", exc_info=True)
             return {
@@ -1391,6 +1601,8 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 'relay_id': RELAY_ID,
                 'region': RELAY_REGION,
                 'peer_count': 0,
+                'cgnat_node_count': 0,
+                'system_vm_count': 0,
                 'max_capacity': RELAY_CAPACITY,
                 'available_slots': RELAY_CAPACITY,
                 'peers': [],
@@ -1486,8 +1698,9 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
 def main():
     """Start the relay API server with background cleanup"""
     
-    # Load persistent relay peer registry
+    # Load persistent registries
     load_peer_registry()
+    load_peer_metadata()
     
     if not os.path.exists(STATIC_DIR):
         logger.error(f"Static directory not found: {STATIC_DIR}")
@@ -1510,7 +1723,7 @@ def main():
     logger.info('=' * 60)
     logger.info('DeCloud Relay VM Management API')
     logger.info('=' * 60)
-    logger.info(f'  Version:      2.1.0 (IMPROVED)')
+    logger.info(f'  Version:      3.0.0 (PEER CLASSIFICATION)')
     logger.info(f'  Relay ID:     {RELAY_ID}')
     logger.info(f'  Relay Name:   {RELAY_NAME}')
     logger.info(f'  Region:       {RELAY_REGION}')

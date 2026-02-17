@@ -16,6 +16,8 @@
 # Optional:
 #   WG_INTERFACE       — Interface name (default: wg-mesh)
 #   WG_DESCRIPTION     — Description for relay peer registry
+#   WG_PEER_TYPE       — Peer classification: "system-vm" (default) or "cgnat-node"
+#   WG_PARENT_NODE_ID  — Node ID that owns this VM (for grouping in dashboard)
 #
 
 set -euo pipefail
@@ -41,6 +43,8 @@ fi
 # ==================== Validate Config ====================
 WG_INTERFACE="${WG_INTERFACE:-wg-mesh}"
 WG_DESCRIPTION="${WG_DESCRIPTION:-vm-peer}"
+WG_PEER_TYPE="${WG_PEER_TYPE:-system-vm}"
+WG_PARENT_NODE_ID="${WG_PARENT_NODE_ID:-}"
 
 for var in WG_RELAY_ENDPOINT WG_RELAY_PUBKEY WG_TUNNEL_IP WG_RELAY_API; do
     if [ -z "${!var:-}" ]; then
@@ -98,7 +102,9 @@ REGISTER_PAYLOAD=$(cat <<EOF
 {
     "public_key": "${PUBLIC_KEY}",
     "allowed_ips": "${TUNNEL_IP_BARE}/32",
-    "description": "${WG_DESCRIPTION}"
+    "description": "${WG_DESCRIPTION}",
+    "peer_type": "${WG_PEER_TYPE}",
+    "parent_node_id": "${WG_PARENT_NODE_ID}"
 }
 EOF
 )

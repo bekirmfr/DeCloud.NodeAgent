@@ -517,6 +517,51 @@ body {
 }
 
 /* ==================== */
+/* Peer Group Headers   */
+/* ==================== */
+.peer-group-header {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    padding: var(--spacing-sm) 0;
+    margin-top: var(--spacing-md);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.peer-group-header:first-child {
+    margin-top: 0;
+}
+
+/* Nested system VM cards (indented under parent CGNAT node) */
+.nested-vms {
+    padding-left: var(--spacing-lg);
+    border-left: 2px solid var(--border-color);
+    margin-left: var(--spacing-sm);
+    margin-bottom: var(--spacing-sm);
+}
+
+.system-vm-card {
+    opacity: 0.85;
+    border-left: 3px solid var(--info) !important;
+}
+
+.system-vm-card .node-name {
+    font-size: 0.8rem;
+}
+
+.node-details.compact {
+    grid-template-columns: 1fr 1fr;
+    gap: 2px;
+}
+
+.status-badge.small {
+    font-size: 0.65rem;
+    padding: 1px 6px;
+}
+
+/* ==================== */
 /* Footer               */
 /* ==================== */
 .dashboard-footer {

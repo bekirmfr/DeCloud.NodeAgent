@@ -76,6 +76,8 @@ write_files:
       WG_RELAY_API=__WG_RELAY_API__
       WG_INTERFACE=wg-mesh
       WG_DESCRIPTION=dht-__VM_ID__
+      WG_PEER_TYPE=system-vm
+      WG_PARENT_NODE_ID=__NODE_ID__
 
   # WireGuard mesh enrollment script (building block)
   - path: /usr/local/bin/wg-mesh-enroll.sh
@@ -117,6 +119,8 @@ write_files:
       WG_RELAY_API=__WG_RELAY_API__
       WG_INTERFACE=wg-mesh
       WG_DESCRIPTION=DHT-__VM_ID__
+      WG_PEER_TYPE=system-vm
+      WG_PARENT_NODE_ID=__NODE_ID__
 
   # Nginx reverse proxy — port 80 → dashboard (8080) and DHT API
   - path: /etc/nginx/sites-available/dht-proxy
