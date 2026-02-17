@@ -194,6 +194,10 @@ builder.Services.AddSingleton<IEphemeralSshKeyService, EphemeralSshKeyService>()
 // =====================================================
 // Background Services
 // =====================================================
+
+// Diagnostic: register first to confirm host service startup begins
+builder.Services.AddHostedService<StartupDiagnosticService>();
+
 builder.Services.AddHostedService<AuthenticationManager>();
 builder.Services.AddHostedService<HeartbeatService>();
 builder.Services.AddHostedService<WireGuardConfigManager>();
@@ -340,13 +344,19 @@ app.MapControllers();
 // the hang is in hosted service startup (IHostedService.StartAsync calls).
 app.Lifetime.ApplicationStarted.Register(() =>
 {
-    var startupLogger = app.Services.GetRequiredService<ILoggerFactory>()
-        .CreateLogger("Startup");
-    startupLogger.LogInformation(
-        "Application started successfully. All hosted services initialized.");
+    Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] ApplicationStarted fired — all services initialized, Kestrel listening");
+    Console.Error.Flush();
 });
 
-app.Run();
+Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] Middleware configured. Calling app.StartAsync()...");
+Console.Error.Flush();
+
+// Manual start instead of app.Run() for diagnostic visibility
+await app.StartAsync();
+Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] app.StartAsync() completed — Kestrel + all services started");
+Console.Error.Flush();
+
+await app.WaitForShutdownAsync();
 
 // =====================================================
 // VM Manager Initialization Service
@@ -392,5 +402,29 @@ public class VmManagerInitializationService : BackgroundService
         {
             _logger.LogError(ex, "Failed to initialize VM Manager");
         }
+    }
+}
+
+// =====================================================
+// Startup Diagnostic Service
+// =====================================================
+/// <summary>
+/// Temporary diagnostic service to identify where host startup hangs.
+/// Registered FIRST so its StartAsync runs before all other services.
+/// </summary>
+public class StartupDiagnosticService : IHostedService
+{
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] StartupDiagnosticService.StartAsync called — host is starting services");
+        Console.Error.Flush();
+        return Task.CompletedTask;
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken)
+    {
+        Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] StartupDiagnosticService.StopAsync called");
+        Console.Error.Flush();
+        return Task.CompletedTask;
     }
 }
