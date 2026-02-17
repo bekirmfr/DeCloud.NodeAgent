@@ -336,6 +336,16 @@ app.UseSwaggerUI();
 
 app.MapControllers();
 
+// Log startup completion — if this appears but "Now listening on" doesn't,
+// the hang is in hosted service startup (IHostedService.StartAsync calls).
+app.Lifetime.ApplicationStarted.Register(() =>
+{
+    var startupLogger = app.Services.GetRequiredService<ILoggerFactory>()
+        .CreateLogger("Startup");
+    startupLogger.LogInformation(
+        "Application started successfully. All hosted services initialized.");
+});
+
 app.Run();
 
 // =====================================================
@@ -364,8 +374,18 @@ public class VmManagerInitializationService : IHostedService
 
         try
         {
-            await _vmManager.InitializeAsync(cancellationToken);
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(TimeSpan.FromSeconds(60));
+
+            await _vmManager.InitializeAsync(cts.Token);
             _logger.LogInformation("✓ VM Manager initialization complete");
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "VM Manager initialization timed out after 60s — " +
+                "continuing startup without full reconciliation. " +
+                "Check libvirt connectivity (virsh list --all).");
         }
         catch (Exception ex)
         {
