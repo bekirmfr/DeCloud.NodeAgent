@@ -178,6 +178,19 @@ public class LibvirtVmManager : IVmManager
 
                         isDirty = true;
                     }
+
+                    // Resolve IP for running VMs that are missing one
+                    if (actualState == VmState.Running && string.IsNullOrEmpty(vm.Spec.IpAddress))
+                    {
+                        var ip = await GetVmIpAddressAsync(vmId, ct);
+                        if (!string.IsNullOrEmpty(ip))
+                        {
+                            vm.Spec.IpAddress = ip;
+                            await _repository.UpdateVmIpAsync(vmId, ip);
+                            _logger.LogInformation("VM {VmId} IP resolved during reconciliation: {Ip}", vmId, ip);
+                            isDirty = true;
+                        }
+                    }
                 }
                 else
                 {

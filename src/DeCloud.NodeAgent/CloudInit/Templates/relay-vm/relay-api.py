@@ -48,6 +48,11 @@ STALE_THRESHOLD_SECONDS = 300             # 5 minutes - peer with no handshake f
 # This aligns with orchestrator's 30-second grace period and provides buffer
 PEER_REGISTRATION_GRACE_PERIOD = 60       # 60 seconds - gives time for client to connect
 
+# System-VM peers (DHT, BlockStore) are generally protected from cleanup,
+# but broken registrations (no AllowedIPs or never-handshaked) should still
+# be cleaned up after this extended threshold.
+SYSTEM_VM_STALE_THRESHOLD_SECONDS = 3600  # 1 hour - generous window for system VMs
+
 ORCHESTRATOR_IP = "10.20.0.1/32"          # Never remove orchestrator peer
 
 # ==================== Logging ====================
@@ -433,10 +438,41 @@ class PeerCleanupThread(threading.Thread):
                     })
                     continue
                 
-                # Never remove system-vm peers (DHT VMs, BlockStore VMs).
-                # They may not generate enough traffic to maintain handshake freshness.
+                # System-vm peers (DHT VMs, BlockStore VMs) are generally protected
+                # from cleanup — they may not generate enough traffic to maintain
+                # handshake freshness. But broken registrations (no AllowedIPs or
+                # never-handshaked after extended period) are clearly failed attempts
+                # and should be cleaned up.
                 peer_type, _ = classify_peer(public_key, allowed_ips)
                 if peer_type == 'system-vm':
+                    is_broken = allowed_ips == '(none)' or not allowed_ips
+                    if latest_handshake == 0:
+                        time_since_handshake_vm = float('inf')
+                    else:
+                        time_since_handshake_vm = current_time - latest_handshake
+
+                    is_long_stale = time_since_handshake_vm > SYSTEM_VM_STALE_THRESHOLD_SECONDS
+
+                    if is_broken or (is_long_stale and latest_handshake == 0):
+                        # Broken registration or never-connected system VM — clean up
+                        remove_result = subprocess.run(
+                            ['wg', 'set', WIREGUARD_INTERFACE, 'peer', public_key, 'remove'],
+                            capture_output=True, text=True, timeout=5
+                        )
+                        if remove_result.returncode == 0:
+                            removed.append({
+                                'public_key': public_key[:16] + '...',
+                                'allowed_ips': allowed_ips,
+                                'handshake': 'never',
+                                'reason': 'broken_system_vm'
+                            })
+                            remove_peer_metadata(public_key)
+                            logger.info(
+                                f"Removed broken system-vm peer: {public_key[:16]}... "
+                                f"(allowed_ips={allowed_ips}, handshake=never)"
+                            )
+                        continue
+
                     kept.append({
                         'public_key': public_key[:16] + '...',
                         'allowed_ips': allowed_ips,
@@ -745,13 +781,23 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            # Validate allowed_ips is a real IP/CIDR, not empty or bare "/32"
+            allowed_ips = data['allowed_ips'].strip()
+            if not allowed_ips or allowed_ips == '/32' or not allowed_ips[0].isdigit():
+                self.send_error_response(
+                    400,
+                    'Invalid allowed_ips',
+                    f"allowed_ips must be a valid CIDR (got: '{allowed_ips}')"
+                )
+                return
+
             public_key = data['public_key']
 
             # Build wg set command
             cmd = [
                 'wg', 'set', WIREGUARD_INTERFACE,
                 'peer', public_key,
-                'allowed-ips', data['allowed_ips']
+                'allowed-ips', allowed_ips
             ]
 
             # Add optional persistent keepalive
@@ -1562,7 +1608,7 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 fields = line.split('\t')
                 if len(fields) >= 7:
                     public_key = fields[0]
-                    allowed_ips = fields[3]
+                    allowed_ips = fields[3] if fields[3] != '(none)' else None
                     peer_type, parent_node_id = classify_peer(public_key, allowed_ips)
                     meta = get_peer_metadata(public_key)
 
