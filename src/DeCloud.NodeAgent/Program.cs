@@ -348,7 +348,31 @@ app.Lifetime.ApplicationStarted.Register(() =>
     Console.Error.Flush();
 });
 
-Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] Middleware configured. Calling app.StartAsync()...");
+Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] Middleware configured. Testing DI resolution...");
+Console.Error.Flush();
+
+// Diagnostic: manually resolve hosted services to see if DI hangs
+try
+{
+    Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] Resolving IHostedService instances from DI...");
+    Console.Error.Flush();
+    var hostedServices = app.Services.GetServices<IHostedService>().ToList();
+    Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] ✓ Resolved {hostedServices.Count} hosted services. Types:");
+    foreach (var svc in hostedServices)
+    {
+        Console.Error.WriteLine($"[DIAG]   - {svc.GetType().Name}");
+    }
+    Console.Error.Flush();
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] ✗ DI resolution FAILED: {ex.GetType().Name}: {ex.Message}");
+    if (ex.InnerException != null)
+        Console.Error.WriteLine($"[DIAG]   Inner: {ex.InnerException.GetType().Name}: {ex.InnerException.Message}");
+    Console.Error.Flush();
+}
+
+Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] Calling app.StartAsync()...");
 Console.Error.Flush();
 
 // Manual start instead of app.Run() for diagnostic visibility
