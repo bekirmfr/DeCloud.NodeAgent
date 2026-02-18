@@ -194,10 +194,6 @@ builder.Services.AddSingleton<IEphemeralSshKeyService, EphemeralSshKeyService>()
 // =====================================================
 // Background Services
 // =====================================================
-
-// Diagnostic: register first to confirm host service startup begins
-builder.Services.AddHostedService<StartupDiagnosticService>();
-
 builder.Services.AddHostedService<AuthenticationManager>();
 builder.Services.AddHostedService<HeartbeatService>();
 builder.Services.AddHostedService<WireGuardConfigManager>();
@@ -340,67 +336,7 @@ app.UseSwaggerUI();
 
 app.MapControllers();
 
-// Log startup completion — if this appears but "Now listening on" doesn't,
-// the hang is in hosted service startup (IHostedService.StartAsync calls).
-app.Lifetime.ApplicationStarted.Register(() =>
-{
-    Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] ApplicationStarted fired — all services initialized, Kestrel listening");
-    Console.Error.Flush();
-});
-
-Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] Middleware configured. Testing DI resolution...");
-Console.Error.Flush();
-
-// Diagnostic: resolve singletons one by one to find which one deadlocks
-void TryResolve<T>(string name) where T : class
-{
-    Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] Resolving {name}...");
-    Console.Error.Flush();
-    var svc = app.Services.GetService<T>();
-    Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] ✓ {name} resolved: {svc?.GetType().Name ?? "null"}");
-    Console.Error.Flush();
-}
-
-try
-{
-    TryResolve<ICommandExecutor>("ICommandExecutor");
-    TryResolve<INodeStateService>("INodeStateService");
-    TryResolve<ICpuBenchmarkService>("ICpuBenchmarkService");
-    TryResolve<IResourceDiscoveryService>("IResourceDiscoveryService");
-    TryResolve<PortMappingRepository>("PortMappingRepository");
-    TryResolve<IPortPoolManager>("IPortPoolManager");
-    TryResolve<INatRuleManager>("INatRuleManager");
-
-    // These two form a circular dependency:
-    // LibvirtVmManager → ICloudInitTemplateService → CloudInitTemplateService → IVmManager → LibvirtVmManager
-    Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] ⚠ About to resolve IVmManager (suspected circular dependency)...");
-    Console.Error.Flush();
-    TryResolve<IVmManager>("IVmManager");
-
-    TryResolve<IPortForwardingManager>("IPortForwardingManager");
-    TryResolve<IPortSecurityService>("IPortSecurityService");
-    TryResolve<IAuditService>("IAuditService");
-
-    Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] All singletons resolved successfully");
-    Console.Error.Flush();
-}
-catch (Exception ex)
-{
-    Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] ✗ DI resolution FAILED: {ex.GetType().Name}: {ex.Message}");
-    if (ex.InnerException != null)
-        Console.Error.WriteLine($"[DIAG]   Inner: {ex.InnerException.GetType().Name}: {ex.InnerException.Message}");
-    Console.Error.Flush();
-}
-
-Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] Calling app.StartAsync()...");
-Console.Error.Flush();
-
-// Manual start instead of app.Run() for diagnostic visibility
-await app.StartAsync();
-Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] app.StartAsync() completed — Kestrel + all services started");
-Console.Error.Flush();
-
-await app.WaitForShutdownAsync();
+app.Run();
 
 // =====================================================
 // VM Manager Initialization Service
@@ -446,29 +382,5 @@ public class VmManagerInitializationService : BackgroundService
         {
             _logger.LogError(ex, "Failed to initialize VM Manager");
         }
-    }
-}
-
-// =====================================================
-// Startup Diagnostic Service
-// =====================================================
-/// <summary>
-/// Temporary diagnostic service to identify where host startup hangs.
-/// Registered FIRST so its StartAsync runs before all other services.
-/// </summary>
-public class StartupDiagnosticService : IHostedService
-{
-    public Task StartAsync(CancellationToken cancellationToken)
-    {
-        Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] StartupDiagnosticService.StartAsync called — host is starting services");
-        Console.Error.Flush();
-        return Task.CompletedTask;
-    }
-
-    public Task StopAsync(CancellationToken cancellationToken)
-    {
-        Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] StartupDiagnosticService.StopAsync called");
-        Console.Error.Flush();
-        return Task.CompletedTask;
     }
 }
