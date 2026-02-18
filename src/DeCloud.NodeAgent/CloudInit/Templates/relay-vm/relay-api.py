@@ -745,13 +745,23 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            # Validate allowed_ips is a real IP/CIDR, not empty or bare "/32"
+            allowed_ips = data['allowed_ips'].strip()
+            if not allowed_ips or allowed_ips == '/32' or not allowed_ips[0].isdigit():
+                self.send_error_response(
+                    400,
+                    'Invalid allowed_ips',
+                    f"allowed_ips must be a valid CIDR (got: '{allowed_ips}')"
+                )
+                return
+
             public_key = data['public_key']
 
             # Build wg set command
             cmd = [
                 'wg', 'set', WIREGUARD_INTERFACE,
                 'peer', public_key,
-                'allowed-ips', data['allowed_ips']
+                'allowed-ips', allowed_ips
             ]
 
             # Add optional persistent keepalive
@@ -1562,7 +1572,7 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 fields = line.split('\t')
                 if len(fields) >= 7:
                     public_key = fields[0]
-                    allowed_ips = fields[3]
+                    allowed_ips = fields[3] if fields[3] != '(none)' else None
                     peer_type, parent_node_id = classify_peer(public_key, allowed_ips)
                     meta = get_peer_metadata(public_key)
 
