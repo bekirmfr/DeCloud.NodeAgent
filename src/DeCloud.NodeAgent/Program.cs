@@ -351,17 +351,37 @@ app.Lifetime.ApplicationStarted.Register(() =>
 Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] Middleware configured. Testing DI resolution...");
 Console.Error.Flush();
 
-// Diagnostic: manually resolve hosted services to see if DI hangs
+// Diagnostic: resolve singletons one by one to find which one deadlocks
+void TryResolve<T>(string name) where T : class
+{
+    Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] Resolving {name}...");
+    Console.Error.Flush();
+    var svc = app.Services.GetService<T>();
+    Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] ✓ {name} resolved: {svc?.GetType().Name ?? "null"}");
+    Console.Error.Flush();
+}
+
 try
 {
-    Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] Resolving IHostedService instances from DI...");
+    TryResolve<ICommandExecutor>("ICommandExecutor");
+    TryResolve<INodeStateService>("INodeStateService");
+    TryResolve<ICpuBenchmarkService>("ICpuBenchmarkService");
+    TryResolve<IResourceDiscoveryService>("IResourceDiscoveryService");
+    TryResolve<PortMappingRepository>("PortMappingRepository");
+    TryResolve<IPortPoolManager>("IPortPoolManager");
+    TryResolve<INatRuleManager>("INatRuleManager");
+
+    // These two form a circular dependency:
+    // LibvirtVmManager → ICloudInitTemplateService → CloudInitTemplateService → IVmManager → LibvirtVmManager
+    Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] ⚠ About to resolve IVmManager (suspected circular dependency)...");
     Console.Error.Flush();
-    var hostedServices = app.Services.GetServices<IHostedService>().ToList();
-    Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] ✓ Resolved {hostedServices.Count} hosted services. Types:");
-    foreach (var svc in hostedServices)
-    {
-        Console.Error.WriteLine($"[DIAG]   - {svc.GetType().Name}");
-    }
+    TryResolve<IVmManager>("IVmManager");
+
+    TryResolve<IPortForwardingManager>("IPortForwardingManager");
+    TryResolve<IPortSecurityService>("IPortSecurityService");
+    TryResolve<IAuditService>("IAuditService");
+
+    Console.Error.WriteLine($"[DIAG {DateTime.UtcNow:O}] All singletons resolved successfully");
     Console.Error.Flush();
 }
 catch (Exception ex)
