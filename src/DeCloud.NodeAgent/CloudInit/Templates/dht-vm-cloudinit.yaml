@@ -66,7 +66,7 @@ write_files:
       DECLOUD_NODE_ID=__NODE_ID__
       DECLOUD_REGION=__DHT_REGION__
 
-  # WireGuard mesh enrollment environment variables
+  # WireGuard mesh environment (consumed by enrollment script)
   - path: /etc/decloud/wg-mesh.env
     permissions: '0600'
     content: |
@@ -75,11 +75,11 @@ write_files:
       WG_TUNNEL_IP=__WG_TUNNEL_IP__
       WG_RELAY_API=__WG_RELAY_API__
       WG_INTERFACE=wg-mesh
-      WG_DESCRIPTION=dht-__VM_ID__
+      WG_DESCRIPTION=DHT-__VM_ID__
       WG_PEER_TYPE=system-vm
       WG_PARENT_NODE_ID=__NODE_ID__
 
-  # WireGuard mesh enrollment script (building block)
+  # WireGuard mesh enrollment script (reusable building block)
   - path: /usr/local/bin/wg-mesh-enroll.sh
     permissions: '0755'
     content: |
@@ -102,25 +102,6 @@ write_files:
         "version": "4.0",
         "connectivity": "wireguard-mesh"
       }
-
-  # WireGuard mesh enrollment script (reusable building block)
-  - path: /usr/local/bin/wg-mesh-enroll.sh
-    permissions: '0755'
-    content: |
-      __WG_MESH_ENROLL__
-
-  # WireGuard mesh environment (consumed by enrollment script)
-  - path: /etc/decloud/wg-mesh.env
-    permissions: '0600'
-    content: |
-      WG_RELAY_ENDPOINT=__WG_RELAY_ENDPOINT__
-      WG_RELAY_PUBKEY=__WG_RELAY_PUBKEY__
-      WG_TUNNEL_IP=__WG_TUNNEL_IP__
-      WG_RELAY_API=__WG_RELAY_API__
-      WG_INTERFACE=wg-mesh
-      WG_DESCRIPTION=DHT-__VM_ID__
-      WG_PEER_TYPE=system-vm
-      WG_PARENT_NODE_ID=__NODE_ID__
 
   # Nginx reverse proxy — port 80 → dashboard (8080) and DHT API
   - path: /etc/nginx/sites-available/dht-proxy
@@ -344,17 +325,6 @@ runcmd:
   - chown -R dht:dht /etc/decloud-dht
   - chown -R dht:dht /var/lib/decloud-dht
   - chown -R dht:dht /opt/decloud-dht
-
-  # =====================================================
-  # WIREGUARD MESH ENROLLMENT (building block)
-  # Joins the relay's WireGuard network so DHT nodes
-  # can communicate directly — no port forwarding needed.
-  # =====================================================
-  - |
-    set -a
-    source /etc/decloud/wg-mesh.env
-    set +a
-    /usr/local/bin/wg-mesh-enroll.sh
 
   # DHT binary is written directly to /usr/local/bin/dht-node by write_files
   # with gz+b64 encoding (cloud-init handles decompression and decoding)

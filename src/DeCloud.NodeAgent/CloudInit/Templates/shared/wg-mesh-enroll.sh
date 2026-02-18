@@ -60,6 +60,14 @@ log "  Tunnel IP:      $WG_TUNNEL_IP"
 log "  Relay API:      $WG_RELAY_API"
 log "  Interface:      $WG_INTERFACE"
 
+# ==================== Idempotency Guard ====================
+# If the WG interface is already up and has a peer with a handshake,
+# skip re-enrollment to prevent duplicate peer registration on the relay.
+if wg show "$WG_INTERFACE" 2>/dev/null | grep -q "latest handshake"; then
+    log "WireGuard interface ${WG_INTERFACE} already active with handshake — skipping enrollment"
+    exit 0
+fi
+
 # ==================== Generate Keypair ====================
 PRIVATE_KEY=$(wg genkey)
 PUBLIC_KEY=$(echo "$PRIVATE_KEY" | wg pubkey)
