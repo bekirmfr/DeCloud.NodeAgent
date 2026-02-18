@@ -1,5 +1,6 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System.Text.RegularExpressions;
 
@@ -91,7 +92,8 @@ public class CloudInitTemplateVariables
 public class CloudInitTemplateService : ICloudInitTemplateService
 {
     private readonly ICommandExecutor _executor;
-    private readonly IVmManager _vmManager;
+    private readonly IServiceProvider _serviceProvider;
+    private IVmManager? _vmManager;
     private readonly ILogger<CloudInitTemplateService> _logger;
     private readonly string _templateBasePath;
 
@@ -100,13 +102,18 @@ public class CloudInitTemplateService : ICloudInitTemplateService
     private readonly Dictionary<string, string> _externalTemplateCache = new();
     private readonly SemaphoreSlim _cacheLock = new(1, 1);
 
+    // IVmManager is resolved lazily to break a circular dependency:
+    // LibvirtVmManager → ICloudInitTemplateService → CloudInitTemplateService → IVmManager → LibvirtVmManager
+    // Resolving IVmManager eagerly in the constructor deadlocks the DI container.
+    private IVmManager VmManager => _vmManager ??= _serviceProvider.GetRequiredService<IVmManager>();
+
     public CloudInitTemplateService(
         ICommandExecutor executor,
-        IVmManager vmManager,
+        IServiceProvider serviceProvider,
         ILogger<CloudInitTemplateService> logger)
     {
         _executor = executor;
-        _vmManager = vmManager;
+        _serviceProvider = serviceProvider;
         _logger = logger;
 
         // Templates are embedded in the NodeAgent assembly or loaded from disk
@@ -763,7 +770,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
     {
         try
         {
-            var allVms = await _vmManager.GetAllVmsAsync(ct);
+            var allVms = await VmManager.GetAllVmsAsync(ct);
             var relayVm = allVms.FirstOrDefault(v =>
                 v.Spec.VmType == VmType.Relay &&
                 v.State is VmState.Running);
@@ -771,7 +778,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             if (relayVm == null)
                 return null;
 
-            var relayIp = await _vmManager.GetVmIpAddressAsync(relayVm.VmId, ct);
+            var relayIp = await VmManager.GetVmIpAddressAsync(relayVm.VmId, ct);
             if (string.IsNullOrEmpty(relayIp))
                 return null;
 
