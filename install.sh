@@ -965,35 +965,34 @@ install_nvidia_container_toolkit() {
     fi
 
     # Add NVIDIA repository
-    # Use stable/deb format first (NVIDIA's current recommended approach)
-    # Then fall back to distribution-specific URL for older setups
+    # Use distro-agnostic stable/deb URL first (works on all Ubuntu versions including 24.04)
+    # Fallback to distribution-specific URL for older setups
     local repo_added=false
 
-    # Try stable/deb format (works for Ubuntu 22.04+, Debian 12+)
-    log_info "Adding NVIDIA container toolkit repository (stable/deb)..."
-    if curl -fsSL "https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list" \
-        -o /tmp/nvidia-container-toolkit.list 2>/dev/null && [ -s /tmp/nvidia-container-toolkit.list ]; then
-        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
-            /tmp/nvidia-container-toolkit.list \
+    # Primary: distro-agnostic URL (recommended by NVIDIA, works on all Ubuntu/Debian)
+    local list_content
+    if list_content=$(curl -fsSL "https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list" 2>/dev/null) \
+        && [ -n "$list_content" ]; then
+        echo "$list_content" \
+            | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
             > /etc/apt/sources.list.d/nvidia-container-toolkit.list
         repo_added=true
     fi
 
     # Fallback: distribution-specific URL
     if [ "$repo_added" = false ]; then
+        log_info "Trying distribution-specific repository format..."
         local distribution
         distribution=$(. /etc/os-release; echo "${ID}${VERSION_ID}")
-        log_info "Trying distribution-specific repository (${distribution})..."
-        if curl -fsSL "https://nvidia.github.io/libnvidia-container/${distribution}/libnvidia-container.list" \
-            -o /tmp/nvidia-container-toolkit.list 2>/dev/null && [ -s /tmp/nvidia-container-toolkit.list ]; then
-            sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
-                /tmp/nvidia-container-toolkit.list \
+
+        if list_content=$(curl -fsSL "https://nvidia.github.io/libnvidia-container/${distribution}/libnvidia-container.list" 2>/dev/null) \
+            && [ -n "$list_content" ]; then
+            echo "$list_content" \
+                | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
                 > /etc/apt/sources.list.d/nvidia-container-toolkit.list
             repo_added=true
         fi
     fi
-
-    rm -f /tmp/nvidia-container-toolkit.list
 
     if [ "$repo_added" = false ]; then
         log_error "Failed to add NVIDIA container toolkit repository"
