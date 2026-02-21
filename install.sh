@@ -957,11 +957,15 @@ install_nvidia_container_toolkit() {
     log_info "Installing NVIDIA Container Toolkit..."
 
     # Add NVIDIA GPG key
-    if ! curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
-        | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null; then
-        log_error "Failed to add NVIDIA GPG key"
-        log_warn "GPU container support will not be available"
-        return 0
+    if [ ! -f /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg ]; then
+        if ! curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+            | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null; then
+            log_error "Failed to add NVIDIA GPG key"
+            log_warn "GPU container support will not be available"
+            return 0
+        fi
+    else
+        log_info "NVIDIA GPG keyring already exists — skipping download"
     fi
 
     # Add NVIDIA repository
