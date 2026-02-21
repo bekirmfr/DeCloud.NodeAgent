@@ -387,7 +387,7 @@ public class CommandProcessorService : BackgroundService
         // Parse service definitions from orchestrator payload
         if (result.Success)
         {
-            var vm = (await _vmManager.GetAllVmsAsync(ct)).FirstOrDefault(v => v.VmId == vmId);
+            var vm = (await manager.GetAllVmsAsync(ct)).FirstOrDefault(v => v.VmId == vmId);
             if (vm != null)
             {
                 vm.Services = ParseServiceDefinitions(root);
