@@ -1,6 +1,7 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Infrastructure.Docker;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
@@ -20,6 +21,7 @@ public class CommandProcessorService : BackgroundService
     private readonly IOrchestratorClient _orchestratorClient;
     private readonly ConcurrentQueue<PendingCommand> _pushedCommands;
     private readonly IVmManager _vmManager;
+    private readonly DockerContainerManager _dockerManager;
     private readonly IResourceDiscoveryService _resourceDiscovery;
     private readonly INatRuleManager _natRuleManager;
     private readonly INodeMetadataService _nodeMetadata;
@@ -47,6 +49,7 @@ public class CommandProcessorService : BackgroundService
         IOrchestratorClient orchestratorClient,
         ConcurrentQueue<PendingCommand> pushedCommands,
         IVmManager vmManager,
+        DockerContainerManager dockerManager,
         IResourceDiscoveryService resourceDiscovery,
         INatRuleManager natRuleManager,
         INodeMetadataService nodeMetadata,
@@ -61,6 +64,7 @@ public class CommandProcessorService : BackgroundService
         _orchestratorClient = orchestratorClient;
         _pushedCommands = pushedCommands;
         _vmManager = vmManager;
+        _dockerManager = dockerManager;
         _resourceDiscovery = resourceDiscovery;
         _natRuleManager = natRuleManager;
         _nodeMetadata = nodeMetadata;
@@ -288,6 +292,19 @@ public class CommandProcessorService : BackgroundService
         string? imageId = GetStringProperty(root, "imageId", "ImageId");
         string? sshPublicKey = GetStringProperty(root, "sshPublicKey", "SshPublicKey");
         string? userData = GetStringProperty(root, "userData", "UserData");
+        string? gpuPciAddress = GetStringProperty(root, "gpuPciAddress", "GpuPciAddress");
+        int deploymentModeInt = GetIntProperty(root, "deploymentMode", "DeploymentMode") ?? 0;
+        var deploymentMode = (DeploymentMode)deploymentModeInt;
+        string? containerImage = GetStringProperty(root, "containerImage", "ContainerImage");
+
+        // Parse environment variables for containers
+        Dictionary<string, string>? environmentVariables = null;
+        if (root.TryGetProperty("EnvironmentVariables", out var envElement) ||
+            root.TryGetProperty("environmentVariables", out envElement))
+        {
+            environmentVariables = JsonSerializer.Deserialize<Dictionary<string, string>>(
+                envElement.GetRawText());
+        }
 
         Dictionary<string, string>? labels = null;
         if (root.TryGetProperty("Labels", out var labelsElement) ||
@@ -314,6 +331,10 @@ public class CommandProcessorService : BackgroundService
             BaseImageUrl = baseImageUrl,
             SshPublicKey = sshPublicKey,
             CloudInitUserData = userData,
+            GpuPciAddress = gpuPciAddress,
+            DeploymentMode = deploymentMode,
+            ContainerImage = containerImage,
+            EnvironmentVariables = environmentVariables,
             Labels = labels
         };
 
@@ -336,20 +357,32 @@ public class CommandProcessorService : BackgroundService
         }
 
         _logger.LogInformation(
-            "Creating {VmType} type VM {VmId}: {VCpus} vCPUs, {MemoryMB}MB RAM, " +
+            "Creating {VmType} type {Mode} {VmId}: {VCpus} vCPUs, {MemoryMB}MB RAM, " +
             "{DiskGB}GB disk, image: {ImageUrl}, quality tier: {QualityTier}",
-            vmSpec.VmType.ToString(), vmId, virtualCpuCores,
+            vmSpec.VmType.ToString(), deploymentMode, vmId, virtualCpuCores,
             memoryBytes / 1024 / 1024, diskBytes / 1024 / 1024 / 1024,
-            baseImageUrl, qualityTier);
+            deploymentMode == DeploymentMode.Container ? containerImage : baseImageUrl,
+            qualityTier);
 
-        if (!string.IsNullOrEmpty(userData))
+        if (deploymentMode == DeploymentMode.Container)
+        {
+            _logger.LogInformation(
+                "VM {VmId}: Container mode - image: {Image}, GPU shared via NVIDIA runtime",
+                vmId, containerImage);
+        }
+        else if (!string.IsNullOrEmpty(userData))
         {
             _logger.LogInformation(
                 "VM {VmId}: Using cloud-init UserData ({Bytes} bytes)",
                 vmId, userData.Length);
         }
 
-        var result = await _vmManager.CreateVmAsync(vmSpec, password, ct);
+        // Route to the correct manager based on deployment mode
+        IVmManager manager = deploymentMode == DeploymentMode.Container
+            ? _dockerManager
+            : _vmManager;
+
+        var result = await manager.CreateVmAsync(vmSpec, password, ct);
 
         // Parse service definitions from orchestrator payload
         if (result.Success)
@@ -451,8 +484,9 @@ public class CommandProcessorService : BackgroundService
         var vmId = GetStringProperty(doc.RootElement, "VmId", "vmId");
         if (string.IsNullOrEmpty(vmId)) return false;
 
+        var manager = await ResolveManagerForVmAsync(vmId, ct);
         _logger.LogInformation("Starting VM {VmId}", vmId);
-        var result = await _vmManager.StartVmAsync(vmId, ct);
+        var result = await manager.StartVmAsync(vmId, ct);
         return result.Success;
     }
 
@@ -463,8 +497,9 @@ public class CommandProcessorService : BackgroundService
         var force = doc.RootElement.TryGetProperty("Force", out var forceProp) && forceProp.GetBoolean();
         if (string.IsNullOrEmpty(vmId)) return false;
 
+        var manager = await ResolveManagerForVmAsync(vmId, ct);
         _logger.LogInformation("Stopping VM {VmId} (force={Force})", vmId, force);
-        var result = await _vmManager.StopVmAsync(vmId, force, ct);
+        var result = await manager.StopVmAsync(vmId, force, ct);
         return result.Success;
     }
 
@@ -474,7 +509,8 @@ public class CommandProcessorService : BackgroundService
         var vmId = GetStringProperty(doc.RootElement, "VmId", "vmId");
         if (string.IsNullOrEmpty(vmId)) return false;
 
-        var vmInstance = await _vmManager.GetVmAsync(vmId, ct);
+        var manager = await ResolveManagerForVmAsync(vmId, ct);
+        var vmInstance = await manager.GetVmAsync(vmId, ct);
         
         // Clean up relay VM NAT rules
         if (vmInstance?.Spec.VmType == VmType.Relay &&
@@ -552,7 +588,7 @@ public class CommandProcessorService : BackgroundService
         }
 
         _logger.LogInformation("Deleting VM {VmId}", vmId);
-        var result = await _vmManager.DeleteVmAsync(vmId, ct);
+        var result = await manager.DeleteVmAsync(vmId, ct);
         return result.Success;
     }
 
@@ -614,6 +650,19 @@ public class CommandProcessorService : BackgroundService
             imageIdToResolve, hostArchitecture, archTag, resolvedUrl);
 
         return resolvedUrl;
+    }
+
+    /// <summary>
+    /// Resolve which manager owns a given VM (libvirt or Docker)
+    /// </summary>
+    private async Task<IVmManager> ResolveManagerForVmAsync(string vmId, CancellationToken ct)
+    {
+        // Check Docker manager first (faster, in-memory lookup)
+        var dockerVm = await _dockerManager.GetVmAsync(vmId, ct);
+        if (dockerVm != null) return _dockerManager;
+
+        // Default to libvirt VM manager
+        return _vmManager;
     }
 
     // Helper methods to handle case-insensitive property names

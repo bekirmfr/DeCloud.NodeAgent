@@ -32,8 +32,15 @@ public class VmSpec
     public string BaseImageUrl { get; set; } = string.Empty;  // URL to download base image
     public string BaseImageHash { get; set; } = string.Empty; // SHA256 for verification
 
-    // Optional GPU passthrough
+    // Optional GPU passthrough (VirtualMachine mode)
     public string? GpuPciAddress { get; set; }
+
+    // Deployment mode (VM or Container)
+    public DeploymentMode DeploymentMode { get; set; } = DeploymentMode.VirtualMachine;
+
+    // Container-specific fields (used when DeploymentMode = Container)
+    public string? ContainerImage { get; set; }
+    public Dictionary<string, string>? EnvironmentVariables { get; set; }
 
     // Network configuration
     public string IpAddress { get; set; } = string.Empty;  // Within overlay network
@@ -127,6 +134,17 @@ public enum VmType
     Relay,
     Dht,
     Inference
+}
+
+/// <summary>
+/// How a workload is deployed on a node.
+/// VirtualMachine: KVM/QEMU VM via libvirt (default, full isolation)
+/// Container: Docker container with GPU sharing (for nodes without IOMMU, e.g. WSL2)
+/// </summary>
+public enum DeploymentMode
+{
+    VirtualMachine = 0,
+    Container = 1
 }
 
 public enum QualityTier

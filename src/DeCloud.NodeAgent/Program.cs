@@ -2,6 +2,7 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Interfaces.UserNetwork;
 using DeCloud.NodeAgent.Core.Settings;
+using DeCloud.NodeAgent.Infrastructure.Docker;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using DeCloud.NodeAgent.Infrastructure.Network;
 using DeCloud.NodeAgent.Infrastructure.Network.UserNetwork;
@@ -182,6 +183,11 @@ builder.Services.AddSingleton<VmRepository>(sp =>
 builder.Services.AddSingleton<ICloudInitTemplateService, CloudInitTemplateService>();
 builder.Services.AddSingleton<LibvirtVmManager>();
 builder.Services.AddSingleton<IVmManager>(sp => sp.GetRequiredService<LibvirtVmManager>());
+
+// =====================================================
+// Docker Container Manager (GPU sharing for WSL2/non-IOMMU nodes)
+// =====================================================
+builder.Services.AddSingleton<DockerContainerManager>();
 
 // =====================================================
 // Network Services
