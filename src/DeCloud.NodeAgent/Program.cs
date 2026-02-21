@@ -219,6 +219,9 @@ builder.Services.AddHostedService<OrphanedPortCleanupService>();
 // Per-service VM readiness monitoring via qemu-guest-agent
 builder.Services.AddHostedService<VmReadinessMonitor>();
 
+// GPU auto-configuration (detects NVIDIA GPUs, installs Docker + NVIDIA Container Toolkit)
+builder.Services.AddHostedService<GpuAutoConfigureService>();
+
 // =====================================================
 // Security services for port validation and auditing
 // =====================================================
