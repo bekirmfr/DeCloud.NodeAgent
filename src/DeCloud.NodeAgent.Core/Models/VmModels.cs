@@ -147,17 +147,6 @@ public enum DeploymentMode
     Container = 1
 }
 
-/// <summary>
-/// GPU setup mode sent by orchestrator in ConfigureGpu command.
-/// Auto: orchestrator picks best strategy based on IOMMU support.
-/// </summary>
-public enum GpuSetupMode
-{
-    Auto = 0,
-    VfioPassthrough = 1,
-    ContainerToolkit = 2
-}
-
 public enum QualityTier
 {
     /// <summary>
