@@ -815,18 +815,58 @@ prewarm_arm_images() {
 }
 
 # ============================================================
+# NVIDIA GPU Detection (supports WSL2 + bare-metal)
+# ============================================================
+NVIDIA_SMI_PATH=""
+
+detect_nvidia_gpu() {
+    # Already detected in this run
+    if [ -n "$NVIDIA_SMI_PATH" ]; then
+        return 0
+    fi
+
+    # 1. Standard PATH (bare-metal Linux, /usr/bin/nvidia-smi)
+    if command -v nvidia-smi &> /dev/null; then
+        NVIDIA_SMI_PATH="$(command -v nvidia-smi)"
+        return 0
+    fi
+
+    # 2. WSL2-specific path (Windows GPU passthrough)
+    if [ -x "/usr/lib/wsl/lib/nvidia-smi" ]; then
+        NVIDIA_SMI_PATH="/usr/lib/wsl/lib/nvidia-smi"
+        log_info "WSL2 GPU detected via ${NVIDIA_SMI_PATH}"
+        return 0
+    fi
+
+    # 3. Fallback: check for WSL2 CUDA libraries (nvidia-smi may not exist but GPU is there)
+    if ls /usr/lib/wsl/lib/libcuda.so* &> /dev/null; then
+        NVIDIA_SMI_PATH="wsl-cuda-only"
+        log_info "WSL2 CUDA libraries detected (GPU available)"
+        return 0
+    fi
+
+    # 4. PCI bus scan (bare-metal only, doesn't work in WSL2)
+    if lspci 2>/dev/null | grep -qi 'nvidia'; then
+        NVIDIA_SMI_PATH="pci-detected"
+        return 0
+    fi
+
+    return 1
+}
+
+# ============================================================
 # Docker Installation (for GPU container sharing)
 # ============================================================
 install_docker() {
     log_step "Checking Docker (for GPU container workloads)..."
 
-    # Only install Docker if an NVIDIA GPU is detected
-    if ! command -v nvidia-smi &> /dev/null && ! lspci 2>/dev/null | grep -qi 'nvidia'; then
+    if ! detect_nvidia_gpu; then
         log_info "No NVIDIA GPU detected — skipping Docker installation"
         return 0
     fi
 
     log_info "NVIDIA GPU detected — Docker required for GPU container sharing"
+    log_info "GPU detection method: ${NVIDIA_SMI_PATH}"
 
     # Check if already installed and running
     if command -v docker &> /dev/null && docker info &> /dev/null; then
@@ -890,9 +930,8 @@ install_docker() {
 install_nvidia_container_toolkit() {
     log_step "Checking NVIDIA Container Toolkit..."
 
-    # Skip if no NVIDIA GPU
-    if ! command -v nvidia-smi &> /dev/null; then
-        log_info "No NVIDIA GPU (nvidia-smi not found) — skipping toolkit"
+    if ! detect_nvidia_gpu; then
+        log_info "No NVIDIA GPU detected — skipping NVIDIA Container Toolkit"
         return 0
     fi
 
@@ -906,7 +945,7 @@ install_nvidia_container_toolkit() {
     if docker info 2>/dev/null | grep -qi 'nvidia'; then
         log_success "NVIDIA Container Toolkit already configured"
 
-        # Verify GPU access works
+        # Verify GPU access works (use detected path)
         if docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu22.04 nvidia-smi &> /dev/null; then
             log_success "GPU container access verified"
         else
