@@ -450,7 +450,8 @@ public enum CommandType
     Benchmark,
     Shutdown,
     AllocatePort,
-    RemovePort
+    RemovePort,
+    ConfigureGpu
 }
 
 /// <summary>
