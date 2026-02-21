@@ -965,22 +965,39 @@ install_nvidia_container_toolkit() {
     fi
 
     # Add NVIDIA repository
-    local distribution
-    distribution=$(. /etc/os-release; echo "${ID}${VERSION_ID}")
+    # Use distro-agnostic stable/deb URL first (works on all Ubuntu versions including 24.04)
+    # Fallback to distribution-specific URL for older setups
+    local repo_added=false
 
-    if ! curl -fsSL "https://nvidia.github.io/libnvidia-container/${distribution}/libnvidia-container.list" \
-        | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
-        | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null 2>&1; then
-
-        # Fallback: try with stable/deb path format
-        log_info "Trying alternative repository format..."
-        if ! curl -fsSL "https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list" \
+    # Primary: distro-agnostic URL (recommended by NVIDIA, works on all Ubuntu/Debian)
+    local list_content
+    if list_content=$(curl -fsSL "https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list" 2>/dev/null) \
+        && [ -n "$list_content" ]; then
+        echo "$list_content" \
             | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
-            | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null 2>&1; then
-            log_error "Failed to add NVIDIA container toolkit repository"
-            log_warn "GPU container support will not be available"
-            return 0
+            > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+        repo_added=true
+    fi
+
+    # Fallback: distribution-specific URL
+    if [ "$repo_added" = false ]; then
+        log_info "Trying distribution-specific repository format..."
+        local distribution
+        distribution=$(. /etc/os-release; echo "${ID}${VERSION_ID}")
+
+        if list_content=$(curl -fsSL "https://nvidia.github.io/libnvidia-container/${distribution}/libnvidia-container.list" 2>/dev/null) \
+            && [ -n "$list_content" ]; then
+            echo "$list_content" \
+                | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+                > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+            repo_added=true
         fi
+    fi
+
+    if [ "$repo_added" = false ]; then
+        log_error "Failed to add NVIDIA container toolkit repository"
+        log_warn "GPU container support will not be available"
+        return 0
     fi
 
     # Install the toolkit
