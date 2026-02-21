@@ -6,6 +6,7 @@
 # - .NET 8 Runtime
 # - Go 1.23+ (for building DHT node binary)
 # - KVM/QEMU/libvirt for virtualization
+# - Docker + NVIDIA Container Toolkit (auto-detected for GPU nodes)
 # - WireGuard for overlay networking
 # - SSH CA for certificate authentication
 #
@@ -811,6 +812,173 @@ prewarm_arm_images() {
         
         log_success "ARM64 image cache pre-warmed"
     fi
+}
+
+# ============================================================
+# Docker Installation (for GPU container sharing)
+# ============================================================
+install_docker() {
+    log_step "Checking Docker (for GPU container workloads)..."
+
+    # Only install Docker if an NVIDIA GPU is detected
+    if ! command -v nvidia-smi &> /dev/null && ! lspci 2>/dev/null | grep -qi 'nvidia'; then
+        log_info "No NVIDIA GPU detected — skipping Docker installation"
+        return 0
+    fi
+
+    log_info "NVIDIA GPU detected — Docker required for GPU container sharing"
+
+    # Check if already installed and running
+    if command -v docker &> /dev/null && docker info &> /dev/null; then
+        local docker_version=$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')
+        log_success "Docker already installed and running (v${docker_version})"
+        return 0
+    fi
+
+    # Check if installed but not running
+    if command -v docker &> /dev/null; then
+        log_info "Docker installed but not running — starting..."
+        systemctl enable docker --quiet 2>/dev/null || true
+        systemctl start docker 2>/dev/null || true
+        sleep 2
+        if docker info &> /dev/null; then
+            log_success "Docker started successfully"
+            return 0
+        fi
+        log_warn "Docker failed to start — reinstalling..."
+    fi
+
+    log_info "Installing Docker via official script..."
+
+    # Use Docker's convenience script (supports Ubuntu/Debian)
+    if ! curl -fsSL https://get.docker.com -o /tmp/get-docker.sh 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
+        log_error "Failed to download Docker install script"
+        log_warn "GPU container support will not be available"
+        return 0  # Non-fatal: node can still run VMs via libvirt
+    fi
+
+    if ! sh /tmp/get-docker.sh 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
+        log_error "Docker installation failed"
+        log_warn "GPU container support will not be available"
+        rm -f /tmp/get-docker.sh
+        return 0
+    fi
+
+    rm -f /tmp/get-docker.sh
+
+    # Enable and start Docker
+    systemctl enable docker --quiet 2>/dev/null || true
+    systemctl start docker 2>/dev/null || true
+    sleep 2
+
+    # Verify
+    if ! docker info &> /dev/null; then
+        log_error "Docker installed but failed to start"
+        log_warn "GPU container support will not be available"
+        log_info "Check: sudo systemctl status docker"
+        return 0
+    fi
+
+    local docker_version=$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')
+    log_success "Docker installed and running (v${docker_version})"
+    return 0
+}
+
+# ============================================================
+# NVIDIA Container Toolkit (for --gpus all support)
+# ============================================================
+install_nvidia_container_toolkit() {
+    log_step "Checking NVIDIA Container Toolkit..."
+
+    # Skip if no NVIDIA GPU
+    if ! command -v nvidia-smi &> /dev/null; then
+        log_info "No NVIDIA GPU (nvidia-smi not found) — skipping toolkit"
+        return 0
+    fi
+
+    # Skip if Docker not available
+    if ! command -v docker &> /dev/null || ! docker info &> /dev/null; then
+        log_info "Docker not available — skipping NVIDIA Container Toolkit"
+        return 0
+    fi
+
+    # Check if already working
+    if docker info 2>/dev/null | grep -qi 'nvidia'; then
+        log_success "NVIDIA Container Toolkit already configured"
+
+        # Verify GPU access works
+        if docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu22.04 nvidia-smi &> /dev/null; then
+            log_success "GPU container access verified"
+        else
+            log_info "NVIDIA runtime present but GPU test skipped (image may not be cached)"
+        fi
+        return 0
+    fi
+
+    log_info "Installing NVIDIA Container Toolkit..."
+
+    # Add NVIDIA GPG key
+    if ! curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+        | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null; then
+        log_error "Failed to add NVIDIA GPG key"
+        log_warn "GPU container support will not be available"
+        return 0
+    fi
+
+    # Add NVIDIA repository
+    local distribution
+    distribution=$(. /etc/os-release; echo "${ID}${VERSION_ID}")
+
+    if ! curl -fsSL "https://nvidia.github.io/libnvidia-container/${distribution}/libnvidia-container.list" \
+        | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+        | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null 2>&1; then
+
+        # Fallback: try with stable/deb path format
+        log_info "Trying alternative repository format..."
+        if ! curl -fsSL "https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list" \
+            | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+            | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null 2>&1; then
+            log_error "Failed to add NVIDIA container toolkit repository"
+            log_warn "GPU container support will not be available"
+            return 0
+        fi
+    fi
+
+    # Install the toolkit
+    apt-get update -qq 2>/dev/null
+    if ! apt-get install -y nvidia-container-toolkit 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
+        log_error "Failed to install nvidia-container-toolkit"
+        log_warn "GPU container support will not be available"
+        return 0
+    fi
+
+    # Configure Docker to use NVIDIA runtime
+    if ! nvidia-ctk runtime configure --runtime=docker 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
+        log_error "Failed to configure NVIDIA runtime for Docker"
+        log_warn "GPU container support may not work"
+        return 0
+    fi
+
+    # Restart Docker to pick up new runtime
+    log_info "Restarting Docker to enable NVIDIA runtime..."
+    systemctl restart docker 2>/dev/null || true
+    sleep 3
+
+    # Verify NVIDIA runtime is registered
+    if docker info 2>/dev/null | grep -qi 'nvidia'; then
+        log_success "NVIDIA Container Toolkit installed and configured"
+    else
+        log_warn "NVIDIA runtime not detected in Docker — check configuration"
+        log_info "Manual fix: sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker"
+        return 0
+    fi
+
+    # Pull base CUDA image in background for faster first deployment
+    log_info "Pre-pulling NVIDIA CUDA base image (background)..."
+    docker pull nvidia/cuda:12.0.0-base-ubuntu22.04 > /dev/null 2>&1 &
+
+    log_success "GPU container support ready (Docker + NVIDIA Container Toolkit)"
+    return 0
 }
 
 install_wireguard() {
@@ -1902,6 +2070,10 @@ main() {
     install_dotnet
     install_go
     install_libvirt
+
+    # GPU container runtime (Docker + NVIDIA Container Toolkit)
+    install_docker
+    install_nvidia_container_toolkit
 
     # ARM64 support
     install_arm_virtualization
