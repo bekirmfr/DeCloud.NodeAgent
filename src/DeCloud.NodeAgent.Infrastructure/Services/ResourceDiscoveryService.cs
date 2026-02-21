@@ -82,6 +82,33 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             var supportsGpu = gpus.Any();
             var network = await GetNetworkInfoAsync(ct);
 
+            // Detect container runtimes and GPU container support
+            var containerRuntimes = await DetectContainerRuntimesAsync(ct);
+            var hasNvidiaRuntime = await DetectNvidiaContainerRuntimeAsync(ct);
+            var supportsGpuContainers = supportsGpu && containerRuntimes.Count > 0 && hasNvidiaRuntime;
+
+            // Update GPU container sharing flags
+            if (supportsGpuContainers)
+            {
+                foreach (var gpu in gpus)
+                {
+                    gpu.IsAvailableForContainerSharing = true;
+                }
+            }
+
+            // Fix passthrough availability: WSL2 cannot do VFIO passthrough
+            var isWsl = await IsWslEnvironmentAsync(ct);
+            if (isWsl)
+            {
+                foreach (var gpu in gpus)
+                {
+                    gpu.IsAvailableForPassthrough = false;
+                }
+                _logger.LogInformation(
+                    "WSL2 detected: GPU passthrough disabled (no IOMMU), container sharing {Status}",
+                    supportsGpuContainers ? "enabled" : "disabled");
+            }
+
             var inventory = new HardwareInventory
             {
                 Cpu = cpu,
@@ -90,6 +117,8 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                 SupportsGpu = supportsGpu,
                 Gpus = gpus,
                 Network = network,
+                ContainerRuntimes = containerRuntimes,
+                SupportsGpuContainers = supportsGpuContainers,
                 CollectedAt = DateTime.UtcNow
             };
 
@@ -990,5 +1019,119 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         }
 
         return items;
+    }
+
+    // =========================================================================
+    // Container Runtime Detection
+    // =========================================================================
+
+    /// <summary>
+    /// Detect available container runtimes (docker, podman)
+    /// </summary>
+    private async Task<List<string>> DetectContainerRuntimesAsync(CancellationToken ct)
+    {
+        var runtimes = new List<string>();
+
+        if (_isWindows) return runtimes;
+
+        try
+        {
+            var dockerResult = await _executor.ExecuteAsync("docker", "info --format '{{.ServerVersion}}'", ct);
+            if (dockerResult.Success && !string.IsNullOrWhiteSpace(dockerResult.StandardOutput))
+            {
+                runtimes.Add("docker");
+                _logger.LogInformation("Docker detected: version {Version}",
+                    dockerResult.StandardOutput.Trim().Trim('\''));
+            }
+        }
+        catch
+        {
+            _logger.LogDebug("Docker not available");
+        }
+
+        return runtimes;
+    }
+
+    /// <summary>
+    /// Detect NVIDIA Container Toolkit (nvidia-docker / nvidia runtime)
+    /// </summary>
+    private async Task<bool> DetectNvidiaContainerRuntimeAsync(CancellationToken ct)
+    {
+        if (_isWindows) return false;
+
+        try
+        {
+            // Check if docker has nvidia runtime
+            var result = await _executor.ExecuteAsync(
+                "docker", "info --format '{{.Runtimes}}'", ct);
+
+            if (result.Success && result.StandardOutput.Contains("nvidia"))
+            {
+                _logger.LogInformation("NVIDIA Container Toolkit detected (nvidia runtime available)");
+                return true;
+            }
+
+            // Fallback: check if nvidia-container-toolkit is installed
+            var toolkitResult = await _executor.ExecuteAsync(
+                "which", "nvidia-container-runtime", ct);
+
+            if (toolkitResult.Success)
+            {
+                _logger.LogInformation("NVIDIA Container Runtime found at: {Path}",
+                    toolkitResult.StandardOutput.Trim());
+                return true;
+            }
+
+            // Fallback: try running a test container
+            var testResult = await _executor.ExecuteAsync(
+                "docker", "run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu22.04 nvidia-smi",
+                TimeSpan.FromSeconds(30), ct);
+
+            if (testResult.Success)
+            {
+                _logger.LogInformation("NVIDIA GPU container support verified via test container");
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "NVIDIA container runtime detection failed");
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Detect if running inside WSL2 (Windows Subsystem for Linux)
+    /// </summary>
+    private async Task<bool> IsWslEnvironmentAsync(CancellationToken ct)
+    {
+        if (_isWindows) return false;
+
+        try
+        {
+            // Check /proc/version for WSL indicators
+            if (File.Exists("/proc/version"))
+            {
+                var version = await File.ReadAllTextAsync("/proc/version", ct);
+                if (version.Contains("microsoft", StringComparison.OrdinalIgnoreCase) ||
+                    version.Contains("WSL", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            // Check for WSL-specific device
+            if (File.Exists("/dev/dxg"))
+            {
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "WSL detection check failed");
+        }
+
+        return false;
     }
 }
