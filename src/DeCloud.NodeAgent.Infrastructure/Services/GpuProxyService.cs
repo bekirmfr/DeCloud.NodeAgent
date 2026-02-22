@@ -21,6 +21,7 @@ public class GpuProxyService
     private Process? _daemonProcess;
     private readonly SemaphoreSlim _lock = new(1, 1);
     private bool _isRunning;
+    private int _consecutiveCrashes;
 
     /// <summary>
     /// Path to the gpu-proxy-daemon binary.
@@ -34,9 +35,20 @@ public class GpuProxyService
     public string ShimPath { get; set; } = "/usr/local/lib/libdecloud_cuda_shim.so";
 
     /// <summary>
+    /// Host-side directory exposed to VMs via virtiofs for shim delivery.
+    /// The shim .so is symlinked/copied here so the guest can mount it.
+    /// </summary>
+    public string ShimShareDir { get; set; } = "/usr/local/lib/decloud-gpu-shim";
+
+    /// <summary>
     /// Port the daemon listens on (vsock port, must match proto/gpu_proxy_proto.h).
     /// </summary>
     public int DaemonPort { get; set; } = 9999;
+
+    /// <summary>
+    /// Maximum consecutive crashes before giving up on auto-restart.
+    /// </summary>
+    public int MaxCrashRestarts { get; set; } = 5;
 
     public bool IsRunning => _isRunning;
 
@@ -48,6 +60,45 @@ public class GpuProxyService
         _executor = executor;
         _resourceDiscovery = resourceDiscovery;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Ensure the host-side virtiofs share directory exists and contains the shim .so.
+    /// Called before starting the daemon so that VMs can mount the share at boot.
+    /// </summary>
+    private void EnsureShimShareDirectory()
+    {
+        try
+        {
+            if (!Directory.Exists(ShimShareDir))
+            {
+                Directory.CreateDirectory(ShimShareDir);
+                _logger.LogInformation(
+                    "Created GPU shim share directory: {Dir}", ShimShareDir);
+            }
+
+            var targetPath = Path.Combine(ShimShareDir, "libdecloud_cuda_shim.so");
+            if (File.Exists(ShimPath) && !File.Exists(targetPath))
+            {
+                File.Copy(ShimPath, targetPath, overwrite: true);
+                _logger.LogInformation(
+                    "Copied CUDA shim to virtiofs share: {Src} -> {Dst}",
+                    ShimPath, targetPath);
+            }
+            else if (!File.Exists(ShimPath))
+            {
+                _logger.LogWarning(
+                    "CUDA shim .so not found at {Path}. " +
+                    "VMs in proxy mode will not have GPU access until " +
+                    "the shim is built and placed at this path.",
+                    ShimPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to set up GPU shim share directory at {Dir}", ShimShareDir);
+        }
     }
 
     /// <summary>
@@ -72,6 +123,9 @@ public class GpuProxyService
                     "GPU proxy mode not supported on this node (no GPU or IOMMU available)");
                 return false;
             }
+
+            // Ensure the virtiofs share directory is ready
+            EnsureShimShareDirectory();
 
             // Check daemon binary exists
             if (!File.Exists(DaemonPath))
@@ -142,6 +196,7 @@ public class GpuProxyService
             }
 
             _isRunning = true;
+            _consecutiveCrashes = 0;
             _logger.LogInformation(
                 "GPU proxy daemon started (PID: {Pid}, vsock port: {Port})",
                 _daemonProcess.Id, DaemonPort);
@@ -208,6 +263,7 @@ public class GpuProxyService
 
     /// <summary>
     /// Check if the daemon is healthy (still running).
+    /// If it has crashed, attempt automatic restart with backoff.
     /// </summary>
     public bool HealthCheck()
     {
@@ -227,5 +283,48 @@ public class GpuProxyService
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Attempt to restart the daemon if it has crashed.
+    /// Returns true if the daemon is now running (either it was already running,
+    /// or it was successfully restarted).
+    /// Uses exponential backoff: 2s, 4s, 8s, 16s between restart attempts.
+    /// Gives up after MaxCrashRestarts consecutive failures.
+    /// </summary>
+    public async Task<bool> EnsureHealthyAsync(CancellationToken ct = default)
+    {
+        if (HealthCheck())
+            return true;
+
+        if (_consecutiveCrashes >= MaxCrashRestarts)
+        {
+            _logger.LogError(
+                "GPU proxy daemon has crashed {Count} times consecutively. " +
+                "Not restarting — manual intervention required.",
+                _consecutiveCrashes);
+            return false;
+        }
+
+        _consecutiveCrashes++;
+        var backoffMs = (int)Math.Pow(2, _consecutiveCrashes) * 1000;
+        backoffMs = Math.Min(backoffMs, 16000);
+
+        _logger.LogWarning(
+            "GPU proxy daemon crashed (attempt {Attempt}/{Max}). " +
+            "Restarting in {BackoffMs}ms...",
+            _consecutiveCrashes, MaxCrashRestarts, backoffMs);
+
+        await Task.Delay(backoffMs, ct);
+
+        var started = await EnsureStartedAsync(ct);
+        if (started)
+        {
+            _logger.LogInformation(
+                "GPU proxy daemon restarted successfully after crash");
+            _consecutiveCrashes = 0;
+        }
+
+        return started;
     }
 }

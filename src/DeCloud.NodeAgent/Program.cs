@@ -436,8 +436,25 @@ public class GpuProxyStartupService : BackgroundService
                 _logger.LogInformation(
                     "GPU proxy daemon auto-started — node is in proxy mode (no IOMMU)");
             }
-            // If not started, EnsureStartedAsync already logged the reason
-            // (no GPU, IOMMU available, daemon binary missing, etc.)
+            else
+            {
+                // If not started, EnsureStartedAsync already logged the reason
+                // (no GPU, IOMMU available, daemon binary missing, etc.)
+                return;
+            }
+
+            // Health monitoring loop: periodically check if the daemon is
+            // still alive and auto-restart with exponential backoff if it crashes.
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+
+                if (!_gpuProxy.HealthCheck())
+                {
+                    _logger.LogWarning("GPU proxy daemon health check failed — attempting recovery");
+                    await _gpuProxy.EnsureHealthyAsync(stoppingToken);
+                }
+            }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
@@ -445,7 +462,7 @@ public class GpuProxyStartupService : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to auto-start GPU proxy daemon");
+            _logger.LogError(ex, "GPU proxy daemon monitoring failed");
         }
     }
 

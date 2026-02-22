@@ -33,6 +33,13 @@ public class CommandProcessorService : BackgroundService
     private readonly ILogger<CommandProcessorService> _logger;
     private readonly CommandProcessorOptions _options;
 
+    /// <summary>
+    /// Tracks GPU PCI addresses currently assigned to VMs via passthrough.
+    /// Key = PCI address (e.g. "0000:01:00.0"), Value = VM ID.
+    /// Prevents double-assignment when concurrent VM creation requests arrive.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, string> _assignedGpus = new();
+
     // Default base image URLs (fallback)
     private static readonly Dictionary<string, string> ImageUrls = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -366,22 +373,41 @@ public class CommandProcessorService : BackgroundService
         // If GpuMode is None but GpuPciAddress is set, infer Passthrough.
         // If this is a GPU/Inference workload with GpuMode=None, auto-detect
         // based on hardware: IOMMU available → Passthrough, else → Proxied.
+        //
+        // Multi-GPU pool: track which GPUs are already assigned to prevent
+        // double-assignment when concurrent VM requests arrive.
         if (vmSpec.GpuMode == GpuMode.None && !string.IsNullOrEmpty(vmSpec.GpuPciAddress))
         {
-            vmSpec.GpuMode = GpuMode.Passthrough;
-            _logger.LogInformation(
-                "VM {VmId}: GpuPciAddress set, auto-selecting GpuMode=Passthrough", vmId);
+            // Orchestrator specified a specific GPU — verify it's not already assigned
+            if (_assignedGpus.ContainsKey(vmSpec.GpuPciAddress))
+            {
+                _logger.LogWarning(
+                    "VM {VmId}: Requested GPU {PciAddr} is already assigned to VM {AssignedVm}",
+                    vmId, vmSpec.GpuPciAddress, _assignedGpus[vmSpec.GpuPciAddress]);
+                vmSpec.GpuPciAddress = null;
+            }
+            else
+            {
+                vmSpec.GpuMode = GpuMode.Passthrough;
+                _assignedGpus.TryAdd(vmSpec.GpuPciAddress, vmId!);
+                _logger.LogInformation(
+                    "VM {VmId}: GpuPciAddress set, auto-selecting GpuMode=Passthrough", vmId);
+            }
         }
         else if (vmSpec.GpuMode == GpuMode.None &&
                  vmSpec.VmType is VmType.Gpu or VmType.Inference &&
                  deploymentMode == DeploymentMode.VirtualMachine)
         {
             var inventory = await _resourceDiscovery.GetInventoryCachedAsync(ct);
-            var passthroughGpu = inventory?.Gpus.FirstOrDefault(g => g.IsAvailableForPassthrough);
+            // Find the first passthrough-capable GPU that isn't already assigned
+            var passthroughGpu = inventory?.Gpus.FirstOrDefault(g =>
+                g.IsAvailableForPassthrough &&
+                !_assignedGpus.ContainsKey(g.PciAddress));
             if (passthroughGpu != null)
             {
                 vmSpec.GpuMode = GpuMode.Passthrough;
                 vmSpec.GpuPciAddress = passthroughGpu.PciAddress;
+                _assignedGpus.TryAdd(passthroughGpu.PciAddress, vmId!);
                 _logger.LogInformation(
                     "VM {VmId}: IOMMU available, auto-selecting Passthrough for GPU {Model} ({PciAddr})",
                     vmId, passthroughGpu.Model, passthroughGpu.PciAddress);
@@ -390,7 +416,7 @@ public class CommandProcessorService : BackgroundService
             {
                 vmSpec.GpuMode = GpuMode.Proxied;
                 _logger.LogInformation(
-                    "VM {VmId}: No IOMMU, auto-selecting Proxied GPU mode (vsock)", vmId);
+                    "VM {VmId}: No IOMMU or all GPUs assigned, auto-selecting Proxied GPU mode (vsock)", vmId);
             }
         }
 
@@ -536,6 +562,20 @@ public class CommandProcessorService : BackgroundService
         if (string.IsNullOrEmpty(vmId)) return false;
 
         var manager = await ResolveManagerForVmAsync(vmId, ct);
+
+        // Release GPU assignment on stop (VFIO will unbind)
+        var vmInstance = await manager.GetVmAsync(vmId, ct);
+        if (vmInstance?.Spec.GpuMode == GpuMode.Passthrough &&
+            !string.IsNullOrEmpty(vmInstance.Spec.GpuPciAddress))
+        {
+            if (_assignedGpus.TryRemove(vmInstance.Spec.GpuPciAddress, out _))
+            {
+                _logger.LogInformation(
+                    "VM {VmId}: Released GPU {PciAddr} back to pool on stop",
+                    vmId, vmInstance.Spec.GpuPciAddress);
+            }
+        }
+
         _logger.LogInformation("Stopping VM {VmId} (force={Force})", vmId, force);
         var result = await manager.StopVmAsync(vmId, force, ct);
         return result.Success;
@@ -623,6 +663,18 @@ public class CommandProcessorService : BackgroundService
         {
             _logger.LogError(ex, "Error cleaning up Direct Access ports for VM {VmId}", vmId);
             // Continue with VM deletion even if port cleanup fails
+        }
+
+        // Release GPU assignment if this VM had a passthrough GPU
+        if (vmInstance?.Spec.GpuMode == GpuMode.Passthrough &&
+            !string.IsNullOrEmpty(vmInstance.Spec.GpuPciAddress))
+        {
+            if (_assignedGpus.TryRemove(vmInstance.Spec.GpuPciAddress, out _))
+            {
+                _logger.LogInformation(
+                    "VM {VmId}: Released GPU {PciAddr} back to pool",
+                    vmId, vmInstance.Spec.GpuPciAddress);
+            }
         }
 
         _logger.LogInformation("Deleting VM {VmId}", vmId);

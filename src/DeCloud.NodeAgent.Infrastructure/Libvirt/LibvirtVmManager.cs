@@ -1815,24 +1815,29 @@ public class LibvirtVmManager : IVmManager
                 result += $"\n\nwrite_files:{writeFilesBlock}";
         }
 
-        // 2. Inject runcmd steps to install the shim and configure the system
+        // 2. Inject runcmd steps to install the shim and configure the system.
+        //    The host exposes the shim .so via a virtiofs shared mount
+        //    (tag: decloud-shim → /usr/local/lib/decloud-gpu-shim/ on host).
+        //    We mount it and copy the .so into the guest's /usr/local/lib/.
         var runcmdSteps = @"
-  # GPU proxy: install CUDA shim from host
-  - mkdir -p /usr/local/lib /etc/decloud
+  # GPU proxy: mount virtiofs share and install CUDA shim from host
+  - mkdir -p /usr/local/lib /etc/decloud /run/decloud
   - |
-    # Download CUDA shim from node agent's host filesystem.
-    # The shim .so is placed at a well-known path by the install script.
-    # We copy it into the VM via the qemu-guest-agent file-read mechanism,
-    # or if the host has exposed it via a shared 9p/virtiofs mount.
-    # For now, check if it was pre-seeded in the cloud-init ISO extras.
+    # Mount the virtiofs share that the host exposes with the CUDA shim .so.
+    # The libvirt XML adds a <filesystem type='mount'> with tag 'decloud-shim'.
+    mount -t virtiofs decloud-shim /run/decloud 2>/dev/null || \
+      mount -t 9p -o trans=virtio,version=9p2000.L decloud-shim /run/decloud 2>/dev/null || true
+  - |
+    # Copy the CUDA shim .so from the mounted share into the system library path
     if [ -f /run/decloud/libdecloud_cuda_shim.so ]; then
       cp /run/decloud/libdecloud_cuda_shim.so /usr/local/lib/
+      chmod 755 /usr/local/lib/libdecloud_cuda_shim.so
     fi
-    chmod 755 /usr/local/lib/libdecloud_cuda_shim.so 2>/dev/null || true
   - |
     # Ensure LD_PRELOAD is set for systemd services that use GPU
     if [ -f /usr/local/lib/libdecloud_cuda_shim.so ]; then
-      echo '/usr/local/lib/libdecloud_cuda_shim.so' >> /etc/ld.so.preload
+      grep -q 'libdecloud_cuda_shim' /etc/ld.so.preload 2>/dev/null || \
+        echo '/usr/local/lib/libdecloud_cuda_shim.so' >> /etc/ld.so.preload
     fi
 ";
 
@@ -2320,6 +2325,30 @@ public class LibvirtVmManager : IVmManager
             : "";
 
         // ========================================
+        // VIRTIOFS — GPU proxy shim delivery
+        // ========================================
+        // Expose the host directory containing the CUDA shim .so to
+        // the guest via virtiofs. The guest mounts this at /run/decloud/
+        // and cloud-init copies the .so to /usr/local/lib/.
+        var virtiofsXml = spec.GpuMode == GpuMode.Proxied
+            ? $@"
+                <filesystem type='mount' accessmode='passthrough'>
+                  <driver type='virtiofs'/>
+                  <source dir='/usr/local/lib/decloud-gpu-shim'/>
+                  <target dir='decloud-shim'/>
+                </filesystem>"
+            : "";
+
+        // virtiofs requires a memory backing for the shared memory region
+        var memoryBackingXml = spec.GpuMode == GpuMode.Proxied
+            ? @"
+              <memoryBacking>
+                <source type='memfd'/>
+                <access mode='shared'/>
+              </memoryBacking>"
+            : "";
+
+        // ========================================
         // COMPLETE LIBVIRT XML
         // ========================================
         return $@"
@@ -2327,7 +2356,7 @@ public class LibvirtVmManager : IVmManager
               <name>{spec.Id}</name>
               <uuid>{spec.Id}</uuid>
               <memory unit='bytes'>{spec.MemoryBytes}</memory>
-              <vcpu placement='static'>{spec.VirtualCpuCores}</vcpu>
+              <vcpu placement='static'>{spec.VirtualCpuCores}</vcpu>{memoryBackingXml}
               {cpuTune}
               <os>
                 <type arch='x86_64' machine='q35'>hvm</type>
@@ -2371,7 +2400,7 @@ public class LibvirtVmManager : IVmManager
                 </video>
                 <rng model='virtio'>
                   <backend model='random'>/dev/urandom</backend>
-                </rng>{gpuPassthroughXml}{vsockXml}
+                </rng>{gpuPassthroughXml}{vsockXml}{virtiofsXml}
                 <channel type='unix'>
                   <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.Id}.org.qemu.guest_agent.0'/>
                   <target type='virtio' name='org.qemu.guest_agent.0'/>
@@ -2612,6 +2641,26 @@ public class LibvirtVmManager : IVmManager
             : "";
 
         // ========================================
+        // VIRTIOFS — GPU proxy shim delivery
+        // ========================================
+        var virtiofsXml = spec.GpuMode == GpuMode.Proxied
+            ? $@"
+                <filesystem type='mount' accessmode='passthrough'>
+                  <driver type='virtiofs'/>
+                  <source dir='/usr/local/lib/decloud-gpu-shim'/>
+                  <target dir='decloud-shim'/>
+                </filesystem>"
+            : "";
+
+        var memoryBackingXml = spec.GpuMode == GpuMode.Proxied
+            ? @"
+              <memoryBacking>
+                <source type='memfd'/>
+                <access mode='shared'/>
+              </memoryBacking>"
+            : "";
+
+        // ========================================
         // COMPLETE LIBVIRT XML
         // ========================================
         return $@"
@@ -2619,7 +2668,7 @@ public class LibvirtVmManager : IVmManager
               <name>{spec.Id}</name>
               <uuid>{spec.Id}</uuid>
               <memory unit='bytes'>{spec.MemoryBytes}</memory>
-              <vcpu placement='static'>{spec.VirtualCpuCores}</vcpu>
+              <vcpu placement='static'>{spec.VirtualCpuCores}</vcpu>{memoryBackingXml}
               {cpuTune}
               {osSection}
               <features>
@@ -2662,7 +2711,7 @@ public class LibvirtVmManager : IVmManager
                 </video>
                 <rng model='virtio'>
                   <backend model='random'>/dev/urandom</backend>
-                </rng>{gpuPassthroughXml}{vsockXml}
+                </rng>{gpuPassthroughXml}{vsockXml}{virtiofsXml}
                 <channel type='unix'>
                   <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.Id}.org.qemu.guest_agent.0'/>
                   <target type='virtio' name='org.qemu.guest_agent.0'/>
