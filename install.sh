@@ -934,9 +934,9 @@ CUDA_HOME=""
 install_cuda_toolkit() {
     log_step "Checking CUDA toolkit (needed to build GPU proxy daemon)..."
 
-    # Only needed when we plan to build the daemon
-    if [ "$GPU_MODE" = "none" ]; then
-        log_info "No GPU — skipping CUDA toolkit"
+    # Only needed in proxy mode — passthrough uses VFIO, not the daemon
+    if [ "$GPU_MODE" != "proxy" ]; then
+        log_info "GPU_MODE=${GPU_MODE} — CUDA toolkit not needed (proxy daemon not required)"
         return 0
     fi
 
@@ -1040,7 +1040,7 @@ build_gpu_proxy() {
         }
     fi
 
-    # --- Build shim (always — no CUDA dependency) ---
+    # --- Build shim (for any GPU mode — guests may need it even alongside passthrough) ---
     log_info "Building CUDA shim (libdecloud_cuda_shim.so)..."
     if make -C "$GPU_PROXY_SRC" shim 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
         log_success "CUDA shim built"
@@ -1050,9 +1050,9 @@ build_gpu_proxy() {
         return 0
     fi
 
-    # --- Build daemon (only if CUDA toolkit available) ---
+    # --- Build daemon (only in proxy mode — passthrough doesn't need it) ---
     local daemon_built=false
-    if [ -n "$CUDA_HOME" ]; then
+    if [ "$GPU_MODE" = "proxy" ] && [ -n "$CUDA_HOME" ]; then
         log_info "Building GPU proxy daemon (CUDA_HOME=$CUDA_HOME)..."
 
         # Resolve lib path: lib64 (standard CUDA) or lib/x86_64-linux-gnu (apt package)
@@ -1074,9 +1074,11 @@ build_gpu_proxy() {
             log_warn "GPU proxy daemon build failed (CUDA linkage issue?)"
             log_info "Shim is still available — daemon can be built later"
         fi
-    else
+    elif [ "$GPU_MODE" = "proxy" ]; then
         log_info "CUDA toolkit not available — skipping daemon build"
         log_info "The shim (for guest VMs) is built; daemon must be built manually when CUDA is installed"
+    else
+        log_info "GPU_MODE=${GPU_MODE} — daemon not needed (passthrough uses VFIO, not proxy)"
     fi
 
     # --- Install built artifacts ---
