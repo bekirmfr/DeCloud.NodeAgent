@@ -39,7 +39,7 @@ $(DAEMON): daemon/gpu_proxy_daemon.c proto/gpu_proxy_proto.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) \
 		-I$(CUDA_INC) \
 		-o $@ $< \
-		-L$(CUDA_LIB) -lcudart -lpthread \
+		-L$(CUDA_LIB) -lcuda -lcudart -lpthread \
 		-Wl,-rpath,$(CUDA_LIB)
 
 # ----------------------------------------------------------------

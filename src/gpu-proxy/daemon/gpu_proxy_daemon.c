@@ -31,6 +31,19 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
+/*
+ * cuFuncGetParamInfo (CUDA 12.0+ Driver API) may be missing from
+ * stub/WSL2 headers even when CUDA_VERSION >= 12000. Provide a
+ * weak forward declaration so we can link against it at runtime
+ * via -lcuda without a compile-time error.
+ */
+#if CUDA_VERSION >= 12000
+  #ifndef cuFuncGetParamInfo
+    extern CUresult cuFuncGetParamInfo(CUfunction func, size_t paramIndex,
+                                       size_t *paramOffset, size_t *paramSize);
+  #endif
+#endif
+
 #include "../proto/gpu_proxy_proto.h"
 
 /* ================================================================
@@ -385,7 +398,7 @@ static int handle_get_device_properties(int fd, const void *payload, uint32_t le
         resp.multi_processor_count           = props.multiProcessorCount;
         resp.major                           = props.major;
         resp.minor                           = props.minor;
-        resp.max_threads_per_multiprocessor  = props.maxThreadsPerMultiprocessor;
+        resp.max_threads_per_multiprocessor  = props.maxThreadsPerMultiProcessor;
         resp.memory_clock_rate               = props.memoryClockRate;
         resp.memory_bus_width                = props.memoryBusWidth;
         resp.l2_cache_size                   = props.l2CacheSize;
