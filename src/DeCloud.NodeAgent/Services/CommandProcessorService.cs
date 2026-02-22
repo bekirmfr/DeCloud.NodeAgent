@@ -367,56 +367,65 @@ public class CommandProcessorService : BackgroundService
         }
 
         // ========================================
-        // GPU MODE AUTO-SELECTION
+        // GPU MODE VALIDATION
         // ========================================
-        // If orchestrator explicitly set GpuMode, honour it.
-        // If GpuMode is None but GpuPciAddress is set, infer Passthrough.
-        // If this is a GPU/Inference workload with GpuMode=None, auto-detect
-        // based on hardware: IOMMU available → Passthrough, else → Proxied.
+        // GpuMode is a scheduling parameter set by the orchestrator:
+        //   Passthrough (1) → dedicated GPU via VFIO, scheduled on IOMMU-enabled nodes
+        //   Proxied (2)     → shared GPU via proxy daemon, scheduled on GPU nodes
+        //   None (0)        → no GPU
+        //
+        // Fallback: if GpuPciAddress is set but GpuMode is None, infer Passthrough.
         //
         // Multi-GPU pool: track which GPUs are already assigned to prevent
         // double-assignment when concurrent VM requests arrive.
         if (vmSpec.GpuMode == GpuMode.None && !string.IsNullOrEmpty(vmSpec.GpuPciAddress))
         {
-            // Orchestrator specified a specific GPU — verify it's not already assigned
-            if (_assignedGpus.ContainsKey(vmSpec.GpuPciAddress))
+            // GpuPciAddress set without explicit GpuMode — infer Passthrough
+            vmSpec.GpuMode = GpuMode.Passthrough;
+            _logger.LogInformation(
+                "VM {VmId}: GpuPciAddress set, inferring GpuMode=Passthrough", vmId);
+        }
+
+        // For Passthrough mode, assign a GPU from the pool if no specific PCI address given
+        if (vmSpec.GpuMode == GpuMode.Passthrough)
+        {
+            if (!string.IsNullOrEmpty(vmSpec.GpuPciAddress))
             {
-                _logger.LogWarning(
-                    "VM {VmId}: Requested GPU {PciAddr} is already assigned to VM {AssignedVm}",
-                    vmId, vmSpec.GpuPciAddress, _assignedGpus[vmSpec.GpuPciAddress]);
-                vmSpec.GpuPciAddress = null;
+                // Verify the requested GPU isn't already assigned
+                if (_assignedGpus.ContainsKey(vmSpec.GpuPciAddress))
+                {
+                    _logger.LogWarning(
+                        "VM {VmId}: Requested GPU {PciAddr} is already assigned to VM {AssignedVm}",
+                        vmId, vmSpec.GpuPciAddress, _assignedGpus[vmSpec.GpuPciAddress]);
+                    vmSpec.GpuPciAddress = null;
+                    vmSpec.GpuMode = GpuMode.None;
+                }
+                else
+                {
+                    _assignedGpus.TryAdd(vmSpec.GpuPciAddress, vmId!);
+                }
             }
             else
             {
-                vmSpec.GpuMode = GpuMode.Passthrough;
-                _assignedGpus.TryAdd(vmSpec.GpuPciAddress, vmId!);
-                _logger.LogInformation(
-                    "VM {VmId}: GpuPciAddress set, auto-selecting GpuMode=Passthrough", vmId);
-            }
-        }
-        else if (vmSpec.GpuMode == GpuMode.None &&
-                 vmSpec.VmType is VmType.Gpu or VmType.Inference &&
-                 deploymentMode == DeploymentMode.VirtualMachine)
-        {
-            var inventory = await _resourceDiscovery.GetInventoryCachedAsync(ct);
-            // Find the first passthrough-capable GPU that isn't already assigned
-            var passthroughGpu = inventory?.Gpus.FirstOrDefault(g =>
-                g.IsAvailableForPassthrough &&
-                !_assignedGpus.ContainsKey(g.PciAddress));
-            if (passthroughGpu != null)
-            {
-                vmSpec.GpuMode = GpuMode.Passthrough;
-                vmSpec.GpuPciAddress = passthroughGpu.PciAddress;
-                _assignedGpus.TryAdd(passthroughGpu.PciAddress, vmId!);
-                _logger.LogInformation(
-                    "VM {VmId}: IOMMU available, auto-selecting Passthrough for GPU {Model} ({PciAddr})",
-                    vmId, passthroughGpu.Model, passthroughGpu.PciAddress);
-            }
-            else if (inventory?.SupportsGpu == true)
-            {
-                vmSpec.GpuMode = GpuMode.Proxied;
-                _logger.LogInformation(
-                    "VM {VmId}: No IOMMU or all GPUs assigned, auto-selecting Proxied GPU mode (vsock)", vmId);
+                // No specific PCI address — pick the first available passthrough GPU
+                var inventory = await _resourceDiscovery.GetInventoryCachedAsync(ct);
+                var passthroughGpu = inventory?.Gpus.FirstOrDefault(g =>
+                    g.IsAvailableForPassthrough &&
+                    !_assignedGpus.ContainsKey(g.PciAddress));
+                if (passthroughGpu != null)
+                {
+                    vmSpec.GpuPciAddress = passthroughGpu.PciAddress;
+                    _assignedGpus.TryAdd(passthroughGpu.PciAddress, vmId!);
+                    _logger.LogInformation(
+                        "VM {VmId}: Assigned passthrough GPU {Model} ({PciAddr})",
+                        vmId, passthroughGpu.Model, passthroughGpu.PciAddress);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "VM {VmId}: GpuMode=Passthrough but no available GPU found on this node", vmId);
+                    vmSpec.GpuMode = GpuMode.None;
+                }
             }
         }
 

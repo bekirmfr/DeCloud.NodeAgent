@@ -32,13 +32,14 @@ public class VmSpec
     public string BaseImageUrl { get; set; } = string.Empty;  // URL to download base image
     public string BaseImageHash { get; set; } = string.Empty; // SHA256 for verification
 
-    // Optional GPU passthrough (VirtualMachine mode)
+    // GPU
     public string? GpuPciAddress { get; set; }
 
     /// <summary>
     /// How GPU access is provided to this VM.
     /// None = no GPU, Passthrough = VFIO (dedicated), Proxied = GPU proxy daemon (shared).
-    /// When the orchestrator doesn't specify, the node agent auto-selects based on IOMMU availability.
+    /// Set by the orchestrator as a scheduling parameter — the orchestrator picks the mode
+    /// based on node capabilities (IOMMU, GPU availability) during scheduling.
     /// </summary>
     public GpuMode GpuMode { get; set; } = GpuMode.None;
 
