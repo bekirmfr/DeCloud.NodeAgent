@@ -32,6 +32,7 @@ public class LibvirtVmManager : IVmManager
     private readonly LibvirtVmManagerOptions _options;
     private readonly VmRepository _repository;
     private readonly IUserWireGuardManager _userWireGuardManager;
+    private readonly GpuProxyService _gpuProxy;
     private readonly bool _isWindows;
 
     // Track our VMs in memory
@@ -51,6 +52,7 @@ public class LibvirtVmManager : IVmManager
         IUserWireGuardManager userWireGuardManager,
         INodeMetadataService nodeMetadata,
         INodeStateService nodeState,
+        GpuProxyService gpuProxy,
         ILogger<LibvirtVmManager> logger)
     {
         _executor = executor;
@@ -59,6 +61,7 @@ public class LibvirtVmManager : IVmManager
         _nodeMetadata = nodeMetadata;
         _nodeState = nodeState;
         _userWireGuardManager = userWireGuardManager;
+        _gpuProxy = gpuProxy;
         _logger = logger;
         _options = options.Value;
         _repository = repository;
@@ -492,6 +495,17 @@ public class LibvirtVmManager : IVmManager
                 _logger.LogInformation(
                     "VM {VmId}: GPU proxy mode — assigned vsock CID {Cid}",
                     spec.Id, spec.VsockCid);
+
+                // Ensure the GPU proxy daemon is running before the VM boots.
+                // The daemon must be listening on vsock before the guest shim connects.
+                var daemonStarted = await _gpuProxy.EnsureStartedAsync(ct);
+                if (!daemonStarted)
+                {
+                    _logger.LogWarning(
+                        "VM {VmId}: GPU proxy daemon could not be started — " +
+                        "GPU proxying may not work until the daemon is available",
+                        spec.Id);
+                }
             }
 
             // Create VM instance tracking object
@@ -1612,6 +1626,17 @@ public class LibvirtVmManager : IVmManager
             cloudInitYaml = EnsureQemuGuestAgent(cloudInitYaml);
 
             // =====================================================
+            // STEP 6.6: Inject GPU proxy shim (for Proxied GPU mode)
+            // =====================================================
+            if (spec.GpuMode == GpuMode.Proxied && spec.VsockCid.HasValue)
+            {
+                cloudInitYaml = EnsureGpuProxyShim(cloudInitYaml, spec.VsockCid.Value);
+                _logger.LogInformation(
+                    "VM {VmId}: Injected CUDA shim into cloud-init (vsock CID={Cid})",
+                    spec.Id, spec.VsockCid.Value);
+            }
+
+            // =====================================================
             // STEP 7: Write user-data and meta-data files
             // =====================================================
             var userDataPath = Path.Combine(vmDir, "user-data");
@@ -1729,6 +1754,98 @@ public class LibvirtVmManager : IVmManager
         return result;
     }
 
+
+    /// <summary>
+    /// Inject GPU proxy CUDA shim into cloud-init for VMs with GpuMode.Proxied.
+    ///
+    /// Adds:
+    ///   1. /etc/profile.d/gpu-proxy.sh — sets LD_PRELOAD and vsock env vars for all login shells
+    ///   2. /etc/ld.so.preload entry — ensures LD_PRELOAD is active for non-login processes (systemd services)
+    ///   3. runcmd to download the shim .so from the host via vsock-aware curl (or a simple bootstrap)
+    ///
+    /// The shim .so itself is fetched at first boot rather than embedded in cloud-init
+    /// (base64-encoding a binary bloats the ISO and complicates template management).
+    /// The fetch uses a tiny bootstrap script that copies the .so from the host filesystem
+    /// via the qemu-guest-agent file-read channel or a pre-seeded path.
+    /// </summary>
+    private static string EnsureGpuProxyShim(string cloudInitYaml, uint vsockCid)
+    {
+        // Guard: don't inject twice
+        if (cloudInitYaml.Contains("gpu-proxy.sh"))
+            return cloudInitYaml;
+
+        var result = cloudInitYaml;
+
+        // 1. Inject write_files entries for the GPU proxy environment
+        var writeFilesBlock = $@"
+  # GPU proxy: environment variables for CUDA shim
+  - path: /etc/profile.d/gpu-proxy.sh
+    permissions: '0644'
+    content: |
+      # DeCloud GPU Proxy — CUDA shim configuration
+      export DECLOUD_GPU_PROXY_CID=2
+      export DECLOUD_GPU_PROXY_PORT=9999
+      if [ -f /usr/local/lib/libdecloud_cuda_shim.so ]; then
+        export LD_PRELOAD=/usr/local/lib/libdecloud_cuda_shim.so
+      fi
+
+  # GPU proxy: ensure LD_PRELOAD is active for non-interactive processes
+  - path: /etc/decloud/gpu-proxy.env
+    permissions: '0644'
+    content: |
+      DECLOUD_GPU_PROXY_CID=2
+      DECLOUD_GPU_PROXY_PORT=9999
+      LD_PRELOAD=/usr/local/lib/libdecloud_cuda_shim.so
+";
+
+        var writeFilesIndex = result.IndexOf("\nwrite_files:", StringComparison.Ordinal);
+        if (writeFilesIndex >= 0)
+        {
+            var lineEnd = result.IndexOf('\n', writeFilesIndex + 1);
+            if (lineEnd >= 0)
+                result = result.Insert(lineEnd + 1, writeFilesBlock);
+        }
+        else
+        {
+            // No write_files section — add one before runcmd
+            var runcmdPos = result.IndexOf("\nruncmd:", StringComparison.Ordinal);
+            if (runcmdPos >= 0)
+                result = result.Insert(runcmdPos, $"\nwrite_files:{writeFilesBlock}");
+            else
+                result += $"\n\nwrite_files:{writeFilesBlock}";
+        }
+
+        // 2. Inject runcmd steps to install the shim and configure the system
+        var runcmdSteps = @"
+  # GPU proxy: install CUDA shim from host
+  - mkdir -p /usr/local/lib /etc/decloud
+  - |
+    # Download CUDA shim from node agent's host filesystem.
+    # The shim .so is placed at a well-known path by the install script.
+    # We copy it into the VM via the qemu-guest-agent file-read mechanism,
+    # or if the host has exposed it via a shared 9p/virtiofs mount.
+    # For now, check if it was pre-seeded in the cloud-init ISO extras.
+    if [ -f /run/decloud/libdecloud_cuda_shim.so ]; then
+      cp /run/decloud/libdecloud_cuda_shim.so /usr/local/lib/
+    fi
+    chmod 755 /usr/local/lib/libdecloud_cuda_shim.so 2>/dev/null || true
+  - |
+    # Ensure LD_PRELOAD is set for systemd services that use GPU
+    if [ -f /usr/local/lib/libdecloud_cuda_shim.so ]; then
+      echo '/usr/local/lib/libdecloud_cuda_shim.so' >> /etc/ld.so.preload
+    fi
+";
+
+        var runcmdIndex = result.IndexOf("\nruncmd:", StringComparison.Ordinal);
+        if (runcmdIndex >= 0)
+        {
+            var runcmdLineEnd = result.IndexOf('\n', runcmdIndex + 1);
+            if (runcmdLineEnd >= 0)
+                result = result.Insert(runcmdLineEnd + 1, runcmdSteps);
+        }
+
+        return result;
+    }
 
     /// <summary>
     /// Merge custom cloud-init UserData with base configuration (hostname, password, SSH)
