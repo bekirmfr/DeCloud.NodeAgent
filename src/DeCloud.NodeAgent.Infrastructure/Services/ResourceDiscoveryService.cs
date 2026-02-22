@@ -559,7 +559,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                     var parts = line.Split(',').Select(p => p.Trim()).ToArray();
                     if (parts.Length < 8) continue;
 
-                    gpus.Add(new GpuInfo
+                    var gpu = new GpuInfo
                     {
                         Vendor = "NVIDIA",
                         Model = parts[0],
@@ -570,8 +570,16 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                         GpuUsagePercent = double.TryParse(parts[5], out var gpuUsage) ? gpuUsage : 0,
                         MemoryUsagePercent = double.TryParse(parts[6], out var memUsage) ? memUsage : 0,
                         TemperatureCelsius = int.TryParse(parts[7], out var temp) ? temp : null,
-                        IsAvailableForPassthrough = !_isWindows
-                    });
+                        IsAvailableForPassthrough = false // Will be set by IOMMU detection below
+                    };
+
+                    // Detect IOMMU group for VFIO passthrough readiness (Linux only)
+                    if (!_isWindows)
+                    {
+                        DetectIommuGroup(gpu);
+                    }
+
+                    gpus.Add(gpu);
                 }
                 
                 // Cache successful detection
@@ -1099,6 +1107,81 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Detect IOMMU group for a GPU by reading sysfs.
+    /// Sets IsIommuEnabled, IommuGroup, and IsAvailableForPassthrough on the GpuInfo.
+    /// </summary>
+    private void DetectIommuGroup(GpuInfo gpu)
+    {
+        try
+        {
+            // Normalize PCI address: nvidia-smi may return "00000000:01:00.0",
+            // sysfs uses "0000:01:00.0" (4-char domain prefix)
+            var pciAddr = NormalizePciAddress(gpu.PciAddress);
+
+            var iommuGroupPath = $"/sys/bus/pci/devices/{pciAddr}/iommu_group";
+
+            if (!Directory.Exists(iommuGroupPath) && !File.Exists(iommuGroupPath))
+            {
+                // No IOMMU group symlink → IOMMU not enabled for this device
+                _logger.LogDebug(
+                    "GPU {Model} ({PciAddr}): No IOMMU group found (IOMMU may not be enabled in BIOS/kernel)",
+                    gpu.Model, pciAddr);
+                return;
+            }
+
+            // The iommu_group is a symlink like:
+            // /sys/bus/pci/devices/0000:01:00.0/iommu_group -> ../../../../kernel/iommu_groups/1
+            // Resolve the symlink to get the group number from the target path
+            var linkTarget = Directory.ResolveLinkTarget(iommuGroupPath, returnFinalTarget: true);
+            var groupNumber = linkTarget != null
+                ? Path.GetFileName(linkTarget.FullName)
+                : Path.GetFileName(new DirectoryInfo(iommuGroupPath).FullName);
+
+            gpu.IsIommuEnabled = true;
+            gpu.IommuGroup = groupNumber;
+
+            // Check if vfio-pci kernel module is available
+            var vfioAvailable = Directory.Exists("/sys/module/vfio_pci")
+                             || File.Exists("/sys/module/vfio_pci");
+
+            gpu.IsAvailableForPassthrough = vfioAvailable;
+
+            _logger.LogInformation(
+                "GPU {Model} ({PciAddr}): IOMMU group {Group}, VFIO passthrough {Status}",
+                gpu.Model, pciAddr, groupNumber,
+                gpu.IsAvailableForPassthrough ? "available" : "unavailable (vfio-pci module not loaded)");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "IOMMU detection failed for GPU {Model} ({PciAddr})",
+                gpu.Model, gpu.PciAddress);
+        }
+    }
+
+    /// <summary>
+    /// Normalize a PCI address to the sysfs 4-char domain format (0000:XX:XX.X).
+    /// nvidia-smi sometimes returns 8-char domains (00000000:XX:XX.X).
+    /// </summary>
+    internal static string NormalizePciAddress(string pciAddress)
+    {
+        if (string.IsNullOrEmpty(pciAddress))
+            return pciAddress;
+
+        var trimmed = pciAddress.Trim();
+
+        // nvidia-smi format: "00000000:01:00.0" → sysfs expects "0000:01:00.0"
+        // Standard format is domain:bus:device.function where domain is 4 hex chars
+        var colonIdx = trimmed.IndexOf(':');
+        if (colonIdx > 4)
+        {
+            // Domain is longer than 4 chars, take last 4
+            trimmed = trimmed[(colonIdx - 4)..];
+        }
+
+        return trimmed;
     }
 
     /// <summary>
