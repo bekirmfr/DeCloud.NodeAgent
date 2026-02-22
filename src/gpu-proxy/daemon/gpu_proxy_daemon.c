@@ -160,9 +160,8 @@ typedef struct {
 typedef struct {
     int          fd;
     unsigned int peer_cid;
-    uint32_t     conn_mode;       /* GpuConnectionMode: PROXY or METER */
 
-    /* Per-connection CUDA Driver API context (proxy mode only) */
+    /* Per-connection CUDA Driver API context */
     CUcontext    cu_ctx;
 
     ModuleSlot   modules[MAX_MODULES];
@@ -170,21 +169,18 @@ typedef struct {
     StreamSlot   streams[MAX_STREAMS];
     EventSlot    events[MAX_EVENTS];
 
-    /* Memory quota enforcement (proxy mode) */
+    /* Memory quota enforcement */
     uint64_t  memory_quota;       /* 0 = unlimited */
     uint64_t  memory_allocated;   /* Current total allocated bytes */
     uint64_t  peak_memory;        /* High-water mark */
     uint64_t  total_alloc_bytes;  /* Cumulative allocation total */
     AllocSlot allocs[MAX_ALLOCS]; /* Track individual allocations */
 
-    /* Metering / billing (both modes) */
+    /* Metering / billing */
     uint64_t  connect_time_us;    /* Timestamp of connection start */
     uint32_t  kernel_launches;    /* Total kernel launches */
     uint32_t  kernel_timeouts;    /* Kernels killed by timeout */
     uint64_t  kernel_time_us;     /* Cumulative kernel execution time */
-
-    /* Last stats pushed by guest agent (meter mode only) */
-    GpuReportUsageStats last_agent_stats;
 } ConnectionCtx;
 
 /* ================================================================
@@ -326,32 +322,25 @@ static void cleanup_connection(ConnectionCtx *ctx)
  * Command handlers — existing (device mgmt, memory, sync)
  * ================================================================ */
 
-static int handle_hello(ConnectionCtx *ctx, const void *payload, uint32_t len)
+static int handle_hello(int fd, const void *payload, uint32_t len)
 {
-    GpuHelloRequest req = {0};
-    if (len >= 8) {
-        /* Backwards compatible: old clients send 8 bytes (no conn_mode) */
-        memcpy(&req, payload, len < sizeof(req) ? len : sizeof(req));
-    } else {
-        return send_response(ctx->fd, GPU_CMD_HELLO, -1, NULL, 0);
+    GpuHelloRequest req;
+    if (len < sizeof(req)) {
+        return send_response(fd, GPU_CMD_HELLO, -1, NULL, 0);
     }
-
-    ctx->conn_mode = req.conn_mode;
+    memcpy(&req, payload, sizeof(req));
 
     int count = 0;
     cudaError_t err = cudaGetDeviceCount(&count);
 
-    const char *mode_str = (req.conn_mode == GPU_CONN_METER)
-                           ? "METER (passthrough)" : "PROXY";
-
-    LOG_INFO("HELLO from guest PID %u (v%u, mode=%s), %d GPU(s) available",
-             req.pid, req.shim_version, mode_str, count);
+    LOG_INFO("HELLO from guest PID %u (shim v%u), %d GPU(s) available",
+             req.pid, req.shim_version, count);
 
     GpuHelloResponse resp = {
         .daemon_version = GPU_PROXY_VERSION,
         .device_count   = (uint32_t)count,
     };
-    return send_response(ctx->fd, GPU_CMD_HELLO, (int32_t)err,
+    return send_response(fd, GPU_CMD_HELLO, (int32_t)err,
                          &resp, sizeof(resp));
 }
 
@@ -1129,42 +1118,6 @@ static int handle_get_usage_stats(ConnectionCtx *ctx)
                          &resp, sizeof(resp));
 }
 
-static int handle_report_usage_stats(ConnectionCtx *ctx,
-                                     const void *payload, uint32_t len)
-{
-    if (len < sizeof(GpuReportUsageStats)) {
-        LOG_ERR("CID %u: REPORT_USAGE_STATS too short (%u < %zu)",
-                ctx->peer_cid, len, sizeof(GpuReportUsageStats));
-        return send_response(ctx->fd, GPU_CMD_REPORT_USAGE_STATS, -1, NULL, 0);
-    }
-
-    GpuReportUsageStats stats;
-    memcpy(&stats, payload, sizeof(stats));
-
-    /* Store latest agent stats */
-    ctx->last_agent_stats = stats;
-
-    /* Mirror key fields into the connection-level metering so
-     * the daemon's final-stats log and GET_USAGE_STATS work
-     * uniformly for both proxy and metering connections. */
-    ctx->memory_allocated = stats.memory_allocated;
-    if (stats.peak_memory > ctx->peak_memory)
-        ctx->peak_memory = stats.peak_memory;
-
-    LOG_DBG("CID %u: agent report — mem=%lu/%lu MiB, gpu=%u%%, "
-            "temp=%d°C, power=%u/%u mW, uptime=%lu µs",
-            ctx->peer_cid,
-            (unsigned long)(stats.memory_allocated / (1024 * 1024)),
-            (unsigned long)(stats.memory_total / (1024 * 1024)),
-            stats.gpu_utilization,
-            stats.temperature_c,
-            stats.power_usage_mw,
-            stats.power_limit_mw,
-            (unsigned long)stats.uptime_us);
-
-    return send_response(ctx->fd, GPU_CMD_REPORT_USAGE_STATS, 0, NULL, 0);
-}
-
 /* ================================================================
  * Per-connection handler (one thread per VM)
  * ================================================================ */
@@ -1226,7 +1179,7 @@ static void *connection_handler(void *arg)
         int rc = 0;
         switch (hdr.cmd) {
         case GPU_CMD_HELLO:
-            rc = handle_hello(ctx, buf, hdr.payload_len);
+            rc = handle_hello(fd, buf, hdr.payload_len);
             break;
         case GPU_CMD_GET_DEVICE_COUNT:
             rc = handle_get_device_count(fd);
@@ -1304,14 +1257,10 @@ static void *connection_handler(void *arg)
         case GPU_CMD_GET_USAGE_STATS:
             rc = handle_get_usage_stats(ctx);
             break;
-        case GPU_CMD_REPORT_USAGE_STATS:
-            rc = handle_report_usage_stats(ctx, buf, hdr.payload_len);
-            break;
 
         case GPU_CMD_GOODBYE:
-            LOG_INFO("CID %u: graceful disconnect (mode=%s mem=%lu kernels=%u ktime=%lu µs)",
+            LOG_INFO("CID %u: graceful disconnect (mem=%lu kernels=%u ktime=%lu µs)",
                      cid,
-                     ctx->conn_mode == GPU_CONN_METER ? "METER" : "PROXY",
                      (unsigned long)ctx->memory_allocated,
                      ctx->kernel_launches,
                      (unsigned long)ctx->kernel_time_us);

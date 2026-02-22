@@ -95,10 +95,9 @@ TEST(header_is_16_bytes)
     ASSERT_EQ(sizeof(GpuProxyHeader), 16);
 }
 
-TEST(hello_request_is_12_bytes)
+TEST(hello_request_is_8_bytes)
 {
-    /* shim_version(4) + pid(4) + conn_mode(4) = 12 */
-    ASSERT_EQ(sizeof(GpuHelloRequest), 12);
+    ASSERT_EQ(sizeof(GpuHelloRequest), 8);
 }
 
 TEST(hello_response_is_8_bytes)
@@ -193,28 +192,6 @@ TEST(usage_stats_response_size)
     ASSERT_EQ(sizeof(GpuUsageStatsResponse), 56);
 }
 
-TEST(report_usage_stats_size)
-{
-    /* 8+8+8+4+4+4+4+4+4+8 = 56 bytes */
-    ASSERT_EQ(sizeof(GpuReportUsageStats), 56);
-}
-
-TEST(connection_modes)
-{
-    ASSERT_EQ(GPU_CONN_PROXY, 0);
-    ASSERT_EQ(GPU_CONN_METER, 1);
-}
-
-TEST(agent_report_interval)
-{
-    ASSERT_EQ(GPU_AGENT_REPORT_INTERVAL_SEC, 5);
-}
-
-TEST(report_cmd_id)
-{
-    ASSERT_EQ(GPU_CMD_REPORT_USAGE_STATS, 0x62);
-}
-
 /* ================================================================
  * Tests — header field offsets (verify packing)
  * ================================================================ */
@@ -262,10 +239,9 @@ TEST(command_id_ranges)
     ASSERT_EQ(GPU_CMD_REGISTER_MODULE, 0x50);
     ASSERT_EQ(GPU_CMD_REGISTER_VAR, 0x53);
 
-    /* Resource mgmt: 0x60-0x62 */
+    /* Resource mgmt: 0x60-0x61 */
     ASSERT_EQ(GPU_CMD_SET_MEMORY_QUOTA, 0x60);
     ASSERT_EQ(GPU_CMD_GET_USAGE_STATS, 0x61);
-    ASSERT_EQ(GPU_CMD_REPORT_USAGE_STATS, 0x62);
 
     /* Lifecycle: 0xF0-0xF1 */
     ASSERT_EQ(GPU_CMD_HELLO, 0xF0);
@@ -375,55 +351,6 @@ TEST(usage_stats_roundtrip)
     ASSERT_EQ(out.kernel_time_us, 123456789);
 }
 
-TEST(report_usage_stats_roundtrip)
-{
-    GpuReportUsageStats stats = {
-        .memory_allocated = 2ULL * 1024 * 1024 * 1024,
-        .memory_total     = 24ULL * 1024 * 1024 * 1024,
-        .peak_memory      = 3ULL * 1024 * 1024 * 1024,
-        .gpu_utilization  = 85,
-        .mem_utilization  = 42,
-        .temperature_c    = 72,
-        .fan_speed_pct    = 55,
-        .power_usage_mw   = 250000,
-        .power_limit_mw   = 350000,
-        .uptime_us        = 3600000000ULL,
-    };
-
-    char buf[sizeof(stats)];
-    memcpy(buf, &stats, sizeof(stats));
-
-    GpuReportUsageStats out;
-    memcpy(&out, buf, sizeof(out));
-
-    ASSERT_EQ(out.memory_allocated, 2ULL * 1024 * 1024 * 1024);
-    ASSERT_EQ(out.memory_total, 24ULL * 1024 * 1024 * 1024);
-    ASSERT_EQ(out.gpu_utilization, 85);
-    ASSERT_EQ(out.temperature_c, 72);
-    ASSERT_EQ(out.power_usage_mw, 250000);
-    ASSERT_EQ(out.power_limit_mw, 350000);
-    ASSERT_EQ(out.uptime_us, 3600000000ULL);
-}
-
-TEST(hello_with_conn_mode_roundtrip)
-{
-    GpuHelloRequest req = {
-        .shim_version = 1,
-        .pid          = 12345,
-        .conn_mode    = GPU_CONN_METER,
-    };
-
-    char buf[sizeof(req)];
-    memcpy(buf, &req, sizeof(req));
-
-    GpuHelloRequest out;
-    memcpy(&out, buf, sizeof(out));
-
-    ASSERT_EQ(out.shim_version, 1);
-    ASSERT_EQ(out.pid, 12345);
-    ASSERT_EQ(out.conn_mode, GPU_CONN_METER);
-}
-
 /* ================================================================
  * Tests — memcpy kind mapping
  * ================================================================ */
@@ -455,7 +382,7 @@ int main(void)
 
     /* Struct sizes */
     run_test_header_is_16_bytes();
-    run_test_hello_request_is_12_bytes();
+    run_test_hello_request_is_8_bytes();
     run_test_hello_response_is_8_bytes();
     run_test_get_device_count_response_is_4_bytes();
     run_test_malloc_request_is_8_bytes();
@@ -474,12 +401,6 @@ int main(void)
     run_test_event_elapsed_time_response_is_4_bytes();
     run_test_set_memory_quota_request_is_8_bytes();
     run_test_usage_stats_response_size();
-    run_test_report_usage_stats_size();
-
-    /* Enums */
-    run_test_connection_modes();
-    run_test_agent_report_interval();
-    run_test_report_cmd_id();
 
     /* Field offsets */
     run_test_header_field_offsets();
@@ -495,8 +416,6 @@ int main(void)
     run_test_header_roundtrip();
     run_test_launch_kernel_roundtrip();
     run_test_usage_stats_roundtrip();
-    run_test_report_usage_stats_roundtrip();
-    run_test_hello_with_conn_mode_roundtrip();
 
     /* Enums */
     run_test_memcpy_kinds();

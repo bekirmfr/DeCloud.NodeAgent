@@ -1,16 +1,13 @@
-# DeCloud GPU Proxy — build daemon + shim + guest agent
+# DeCloud GPU Proxy — build daemon + shim
 #
 # Prerequisites:
 #   Daemon: CUDA toolkit (nvcc, libcudart, libcuda)
 #   Shim:   Just a C compiler (no CUDA needed)
-#   Agent:  Just a C compiler (no CUDA needed; uses nvidia-smi at runtime)
 #
 # Usage:
-#   make              — build daemon + shim
+#   make              — build both
 #   make daemon       — build daemon only (requires CUDA)
 #   make shim         — build shim only (no CUDA needed)
-#   make agent        — build guest agent only (no CUDA needed)
-#   make test         — build and run protocol tests (no CUDA needed)
 #   make clean        — remove build artifacts
 #   make install      — install to /usr/local
 
@@ -28,11 +25,10 @@ CUDA_LIB   = $(CUDA_HOME)/lib64
 BUILD_DIR := build
 DAEMON    := $(BUILD_DIR)/gpu-proxy-daemon
 SHIM      := $(BUILD_DIR)/libdecloud_cuda_shim.so
-AGENT     := $(BUILD_DIR)/decloud-gpu-agent
 
-.PHONY: all daemon shim agent test clean install
+.PHONY: all daemon shim test clean install
 
-all: daemon shim agent
+all: daemon shim
 
 # ----------------------------------------------------------------
 # Daemon: links against CUDA runtime
@@ -53,16 +49,6 @@ shim: $(SHIM)
 
 $(SHIM): shim/cuda_shim.c proto/gpu_proxy_proto.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -shared -fPIC \
-		-o $@ $< \
-		-lpthread
-
-# ----------------------------------------------------------------
-# Guest Agent: no CUDA dependency, polls nvidia-smi
-# ----------------------------------------------------------------
-agent: $(AGENT)
-
-$(AGENT): agent/gpu_guest_agent.c proto/gpu_proxy_proto.h | $(BUILD_DIR)
-	$(CC) $(CFLAGS) \
 		-o $@ $< \
 		-lpthread
 
@@ -94,5 +80,4 @@ install: all
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -d $(DESTDIR)$(PREFIX)/lib
 	install -m 755 $(DAEMON) $(DESTDIR)$(PREFIX)/bin/gpu-proxy-daemon
-	install -m 755 $(AGENT)  $(DESTDIR)$(PREFIX)/bin/decloud-gpu-agent
 	install -m 644 $(SHIM)   $(DESTDIR)$(PREFIX)/lib/libdecloud_cuda_shim.so

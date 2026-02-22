@@ -488,27 +488,23 @@ public class LibvirtVmManager : IVmManager
                 return VmOperationResult.Fail(spec.Id, "VM already exists", "DUPLICATE");
             }
 
-            // Assign vsock CID for GPU modes that need host communication.
-            //   Proxied:     CUDA shim uses vsock to forward all CUDA calls to daemon.
-            //   Passthrough: Guest agent uses vsock to push metering stats to daemon.
-            if (spec.GpuMode == GpuMode.Proxied || spec.GpuMode == GpuMode.Passthrough)
+            // Assign vsock CID if GPU proxy mode is requested
+            if (spec.GpuMode == GpuMode.Proxied)
             {
                 spec.VsockCid = _nextVsockCid++;
                 _logger.LogInformation(
-                    "VM {VmId}: GPU {Mode} mode — assigned vsock CID {Cid}",
-                    spec.Id, spec.GpuMode, spec.VsockCid);
+                    "VM {VmId}: GPU proxy mode — assigned vsock CID {Cid}",
+                    spec.Id, spec.VsockCid);
 
                 // Ensure the GPU proxy daemon is running before the VM boots.
-                // In proxy mode the daemon proxies CUDA calls; in passthrough
-                // mode it receives metering reports from the guest agent.
+                // The daemon must be listening on vsock before the guest shim connects.
                 var daemonStarted = await _gpuProxy.EnsureStartedAsync(ct);
                 if (!daemonStarted)
                 {
-                    var feature = spec.GpuMode == GpuMode.Proxied ? "proxying" : "metering";
                     _logger.LogWarning(
                         "VM {VmId}: GPU proxy daemon could not be started — " +
-                        "GPU {Feature} may not work until the daemon is available",
-                        spec.Id, feature);
+                        "GPU proxying may not work until the daemon is available",
+                        spec.Id);
                 }
             }
 
@@ -1631,20 +1627,12 @@ public class LibvirtVmManager : IVmManager
 
             // =====================================================
             // STEP 6.6: Inject GPU proxy shim (for Proxied GPU mode)
-            //           or GPU guest agent (for Passthrough GPU mode)
             // =====================================================
             if (spec.GpuMode == GpuMode.Proxied && spec.VsockCid.HasValue)
             {
                 cloudInitYaml = EnsureGpuProxyShim(cloudInitYaml, spec.VsockCid.Value);
                 _logger.LogInformation(
                     "VM {VmId}: Injected CUDA shim into cloud-init (vsock CID={Cid})",
-                    spec.Id, spec.VsockCid.Value);
-            }
-            else if (spec.GpuMode == GpuMode.Passthrough && spec.VsockCid.HasValue)
-            {
-                cloudInitYaml = EnsureGpuGuestAgent(cloudInitYaml);
-                _logger.LogInformation(
-                    "VM {VmId}: Injected GPU guest agent into cloud-init (vsock CID={Cid})",
                     spec.Id, spec.VsockCid.Value);
             }
 
@@ -1850,98 +1838,6 @@ public class LibvirtVmManager : IVmManager
     if [ -f /usr/local/lib/libdecloud_cuda_shim.so ]; then
       grep -q 'libdecloud_cuda_shim' /etc/ld.so.preload 2>/dev/null || \
         echo '/usr/local/lib/libdecloud_cuda_shim.so' >> /etc/ld.so.preload
-    fi
-";
-
-        var runcmdIndex = result.IndexOf("\nruncmd:", StringComparison.Ordinal);
-        if (runcmdIndex >= 0)
-        {
-            var runcmdLineEnd = result.IndexOf('\n', runcmdIndex + 1);
-            if (runcmdLineEnd >= 0)
-                result = result.Insert(runcmdLineEnd + 1, runcmdSteps);
-        }
-
-        return result;
-    }
-
-    /// <summary>
-    /// Inject GPU guest agent into cloud-init for VMs with GpuMode.Passthrough.
-    ///
-    /// The guest agent is a lightweight binary that polls nvidia-smi inside the VM
-    /// and pushes GPU usage stats to the host daemon over virtio-vsock. This provides
-    /// metering/billing data for passthrough VMs without any CUDA interception overhead.
-    ///
-    /// Adds:
-    ///   1. runcmd steps to mount virtiofs share and install the agent binary
-    ///   2. A systemd service that runs the agent as a background daemon
-    /// </summary>
-    private static string EnsureGpuGuestAgent(string cloudInitYaml)
-    {
-        // Guard: don't inject twice
-        if (cloudInitYaml.Contains("decloud-gpu-agent"))
-            return cloudInitYaml;
-
-        var result = cloudInitYaml;
-
-        // 1. Inject write_files for the systemd service unit
-        var writeFilesBlock = @"
-  # GPU metering agent: systemd service for passthrough GPU monitoring
-  - path: /etc/systemd/system/decloud-gpu-agent.service
-    permissions: '0644'
-    content: |
-      [Unit]
-      Description=DeCloud GPU Metering Agent
-      After=network.target
-      ConditionPathExists=/usr/local/bin/decloud-gpu-agent
-
-      [Service]
-      Type=simple
-      ExecStart=/usr/local/bin/decloud-gpu-agent -i 5 -v
-      Restart=always
-      RestartSec=10
-      StandardOutput=journal
-      StandardError=journal
-
-      [Install]
-      WantedBy=multi-user.target
-";
-
-        var writeFilesIndex = result.IndexOf("\nwrite_files:", StringComparison.Ordinal);
-        if (writeFilesIndex >= 0)
-        {
-            var lineEnd = result.IndexOf('\n', writeFilesIndex + 1);
-            if (lineEnd >= 0)
-                result = result.Insert(lineEnd + 1, writeFilesBlock);
-        }
-        else
-        {
-            var runcmdPos = result.IndexOf("\nruncmd:", StringComparison.Ordinal);
-            if (runcmdPos >= 0)
-                result = result.Insert(runcmdPos, $"\nwrite_files:{writeFilesBlock}");
-            else
-                result += $"\n\nwrite_files:{writeFilesBlock}";
-        }
-
-        // 2. Inject runcmd steps to install and start the agent
-        var runcmdSteps = @"
-  # GPU metering: mount virtiofs share and install guest agent from host
-  - mkdir -p /usr/local/bin /run/decloud
-  - |
-    # Mount the virtiofs share that the host exposes with the GPU binaries.
-    mount -t virtiofs decloud-shim /run/decloud 2>/dev/null || \
-      mount -t 9p -o trans=virtio,version=9p2000.L decloud-shim /run/decloud 2>/dev/null || true
-  - |
-    # Copy the GPU guest agent from the mounted share
-    if [ -f /run/decloud/decloud-gpu-agent ]; then
-      cp /run/decloud/decloud-gpu-agent /usr/local/bin/
-      chmod 755 /usr/local/bin/decloud-gpu-agent
-    fi
-  - |
-    # Enable and start the metering agent if it was installed
-    if [ -f /usr/local/bin/decloud-gpu-agent ]; then
-      systemctl daemon-reload
-      systemctl enable decloud-gpu-agent.service
-      systemctl start decloud-gpu-agent.service
     fi
 ";
 
@@ -2429,15 +2325,12 @@ public class LibvirtVmManager : IVmManager
             : "";
 
         // ========================================
-        // VIRTIOFS — GPU proxy shim / guest agent delivery
+        // VIRTIOFS — GPU proxy shim delivery
         // ========================================
-        // Expose the host directory containing the CUDA shim .so (proxy mode)
-        // or guest agent binary (passthrough mode) to the guest via virtiofs.
-        // The guest mounts this at /run/decloud/ and cloud-init copies the
-        // binary to the appropriate location.
-        var needsVirtiofs = spec.GpuMode == GpuMode.Proxied ||
-                            spec.GpuMode == GpuMode.Passthrough;
-        var virtiofsXml = needsVirtiofs
+        // Expose the host directory containing the CUDA shim .so to
+        // the guest via virtiofs. The guest mounts this at /run/decloud/
+        // and cloud-init copies the .so to /usr/local/lib/.
+        var virtiofsXml = spec.GpuMode == GpuMode.Proxied
             ? $@"
                 <filesystem type='mount' accessmode='passthrough'>
                   <driver type='virtiofs'/>
@@ -2447,7 +2340,7 @@ public class LibvirtVmManager : IVmManager
             : "";
 
         // virtiofs requires a memory backing for the shared memory region
-        var memoryBackingXml = needsVirtiofs
+        var memoryBackingXml = spec.GpuMode == GpuMode.Proxied
             ? @"
               <memoryBacking>
                 <source type='memfd'/>
@@ -2748,11 +2641,9 @@ public class LibvirtVmManager : IVmManager
             : "";
 
         // ========================================
-        // VIRTIOFS — GPU proxy shim / guest agent delivery
+        // VIRTIOFS — GPU proxy shim delivery
         // ========================================
-        var needsVirtiofs = spec.GpuMode == GpuMode.Proxied ||
-                            spec.GpuMode == GpuMode.Passthrough;
-        var virtiofsXml = needsVirtiofs
+        var virtiofsXml = spec.GpuMode == GpuMode.Proxied
             ? $@"
                 <filesystem type='mount' accessmode='passthrough'>
                   <driver type='virtiofs'/>
@@ -2761,7 +2652,7 @@ public class LibvirtVmManager : IVmManager
                 </filesystem>"
             : "";
 
-        var memoryBackingXml = needsVirtiofs
+        var memoryBackingXml = spec.GpuMode == GpuMode.Proxied
             ? @"
               <memoryBacking>
                 <source type='memfd'/>
