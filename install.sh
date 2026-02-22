@@ -7,6 +7,7 @@
 # - Go 1.23+ (for building DHT node binary)
 # - KVM/QEMU/libvirt for virtualization
 # - Docker + NVIDIA Container Toolkit (auto-detected for GPU nodes)
+# - GPU proxy daemon + CUDA shim (auto-built for proxy-mode GPU nodes)
 # - WireGuard for overlay networking
 # - SSH CA for certificate authentication
 #
@@ -852,6 +853,270 @@ detect_nvidia_gpu() {
     fi
 
     return 1
+}
+
+# ============================================================
+# GPU Mode Detection (passthrough vs proxy vs none)
+# Mirrors ResourceDiscoveryService.cs logic
+# ============================================================
+GPU_MODE="none"
+IS_WSL2=false
+
+detect_gpu_mode() {
+    log_step "Detecting GPU sharing mode..."
+
+    # 1. No GPU → nothing to do
+    if ! detect_nvidia_gpu; then
+        GPU_MODE="none"
+        log_info "No NVIDIA GPU detected — GPU_MODE=none"
+        return 0
+    fi
+
+    # 2. Check WSL2 (passthrough never available under WSL2)
+    if grep -qi 'microsoft\|wsl' /proc/version 2>/dev/null || [ -e /dev/dxg ]; then
+        IS_WSL2=true
+        GPU_MODE="proxy"
+        log_info "WSL2 environment detected — GPU_MODE=proxy (no passthrough)"
+        return 0
+    fi
+
+    # 3. Try to get the GPU PCI address via nvidia-smi
+    local pci_addr=""
+    if [ -n "$NVIDIA_SMI_PATH" ] && [ "$NVIDIA_SMI_PATH" != "pci-detected" ] && [ "$NVIDIA_SMI_PATH" != "wsl-cuda-only" ]; then
+        pci_addr=$($NVIDIA_SMI_PATH --query-gpu=pci.bus_id --format=csv,noheader 2>/dev/null | head -1 | tr -d '[:space:]')
+    fi
+
+    # 4. Normalise PCI address (00000000:01:00.0 → 0000:01:00.0)
+    if [ -n "$pci_addr" ]; then
+        # nvidia-smi returns e.g. "00000000:01:00.0" — trim leading domain zeros
+        pci_addr=$(echo "$pci_addr" | sed -E 's/^0+:/0000:/')
+        # Ensure lowercase for sysfs lookup
+        pci_addr=$(echo "$pci_addr" | tr '[:upper:]' '[:lower:]')
+    fi
+
+    # 5. Check IOMMU group for this device
+    local has_iommu=false
+    if [ -n "$pci_addr" ] && [ -e "/sys/bus/pci/devices/${pci_addr}/iommu_group" ]; then
+        has_iommu=true
+        local iommu_group
+        iommu_group=$(basename "$(readlink "/sys/bus/pci/devices/${pci_addr}/iommu_group")")
+        log_info "GPU PCI ${pci_addr} is in IOMMU group ${iommu_group}"
+    fi
+
+    # 6. Check vfio-pci kernel module
+    local has_vfio=false
+    if modinfo vfio-pci &>/dev/null; then
+        has_vfio=true
+    fi
+
+    # 7. Decide mode
+    if [ "$has_iommu" = true ] && [ "$has_vfio" = true ]; then
+        GPU_MODE="passthrough"
+        log_success "GPU_MODE=passthrough (IOMMU + vfio-pci available)"
+    else
+        GPU_MODE="proxy"
+        if [ "$has_iommu" = false ]; then
+            log_info "IOMMU not enabled for GPU — falling back to proxy mode"
+        elif [ "$has_vfio" = false ]; then
+            log_info "vfio-pci module not available — falling back to proxy mode"
+        fi
+        log_success "GPU_MODE=proxy (daemon + shim required)"
+    fi
+
+    return 0
+}
+
+# ============================================================
+# CUDA Toolkit Detection / Installation (for daemon build)
+# ============================================================
+CUDA_HOME=""
+
+install_cuda_toolkit() {
+    log_step "Checking CUDA toolkit (needed to build GPU proxy daemon)..."
+
+    # Only needed in proxy mode — passthrough uses VFIO, not the daemon
+    if [ "$GPU_MODE" != "proxy" ]; then
+        log_info "GPU_MODE=${GPU_MODE} — CUDA toolkit not needed (proxy daemon not required)"
+        return 0
+    fi
+
+    # 1. Honour explicit CUDA_HOME
+    if [ -n "$CUDA_HOME" ] && [ -d "$CUDA_HOME/include" ] && [ -d "$CUDA_HOME/lib64" ]; then
+        log_success "CUDA toolkit found at CUDA_HOME=$CUDA_HOME"
+        return 0
+    fi
+
+    # 2. Standard path: /usr/local/cuda
+    if [ -d "/usr/local/cuda/include" ] && [ -d "/usr/local/cuda/lib64" ]; then
+        CUDA_HOME="/usr/local/cuda"
+        log_success "CUDA toolkit found at $CUDA_HOME"
+        return 0
+    fi
+
+    # 3. WSL2: CUDA libraries live under /usr/lib/wsl/lib but headers may be missing
+    if [ "$IS_WSL2" = true ] && ls /usr/lib/wsl/lib/libcuda.so* &>/dev/null; then
+        # Check if cuda headers exist anywhere
+        if [ -f "/usr/include/cuda.h" ] || [ -f "/usr/local/cuda/include/cuda.h" ]; then
+            CUDA_HOME="/usr/local/cuda"
+            log_success "CUDA headers + WSL2 runtime libraries found"
+            return 0
+        fi
+        log_info "WSL2 CUDA runtime found but headers missing — will install toolkit"
+    fi
+
+    # 4. Check if already installed via apt
+    if dpkg -l cuda-toolkit-* 2>/dev/null | grep -q '^ii'; then
+        # Find the path
+        local cuda_ver
+        cuda_ver=$(dpkg -l cuda-toolkit-* 2>/dev/null | grep '^ii' | head -1 | awk '{print $2}' | sed 's/cuda-toolkit-//')
+        if [ -d "/usr/local/cuda-${cuda_ver}" ]; then
+            CUDA_HOME="/usr/local/cuda-${cuda_ver}"
+        elif [ -d "/usr/local/cuda" ]; then
+            CUDA_HOME="/usr/local/cuda"
+        fi
+        if [ -n "$CUDA_HOME" ]; then
+            log_success "CUDA toolkit already installed (apt): $CUDA_HOME"
+            return 0
+        fi
+    fi
+
+    # 5. Check nvidia-cuda-toolkit (lighter-weight package on Debian/Ubuntu)
+    if dpkg -l nvidia-cuda-toolkit 2>/dev/null | grep -q '^ii'; then
+        # This package puts headers in /usr/include and libs in /usr/lib
+        if [ -f "/usr/include/cuda.h" ]; then
+            # Create a pseudo CUDA_HOME that the Makefile can use
+            CUDA_HOME="/usr"
+            log_success "nvidia-cuda-toolkit found (headers in /usr/include)"
+            return 0
+        fi
+    fi
+
+    # 6. Install nvidia-cuda-toolkit (lightweight — headers + runtime stubs)
+    log_info "CUDA toolkit not found — installing nvidia-cuda-toolkit..."
+
+    apt-get update -qq 2>/dev/null
+    if apt-get install -y nvidia-cuda-toolkit 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
+        if [ -f "/usr/include/cuda.h" ]; then
+            CUDA_HOME="/usr"
+            log_success "nvidia-cuda-toolkit installed (CUDA_HOME=/usr)"
+            return 0
+        elif [ -d "/usr/local/cuda" ]; then
+            CUDA_HOME="/usr/local/cuda"
+            log_success "nvidia-cuda-toolkit installed (CUDA_HOME=/usr/local/cuda)"
+            return 0
+        fi
+    fi
+
+    log_warn "Could not install CUDA toolkit"
+    log_warn "GPU proxy daemon will NOT be built (shim will still be built)"
+    log_info "To fix: install CUDA toolkit manually and re-run, or set CUDA_HOME"
+    return 0
+}
+
+# ============================================================
+# GPU Proxy Build (daemon + shim)
+# ============================================================
+build_gpu_proxy() {
+    log_step "Building GPU proxy components..."
+
+    if [ "$GPU_MODE" = "none" ]; then
+        log_info "No GPU — skipping GPU proxy build"
+        return 0
+    fi
+
+    local GPU_PROXY_SRC="$INSTALL_DIR/DeCloud.NodeAgent/src/gpu-proxy"
+
+    if [ ! -f "$GPU_PROXY_SRC/Makefile" ]; then
+        log_warn "GPU proxy source not found at $GPU_PROXY_SRC — skipping"
+        return 0
+    fi
+
+    # Ensure build tools are available
+    if ! command -v gcc &>/dev/null || ! command -v make &>/dev/null; then
+        log_info "Installing build-essential for GPU proxy compilation..."
+        apt-get install -y build-essential 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null || {
+            log_error "Failed to install build-essential — cannot build GPU proxy"
+            return 0
+        }
+    fi
+
+    # --- Build shim (for any GPU mode — guests may need it even alongside passthrough) ---
+    log_info "Building CUDA shim (libdecloud_cuda_shim.so)..."
+    if make -C "$GPU_PROXY_SRC" shim 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
+        log_success "CUDA shim built"
+    else
+        log_error "CUDA shim build failed"
+        log_info "Check logs: $LOG_DIR/install.log"
+        return 0
+    fi
+
+    # --- Build daemon (only in proxy mode — passthrough doesn't need it) ---
+    local daemon_built=false
+    if [ "$GPU_MODE" = "proxy" ] && [ -n "$CUDA_HOME" ]; then
+        log_info "Building GPU proxy daemon (CUDA_HOME=$CUDA_HOME)..."
+
+        # Resolve lib path: lib64 (standard CUDA) or lib/x86_64-linux-gnu (apt package)
+        local cuda_lib_dir="$CUDA_HOME/lib64"
+        if [ ! -d "$cuda_lib_dir" ]; then
+            cuda_lib_dir="$CUDA_HOME/lib/x86_64-linux-gnu"
+        fi
+        if [ ! -d "$cuda_lib_dir" ]; then
+            cuda_lib_dir="$CUDA_HOME/lib"
+        fi
+
+        if make -C "$GPU_PROXY_SRC" daemon \
+            CUDA_HOME="$CUDA_HOME" \
+            CUDA_LIB="$cuda_lib_dir" \
+            2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
+            daemon_built=true
+            log_success "GPU proxy daemon built"
+        else
+            log_warn "GPU proxy daemon build failed (CUDA linkage issue?)"
+            log_info "Shim is still available — daemon can be built later"
+        fi
+    elif [ "$GPU_MODE" = "proxy" ]; then
+        log_info "CUDA toolkit not available — skipping daemon build"
+        log_info "The shim (for guest VMs) is built; daemon must be built manually when CUDA is installed"
+    else
+        log_info "GPU_MODE=${GPU_MODE} — daemon not needed (passthrough uses VFIO, not proxy)"
+    fi
+
+    # --- Install built artifacts ---
+    log_info "Installing GPU proxy artifacts..."
+
+    # Shim → /usr/local/lib
+    if [ -f "$GPU_PROXY_SRC/build/libdecloud_cuda_shim.so" ]; then
+        install -d /usr/local/lib
+        install -m 644 "$GPU_PROXY_SRC/build/libdecloud_cuda_shim.so" /usr/local/lib/
+        ldconfig 2>/dev/null || true
+        log_success "Shim installed: /usr/local/lib/libdecloud_cuda_shim.so"
+
+        # Also copy to a share directory for virtiofs delivery into guest VMs
+        install -d /usr/local/lib/decloud-gpu-shim
+        install -m 644 "$GPU_PROXY_SRC/build/libdecloud_cuda_shim.so" /usr/local/lib/decloud-gpu-shim/
+    fi
+
+    # Daemon → /usr/local/bin
+    if [ "$daemon_built" = true ] && [ -f "$GPU_PROXY_SRC/build/gpu-proxy-daemon" ]; then
+        install -d /usr/local/bin
+        install -m 755 "$GPU_PROXY_SRC/build/gpu-proxy-daemon" /usr/local/bin/
+        log_success "Daemon installed: /usr/local/bin/gpu-proxy-daemon"
+    fi
+
+    # --- Summary ---
+    echo ""
+    log_info "┌─────────────────────────────────────────┐"
+    log_info "│ GPU Proxy Build Summary                  │"
+    log_info "├─────────────────────────────────────────┤"
+    log_info "│ GPU Mode:    ${GPU_MODE}"
+    log_info "│ WSL2:        ${IS_WSL2}"
+    log_info "│ CUDA Home:   ${CUDA_HOME:-not found}"
+    log_info "│ Shim:        $([ -f /usr/local/lib/libdecloud_cuda_shim.so ] && echo 'installed' || echo 'not built')"
+    log_info "│ Daemon:      $([ -f /usr/local/bin/gpu-proxy-daemon ] && echo 'installed' || echo 'not built')"
+    log_info "└─────────────────────────────────────────┘"
+    echo ""
+
+    return 0
 }
 
 # ============================================================
@@ -2049,6 +2314,20 @@ print_summary() {
     echo "    Node Agent:    Installed & Running"
     echo "    Status:        Awaiting Authentication"
     echo "    Public IP:     ${PUBLIC_IP}"
+
+    # GPU summary
+    if [ "$GPU_MODE" != "none" ]; then
+        local gpu_name=""
+        if [ -n "$NVIDIA_SMI_PATH" ] && [ "$NVIDIA_SMI_PATH" != "pci-detected" ] && [ "$NVIDIA_SMI_PATH" != "wsl-cuda-only" ]; then
+            gpu_name=$($NVIDIA_SMI_PATH --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+        fi
+        echo "    GPU:           ${gpu_name:-detected}"
+        echo "    GPU Mode:      ${GPU_MODE}"
+        echo "    Proxy Daemon:  $([ -f /usr/local/bin/gpu-proxy-daemon ] && echo 'installed' || echo 'not built')"
+        echo "    CUDA Shim:     $([ -f /usr/local/lib/libdecloud_cuda_shim.so ] && echo 'installed' || echo 'not built')"
+    else
+        echo "    GPU:           not detected"
+    fi
     echo ""
     echo "  ─────────────────────────────────────────────────────────────"
     echo "  Next Steps:"
@@ -2131,9 +2410,11 @@ main() {
     install_go
     install_libvirt
 
-    # GPU container runtime (Docker + NVIDIA Container Toolkit)
+    # GPU: detect mode, container runtime, and CUDA toolkit
+    detect_gpu_mode
     install_docker
     install_nvidia_container_toolkit
+    install_cuda_toolkit
 
     # ARM64 support
     install_arm_virtualization
@@ -2161,6 +2442,7 @@ main() {
     install_relay_nat_support
 
     build_dht_binary
+    build_gpu_proxy
     build_node_agent
     create_configuration
     create_systemd_service
