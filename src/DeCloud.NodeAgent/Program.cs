@@ -410,20 +410,23 @@ public class VmManagerInitializationService : BackgroundService
 public class GpuProxyStartupService : BackgroundService
 {
     private readonly GpuProxyService _gpuProxy;
+    private readonly INodeStateService _nodeState;
     private readonly ILogger<GpuProxyStartupService> _logger;
 
     public GpuProxyStartupService(
         GpuProxyService gpuProxy,
+        INodeStateService nodeState,
         ILogger<GpuProxyStartupService> logger)
     {
         _gpuProxy = gpuProxy;
+        _nodeState = nodeState;
         _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Small delay to let resource discovery complete first
-        await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+        // Wait for resource discovery to complete so we know the GPU/IOMMU state
+        await _nodeState.WaitForDiscoveryAsync(stoppingToken);
 
         try
         {
