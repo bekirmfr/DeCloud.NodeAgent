@@ -36,6 +36,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
+BOLD='\033[1m'
 NC='\033[0m'
 
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
@@ -1664,12 +1665,12 @@ install_walletconnect_cli() {
     
     # Verify CLI works
     if cli-decloud-node version &> /dev/null; then
-        local cli_version=$(cli-decloud-node version 2>/dev/null | awk '{print $NF}')
+        local cli_version=$(cli-decloud-node version 2>/dev/null | grep -oP 'v\K[\d.]+')
         log_success "Authentication CLI installed"
-        
+
         # Check which version (show feature)
         if cli-decloud-node version 2>/dev/null | grep -q "WalletConnect"; then
-            log_info "CLI: WalletConnect Edition (${cli_version})"
+            log_info "CLI: WalletConnect Edition (v${cli_version})"
         else
             log_info "CLI: $(basename $cli_source) (v${cli_version})"
         fi
@@ -1705,7 +1706,7 @@ install_decloud_cli() {
     
     # Verify CLI works
     if decloud --version &> /dev/null; then
-        local cli_version=$(decloud --version 2>/dev/null | awk '{print $NF}')
+        local cli_version=$(decloud --version 2>/dev/null | grep -oP 'v\K[\d.]+')
         log_success "DeCloud CLI installed (v${cli_version})"
     else
         # Version check might fail on first install, that's OK
@@ -2345,35 +2346,35 @@ print_summary() {
     echo "  ─────────────────────────────────────────────────────────────"
     echo ""
     echo "    1. Authenticate your node:"
-    echo "       ${BOLD}sudo decloud login${NC}"
+    echo -e "       ${BOLD}sudo decloud login${NC}"
     echo "       (or: sudo cli-decloud-node login)"
     echo ""
     echo "    2. Check node status:"
-    echo "       ${BOLD}decloud status${NC}"
+    echo -e "       ${BOLD}decloud status${NC}"
     echo ""
     echo "    3. Monitor logs:"
-    echo "       ${BOLD}decloud logs -f${NC}"
+    echo -e "       ${BOLD}decloud logs -f${NC}"
     echo "       (or: sudo journalctl -u decloud-node-agent -f)"
     echo ""
     echo "    4. View all commands:"
-    echo "       ${BOLD}decloud --help${NC}"
+    echo -e "       ${BOLD}decloud --help${NC}"
     echo ""
     echo "  ─────────────────────────────────────────────────────────────"
     echo "  Quick Reference:"
     echo "  ─────────────────────────────────────────────────────────────"
     echo ""
-    echo "    ${BOLD}decloud status${NC}           Show comprehensive node status"
-    echo "    ${BOLD}decloud vm list${NC}          List all VMs on this node"
-    echo "    ${BOLD}decloud diagnose${NC}         Run health diagnostics"
-    echo "    ${BOLD}decloud resources${NC}        Show resource information"
-    echo "    ${BOLD}decloud logs -f${NC}          Follow service logs"
+    echo -e "    ${BOLD}decloud status${NC}           Show comprehensive node status"
+    echo -e "    ${BOLD}decloud vm list${NC}          List all VMs on this node"
+    echo -e "    ${BOLD}decloud diagnose${NC}         Run health diagnostics"
+    echo -e "    ${BOLD}decloud resources${NC}        Show resource information"
+    echo -e "    ${BOLD}decloud logs -f${NC}          Follow service logs"
     echo ""
     echo "  ─────────────────────────────────────────────────────────────"
     echo "  Legacy Commands (still available):"
     echo "  ─────────────────────────────────────────────────────────────"
     echo ""
-    echo "    Relay NAT:  ${BOLD}sudo decloud-relay-nat {add|clean|show}${NC}"
-    echo "    VM Cleanup: ${BOLD}sudo vm-cleanup.sh --vm <id>${NC}"
+    echo -e "    Relay NAT:  ${BOLD}sudo decloud-relay-nat {add|clean|show}${NC}"
+    echo -e "    VM Cleanup: ${BOLD}sudo vm-cleanup.sh --vm <id>${NC}"
     echo ""
     echo "  ─────────────────────────────────────────────────────────────"
     echo "  Documentation:"
