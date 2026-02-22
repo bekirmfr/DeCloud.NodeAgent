@@ -24,6 +24,7 @@
 #include <signal.h>
 #include <pthread.h>
 #include <errno.h>
+#include <time.h>
 #include <sys/socket.h>
 #include <linux/vm_sockets.h>
 
@@ -38,6 +39,15 @@
 
 static int g_verbose = 0;
 static volatile sig_atomic_t g_running = 1;
+static uint64_t g_kernel_timeout_us = GPU_PROXY_DEFAULT_KERNEL_TIMEOUT_US;
+
+/* Monotonic clock helper — returns microseconds since an arbitrary epoch */
+static uint64_t now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
 
 #define LOG_INFO(fmt, ...) \
     fprintf(stdout, "[gpu-proxy] " fmt "\n", ##__VA_ARGS__)
@@ -138,6 +148,15 @@ typedef struct {
     int         in_use;
 } EventSlot;
 
+/* Per-allocation tracking for memory quota enforcement */
+#define MAX_ALLOCS 4096
+
+typedef struct {
+    uint64_t device_ptr;
+    uint64_t size;
+    int      in_use;
+} AllocSlot;
+
 typedef struct {
     int          fd;
     unsigned int peer_cid;
@@ -149,6 +168,19 @@ typedef struct {
     FunctionSlot functions[MAX_FUNCTIONS];
     StreamSlot   streams[MAX_STREAMS];
     EventSlot    events[MAX_EVENTS];
+
+    /* Memory quota enforcement */
+    uint64_t  memory_quota;       /* 0 = unlimited */
+    uint64_t  memory_allocated;   /* Current total allocated bytes */
+    uint64_t  peak_memory;        /* High-water mark */
+    uint64_t  total_alloc_bytes;  /* Cumulative allocation total */
+    AllocSlot allocs[MAX_ALLOCS]; /* Track individual allocations */
+
+    /* Metering / billing */
+    uint64_t  connect_time_us;    /* Timestamp of connection start */
+    uint32_t  kernel_launches;    /* Total kernel launches */
+    uint32_t  kernel_timeouts;    /* Kernels killed by timeout */
+    uint64_t  kernel_time_us;     /* Cumulative kernel execution time */
 } ConnectionCtx;
 
 /* ================================================================
@@ -237,6 +269,28 @@ static cudaEvent_t resolve_event(ConnectionCtx *ctx, uint64_t handle)
 /* Free all per-connection CUDA resources */
 static void cleanup_connection(ConnectionCtx *ctx)
 {
+    /* Log final usage stats for billing */
+    if (ctx->connect_time_us > 0) {
+        uint64_t uptime = now_us() - ctx->connect_time_us;
+        LOG_INFO("CID %u final stats: mem_peak=%lu alloc_total=%lu "
+                 "kernels=%u timeouts=%u ktime=%lu µs uptime=%lu µs",
+                 ctx->peer_cid,
+                 (unsigned long)ctx->peak_memory,
+                 (unsigned long)ctx->total_alloc_bytes,
+                 ctx->kernel_launches,
+                 ctx->kernel_timeouts,
+                 (unsigned long)ctx->kernel_time_us,
+                 (unsigned long)uptime);
+    }
+
+    /* Free tracked device allocations */
+    for (int i = 0; i < MAX_ALLOCS; i++) {
+        if (ctx->allocs[i].in_use) {
+            cudaFree((void *)(uintptr_t)ctx->allocs[i].device_ptr);
+            ctx->allocs[i].in_use = 0;
+        }
+    }
+
     for (int i = 0; i < MAX_EVENTS; i++) {
         if (ctx->events[i].in_use) {
             cudaEventDestroy(ctx->events[i].event);
@@ -353,31 +407,62 @@ static int handle_set_device(int fd, const void *payload, uint32_t len)
     return send_response(fd, GPU_CMD_SET_DEVICE, (int32_t)err, NULL, 0);
 }
 
-static int handle_malloc(int fd, const void *payload, uint32_t len)
+static int handle_malloc(ConnectionCtx *ctx, const void *payload, uint32_t len)
 {
     GpuMallocRequest req;
     if (len < sizeof(req)) {
-        return send_response(fd, GPU_CMD_MALLOC, -1, NULL, 0);
+        return send_response(ctx->fd, GPU_CMD_MALLOC, -1, NULL, 0);
     }
     memcpy(&req, payload, sizeof(req));
+
+    /* Enforce memory quota */
+    if (ctx->memory_quota > 0 &&
+        ctx->memory_allocated + req.size > ctx->memory_quota) {
+        LOG_ERR("CID %u: cudaMalloc(%lu) DENIED — would exceed quota "
+                "(%lu + %lu > %lu)",
+                ctx->peer_cid, (unsigned long)req.size,
+                (unsigned long)ctx->memory_allocated,
+                (unsigned long)req.size,
+                (unsigned long)ctx->memory_quota);
+        /* cudaErrorMemoryAllocation = 2 */
+        return send_response(ctx->fd, GPU_CMD_MALLOC, 2, NULL, 0);
+    }
 
     void *devptr = NULL;
     cudaError_t err = cudaMalloc(&devptr, (size_t)req.size);
 
     LOG_DBG("cudaMalloc(%lu) -> %p (err=%d)", (unsigned long)req.size, devptr, err);
 
+    if (err == cudaSuccess) {
+        /* Track allocation */
+        ctx->memory_allocated += req.size;
+        ctx->total_alloc_bytes += req.size;
+        if (ctx->memory_allocated > ctx->peak_memory)
+            ctx->peak_memory = ctx->memory_allocated;
+
+        /* Record in alloc table for cleanup */
+        for (int i = 0; i < MAX_ALLOCS; i++) {
+            if (!ctx->allocs[i].in_use) {
+                ctx->allocs[i].device_ptr = (uint64_t)(uintptr_t)devptr;
+                ctx->allocs[i].size = req.size;
+                ctx->allocs[i].in_use = 1;
+                break;
+            }
+        }
+    }
+
     GpuMallocResponse resp = {
         .device_ptr = (uint64_t)(uintptr_t)devptr,
     };
-    return send_response(fd, GPU_CMD_MALLOC, (int32_t)err,
+    return send_response(ctx->fd, GPU_CMD_MALLOC, (int32_t)err,
                          &resp, sizeof(resp));
 }
 
-static int handle_free(int fd, const void *payload, uint32_t len)
+static int handle_free(ConnectionCtx *ctx, const void *payload, uint32_t len)
 {
     GpuFreeRequest req;
     if (len < sizeof(req)) {
-        return send_response(fd, GPU_CMD_FREE, -1, NULL, 0);
+        return send_response(ctx->fd, GPU_CMD_FREE, -1, NULL, 0);
     }
     memcpy(&req, payload, sizeof(req));
 
@@ -386,7 +471,22 @@ static int handle_free(int fd, const void *payload, uint32_t len)
 
     LOG_DBG("cudaFree(%p) -> err=%d", devptr, err);
 
-    return send_response(fd, GPU_CMD_FREE, (int32_t)err, NULL, 0);
+    if (err == cudaSuccess) {
+        /* Release from alloc tracking */
+        for (int i = 0; i < MAX_ALLOCS; i++) {
+            if (ctx->allocs[i].in_use &&
+                ctx->allocs[i].device_ptr == req.device_ptr) {
+                if (ctx->memory_allocated >= ctx->allocs[i].size)
+                    ctx->memory_allocated -= ctx->allocs[i].size;
+                else
+                    ctx->memory_allocated = 0;
+                ctx->allocs[i].in_use = 0;
+                break;
+            }
+        }
+    }
+
+    return send_response(ctx->fd, GPU_CMD_FREE, (int32_t)err, NULL, 0);
 }
 
 static int handle_memcpy(int fd, const void *payload, uint32_t payload_len)
@@ -699,6 +799,8 @@ static int handle_launch_kernel(ConnectionCtx *ctx, const void *payload, uint32_
     /* Resolve stream */
     CUstream cu_stream = (CUstream)resolve_stream(ctx, req.stream_handle);
 
+    uint64_t t0 = now_us();
+
     CUresult cr = cuLaunchKernel(
         fs->cu_func,
         req.grid_dim_x, req.grid_dim_y, req.grid_dim_z,
@@ -709,10 +811,66 @@ static int handle_launch_kernel(ConnectionCtx *ctx, const void *payload, uint32_
         NULL  /* extra — unused when kernel_params is provided */
     );
 
-    LOG_DBG("CID %u: cuLaunchKernel(func=0x%lx, grid=[%u,%u,%u], block=[%u,%u,%u]) -> %d",
+    ctx->kernel_launches++;
+
+    /*
+     * Kernel timeout enforcement:
+     * After launching, synchronize with a timeout. If the kernel exceeds the
+     * configured limit, we reset the device to abort the runaway kernel.
+     * This prevents a single VM from monopolizing the GPU indefinitely.
+     */
+    if (cr == CUDA_SUCCESS && g_kernel_timeout_us > 0) {
+        /* Poll-based sync with timeout */
+        CUresult sync_cr;
+        uint64_t deadline = t0 + g_kernel_timeout_us;
+        int timed_out = 0;
+
+        while (1) {
+            sync_cr = cuStreamQuery(cu_stream ? cu_stream : 0);
+            if (sync_cr == CUDA_SUCCESS) break;
+            if (sync_cr != CUDA_ERROR_NOT_READY) {
+                cr = sync_cr;
+                break;
+            }
+            if (now_us() >= deadline) {
+                timed_out = 1;
+                break;
+            }
+            usleep(1000); /* 1ms polling interval */
+        }
+
+        if (timed_out) {
+            LOG_ERR("CID %u: kernel TIMEOUT after %lu µs (limit=%lu µs) — "
+                    "resetting CUDA context",
+                    ctx->peer_cid,
+                    (unsigned long)(now_us() - t0),
+                    (unsigned long)g_kernel_timeout_us);
+            ctx->kernel_timeouts++;
+            /* cuCtxResetPersistingL2Cache is lightweight; for a hard stop
+             * we destroy and recreate the context on the next call. */
+            if (ctx->cu_ctx) {
+                cuCtxSetCurrent(ctx->cu_ctx);
+                cudaDeviceReset();
+                /* Invalidate the context so it's recreated on next module load */
+                cuCtxDestroy(ctx->cu_ctx);
+                ctx->cu_ctx = NULL;
+            }
+            cr = CUDA_ERROR_LAUNCH_TIMEOUT; /* 702 */
+        }
+    } else if (cr == CUDA_SUCCESS && g_kernel_timeout_us == 0) {
+        /* No timeout — just sync for metering */
+        cuStreamSynchronize(cu_stream ? cu_stream : 0);
+    }
+
+    uint64_t elapsed = now_us() - t0;
+    ctx->kernel_time_us += elapsed;
+
+    LOG_DBG("CID %u: cuLaunchKernel(func=0x%lx, grid=[%u,%u,%u], block=[%u,%u,%u]) "
+            "-> %d (%lu µs)",
             ctx->peer_cid, (unsigned long)req.host_func_ptr,
             req.grid_dim_x, req.grid_dim_y, req.grid_dim_z,
-            req.block_dim_x, req.block_dim_y, req.block_dim_z, cr);
+            req.block_dim_x, req.block_dim_y, req.block_dim_z,
+            cr, (unsigned long)elapsed);
 
     return send_response(ctx->fd, GPU_CMD_LAUNCH_KERNEL, (int32_t)cr, NULL, 0);
 }
@@ -909,6 +1067,58 @@ static int handle_event_elapsed_time(ConnectionCtx *ctx, const void *payload, ui
 }
 
 /* ================================================================
+ * Command handlers — resource management (quotas, metering)
+ * ================================================================ */
+
+static int handle_set_memory_quota(ConnectionCtx *ctx, const void *payload, uint32_t len)
+{
+    if (len < sizeof(GpuSetMemoryQuotaRequest)) {
+        return send_response(ctx->fd, GPU_CMD_SET_MEMORY_QUOTA, -1, NULL, 0);
+    }
+
+    GpuSetMemoryQuotaRequest req;
+    memcpy(&req, payload, sizeof(req));
+
+    ctx->memory_quota = req.quota_bytes;
+
+    LOG_INFO("CID %u: memory quota set to %lu bytes (%lu MB)%s",
+             ctx->peer_cid,
+             (unsigned long)req.quota_bytes,
+             (unsigned long)(req.quota_bytes / (1024 * 1024)),
+             req.quota_bytes == 0 ? " (unlimited)" : "");
+
+    return send_response(ctx->fd, GPU_CMD_SET_MEMORY_QUOTA, 0, NULL, 0);
+}
+
+static int handle_get_usage_stats(ConnectionCtx *ctx)
+{
+    GpuUsageStatsResponse resp = {
+        .memory_allocated = ctx->memory_allocated,
+        .memory_quota     = ctx->memory_quota,
+        .peak_memory      = ctx->peak_memory,
+        .total_alloc_bytes = ctx->total_alloc_bytes,
+        .kernel_launches  = ctx->kernel_launches,
+        .kernel_timeouts  = ctx->kernel_timeouts,
+        .kernel_time_us   = ctx->kernel_time_us,
+        .connect_time_us  = now_us() - ctx->connect_time_us,
+    };
+
+    LOG_DBG("CID %u: usage stats — mem=%lu/%lu peak=%lu kernels=%u "
+            "timeouts=%u ktime=%lu µs uptime=%lu µs",
+            ctx->peer_cid,
+            (unsigned long)resp.memory_allocated,
+            (unsigned long)resp.memory_quota,
+            (unsigned long)resp.peak_memory,
+            resp.kernel_launches,
+            resp.kernel_timeouts,
+            (unsigned long)resp.kernel_time_us,
+            (unsigned long)resp.connect_time_us);
+
+    return send_response(ctx->fd, GPU_CMD_GET_USAGE_STATS, 0,
+                         &resp, sizeof(resp));
+}
+
+/* ================================================================
  * Per-connection handler (one thread per VM)
  * ================================================================ */
 
@@ -919,6 +1129,8 @@ static void *connection_handler(void *arg)
     unsigned int cid = ctx->peer_cid;
 
     LOG_INFO("VM CID %u connected", cid);
+
+    ctx->connect_time_us = now_us();
 
     /* Allocate a reusable payload buffer */
     size_t buf_cap = 4096;
@@ -979,10 +1191,10 @@ static void *connection_handler(void *arg)
             rc = handle_set_device(fd, buf, hdr.payload_len);
             break;
         case GPU_CMD_MALLOC:
-            rc = handle_malloc(fd, buf, hdr.payload_len);
+            rc = handle_malloc(ctx, buf, hdr.payload_len);
             break;
         case GPU_CMD_FREE:
-            rc = handle_free(fd, buf, hdr.payload_len);
+            rc = handle_free(ctx, buf, hdr.payload_len);
             break;
         case GPU_CMD_MEMCPY:
             rc = handle_memcpy(fd, buf, hdr.payload_len);
@@ -1038,8 +1250,20 @@ static void *connection_handler(void *arg)
             rc = handle_event_elapsed_time(ctx, buf, hdr.payload_len);
             break;
 
+        /* Resource management */
+        case GPU_CMD_SET_MEMORY_QUOTA:
+            rc = handle_set_memory_quota(ctx, buf, hdr.payload_len);
+            break;
+        case GPU_CMD_GET_USAGE_STATS:
+            rc = handle_get_usage_stats(ctx);
+            break;
+
         case GPU_CMD_GOODBYE:
-            LOG_INFO("CID %u: graceful disconnect", cid);
+            LOG_INFO("CID %u: graceful disconnect (mem=%lu kernels=%u ktime=%lu µs)",
+                     cid,
+                     (unsigned long)ctx->memory_allocated,
+                     ctx->kernel_launches,
+                     (unsigned long)ctx->kernel_time_us);
             send_response(fd, GPU_CMD_GOODBYE, 0, NULL, 0);
             goto done;
         default:
@@ -1075,9 +1299,11 @@ static void sig_handler(int sig)
 
 static void usage(const char *prog)
 {
-    fprintf(stderr, "Usage: %s [-p port] [-v]\n", prog);
-    fprintf(stderr, "  -p port   vsock port to listen on (default: %d)\n", GPU_PROXY_PORT);
-    fprintf(stderr, "  -v        verbose logging\n");
+    fprintf(stderr, "Usage: %s [-p port] [-t timeout_sec] [-v]\n", prog);
+    fprintf(stderr, "  -p port          vsock port to listen on (default: %d)\n", GPU_PROXY_PORT);
+    fprintf(stderr, "  -t timeout_sec   kernel execution timeout in seconds (default: %d, 0=disable)\n",
+            (int)(GPU_PROXY_DEFAULT_KERNEL_TIMEOUT_US / 1000000));
+    fprintf(stderr, "  -v               verbose logging\n");
     exit(1);
 }
 
@@ -1086,9 +1312,10 @@ int main(int argc, char **argv)
     int port = GPU_PROXY_PORT;
     int opt;
 
-    while ((opt = getopt(argc, argv, "p:v")) != -1) {
+    while ((opt = getopt(argc, argv, "p:t:v")) != -1) {
         switch (opt) {
         case 'p': port = atoi(optarg); break;
+        case 't': g_kernel_timeout_us = (uint64_t)atoi(optarg) * 1000000ULL; break;
         case 'v': g_verbose = 1; break;
         default: usage(argv[0]);
         }
@@ -1149,7 +1376,9 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    LOG_INFO("Listening on vsock port %d (CID=any) — kernel launch enabled", port);
+    LOG_INFO("Listening on vsock port %d (CID=any) — kernel launch enabled, "
+             "timeout=%lu s, quotas=enabled",
+             port, (unsigned long)(g_kernel_timeout_us / 1000000));
 
     /* Accept loop */
     while (g_running) {

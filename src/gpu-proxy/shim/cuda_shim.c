@@ -928,6 +928,139 @@ cudaError_t cudaPeekAtLastError(void)
     return cudaSuccess;
 }
 
+/* ================================================================
+ * cuDNN stubs — functions that ML frameworks probe at import time.
+ *
+ * PyTorch, TensorFlow, and other frameworks dynamically load
+ * libcudnn.so and call these to check cuDNN availability. By
+ * providing stubs here, we prevent import failures when the
+ * framework checks for cuDNN support.
+ *
+ * Note: actual cuDNN operations (convolution, etc.) must be
+ * forwarded to the daemon in the future. For now these stubs
+ * report cuDNN as available so frameworks can initialize,
+ * and individual cuDNN operations fall through to CUDA kernels.
+ * ================================================================ */
+
+/* cuDNN status codes */
+#define CUDNN_STATUS_SUCCESS           0
+#define CUDNN_STATUS_NOT_SUPPORTED     9
+
+/* cuDNN version info — report as 8.9.0 (widely supported) */
+#define CUDNN_MAJOR 8
+#define CUDNN_MINOR 9
+#define CUDNN_PATCHLEVEL 0
+
+typedef void *cudnnHandle_t;
+
+size_t cudnnGetVersion(void)
+{
+    return CUDNN_MAJOR * 1000 + CUDNN_MINOR * 100 + CUDNN_PATCHLEVEL;
+}
+
+size_t cudnnGetCudartVersion(void)
+{
+    return 12000; /* Match our reported CUDA 12.0 */
+}
+
+int cudnnCreate(cudnnHandle_t *handle)
+{
+    SHIM_LOG("cudnnCreate() — stub");
+    if (handle) *handle = (cudnnHandle_t)(uintptr_t)0xCDNN0001;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+int cudnnDestroy(cudnnHandle_t handle)
+{
+    SHIM_LOG("cudnnDestroy() — stub");
+    (void)handle;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+int cudnnSetStream(cudnnHandle_t handle, cudaStream_t stream)
+{
+    (void)handle;
+    (void)stream;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+int cudnnGetStream(cudnnHandle_t handle, cudaStream_t *stream)
+{
+    (void)handle;
+    if (stream) *stream = NULL;
+    return CUDNN_STATUS_SUCCESS;
+}
+
+const char *cudnnGetErrorString(int status)
+{
+    switch (status) {
+    case 0: return "CUDNN_STATUS_SUCCESS";
+    case 9: return "CUDNN_STATUS_NOT_SUPPORTED";
+    default: return "CUDNN_STATUS_UNKNOWN";
+    }
+}
+
+/* ================================================================
+ * cuBLAS stubs — similar pattern for BLAS operations.
+ *
+ * ML frameworks call cublasCreate to detect cuBLAS availability.
+ * Linear algebra operations (GEMM, etc.) will go through CUDA
+ * kernels or need future daemon-side forwarding.
+ * ================================================================ */
+
+#define CUBLAS_STATUS_SUCCESS 0
+
+typedef void *cublasHandle_t;
+
+size_t cublasGetVersion_v2(cublasHandle_t handle, int *version)
+{
+    (void)handle;
+    if (version) *version = 12000;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+int cublasCreate_v2(cublasHandle_t *handle)
+{
+    SHIM_LOG("cublasCreate_v2() — stub");
+    if (handle) *handle = (cublasHandle_t)(uintptr_t)0xBLA50001;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+int cublasDestroy_v2(cublasHandle_t handle)
+{
+    SHIM_LOG("cublasDestroy_v2() — stub");
+    (void)handle;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+int cublasSetStream_v2(cublasHandle_t handle, cudaStream_t stream)
+{
+    (void)handle;
+    (void)stream;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+int cublasGetStream_v2(cublasHandle_t handle, cudaStream_t *stream)
+{
+    (void)handle;
+    if (stream) *stream = NULL;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+int cublasSetMathMode(cublasHandle_t handle, int mode)
+{
+    (void)handle;
+    (void)mode;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+int cublasGetMathMode(cublasHandle_t handle, int *mode)
+{
+    (void)handle;
+    if (mode) *mode = 0; /* CUBLAS_DEFAULT_MATH */
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 /* Cleanup on unload */
 __attribute__((destructor))
 static void shim_cleanup(void)

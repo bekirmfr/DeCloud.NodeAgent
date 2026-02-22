@@ -50,6 +50,18 @@ public class GpuProxyService
     /// </summary>
     public int MaxCrashRestarts { get; set; } = 5;
 
+    /// <summary>
+    /// Default per-VM GPU memory quota in bytes. 0 = unlimited.
+    /// Overridden per-VM via the SET_MEMORY_QUOTA protocol command.
+    /// </summary>
+    public long DefaultMemoryQuotaBytes { get; set; } = 0;
+
+    /// <summary>
+    /// Kernel execution timeout in seconds. 0 = disabled.
+    /// Protects against runaway GPU kernels monopolizing the device.
+    /// </summary>
+    public int KernelTimeoutSeconds { get; set; } = 30;
+
     public bool IsRunning => _isRunning;
 
     public GpuProxyService(
@@ -157,7 +169,7 @@ public class GpuProxyService
             var psi = new ProcessStartInfo
             {
                 FileName = DaemonPath,
-                Arguments = $"-p {DaemonPort} -v",
+                Arguments = $"-p {DaemonPort} -t {KernelTimeoutSeconds} -v",
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,

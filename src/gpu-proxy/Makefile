@@ -26,7 +26,7 @@ BUILD_DIR := build
 DAEMON    := $(BUILD_DIR)/gpu-proxy-daemon
 SHIM      := $(BUILD_DIR)/libdecloud_cuda_shim.so
 
-.PHONY: all daemon shim clean install
+.PHONY: all daemon shim test clean install
 
 all: daemon shim
 
@@ -51,6 +51,18 @@ $(SHIM): shim/cuda_shim.c proto/gpu_proxy_proto.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -shared -fPIC \
 		-o $@ $< \
 		-lpthread
+
+# ----------------------------------------------------------------
+# Tests: no CUDA dependency — runs on any machine
+# ----------------------------------------------------------------
+TEST_PROTO := $(BUILD_DIR)/test_proto
+
+test: $(TEST_PROTO)
+	@echo "Running protocol tests..."
+	@./$(TEST_PROTO)
+
+$(TEST_PROTO): tests/test_proto.c proto/gpu_proxy_proto.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $<
 
 # ----------------------------------------------------------------
 $(BUILD_DIR):
