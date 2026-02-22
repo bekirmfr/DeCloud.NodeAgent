@@ -28,23 +28,31 @@
 #include <sys/socket.h>
 #include <linux/vm_sockets.h>
 
+#include <dlfcn.h>
+
 #include <cuda.h>
 #include <cuda_runtime.h>
 
+#include "../proto/gpu_proxy_proto.h"
+
 /*
  * cuFuncGetParamInfo (CUDA 12.0+ Driver API) may be missing from
- * stub/WSL2 headers even when CUDA_VERSION >= 12000. Provide a
- * weak forward declaration so we can link against it at runtime
- * via -lcuda without a compile-time error.
+ * the linked libcuda.so (e.g. WSL2 stubs). We look it up via dlsym
+ * at runtime so the daemon still compiles/links everywhere, and
+ * falls back to "sizes unknown" when the symbol isn't available.
  */
-#if CUDA_VERSION >= 12000
-  #ifndef cuFuncGetParamInfo
-    extern CUresult cuFuncGetParamInfo(CUfunction func, size_t paramIndex,
-                                       size_t *paramOffset, size_t *paramSize);
-  #endif
-#endif
+typedef CUresult (*pfn_cuFuncGetParamInfo)(CUfunction, size_t, size_t *, size_t *);
+static pfn_cuFuncGetParamInfo g_cuFuncGetParamInfo = NULL;
+static int g_cuFuncGetParamInfo_resolved = 0;
 
-#include "../proto/gpu_proxy_proto.h"
+static pfn_cuFuncGetParamInfo resolve_cuFuncGetParamInfo(void)
+{
+    if (!g_cuFuncGetParamInfo_resolved) {
+        g_cuFuncGetParamInfo = (pfn_cuFuncGetParamInfo)dlsym(RTLD_DEFAULT, "cuFuncGetParamInfo");
+        g_cuFuncGetParamInfo_resolved = 1;
+    }
+    return g_cuFuncGetParamInfo;
+}
 
 /* ================================================================
  * Logging
@@ -733,24 +741,23 @@ static int handle_register_function(ConnectionCtx *ctx, const void *payload, uin
     memset(fs->param_sizes, 0, sizeof(fs->param_sizes));
     memset(fs->param_offsets, 0, sizeof(fs->param_offsets));
 
-#if CUDA_VERSION >= 12000
-    /* cuFuncGetParamInfo available in CUDA 12.0+ Driver API */
-    for (uint32_t p = 0; p < GPU_MAX_KERNEL_PARAMS; p++) {
-        size_t paramOffset, paramSize;
-        cr = cuFuncGetParamInfo(func, p, &paramOffset, &paramSize);
-        if (cr != CUDA_SUCCESS) break; /* no more params */
-        fs->param_offsets[p] = (uint32_t)paramOffset;
-        fs->param_sizes[p] = (uint32_t)paramSize;
-        fs->num_params = p + 1;
-    }
-#else
     /*
-     * Fallback for CUDA < 12: The daemon cannot introspect parameter sizes.
-     * The shim must send param sizes explicitly in the launch request.
-     * Set num_params=0 to signal "sizes unknown, shim must provide them".
+     * Try to introspect kernel parameter sizes via cuFuncGetParamInfo
+     * (CUDA 12.0+ Driver API, resolved at runtime via dlsym).
+     * If the symbol isn't available (e.g. WSL2, older drivers), fall
+     * back to num_params=0 which tells the shim to send sizes itself.
      */
-    fs->num_params = 0;
-#endif
+    pfn_cuFuncGetParamInfo fnGetParamInfo = resolve_cuFuncGetParamInfo();
+    if (fnGetParamInfo) {
+        for (uint32_t p = 0; p < GPU_MAX_KERNEL_PARAMS; p++) {
+            size_t paramOffset, paramSize;
+            cr = fnGetParamInfo(func, p, &paramOffset, &paramSize);
+            if (cr != CUDA_SUCCESS) break; /* no more params */
+            fs->param_offsets[p] = (uint32_t)paramOffset;
+            fs->param_sizes[p] = (uint32_t)paramSize;
+            fs->num_params = p + 1;
+        }
+    }
 
     LOG_INFO("CID %u: registered function '%s' -> slot %d, %u params",
              ctx->peer_cid, device_name, func_slot, fs->num_params);
