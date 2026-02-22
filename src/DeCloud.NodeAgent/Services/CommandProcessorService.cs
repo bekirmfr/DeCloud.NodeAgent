@@ -300,6 +300,8 @@ public class CommandProcessorService : BackgroundService
         string? sshPublicKey = GetStringProperty(root, "sshPublicKey", "SshPublicKey");
         string? userData = GetStringProperty(root, "userData", "UserData");
         string? gpuPciAddress = GetStringProperty(root, "gpuPciAddress", "GpuPciAddress");
+        bool requiresGpu = (root.TryGetProperty("requiresGpu", out var rgProp) || root.TryGetProperty("RequiresGpu", out rgProp))
+            && rgProp.ValueKind == JsonValueKind.True;
         int gpuModeInt = GetIntProperty(root, "gpuMode", "GpuMode") ?? 0;
         var gpuMode = (GpuMode)gpuModeInt;
         int deploymentModeInt = GetIntProperty(root, "deploymentMode", "DeploymentMode") ?? 0;
@@ -340,6 +342,7 @@ public class CommandProcessorService : BackgroundService
             BaseImageUrl = baseImageUrl,
             SshPublicKey = sshPublicKey,
             CloudInitUserData = userData,
+            RequiresGpu = requiresGpu,
             GpuPciAddress = gpuPciAddress,
             GpuMode = gpuMode,
             DeploymentMode = deploymentMode,
@@ -371,8 +374,8 @@ public class CommandProcessorService : BackgroundService
         // ========================================
         // If orchestrator explicitly set GpuMode, honour it.
         // If GpuMode is None but GpuPciAddress is set, infer Passthrough.
-        // If this is a GPU/Inference workload with GpuMode=None, auto-detect
-        // based on hardware: IOMMU available → Passthrough, else → Proxied.
+        // If RequiresGpu is true with GpuMode=None, auto-detect based on
+        // hardware: IOMMU available → Passthrough, else → Proxied.
         //
         // Multi-GPU pool: track which GPUs are already assigned to prevent
         // double-assignment when concurrent VM requests arrive.
@@ -395,7 +398,7 @@ public class CommandProcessorService : BackgroundService
             }
         }
         else if (vmSpec.GpuMode == GpuMode.None &&
-                 vmSpec.VmType is VmType.Gpu or VmType.Inference &&
+                 vmSpec.RequiresGpu &&
                  deploymentMode == DeploymentMode.VirtualMachine)
         {
             var inventory = await _resourceDiscovery.GetInventoryCachedAsync(ct);

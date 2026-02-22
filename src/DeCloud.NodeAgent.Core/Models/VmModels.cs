@@ -32,7 +32,13 @@ public class VmSpec
     public string BaseImageUrl { get; set; } = string.Empty;  // URL to download base image
     public string BaseImageHash { get; set; } = string.Empty; // SHA256 for verification
 
-    // Optional GPU passthrough (VirtualMachine mode)
+    // GPU
+    /// <summary>
+    /// Whether this VM requires GPU access.
+    /// Set by the orchestrator when the template or user request includes a GPU.
+    /// Triggers GPU mode auto-selection (Passthrough or Proxied) during VM creation.
+    /// </summary>
+    public bool RequiresGpu { get; set; }
     public string? GpuPciAddress { get; set; }
 
     /// <summary>
