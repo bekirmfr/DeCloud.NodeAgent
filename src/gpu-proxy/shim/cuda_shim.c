@@ -966,7 +966,7 @@ size_t cudnnGetCudartVersion(void)
 int cudnnCreate(cudnnHandle_t *handle)
 {
     SHIM_LOG("cudnnCreate() — stub");
-    if (handle) *handle = (cudnnHandle_t)(uintptr_t)0xCDNN0001;
+    if (handle) *handle = (cudnnHandle_t)(uintptr_t)0xCD000001;
     return CUDNN_STATUS_SUCCESS;
 }
 
@@ -1022,7 +1022,7 @@ size_t cublasGetVersion_v2(cublasHandle_t handle, int *version)
 int cublasCreate_v2(cublasHandle_t *handle)
 {
     SHIM_LOG("cublasCreate_v2() — stub");
-    if (handle) *handle = (cublasHandle_t)(uintptr_t)0xBLA50001;
+    if (handle) *handle = (cublasHandle_t)(uintptr_t)0xB1A50001;
     return CUBLAS_STATUS_SUCCESS;
 }
 
