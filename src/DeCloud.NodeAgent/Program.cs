@@ -185,6 +185,11 @@ builder.Services.AddSingleton<LibvirtVmManager>();
 builder.Services.AddSingleton<IVmManager>(sp => sp.GetRequiredService<LibvirtVmManager>());
 
 // =====================================================
+// GPU Proxy Service (host-side daemon for proxied GPU access via vsock)
+// =====================================================
+builder.Services.AddSingleton<GpuProxyService>();
+
+// =====================================================
 // Docker Container Manager (GPU sharing for WSL2/non-IOMMU nodes)
 // =====================================================
 builder.Services.AddSingleton<DockerContainerManager>();
@@ -218,6 +223,9 @@ builder.Services.AddHostedService<OrphanedPortCleanupService>();
 
 // Per-service VM readiness monitoring via qemu-guest-agent
 builder.Services.AddHostedService<VmReadinessMonitor>();
+
+// Auto-start GPU proxy daemon on non-IOMMU nodes with GPUs
+builder.Services.AddHostedService<GpuProxyStartupService>();
 
 // =====================================================
 // Security services for port validation and auditing
@@ -388,5 +396,60 @@ public class VmManagerInitializationService : BackgroundService
         {
             _logger.LogError(ex, "Failed to initialize VM Manager");
         }
+    }
+}
+
+// =====================================================
+// GPU Proxy Daemon Auto-Start Service
+// =====================================================
+/// <summary>
+/// Background service that auto-starts the GPU proxy daemon on nodes
+/// that have GPU(s) but no IOMMU (i.e., proxy mode is required).
+/// Runs once at startup so the daemon is ready before any VM boots.
+/// </summary>
+public class GpuProxyStartupService : BackgroundService
+{
+    private readonly GpuProxyService _gpuProxy;
+    private readonly ILogger<GpuProxyStartupService> _logger;
+
+    public GpuProxyStartupService(
+        GpuProxyService gpuProxy,
+        ILogger<GpuProxyStartupService> logger)
+    {
+        _gpuProxy = gpuProxy;
+        _logger = logger;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        // Small delay to let resource discovery complete first
+        await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+
+        try
+        {
+            var started = await _gpuProxy.EnsureStartedAsync(stoppingToken);
+            if (started)
+            {
+                _logger.LogInformation(
+                    "GPU proxy daemon auto-started — node is in proxy mode (no IOMMU)");
+            }
+            // If not started, EnsureStartedAsync already logged the reason
+            // (no GPU, IOMMU available, daemon binary missing, etc.)
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Normal shutdown
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to auto-start GPU proxy daemon");
+        }
+    }
+
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Stopping GPU proxy daemon...");
+        await _gpuProxy.StopAsync(cancellationToken);
+        await base.StopAsync(cancellationToken);
     }
 }
