@@ -1042,11 +1042,14 @@ build_gpu_proxy() {
 
     # --- Build shim (for any GPU mode — guests may need it even alongside passthrough) ---
     log_info "Building CUDA shim (libdecloud_cuda_shim.so)..."
-    if make -C "$GPU_PROXY_SRC" shim 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
-        log_success "CUDA shim built"
+    make -C "$GPU_PROXY_SRC" shim 2>&1 | tee -a "$LOG_DIR/install.log"
+    if [ -f "$GPU_PROXY_SRC/build/libdecloud_cuda_shim.so" ]; then
+        log_success "CUDA shim built: $GPU_PROXY_SRC/build/libdecloud_cuda_shim.so"
     else
-        log_error "CUDA shim build failed"
+        log_error "CUDA shim build failed — output binary not found"
         log_info "Check logs: $LOG_DIR/install.log"
+        # List what's in build dir for debugging
+        ls -la "$GPU_PROXY_SRC/build/" 2>/dev/null || log_info "Build directory does not exist"
         return 0
     fi
 
@@ -1064,14 +1067,18 @@ build_gpu_proxy() {
             cuda_lib_dir="$CUDA_HOME/lib"
         fi
 
-        if make -C "$GPU_PROXY_SRC" daemon \
+        log_info "CUDA lib dir: $cuda_lib_dir"
+        make -C "$GPU_PROXY_SRC" daemon \
             CUDA_HOME="$CUDA_HOME" \
             CUDA_LIB="$cuda_lib_dir" \
-            2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
+            2>&1 | tee -a "$LOG_DIR/install.log"
+
+        if [ -f "$GPU_PROXY_SRC/build/gpu-proxy-daemon" ]; then
             daemon_built=true
-            log_success "GPU proxy daemon built"
+            log_success "GPU proxy daemon built: $GPU_PROXY_SRC/build/gpu-proxy-daemon"
         else
-            log_warn "GPU proxy daemon build failed (CUDA linkage issue?)"
+            log_warn "GPU proxy daemon build failed (binary not found)"
+            ls -la "$GPU_PROXY_SRC/build/" 2>/dev/null || log_info "Build directory does not exist"
             log_info "Shim is still available — daemon can be built later"
         fi
     elif [ "$GPU_MODE" = "proxy" ]; then
@@ -1082,25 +1089,29 @@ build_gpu_proxy() {
     fi
 
     # --- Install built artifacts ---
-    log_info "Installing GPU proxy artifacts..."
+    log_info "Installing GPU proxy artifacts to system paths..."
 
     # Shim → /usr/local/lib
     if [ -f "$GPU_PROXY_SRC/build/libdecloud_cuda_shim.so" ]; then
         install -d /usr/local/lib
         install -m 644 "$GPU_PROXY_SRC/build/libdecloud_cuda_shim.so" /usr/local/lib/
         ldconfig 2>/dev/null || true
-        log_success "Shim installed: /usr/local/lib/libdecloud_cuda_shim.so"
+        log_success "Shim installed → /usr/local/lib/libdecloud_cuda_shim.so"
 
         # Also copy to a share directory for virtiofs delivery into guest VMs
         install -d /usr/local/lib/decloud-gpu-shim
         install -m 644 "$GPU_PROXY_SRC/build/libdecloud_cuda_shim.so" /usr/local/lib/decloud-gpu-shim/
+    else
+        log_warn "Shim binary not found at $GPU_PROXY_SRC/build/libdecloud_cuda_shim.so — skipping install"
     fi
 
     # Daemon → /usr/local/bin
     if [ "$daemon_built" = true ] && [ -f "$GPU_PROXY_SRC/build/gpu-proxy-daemon" ]; then
         install -d /usr/local/bin
         install -m 755 "$GPU_PROXY_SRC/build/gpu-proxy-daemon" /usr/local/bin/
-        log_success "Daemon installed: /usr/local/bin/gpu-proxy-daemon"
+        log_success "Daemon installed → /usr/local/bin/gpu-proxy-daemon"
+    elif [ "$daemon_built" = true ]; then
+        log_warn "Daemon binary not found at $GPU_PROXY_SRC/build/gpu-proxy-daemon — skipping install"
     fi
 
     # --- Summary ---
