@@ -50,6 +50,12 @@ typedef enum {
     GPU_CMD_EVENT_SYNCHRONIZE      = 0x43,
     GPU_CMD_EVENT_ELAPSED_TIME     = 0x44,
 
+    /* Module/function registration (required for kernel launch) */
+    GPU_CMD_REGISTER_MODULE        = 0x50,  /* Send fat binary → load CUmodule */
+    GPU_CMD_UNREGISTER_MODULE      = 0x51,  /* Unload CUmodule */
+    GPU_CMD_REGISTER_FUNCTION      = 0x52,  /* Map host ptr → device function name */
+    GPU_CMD_REGISTER_VAR           = 0x53,  /* Register device variable */
+
     /* Lifecycle */
     GPU_CMD_HELLO                  = 0xF0,  /* Handshake: shim → daemon */
     GPU_CMD_GOODBYE                = 0xF1,  /* Graceful disconnect */
@@ -169,8 +175,143 @@ typedef struct __attribute__((packed)) {
 } GpuMemsetRequest;
 
 /* ================================================================
- * Helper: compute total request size for memcpy H2D
+ * Module / function registration (for kernel launch)
+ * ================================================================
+ *
+ * CUDA kernel launch flow:
+ * 1. __cudaRegisterFatBinary(fatCubin)  → GPU_CMD_REGISTER_MODULE
+ *    Sends the fat binary (PTX/cubin) to the daemon, which loads it
+ *    via cuModuleLoadData and returns a module handle.
+ *
+ * 2. __cudaRegisterFunction(fatHandle, hostFun, deviceName, ...)
+ *    → GPU_CMD_REGISTER_FUNCTION
+ *    Maps a host-side function pointer to a device function name.
+ *    Daemon calls cuModuleGetFunction and returns parameter metadata
+ *    (count + sizes) so the shim can serialize args at launch time.
+ *
+ * 3. cudaLaunchKernel(func, grid, block, args, sharedMem, stream)
+ *    → GPU_CMD_LAUNCH_KERNEL
+ *    Shim looks up the function's param metadata, serializes the
+ *    argument values, and sends them to the daemon which calls
+ *    cuLaunchKernel on the real GPU.
+ */
+
+/* --- GPU_CMD_REGISTER_MODULE (request) ---
+ * Payload: [GpuRegisterModuleRequest][fat binary data...] */
+typedef struct __attribute__((packed)) {
+    uint64_t fatbin_size;    /* Size of fat binary data following this struct */
+} GpuRegisterModuleRequest;
+
+/* --- GPU_CMD_REGISTER_MODULE (response) --- */
+typedef struct __attribute__((packed)) {
+    uint64_t module_handle;  /* Opaque handle (daemon-side CUmodule index) */
+} GpuRegisterModuleResponse;
+
+/* --- GPU_CMD_UNREGISTER_MODULE (request) --- */
+typedef struct __attribute__((packed)) {
+    uint64_t module_handle;
+} GpuUnregisterModuleRequest;
+
+/* --- GPU_CMD_REGISTER_FUNCTION (request) ---
+ * Payload: [GpuRegisterFunctionRequest][device_name string (null-terminated)] */
+typedef struct __attribute__((packed)) {
+    uint64_t module_handle;       /* From GPU_CMD_REGISTER_MODULE response */
+    uint64_t host_func_ptr;       /* Shim-side key for this function */
+    uint32_t device_name_len;     /* Length of device function name including null */
+} GpuRegisterFunctionRequest;
+
+/* --- GPU_CMD_REGISTER_FUNCTION (response) --- */
+#define GPU_MAX_KERNEL_PARAMS 64
+typedef struct __attribute__((packed)) {
+    uint32_t num_params;                        /* Number of kernel parameters */
+    uint32_t param_sizes[GPU_MAX_KERNEL_PARAMS]; /* Size (bytes) of each param */
+} GpuRegisterFunctionResponse;
+
+/* --- GPU_CMD_LAUNCH_KERNEL (request) ---
+ * Payload: [GpuLaunchKernelRequest][serialized arg data...] */
+typedef struct __attribute__((packed)) {
+    uint64_t host_func_ptr;       /* Identifies the function (shim-side key) */
+    uint32_t grid_dim_x;
+    uint32_t grid_dim_y;
+    uint32_t grid_dim_z;
+    uint32_t block_dim_x;
+    uint32_t block_dim_y;
+    uint32_t block_dim_z;
+    uint64_t shared_mem_bytes;
+    uint64_t stream_handle;       /* 0 = default stream */
+    uint32_t num_params;          /* Number of parameters */
+    uint32_t args_total_size;     /* Total bytes of serialized arg data following */
+} GpuLaunchKernelRequest;
+
+/* ================================================================
+ * Stream operations
  * ================================================================ */
+
+/* --- GPU_CMD_STREAM_CREATE (request) --- */
+typedef struct __attribute__((packed)) {
+    uint32_t flags;              /* cudaStreamDefault=0, cudaStreamNonBlocking=1 */
+} GpuStreamCreateRequest;
+
+/* --- GPU_CMD_STREAM_CREATE (response) --- */
+typedef struct __attribute__((packed)) {
+    uint64_t stream_handle;      /* Opaque handle (daemon-side cudaStream_t) */
+} GpuStreamCreateResponse;
+
+/* --- GPU_CMD_STREAM_DESTROY (request) --- */
+typedef struct __attribute__((packed)) {
+    uint64_t stream_handle;
+} GpuStreamDestroyRequest;
+
+/* --- GPU_CMD_STREAM_SYNCHRONIZE (request) --- */
+typedef struct __attribute__((packed)) {
+    uint64_t stream_handle;
+} GpuStreamSynchronizeRequest;
+
+/* ================================================================
+ * Event operations
+ * ================================================================ */
+
+/* --- GPU_CMD_EVENT_CREATE (request) --- */
+typedef struct __attribute__((packed)) {
+    uint32_t flags;              /* cudaEventDefault=0, cudaEventDisableTiming=2, etc. */
+} GpuEventCreateRequest;
+
+/* --- GPU_CMD_EVENT_CREATE (response) --- */
+typedef struct __attribute__((packed)) {
+    uint64_t event_handle;       /* Opaque handle (daemon-side cudaEvent_t) */
+} GpuEventCreateResponse;
+
+/* --- GPU_CMD_EVENT_DESTROY (request) --- */
+typedef struct __attribute__((packed)) {
+    uint64_t event_handle;
+} GpuEventDestroyRequest;
+
+/* --- GPU_CMD_EVENT_RECORD (request) --- */
+typedef struct __attribute__((packed)) {
+    uint64_t event_handle;
+    uint64_t stream_handle;      /* 0 = default stream */
+} GpuEventRecordRequest;
+
+/* --- GPU_CMD_EVENT_SYNCHRONIZE (request) --- */
+typedef struct __attribute__((packed)) {
+    uint64_t event_handle;
+} GpuEventSynchronizeRequest;
+
+/* --- GPU_CMD_EVENT_ELAPSED_TIME (request) --- */
+typedef struct __attribute__((packed)) {
+    uint64_t start_event;
+    uint64_t end_event;
+} GpuEventElapsedTimeRequest;
+
+/* --- GPU_CMD_EVENT_ELAPSED_TIME (response) --- */
+typedef struct __attribute__((packed)) {
+    float elapsed_ms;
+} GpuEventElapsedTimeResponse;
+
+/* ================================================================
+ * Helpers
+ * ================================================================ */
+
 static inline uint32_t gpu_memcpy_h2d_payload_len(uint64_t data_size)
 {
     return (uint32_t)(sizeof(GpuMemcpyRequest) + data_size);
