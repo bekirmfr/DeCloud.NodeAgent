@@ -56,6 +56,10 @@ typedef enum {
     GPU_CMD_REGISTER_FUNCTION      = 0x52,  /* Map host ptr → device function name */
     GPU_CMD_REGISTER_VAR           = 0x53,  /* Register device variable */
 
+    /* Resource management */
+    GPU_CMD_SET_MEMORY_QUOTA       = 0x60,  /* Set per-VM GPU memory quota */
+    GPU_CMD_GET_USAGE_STATS        = 0x61,  /* Query cumulative GPU usage */
+
     /* Lifecycle */
     GPU_CMD_HELLO                  = 0xF0,  /* Handshake: shim → daemon */
     GPU_CMD_GOODBYE                = 0xF1,  /* Graceful disconnect */
@@ -307,6 +311,34 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     float elapsed_ms;
 } GpuEventElapsedTimeResponse;
+
+/* ================================================================
+ * Resource management — memory quotas & usage metering
+ * ================================================================ */
+
+/* --- GPU_CMD_SET_MEMORY_QUOTA (request) ---
+ * Sent by the orchestrator (via daemon CLI or config) to cap per-VM
+ * GPU memory usage. The daemon enforces this on cudaMalloc. */
+typedef struct __attribute__((packed)) {
+    uint64_t quota_bytes;        /* 0 = unlimited */
+} GpuSetMemoryQuotaRequest;
+
+/* --- GPU_CMD_GET_USAGE_STATS (response) ---
+ * Cumulative GPU usage for a single VM connection, used for billing. */
+typedef struct __attribute__((packed)) {
+    uint64_t memory_allocated;   /* Current GPU memory in use (bytes) */
+    uint64_t memory_quota;       /* Configured quota (0 = unlimited) */
+    uint64_t peak_memory;        /* High-water mark (bytes) */
+    uint64_t total_alloc_bytes;  /* Cumulative bytes allocated */
+    uint32_t kernel_launches;    /* Total kernel launches */
+    uint32_t kernel_timeouts;    /* Kernels killed by timeout */
+    uint64_t kernel_time_us;     /* Cumulative kernel execution time (µs) */
+    uint64_t connect_time_us;    /* Time since connection (µs) */
+} GpuUsageStatsResponse;
+
+/* Default kernel execution timeout (microseconds). 0 = no timeout.
+ * Can be overridden per-daemon via -t flag. */
+#define GPU_PROXY_DEFAULT_KERNEL_TIMEOUT_US  (30ULL * 1000000ULL)  /* 30 seconds */
 
 /* ================================================================
  * Helpers

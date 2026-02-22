@@ -340,3 +340,34 @@ public enum ServiceReadiness
     /// <summary>cloud-init reported error (System service only)</summary>
     Failed
 }
+
+/// <summary>
+/// GPU usage statistics for a single VM connection, used for billing and monitoring.
+/// Populated by the GPU proxy daemon via the GET_USAGE_STATS protocol command.
+/// </summary>
+public class GpuUsageStats
+{
+    /// <summary>Current GPU memory allocated (bytes)</summary>
+    public long MemoryAllocated { get; set; }
+
+    /// <summary>Configured memory quota (0 = unlimited)</summary>
+    public long MemoryQuota { get; set; }
+
+    /// <summary>Peak GPU memory usage (bytes)</summary>
+    public long PeakMemory { get; set; }
+
+    /// <summary>Cumulative total bytes allocated</summary>
+    public long TotalAllocBytes { get; set; }
+
+    /// <summary>Total kernel launches</summary>
+    public int KernelLaunches { get; set; }
+
+    /// <summary>Number of kernels killed by timeout</summary>
+    public int KernelTimeouts { get; set; }
+
+    /// <summary>Cumulative kernel execution time (microseconds)</summary>
+    public long KernelTimeUs { get; set; }
+
+    /// <summary>Time since VM connected (microseconds)</summary>
+    public long ConnectTimeUs { get; set; }
+}
