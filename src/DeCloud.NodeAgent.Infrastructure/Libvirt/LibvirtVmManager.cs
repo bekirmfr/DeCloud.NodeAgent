@@ -641,6 +641,27 @@ public class LibvirtVmManager : IVmManager
             }
 
             // =====================================================
+            // STEP 6.5: Bind GPU to VFIO (if GPU passthrough requested)
+            // =====================================================
+            if (!string.IsNullOrEmpty(spec.GpuPciAddress))
+            {
+                _logger.LogInformation("VM {VmId}: GPU passthrough requested for {PciAddr}",
+                    spec.Id, spec.GpuPciAddress);
+
+                var vfioBound = await BindToVfioAsync(spec.GpuPciAddress, spec.Id, ct);
+                if (!vfioBound)
+                {
+                    _logger.LogError(
+                        "VM {VmId}: Failed to bind GPU {PciAddr} to vfio-pci. " +
+                        "VM will be created without GPU passthrough.",
+                        spec.Id, spec.GpuPciAddress);
+                    // Don't fail the VM — it was already defined. Log the error and let
+                    // the operator investigate. The VM start will fail if libvirt can't
+                    // access the device, which gives a clear error message.
+                }
+            }
+
+            // =====================================================
             // STEP 7: Start the VM
             // =====================================================
             instance.State = VmState.Starting;
@@ -923,6 +944,12 @@ public class LibvirtVmManager : IVmManager
         {
             await _executor.ExecuteAsync("virsh", $"destroy {vmId}", ct);
             await Task.Delay(500, ct);
+        }
+
+        // Return GPU to host if passthrough was active
+        if (!string.IsNullOrEmpty(instance.Spec.GpuPciAddress))
+        {
+            await UnbindFromVfioAsync(instance.Spec.GpuPciAddress, vmId, ct);
         }
 
         // Undefine from libvirt
@@ -1782,6 +1809,180 @@ public class LibvirtVmManager : IVmManager
         return merged;
     }
 
+    // =====================================================================
+    // VFIO GPU PASSTHROUGH HELPERS
+    // =====================================================================
+
+    /// <summary>
+    /// Parse a PCI address like "0000:01:00.0" into its domain/bus/slot/function components.
+    /// Returns null if the address cannot be parsed.
+    /// </summary>
+    internal static (int Domain, int Bus, int Slot, int Function)? ParsePciAddress(string pciAddress)
+    {
+        if (string.IsNullOrWhiteSpace(pciAddress))
+            return null;
+
+        var addr = ResourceDiscoveryService.NormalizePciAddress(pciAddress);
+
+        // Expected format: DDDD:BB:SS.F (e.g., 0000:01:00.0)
+        var parts = addr.Split(new[] { ':', '.' });
+        if (parts.Length != 4)
+            return null;
+
+        if (int.TryParse(parts[0], System.Globalization.NumberStyles.HexNumber, null, out var domain) &&
+            int.TryParse(parts[1], System.Globalization.NumberStyles.HexNumber, null, out var bus) &&
+            int.TryParse(parts[2], System.Globalization.NumberStyles.HexNumber, null, out var slot) &&
+            int.TryParse(parts[3], System.Globalization.NumberStyles.HexNumber, null, out var func))
+        {
+            return (domain, bus, slot, func);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Bind a PCI device to the vfio-pci driver so it can be passed through to a VM.
+    /// Steps:
+    ///   1. Unbind from current driver (e.g. nvidia)
+    ///   2. Set driver_override to vfio-pci
+    ///   3. Trigger reprobe
+    /// </summary>
+    private async Task<bool> BindToVfioAsync(string pciAddress, string vmId, CancellationToken ct)
+    {
+        var addr = ResourceDiscoveryService.NormalizePciAddress(pciAddress);
+        _logger.LogInformation("VM {VmId}: Binding GPU {PciAddr} to vfio-pci", vmId, addr);
+
+        try
+        {
+            // Ensure vfio-pci module is loaded
+            var modprobeResult = await _executor.ExecuteAsync("modprobe", "vfio-pci", ct);
+            if (!modprobeResult.Success)
+            {
+                _logger.LogWarning("VM {VmId}: modprobe vfio-pci failed: {Error}. " +
+                    "Continuing anyway (module may already be loaded).",
+                    vmId, modprobeResult.StandardError);
+            }
+
+            var driverPath = $"/sys/bus/pci/devices/{addr}/driver";
+
+            // Step 1: Unbind from current driver
+            if (Directory.Exists(driverPath))
+            {
+                var unbindResult = await _executor.ExecuteAsync(
+                    "bash", $"-c \"echo '{addr}' > /sys/bus/pci/devices/{addr}/driver/unbind\"", ct);
+
+                if (!unbindResult.Success)
+                {
+                    _logger.LogError("VM {VmId}: Failed to unbind GPU {PciAddr} from current driver: {Error}",
+                        vmId, addr, unbindResult.StandardError);
+                    return false;
+                }
+
+                _logger.LogInformation("VM {VmId}: Unbound GPU {PciAddr} from existing driver", vmId, addr);
+            }
+
+            // Step 2: Set driver_override to vfio-pci
+            var overrideResult = await _executor.ExecuteAsync(
+                "bash", $"-c \"echo 'vfio-pci' > /sys/bus/pci/devices/{addr}/driver_override\"", ct);
+
+            if (!overrideResult.Success)
+            {
+                _logger.LogError("VM {VmId}: Failed to set driver_override for GPU {PciAddr}: {Error}",
+                    vmId, addr, overrideResult.StandardError);
+                return false;
+            }
+
+            // Step 3: Trigger reprobe so vfio-pci picks up the device
+            var probeResult = await _executor.ExecuteAsync(
+                "bash", $"-c \"echo '{addr}' > /sys/bus/pci/drivers_probe\"", ct);
+
+            if (!probeResult.Success)
+            {
+                _logger.LogError("VM {VmId}: Failed to reprobe GPU {PciAddr}: {Error}",
+                    vmId, addr, probeResult.StandardError);
+                return false;
+            }
+
+            // Verify the device is now bound to vfio-pci
+            await Task.Delay(500, ct); // Give kernel time to bind
+            var verifyResult = await _executor.ExecuteAsync(
+                "bash", $"-c \"readlink /sys/bus/pci/devices/{addr}/driver\"", ct);
+
+            if (verifyResult.Success && verifyResult.StandardOutput.Contains("vfio-pci"))
+            {
+                _logger.LogInformation("VM {VmId}: GPU {PciAddr} successfully bound to vfio-pci", vmId, addr);
+                return true;
+            }
+
+            _logger.LogWarning("VM {VmId}: GPU {PciAddr} driver binding could not be verified (driver: {Driver})",
+                vmId, addr, verifyResult.StandardOutput.Trim());
+            return true; // Proceed anyway — libvirt may still handle it
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "VM {VmId}: Exception during VFIO bind for GPU {PciAddr}", vmId, addr);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Unbind a PCI device from vfio-pci and clear driver_override so the
+    /// original host driver (e.g. nvidia) can reclaim it.
+    /// Called during VM deletion to return the GPU to the host.
+    /// </summary>
+    private async Task UnbindFromVfioAsync(string pciAddress, string vmId, CancellationToken ct)
+    {
+        var addr = ResourceDiscoveryService.NormalizePciAddress(pciAddress);
+        _logger.LogInformation("VM {VmId}: Returning GPU {PciAddr} to host (unbinding from vfio-pci)", vmId, addr);
+
+        try
+        {
+            // Step 1: Unbind from vfio-pci
+            var unbindPath = $"/sys/bus/pci/devices/{addr}/driver";
+            if (Directory.Exists(unbindPath))
+            {
+                await _executor.ExecuteAsync(
+                    "bash", $"-c \"echo '{addr}' > /sys/bus/pci/devices/{addr}/driver/unbind\"", ct);
+            }
+
+            // Step 2: Clear driver_override so original driver can bind
+            await _executor.ExecuteAsync(
+                "bash", $"-c \"echo '' > /sys/bus/pci/devices/{addr}/driver_override\"", ct);
+
+            // Step 3: Reprobe to let original driver reclaim
+            await _executor.ExecuteAsync(
+                "bash", $"-c \"echo '{addr}' > /sys/bus/pci/drivers_probe\"", ct);
+
+            _logger.LogInformation("VM {VmId}: GPU {PciAddr} returned to host", vmId, addr);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "VM {VmId}: Failed to return GPU {PciAddr} to host. " +
+                "Manual intervention may be needed (echo '' > /sys/bus/pci/devices/{PciAddr}/driver_override)",
+                vmId, addr, addr);
+        }
+    }
+
+    /// <summary>
+    /// Generate libvirt XML for PCI hostdev passthrough of a GPU.
+    /// </summary>
+    private static string GenerateGpuPassthroughXml(string pciAddress)
+    {
+        var parsed = ParsePciAddress(pciAddress);
+        if (parsed == null)
+            return string.Empty;
+
+        var (domain, bus, slot, function) = parsed.Value;
+
+        return $@"
+                <hostdev mode='subsystem' type='pci' managed='yes'>
+                  <source>
+                    <address domain='0x{domain:X4}' bus='0x{bus:X2}' slot='0x{slot:X2}' function='0x{function:X1}'/>
+                  </source>
+                </hostdev>";
+    }
+
     private string GenerateLibvirtXml(VmSpec spec, string diskPath, string? cloudInitIso, int vncPort)
     {
         // ========================================
@@ -1939,6 +2140,30 @@ public class LibvirtVmManager : IVmManager
         };
 
         // ========================================
+        // GPU PASSTHROUGH (VFIO)
+        // ========================================
+        var gpuPassthroughXml = string.Empty;
+        var hasGpuPassthrough = !string.IsNullOrEmpty(spec.GpuPciAddress);
+
+        if (hasGpuPassthrough)
+        {
+            gpuPassthroughXml = GenerateGpuPassthroughXml(spec.GpuPciAddress!);
+            if (string.IsNullOrEmpty(gpuPassthroughXml))
+            {
+                _logger.LogWarning(
+                    "VM {VmId}: GPU PCI address '{PciAddr}' could not be parsed, skipping GPU passthrough",
+                    spec.Id, spec.GpuPciAddress);
+                hasGpuPassthrough = false;
+            }
+        }
+
+        // IOMMU must be enabled in the <features> block for VFIO passthrough
+        var iommuFeature = hasGpuPassthrough
+            ? @"
+                <ioapic driver='qemu'/>"
+            : "";
+
+        // ========================================
         // COMPLETE LIBVIRT XML
         // ========================================
         return $@"
@@ -1954,9 +2179,9 @@ public class LibvirtVmManager : IVmManager
               </os>
               <features>
                 <acpi/>
-                <apic/>
+                <apic/>{iommuFeature}
               </features>
-              <cpu mode='host-passthrough' check='none'/>
+              <cpu mode='host-passthrough' check='none'{(hasGpuPassthrough ? " migratable='off'" : "")}/>
               <clock offset='utc'>
                 <timer name='rtc' tickpolicy='catchup'/>
                 <timer name='pit' tickpolicy='delay'/>
@@ -1990,7 +2215,7 @@ public class LibvirtVmManager : IVmManager
                 </video>
                 <rng model='virtio'>
                   <backend model='random'>/dev/urandom</backend>
-                </rng>
+                </rng>{gpuPassthroughXml}
                 <channel type='unix'>
                   <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.Id}.org.qemu.guest_agent.0'/>
                   <target type='virtio' name='org.qemu.guest_agent.0'/>
@@ -2198,6 +2423,29 @@ public class LibvirtVmManager : IVmManager
         };
 
         // ========================================
+        // GPU PASSTHROUGH (VFIO)
+        // ========================================
+        var gpuPassthroughXml = string.Empty;
+        var hasGpuPassthrough = !string.IsNullOrEmpty(spec.GpuPciAddress);
+
+        if (hasGpuPassthrough)
+        {
+            gpuPassthroughXml = GenerateGpuPassthroughXml(spec.GpuPciAddress!);
+            if (string.IsNullOrEmpty(gpuPassthroughXml))
+            {
+                _logger.LogWarning(
+                    "VM {VmId}: GPU PCI address '{PciAddr}' could not be parsed, skipping GPU passthrough",
+                    spec.Id, spec.GpuPciAddress);
+                hasGpuPassthrough = false;
+            }
+        }
+
+        var iommuFeature = hasGpuPassthrough
+            ? @"
+                <ioapic driver='qemu'/>"
+            : "";
+
+        // ========================================
         // COMPLETE LIBVIRT XML
         // ========================================
         return $@"
@@ -2210,9 +2458,9 @@ public class LibvirtVmManager : IVmManager
               {osSection}
               <features>
                 <acpi/>
-                <apic/>
+                <apic/>{iommuFeature}
               </features>
-              <cpu mode='host-passthrough' check='none'/>
+              <cpu mode='host-passthrough' check='none'{(hasGpuPassthrough ? " migratable='off'" : "")}/>
               <clock offset='utc'>
                 <timer name='rtc' tickpolicy='catchup'/>
                 <timer name='pit' tickpolicy='delay'/>
@@ -2248,7 +2496,7 @@ public class LibvirtVmManager : IVmManager
                 </video>
                 <rng model='virtio'>
                   <backend model='random'>/dev/urandom</backend>
-                </rng>
+                </rng>{gpuPassthroughXml}
                 <channel type='unix'>
                   <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.Id}.org.qemu.guest_agent.0'/>
                   <target type='virtio' name='org.qemu.guest_agent.0'/>
