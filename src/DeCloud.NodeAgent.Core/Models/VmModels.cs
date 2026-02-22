@@ -33,18 +33,13 @@ public class VmSpec
     public string BaseImageHash { get; set; } = string.Empty; // SHA256 for verification
 
     // GPU
-    /// <summary>
-    /// Whether this VM requires GPU access.
-    /// Set by the orchestrator when the template or user request includes a GPU.
-    /// Triggers GPU mode auto-selection (Passthrough or Proxied) during VM creation.
-    /// </summary>
-    public bool RequiresGpu { get; set; }
     public string? GpuPciAddress { get; set; }
 
     /// <summary>
     /// How GPU access is provided to this VM.
     /// None = no GPU, Passthrough = VFIO (dedicated), Proxied = GPU proxy daemon (shared).
-    /// When the orchestrator doesn't specify, the node agent auto-selects based on IOMMU availability.
+    /// Set by the orchestrator as a scheduling parameter — the orchestrator picks the mode
+    /// based on node capabilities (IOMMU, GPU availability) during scheduling.
     /// </summary>
     public GpuMode GpuMode { get; set; } = GpuMode.None;
 
