@@ -35,6 +35,21 @@ public class VmSpec
     // Optional GPU passthrough (VirtualMachine mode)
     public string? GpuPciAddress { get; set; }
 
+    /// <summary>
+    /// How GPU access is provided to this VM.
+    /// None = no GPU, Passthrough = VFIO (dedicated), Proxied = GPU proxy daemon (shared).
+    /// When the orchestrator doesn't specify, the node agent auto-selects based on IOMMU availability.
+    /// </summary>
+    public GpuMode GpuMode { get; set; } = GpuMode.None;
+
+    /// <summary>
+    /// Vsock context ID (CID) assigned to this VM for host↔guest communication.
+    /// Used by the GPU proxy daemon to identify which VM is making requests.
+    /// CID 0 = hypervisor, 1 = reserved, 2 = host, 3+ = guests.
+    /// Set automatically by LibvirtVmManager when GpuMode is Proxied.
+    /// </summary>
+    public uint? VsockCid { get; set; }
+
     // Deployment mode (VM or Container)
     public DeploymentMode DeploymentMode { get; set; } = DeploymentMode.VirtualMachine;
 
@@ -145,6 +160,28 @@ public enum DeploymentMode
 {
     VirtualMachine = 0,
     Container = 1
+}
+
+/// <summary>
+/// How GPU access is provided to a virtual machine.
+/// </summary>
+public enum GpuMode
+{
+    /// <summary>No GPU access</summary>
+    None = 0,
+
+    /// <summary>
+    /// VFIO passthrough: GPU bound to vfio-pci, passed as PCI hostdev to VM.
+    /// Requires IOMMU enabled in BIOS/kernel. One GPU per VM, full performance.
+    /// </summary>
+    Passthrough = 1,
+
+    /// <summary>
+    /// GPU proxy: VM communicates with a host-side GPU proxy daemon over virtio-vsock.
+    /// A CUDA shim (LD_PRELOAD) inside the VM intercepts CUDA calls and forwards them.
+    /// Works without IOMMU. Multiple VMs can share one GPU.
+    /// </summary>
+    Proxied = 2
 }
 
 public enum QualityTier
