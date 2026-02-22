@@ -389,7 +389,7 @@ public class CommandProcessorService : BackgroundService
             else
             {
                 vmSpec.GpuMode = GpuMode.Passthrough;
-                _assignedGpus.TryAdd(vmSpec.GpuPciAddress, vmId);
+                _assignedGpus.TryAdd(vmSpec.GpuPciAddress, vmId!);
                 _logger.LogInformation(
                     "VM {VmId}: GpuPciAddress set, auto-selecting GpuMode=Passthrough", vmId);
             }
@@ -407,7 +407,7 @@ public class CommandProcessorService : BackgroundService
             {
                 vmSpec.GpuMode = GpuMode.Passthrough;
                 vmSpec.GpuPciAddress = passthroughGpu.PciAddress;
-                _assignedGpus.TryAdd(passthroughGpu.PciAddress, vmId);
+                _assignedGpus.TryAdd(passthroughGpu.PciAddress, vmId!);
                 _logger.LogInformation(
                     "VM {VmId}: IOMMU available, auto-selecting Passthrough for GPU {Model} ({PciAddr})",
                     vmId, passthroughGpu.Model, passthroughGpu.PciAddress);
