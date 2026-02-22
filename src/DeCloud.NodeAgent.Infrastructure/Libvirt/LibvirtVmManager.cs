@@ -38,6 +38,7 @@ public class LibvirtVmManager : IVmManager
     private readonly Dictionary<string, VmInstance> _vms = new();
     private readonly SemaphoreSlim _lock = new(1, 1);
     private int _nextVncPort;
+    private uint _nextVsockCid = 3; // CID 0=hypervisor, 1=reserved, 2=host, 3+=guests
     private bool _initialized = false;
     private string _hostArchitecture = "x86_64"; // Default, will be detected
 
@@ -126,9 +127,10 @@ public class LibvirtVmManager : IVmManager
             }
 
             // =====================================================
-            // STEP 3: Update next VNC port
+            // STEP 3: Update next VNC port and vsock CID
             // =====================================================
             await UpdateNextVncPortAsync(ct);
+            UpdateNextVsockCid();
 
             _initialized = true;
             _logger.LogInformation("✓ LibvirtVmManager initialized with {Count} VMs", _vms.Count);
@@ -427,6 +429,24 @@ public class LibvirtVmManager : IVmManager
         _logger.LogDebug("Next VNC port set to {Port}", _nextVncPort);
     }
 
+    /// <summary>
+    /// Recalculate the next available vsock CID from existing VMs.
+    /// CIDs 0-2 are reserved (hypervisor, reserved, host). Guest CIDs start at 3.
+    /// </summary>
+    private void UpdateNextVsockCid()
+    {
+        uint maxCid = 2; // Start scanning from 2 (host CID)
+        foreach (var vm in _vms.Values)
+        {
+            if (vm.Spec.VsockCid.HasValue && vm.Spec.VsockCid.Value > maxCid)
+            {
+                maxCid = vm.Spec.VsockCid.Value;
+            }
+        }
+        _nextVsockCid = maxCid + 1;
+        _logger.LogDebug("Next vsock CID set to {Cid}", _nextVsockCid);
+    }
+
     public async Task<VmState> GetVmStateFromLibvirtAsync(string vmId, CancellationToken ct)
     {
         var result = await _executor.ExecuteAsync("virsh", $"domstate {vmId}", ct);
@@ -463,6 +483,15 @@ public class LibvirtVmManager : IVmManager
             if (_vms.ContainsKey(spec.Id))
             {
                 return VmOperationResult.Fail(spec.Id, "VM already exists", "DUPLICATE");
+            }
+
+            // Assign vsock CID if GPU proxy mode is requested
+            if (spec.GpuMode == GpuMode.Proxied)
+            {
+                spec.VsockCid = _nextVsockCid++;
+                _logger.LogInformation(
+                    "VM {VmId}: GPU proxy mode — assigned vsock CID {Cid}",
+                    spec.Id, spec.VsockCid);
             }
 
             // Create VM instance tracking object
@@ -2164,6 +2193,16 @@ public class LibvirtVmManager : IVmManager
             : "";
 
         // ========================================
+        // VSOCK (GPU proxy communication channel)
+        // ========================================
+        var vsockXml = spec.VsockCid.HasValue
+            ? $@"
+                <vsock model='virtio'>
+                  <cid auto='no' value='{spec.VsockCid.Value}'/>
+                </vsock>"
+            : "";
+
+        // ========================================
         // COMPLETE LIBVIRT XML
         // ========================================
         return $@"
@@ -2215,7 +2254,7 @@ public class LibvirtVmManager : IVmManager
                 </video>
                 <rng model='virtio'>
                   <backend model='random'>/dev/urandom</backend>
-                </rng>{gpuPassthroughXml}
+                </rng>{gpuPassthroughXml}{vsockXml}
                 <channel type='unix'>
                   <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.Id}.org.qemu.guest_agent.0'/>
                   <target type='virtio' name='org.qemu.guest_agent.0'/>
@@ -2446,6 +2485,16 @@ public class LibvirtVmManager : IVmManager
             : "";
 
         // ========================================
+        // VSOCK (GPU proxy communication channel)
+        // ========================================
+        var vsockXml = spec.VsockCid.HasValue
+            ? $@"
+                <vsock model='virtio'>
+                  <cid auto='no' value='{spec.VsockCid.Value}'/>
+                </vsock>"
+            : "";
+
+        // ========================================
         // COMPLETE LIBVIRT XML
         // ========================================
         return $@"
@@ -2496,7 +2545,7 @@ public class LibvirtVmManager : IVmManager
                 </video>
                 <rng model='virtio'>
                   <backend model='random'>/dev/urandom</backend>
-                </rng>{gpuPassthroughXml}
+                </rng>{gpuPassthroughXml}{vsockXml}
                 <channel type='unix'>
                   <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.Id}.org.qemu.guest_agent.0'/>
                   <target type='virtio' name='org.qemu.guest_agent.0'/>

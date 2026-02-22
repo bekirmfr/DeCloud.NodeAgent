@@ -293,6 +293,8 @@ public class CommandProcessorService : BackgroundService
         string? sshPublicKey = GetStringProperty(root, "sshPublicKey", "SshPublicKey");
         string? userData = GetStringProperty(root, "userData", "UserData");
         string? gpuPciAddress = GetStringProperty(root, "gpuPciAddress", "GpuPciAddress");
+        int gpuModeInt = GetIntProperty(root, "gpuMode", "GpuMode") ?? 0;
+        var gpuMode = (GpuMode)gpuModeInt;
         int deploymentModeInt = GetIntProperty(root, "deploymentMode", "DeploymentMode") ?? 0;
         var deploymentMode = (DeploymentMode)deploymentModeInt;
         string? containerImage = GetStringProperty(root, "containerImage", "ContainerImage");
@@ -332,6 +334,7 @@ public class CommandProcessorService : BackgroundService
             SshPublicKey = sshPublicKey,
             CloudInitUserData = userData,
             GpuPciAddress = gpuPciAddress,
+            GpuMode = gpuMode,
             DeploymentMode = deploymentMode,
             ContainerImage = containerImage,
             EnvironmentVariables = environmentVariables,
@@ -356,13 +359,48 @@ public class CommandProcessorService : BackgroundService
             }
         }
 
+        // ========================================
+        // GPU MODE AUTO-SELECTION
+        // ========================================
+        // If orchestrator explicitly set GpuMode, honour it.
+        // If GpuMode is None but GpuPciAddress is set, infer Passthrough.
+        // If this is a GPU/Inference workload with GpuMode=None, auto-detect
+        // based on hardware: IOMMU available → Passthrough, else → Proxied.
+        if (vmSpec.GpuMode == GpuMode.None && !string.IsNullOrEmpty(vmSpec.GpuPciAddress))
+        {
+            vmSpec.GpuMode = GpuMode.Passthrough;
+            _logger.LogInformation(
+                "VM {VmId}: GpuPciAddress set, auto-selecting GpuMode=Passthrough", vmId);
+        }
+        else if (vmSpec.GpuMode == GpuMode.None &&
+                 vmSpec.VmType is VmType.Gpu or VmType.Inference &&
+                 deploymentMode == DeploymentMode.VirtualMachine)
+        {
+            var inventory = await _resourceDiscovery.GetInventoryCachedAsync(ct);
+            var passthroughGpu = inventory?.Gpus.FirstOrDefault(g => g.IsAvailableForPassthrough);
+            if (passthroughGpu != null)
+            {
+                vmSpec.GpuMode = GpuMode.Passthrough;
+                vmSpec.GpuPciAddress = passthroughGpu.PciAddress;
+                _logger.LogInformation(
+                    "VM {VmId}: IOMMU available, auto-selecting Passthrough for GPU {Model} ({PciAddr})",
+                    vmId, passthroughGpu.Model, passthroughGpu.PciAddress);
+            }
+            else if (inventory?.SupportsGpu == true)
+            {
+                vmSpec.GpuMode = GpuMode.Proxied;
+                _logger.LogInformation(
+                    "VM {VmId}: No IOMMU, auto-selecting Proxied GPU mode (vsock)", vmId);
+            }
+        }
+
         _logger.LogInformation(
             "Creating {VmType} type {Mode} {VmId}: {VCpus} vCPUs, {MemoryMB}MB RAM, " +
-            "{DiskGB}GB disk, image: {ImageUrl}, quality tier: {QualityTier}",
+            "{DiskGB}GB disk, image: {ImageUrl}, quality tier: {QualityTier}, GPU: {GpuMode}",
             vmSpec.VmType.ToString(), deploymentMode, vmId, virtualCpuCores,
             memoryBytes / 1024 / 1024, diskBytes / 1024 / 1024 / 1024,
             deploymentMode == DeploymentMode.Container ? containerImage : baseImageUrl,
-            qualityTier);
+            qualityTier, vmSpec.GpuMode);
 
         if (deploymentMode == DeploymentMode.Container)
         {

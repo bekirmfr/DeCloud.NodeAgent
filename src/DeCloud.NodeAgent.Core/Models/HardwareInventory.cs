@@ -23,6 +23,12 @@ public class HardwareInventory
     /// True if any GPU supports container-based sharing (Docker + NVIDIA Container Toolkit)
     /// </summary>
     public bool SupportsGpuContainers { get; set; }
+
+    /// <summary>
+    /// True if GPU proxy mode is available: GPU detected but no IOMMU,
+    /// so GPU access is provided via a host-side proxy daemon over virtio-vsock.
+    /// </summary>
+    public bool SupportsGpuProxy { get; set; }
 }
 
 public class CpuInfo
@@ -110,6 +116,12 @@ public class GpuInfo
     /// Set when Docker daemon and nvidia runtime are detected.
     /// </summary>
     public bool IsAvailableForContainerSharing { get; set; }
+
+    /// <summary>
+    /// True if GPU can be shared via the host-side GPU proxy daemon over virtio-vsock.
+    /// Set when GPU is detected but IOMMU is not available (no VFIO passthrough).
+    /// </summary>
+    public bool IsAvailableForProxiedSharing { get; set; }
 
     // Current utilization
     public double GpuUsagePercent { get; set; }

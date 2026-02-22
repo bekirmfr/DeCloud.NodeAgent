@@ -109,6 +109,21 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                     supportsGpuContainers ? "enabled" : "disabled");
             }
 
+            // GPU proxy mode: available when GPU exists but VFIO passthrough is not.
+            // The GPU proxy daemon on the host bridges CUDA calls from VMs over virtio-vsock.
+            var hasAnyPassthrough = gpus.Any(g => g.IsAvailableForPassthrough);
+            var supportsGpuProxy = supportsGpu && !hasAnyPassthrough && !_isWindows;
+            if (supportsGpuProxy)
+            {
+                foreach (var gpu in gpus)
+                {
+                    gpu.IsAvailableForProxiedSharing = true;
+                }
+                _logger.LogInformation(
+                    "GPU proxy mode available: {GpuCount} GPU(s) accessible via virtio-vsock proxy (no IOMMU)",
+                    gpus.Count);
+            }
+
             var inventory = new HardwareInventory
             {
                 Cpu = cpu,
@@ -119,6 +134,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                 Network = network,
                 ContainerRuntimes = containerRuntimes,
                 SupportsGpuContainers = supportsGpuContainers,
+                SupportsGpuProxy = supportsGpuProxy,
                 CollectedAt = DateTime.UtcNow
             };
 
