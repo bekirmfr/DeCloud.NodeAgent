@@ -58,12 +58,24 @@ typedef enum {
 
     /* Resource management */
     GPU_CMD_SET_MEMORY_QUOTA       = 0x60,  /* Set per-VM GPU memory quota */
-    GPU_CMD_GET_USAGE_STATS        = 0x61,  /* Query cumulative GPU usage */
+    GPU_CMD_GET_USAGE_STATS        = 0x61,  /* Query cumulative GPU usage (pull) */
+    GPU_CMD_REPORT_USAGE_STATS     = 0x62,  /* Guest agent pushes GPU stats (push) */
 
     /* Lifecycle */
-    GPU_CMD_HELLO                  = 0xF0,  /* Handshake: shim → daemon */
+    GPU_CMD_HELLO                  = 0xF0,  /* Handshake: shim/agent → daemon */
     GPU_CMD_GOODBYE                = 0xF1,  /* Graceful disconnect */
 } GpuProxyCmd;
+
+/* Connection modes — sent in HELLO to tell the daemon what kind of
+ * client is connecting.  Determines which commands are valid on this
+ * connection.
+ *
+ *   PROXY  — CUDA shim in non-IOMMU VM.  Full bidirectional proxy.
+ *   METER  — Guest agent in passthrough VM.  Metering only (push). */
+typedef enum {
+    GPU_CONN_PROXY  = 0,  /* CUDA shim: full proxy mode (non-IOMMU) */
+    GPU_CONN_METER  = 1,  /* Guest agent: metering-only (passthrough) */
+} GpuConnectionMode;
 
 /* cudaMemcpyKind equivalent */
 typedef enum {
@@ -101,6 +113,7 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint32_t shim_version;   /* Shim protocol version */
     uint32_t pid;            /* Guest PID (for logging) */
+    uint32_t conn_mode;      /* GpuConnectionMode (0=proxy, 1=meter) */
 } GpuHelloRequest;
 
 /* --- GPU_CMD_HELLO (response) --- */
@@ -335,6 +348,26 @@ typedef struct __attribute__((packed)) {
     uint64_t kernel_time_us;     /* Cumulative kernel execution time (µs) */
     uint64_t connect_time_us;    /* Time since connection (µs) */
 } GpuUsageStatsResponse;
+
+/* --- GPU_CMD_REPORT_USAGE_STATS (request) ---
+ * Pushed periodically by the guest agent (passthrough VMs).
+ * Fields mirror GpuUsageStatsResponse but the data source is
+ * nvidia-smi / NVML inside the VM rather than the proxy daemon. */
+typedef struct __attribute__((packed)) {
+    uint64_t memory_allocated;   /* Current GPU memory in use (bytes) */
+    uint64_t memory_total;       /* Total GPU memory (bytes) */
+    uint64_t peak_memory;        /* High-water mark (bytes) */
+    uint32_t gpu_utilization;    /* GPU core utilization % (0-100) */
+    uint32_t mem_utilization;    /* Memory controller utilization % (0-100) */
+    int32_t  temperature_c;      /* GPU temperature (Celsius) */
+    uint32_t fan_speed_pct;      /* Fan speed % (0-100, 0 if passive) */
+    uint32_t power_usage_mw;     /* Current power draw (milliwatts) */
+    uint32_t power_limit_mw;     /* Power limit (milliwatts) */
+    uint64_t uptime_us;          /* Agent uptime (µs) */
+} GpuReportUsageStats;
+
+/* Default guest agent reporting interval (seconds) */
+#define GPU_AGENT_REPORT_INTERVAL_SEC  5
 
 /* Default kernel execution timeout (microseconds). 0 = no timeout.
  * Can be overridden per-daemon via -t flag. */

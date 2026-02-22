@@ -35,8 +35,13 @@ public class GpuProxyService
     public string ShimPath { get; set; } = "/usr/local/lib/libdecloud_cuda_shim.so";
 
     /// <summary>
-    /// Host-side directory exposed to VMs via virtiofs for shim delivery.
-    /// The shim .so is symlinked/copied here so the guest can mount it.
+    /// Path to the GPU guest agent binary (injected into passthrough VMs).
+    /// </summary>
+    public string AgentPath { get; set; } = "/usr/local/bin/decloud-gpu-agent";
+
+    /// <summary>
+    /// Host-side directory exposed to VMs via virtiofs for shim/agent delivery.
+    /// The shim .so and agent binary are copied here so the guest can mount it.
     /// </summary>
     public string ShimShareDir { get; set; } = "/usr/local/lib/decloud-gpu-shim";
 
@@ -105,6 +110,16 @@ public class GpuProxyService
                     "the shim is built and placed at this path.",
                     ShimPath);
             }
+
+            // Also copy the guest agent binary for passthrough VMs
+            var agentTargetPath = Path.Combine(ShimShareDir, "decloud-gpu-agent");
+            if (File.Exists(AgentPath) && !File.Exists(agentTargetPath))
+            {
+                File.Copy(AgentPath, agentTargetPath, overwrite: true);
+                _logger.LogInformation(
+                    "Copied GPU guest agent to virtiofs share: {Src} -> {Dst}",
+                    AgentPath, agentTargetPath);
+            }
         }
         catch (Exception ex)
         {
@@ -127,12 +142,14 @@ public class GpuProxyService
                 return true;
             }
 
-            // Check if proxy mode is supported
+            // Check if this node has any GPU that needs the daemon.
+            // Proxy mode:      daemon proxies CUDA calls (non-IOMMU).
+            // Passthrough mode: daemon receives metering stats from guest agent.
             var inventory = await _resourceDiscovery.GetInventoryCachedAsync(ct);
-            if (inventory?.SupportsGpuProxy != true)
+            if (inventory?.SupportsGpu != true)
             {
                 _logger.LogDebug(
-                    "GPU proxy mode not supported on this node (no GPU or IOMMU available)");
+                    "No GPU detected on this node — daemon not needed");
                 return false;
             }
 

@@ -343,31 +343,57 @@ public enum ServiceReadiness
 
 /// <summary>
 /// GPU usage statistics for a single VM connection, used for billing and monitoring.
-/// Populated by the GPU proxy daemon via the GET_USAGE_STATS protocol command.
+/// Populated by the GPU proxy daemon (proxy mode) or guest agent (passthrough mode).
+/// Both sources feed into the same model for unified billing.
 /// </summary>
 public class GpuUsageStats
 {
+    // --- Common fields (both proxy and passthrough) ---
+
     /// <summary>Current GPU memory allocated (bytes)</summary>
     public long MemoryAllocated { get; set; }
 
-    /// <summary>Configured memory quota (0 = unlimited)</summary>
+    /// <summary>Configured memory quota (0 = unlimited). Proxy mode only.</summary>
     public long MemoryQuota { get; set; }
 
     /// <summary>Peak GPU memory usage (bytes)</summary>
     public long PeakMemory { get; set; }
 
-    /// <summary>Cumulative total bytes allocated</summary>
+    /// <summary>Cumulative total bytes allocated. Proxy mode only.</summary>
     public long TotalAllocBytes { get; set; }
 
-    /// <summary>Total kernel launches</summary>
+    /// <summary>Total kernel launches. Proxy mode only.</summary>
     public int KernelLaunches { get; set; }
 
-    /// <summary>Number of kernels killed by timeout</summary>
+    /// <summary>Number of kernels killed by timeout. Proxy mode only.</summary>
     public int KernelTimeouts { get; set; }
 
-    /// <summary>Cumulative kernel execution time (microseconds)</summary>
+    /// <summary>Cumulative kernel execution time (microseconds). Proxy mode only.</summary>
     public long KernelTimeUs { get; set; }
 
     /// <summary>Time since VM connected (microseconds)</summary>
     public long ConnectTimeUs { get; set; }
+
+    // --- Agent-reported fields (passthrough mode) ---
+
+    /// <summary>Total GPU memory on device (bytes). Agent mode only.</summary>
+    public long MemoryTotal { get; set; }
+
+    /// <summary>GPU core utilization % (0-100). Agent mode only.</summary>
+    public int GpuUtilization { get; set; }
+
+    /// <summary>Memory controller utilization % (0-100). Agent mode only.</summary>
+    public int MemUtilization { get; set; }
+
+    /// <summary>GPU temperature in Celsius. Agent mode only.</summary>
+    public int TemperatureCelsius { get; set; }
+
+    /// <summary>Current power draw in milliwatts. Agent mode only.</summary>
+    public int PowerUsageMw { get; set; }
+
+    /// <summary>Power limit in milliwatts. Agent mode only.</summary>
+    public int PowerLimitMw { get; set; }
+
+    /// <summary>Source of this data: "proxy" or "agent"</summary>
+    public string Source { get; set; } = "proxy";
 }

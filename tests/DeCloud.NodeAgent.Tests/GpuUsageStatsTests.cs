@@ -10,6 +10,7 @@ public class GpuUsageStatsTests
     {
         var stats = new GpuUsageStats();
 
+        // Common fields
         Assert.Equal(0, stats.MemoryAllocated);
         Assert.Equal(0, stats.MemoryQuota);
         Assert.Equal(0, stats.PeakMemory);
@@ -18,10 +19,21 @@ public class GpuUsageStatsTests
         Assert.Equal(0, stats.KernelTimeouts);
         Assert.Equal(0, stats.KernelTimeUs);
         Assert.Equal(0, stats.ConnectTimeUs);
+
+        // Agent fields
+        Assert.Equal(0, stats.MemoryTotal);
+        Assert.Equal(0, stats.GpuUtilization);
+        Assert.Equal(0, stats.MemUtilization);
+        Assert.Equal(0, stats.TemperatureCelsius);
+        Assert.Equal(0, stats.PowerUsageMw);
+        Assert.Equal(0, stats.PowerLimitMw);
+
+        // Default source
+        Assert.Equal("proxy", stats.Source);
     }
 
     [Fact]
-    public void GpuUsageStats_CanSetProperties()
+    public void GpuUsageStats_ProxyMode_CanSetProperties()
     {
         var stats = new GpuUsageStats
         {
@@ -33,6 +45,7 @@ public class GpuUsageStatsTests
             KernelTimeouts = 1,
             KernelTimeUs = 123456789L,
             ConnectTimeUs = 987654321L,
+            Source = "proxy",
         };
 
         Assert.Equal(512 * 1024 * 1024L, stats.MemoryAllocated);
@@ -43,6 +56,34 @@ public class GpuUsageStatsTests
         Assert.Equal(1, stats.KernelTimeouts);
         Assert.Equal(123456789L, stats.KernelTimeUs);
         Assert.Equal(987654321L, stats.ConnectTimeUs);
+        Assert.Equal("proxy", stats.Source);
+    }
+
+    [Fact]
+    public void GpuUsageStats_AgentMode_CanSetProperties()
+    {
+        var stats = new GpuUsageStats
+        {
+            MemoryAllocated = 2L * 1024 * 1024 * 1024,
+            MemoryTotal = 24L * 1024 * 1024 * 1024,
+            PeakMemory = 3L * 1024 * 1024 * 1024,
+            GpuUtilization = 85,
+            MemUtilization = 42,
+            TemperatureCelsius = 72,
+            PowerUsageMw = 250000,
+            PowerLimitMw = 350000,
+            ConnectTimeUs = 3600000000L,
+            Source = "agent",
+        };
+
+        Assert.Equal(2L * 1024 * 1024 * 1024, stats.MemoryAllocated);
+        Assert.Equal(24L * 1024 * 1024 * 1024, stats.MemoryTotal);
+        Assert.Equal(85, stats.GpuUtilization);
+        Assert.Equal(42, stats.MemUtilization);
+        Assert.Equal(72, stats.TemperatureCelsius);
+        Assert.Equal(250000, stats.PowerUsageMw);
+        Assert.Equal(350000, stats.PowerLimitMw);
+        Assert.Equal("agent", stats.Source);
     }
 
     [Fact]

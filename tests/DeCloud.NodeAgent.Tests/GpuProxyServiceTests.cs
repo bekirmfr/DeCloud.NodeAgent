@@ -31,6 +31,7 @@ public class GpuProxyServiceTests
     {
         Assert.Equal("/usr/local/bin/gpu-proxy-daemon", _service.DaemonPath);
         Assert.Equal("/usr/local/lib/libdecloud_cuda_shim.so", _service.ShimPath);
+        Assert.Equal("/usr/local/bin/decloud-gpu-agent", _service.AgentPath);
         Assert.Equal("/usr/local/lib/decloud-gpu-shim", _service.ShimShareDir);
         Assert.Equal(9999, _service.DaemonPort);
         Assert.Equal(5, _service.MaxCrashRestarts);
@@ -40,21 +41,21 @@ public class GpuProxyServiceTests
     }
 
     [Fact]
-    public async Task EnsureStartedAsync_ReturnsTrue_WhenAlreadyRunning()
+    public async Task EnsureStartedAsync_ReturnsFalse_WhenNoGpu()
     {
-        // Simulate that proxy mode is not supported (no GPU)
+        // No GPU detected on node — daemon should not start
         _resourceDiscovery.Setup(r => r.GetInventoryCachedAsync(It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new HardwareInventory { SupportsGpuProxy = false });
+            .ReturnsAsync(new HardwareInventory { SupportsGpu = false });
 
         var result = await _service.EnsureStartedAsync();
         Assert.False(result);
     }
 
     [Fact]
-    public async Task EnsureStartedAsync_ReturnsFalse_WhenNoGpuProxy()
+    public async Task EnsureStartedAsync_ReturnsFalse_WhenInventoryNull()
     {
         _resourceDiscovery.Setup(r => r.GetInventoryCachedAsync(It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new HardwareInventory { SupportsGpuProxy = false });
+            .ReturnsAsync((HardwareInventory?)null);
 
         var result = await _service.EnsureStartedAsync();
         Assert.False(result);
@@ -70,9 +71,9 @@ public class GpuProxyServiceTests
     public async Task EnsureHealthyAsync_ReturnsFalse_WhenNotRunning()
     {
         // Not running, no crashes yet — should attempt restart but fail
-        // because no GPU proxy support
+        // because no GPU detected
         _resourceDiscovery.Setup(r => r.GetInventoryCachedAsync(It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new HardwareInventory { SupportsGpuProxy = false });
+            .ReturnsAsync(new HardwareInventory { SupportsGpu = false });
 
         var result = await _service.EnsureHealthyAsync();
         Assert.False(result);
