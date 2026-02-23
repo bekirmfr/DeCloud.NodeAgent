@@ -42,6 +42,7 @@ public class LibvirtVmManager : IVmManager
     private uint _nextVsockCid = 3; // CID 0=hypervisor, 1=reserved, 2=host, 3+=guests
     private bool _initialized = false;
     private string _hostArchitecture = "x86_64"; // Default, will be detected
+    private bool? _hasVirtiofsd; // Cached virtiofsd availability
 
     public LibvirtVmManager(
         ICommandExecutor executor,
@@ -1770,11 +1771,18 @@ public class LibvirtVmManager : IVmManager
     /// </summary>
     private static string EnsureGpuProxyShim(string cloudInitYaml, uint vsockCid)
     {
-        // Guard: don't inject twice
-        if (cloudInitYaml.Contains("gpu-proxy.sh"))
-            return cloudInitYaml;
-
         var result = cloudInitYaml;
+
+        // If the orchestrator's UserData already contains GPU proxy entries,
+        // fix up any stale/hardcoded CID values to match the assigned vsock CID.
+        if (result.Contains("gpu-proxy.sh"))
+        {
+            result = Regex.Replace(
+                result,
+                @"DECLOUD_GPU_PROXY_CID=\d+",
+                $"DECLOUD_GPU_PROXY_CID={vsockCid}");
+            return result;
+        }
 
         // 1. Inject write_files entries for the GPU proxy environment
         var writeFilesBlock = $@"
@@ -1783,7 +1791,7 @@ public class LibvirtVmManager : IVmManager
     permissions: '0644'
     content: |
       # DeCloud GPU Proxy — CUDA shim configuration
-      export DECLOUD_GPU_PROXY_CID=2
+      export DECLOUD_GPU_PROXY_CID={vsockCid}
       export DECLOUD_GPU_PROXY_PORT=9999
       if [ -f /usr/local/lib/libdecloud_cuda_shim.so ]; then
         export LD_PRELOAD=/usr/local/lib/libdecloud_cuda_shim.so
@@ -1793,7 +1801,7 @@ public class LibvirtVmManager : IVmManager
   - path: /etc/decloud/gpu-proxy.env
     permissions: '0644'
     content: |
-      DECLOUD_GPU_PROXY_CID=2
+      DECLOUD_GPU_PROXY_CID={vsockCid}
       DECLOUD_GPU_PROXY_PORT=9999
       LD_PRELOAD=/usr/local/lib/libdecloud_cuda_shim.so
 ";
@@ -2134,6 +2142,34 @@ public class LibvirtVmManager : IVmManager
                 </hostdev>";
     }
 
+    /// <summary>
+    /// Check whether virtiofsd is available on the host (cached after first probe).
+    /// When missing, GPU-proxied VMs fall back to 9p for the shim filesystem share.
+    /// </summary>
+    private bool HasVirtiofsd()
+    {
+        if (_hasVirtiofsd.HasValue)
+            return _hasVirtiofsd.Value;
+
+        var paths = new[]
+        {
+            "/usr/libexec/virtiofsd",
+            "/usr/lib/qemu/virtiofsd",
+            "/usr/bin/virtiofsd",
+        };
+
+        _hasVirtiofsd = paths.Any(File.Exists);
+
+        if (_hasVirtiofsd.Value)
+            _logger.LogDebug("virtiofsd found on host");
+        else
+            _logger.LogWarning(
+                "virtiofsd not found on host — GPU-proxied VMs will use 9p fallback for shim delivery. " +
+                "Install virtiofsd for better performance: apt install virtiofsd");
+
+        return _hasVirtiofsd.Value;
+    }
+
     private string GenerateLibvirtXml(VmSpec spec, string diskPath, string? cloudInitIso, int vncPort)
     {
         // ========================================
@@ -2325,28 +2361,43 @@ public class LibvirtVmManager : IVmManager
             : "";
 
         // ========================================
-        // VIRTIOFS — GPU proxy shim delivery
+        // FILESYSTEM — GPU proxy shim delivery
         // ========================================
         // Expose the host directory containing the CUDA shim .so to
-        // the guest via virtiofs. The guest mounts this at /run/decloud/
-        // and cloud-init copies the .so to /usr/local/lib/.
-        var virtiofsXml = spec.GpuMode == GpuMode.Proxied
-            ? $@"
+        // the guest. Prefer virtiofs when virtiofsd is available;
+        // fall back to 9p so the VM can still boot without it.
+        var filesystemXml = "";
+        var memoryBackingXml = "";
+
+        if (spec.GpuMode == GpuMode.Proxied)
+        {
+            if (HasVirtiofsd())
+            {
+                filesystemXml = $@"
                 <filesystem type='mount' accessmode='passthrough'>
                   <driver type='virtiofs'/>
                   <source dir='/usr/local/lib/decloud-gpu-shim'/>
                   <target dir='decloud-shim'/>
-                </filesystem>"
-            : "";
+                </filesystem>";
 
-        // virtiofs requires a memory backing for the shared memory region
-        var memoryBackingXml = spec.GpuMode == GpuMode.Proxied
-            ? @"
+                // virtiofs requires a memory backing for the shared memory region
+                memoryBackingXml = @"
               <memoryBacking>
                 <source type='memfd'/>
                 <access mode='shared'/>
-              </memoryBacking>"
-            : "";
+              </memoryBacking>";
+            }
+            else
+            {
+                // 9p fallback — no virtiofsd required, no memoryBacking needed
+                filesystemXml = $@"
+                <filesystem type='mount' accessmode='passthrough'>
+                  <driver type='path' wrpolicy='immediate'/>
+                  <source dir='/usr/local/lib/decloud-gpu-shim'/>
+                  <target dir='decloud-shim'/>
+                </filesystem>";
+            }
+        }
 
         // ========================================
         // COMPLETE LIBVIRT XML
@@ -2400,7 +2451,7 @@ public class LibvirtVmManager : IVmManager
                 </video>
                 <rng model='virtio'>
                   <backend model='random'>/dev/urandom</backend>
-                </rng>{gpuPassthroughXml}{vsockXml}{virtiofsXml}
+                </rng>{gpuPassthroughXml}{vsockXml}{filesystemXml}
                 <channel type='unix'>
                   <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.Id}.org.qemu.guest_agent.0'/>
                   <target type='virtio' name='org.qemu.guest_agent.0'/>
@@ -2641,24 +2692,38 @@ public class LibvirtVmManager : IVmManager
             : "";
 
         // ========================================
-        // VIRTIOFS — GPU proxy shim delivery
+        // FILESYSTEM — GPU proxy shim delivery
         // ========================================
-        var virtiofsXml = spec.GpuMode == GpuMode.Proxied
-            ? $@"
+        var filesystemXml = "";
+        var memoryBackingXml = "";
+
+        if (spec.GpuMode == GpuMode.Proxied)
+        {
+            if (HasVirtiofsd())
+            {
+                filesystemXml = $@"
                 <filesystem type='mount' accessmode='passthrough'>
                   <driver type='virtiofs'/>
                   <source dir='/usr/local/lib/decloud-gpu-shim'/>
                   <target dir='decloud-shim'/>
-                </filesystem>"
-            : "";
+                </filesystem>";
 
-        var memoryBackingXml = spec.GpuMode == GpuMode.Proxied
-            ? @"
+                memoryBackingXml = @"
               <memoryBacking>
                 <source type='memfd'/>
                 <access mode='shared'/>
-              </memoryBacking>"
-            : "";
+              </memoryBacking>";
+            }
+            else
+            {
+                filesystemXml = $@"
+                <filesystem type='mount' accessmode='passthrough'>
+                  <driver type='path' wrpolicy='immediate'/>
+                  <source dir='/usr/local/lib/decloud-gpu-shim'/>
+                  <target dir='decloud-shim'/>
+                </filesystem>";
+            }
+        }
 
         // ========================================
         // COMPLETE LIBVIRT XML
@@ -2711,7 +2776,7 @@ public class LibvirtVmManager : IVmManager
                 </video>
                 <rng model='virtio'>
                   <backend model='random'>/dev/urandom</backend>
-                </rng>{gpuPassthroughXml}{vsockXml}{virtiofsXml}
+                </rng>{gpuPassthroughXml}{vsockXml}{filesystemXml}
                 <channel type='unix'>
                   <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.Id}.org.qemu.guest_agent.0'/>
                   <target type='virtio' name='org.qemu.guest_agent.0'/>
