@@ -2638,7 +2638,7 @@ public class LibvirtVmManager : IVmManager
         var sharedFsXml = spec.GpuMode == GpuMode.Proxied
             ? $@"
                 <filesystem type='mount' accessmode='passthrough'>
-                  <driver type='handle' wrpolicy='immediate'/>
+                  <driver type='path' wrpolicy='immediate'/>
                   <source dir='/usr/local/lib/decloud-gpu-shim'/>
                   <target dir='decloud-shim'/>
                 </filesystem>"
