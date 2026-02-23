@@ -457,19 +457,6 @@ static int handle_hello(int fd, const void *payload, uint32_t len)
         .device_count   = (uint32_t)count,
     };
 
-    /* Validate auth token for TCP connections */
-    if (ctx->is_tcp) {
-        char vm_id[64] = {0};
-        int tok_result = validate_token(hello.auth_token, vm_id, sizeof(vm_id));
-        if (tok_result < 0) {
-            LOG_ERR("TCP connection rejected: invalid auth token");
-            send_response(ctx->fd, GPU_CMD_HELLO, -1, NULL, 0);
-            return -1; /* Triggers disconnect */
-        }
-        strncpy(ctx->vm_id, vm_id, sizeof(ctx->vm_id) - 1);
-        LOG_INFO("TCP connection authenticated: VM %s (PID %u)", vm_id, hello.pid);
-    }
-
     return send_response(fd, GPU_CMD_HELLO, (int32_t)err,
                          &resp, sizeof(resp));
 }
@@ -1307,8 +1294,25 @@ static void *connection_handler(void *arg)
         /* Dispatch */
         int rc = 0;
         switch (hdr.cmd) {
+        // In connection_handler, after GPU_CMD_HELLO case:
         case GPU_CMD_HELLO:
             rc = handle_hello(fd, buf, hdr.payload_len);
+            /* Validate token for TCP connections after HELLO */
+            if (rc == 0 && ctx->is_tcp) {
+                GpuHelloRequest hello;
+                if (hdr.payload_len >= sizeof(hello)) {
+                    memcpy(&hello, buf, sizeof(hello));
+                    char vm_id[64] = {0};
+                    int tok_result = validate_token(hello.auth_token, vm_id, sizeof(vm_id));
+                    if (tok_result < 0) {
+                        LOG_ERR("TCP connection rejected: invalid auth token");
+                        rc = -1;
+                    } else {
+                        strncpy(ctx->vm_id, vm_id, sizeof(ctx->vm_id) - 1);
+                        LOG_INFO("TCP auth OK: VM %s (PID %u)", vm_id, hello.pid);
+                    }
+                }
+            }
             break;
         case GPU_CMD_GET_DEVICE_COUNT:
             rc = handle_get_device_count(fd);

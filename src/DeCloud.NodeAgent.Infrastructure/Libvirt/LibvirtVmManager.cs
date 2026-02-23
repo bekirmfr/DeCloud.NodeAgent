@@ -1697,7 +1697,7 @@ public class LibvirtVmManager : IVmManager
                 cloudInitYaml = EnsureGpuProxyShim(cloudInitYaml, spec.VsockCid, spec.GpuProxyToken);
                 _logger.LogInformation(
                     "VM {VmId}: Injected CUDA shim into cloud-init (vsock CID={Cid})",
-                    spec.Id, spec.VsockCid.Value);
+                    spec.Id, spec.VsockCid?.ToString() ?? "none (TCP)");
             }
 
             // =====================================================
