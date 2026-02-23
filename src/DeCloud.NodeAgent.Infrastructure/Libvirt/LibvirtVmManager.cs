@@ -1816,17 +1816,17 @@ public class LibvirtVmManager : IVmManager
         }
 
         // 2. Inject runcmd steps to install the shim and configure the system.
-        //    The host exposes the shim .so via a virtiofs shared mount
+        //    The host exposes the shim .so via a 9p shared mount
         //    (tag: decloud-shim → /usr/local/lib/decloud-gpu-shim/ on host).
         //    We mount it and copy the .so into the guest's /usr/local/lib/.
         var runcmdSteps = @"
-  # GPU proxy: mount virtiofs share and install CUDA shim from host
+  # GPU proxy: mount 9p share and install CUDA shim from host
   - mkdir -p /usr/local/lib /etc/decloud /run/decloud
   - |
-    # Mount the virtiofs share that the host exposes with the CUDA shim .so.
+    # Mount the 9p share that the host exposes with the CUDA shim .so.
     # The libvirt XML adds a <filesystem type='mount'> with tag 'decloud-shim'.
-    mount -t virtiofs decloud-shim /run/decloud 2>/dev/null || \
-      mount -t 9p -o trans=virtio,version=9p2000.L decloud-shim /run/decloud 2>/dev/null || true
+    mount -t 9p -o trans=virtio,version=9p2000.L decloud-shim /run/decloud 2>/dev/null || \
+      mount -t virtiofs decloud-shim /run/decloud 2>/dev/null || true
   - |
     # Copy the CUDA shim .so from the mounted share into the system library path
     if [ -f /run/decloud/libdecloud_cuda_shim.so ]; then
@@ -2325,27 +2325,17 @@ public class LibvirtVmManager : IVmManager
             : "";
 
         // ========================================
-        // VIRTIOFS — GPU proxy shim delivery
+        // 9P SHARED FS — GPU proxy shim delivery
         // ========================================
-        // Expose the host directory containing the CUDA shim .so to
-        // the guest via virtiofs. The guest mounts this at /run/decloud/
-        // and cloud-init copies the .so to /usr/local/lib/.
-        var virtiofsXml = spec.GpuMode == GpuMode.Proxied
+        // Delivers the CUDA shim .so from host dir to guest via virtio-9p.
+        // 9p is built into QEMU — no external daemon, works on all distros.
+        var sharedFsXml = spec.GpuMode == GpuMode.Proxied
             ? $@"
                 <filesystem type='mount' accessmode='passthrough'>
-                  <driver type='virtiofs'/>
+                  <driver type='handle' wrpolicy='immediate'/>
                   <source dir='/usr/local/lib/decloud-gpu-shim'/>
                   <target dir='decloud-shim'/>
                 </filesystem>"
-            : "";
-
-        // virtiofs requires a memory backing for the shared memory region
-        var memoryBackingXml = spec.GpuMode == GpuMode.Proxied
-            ? @"
-              <memoryBacking>
-                <source type='memfd'/>
-                <access mode='shared'/>
-              </memoryBacking>"
             : "";
 
         // ========================================
@@ -2356,7 +2346,7 @@ public class LibvirtVmManager : IVmManager
               <name>{spec.Id}</name>
               <uuid>{spec.Id}</uuid>
               <memory unit='bytes'>{spec.MemoryBytes}</memory>
-              <vcpu placement='static'>{spec.VirtualCpuCores}</vcpu>{memoryBackingXml}
+              <vcpu placement='static'>{spec.VirtualCpuCores}</vcpu>
               {cpuTune}
               <os>
                 <type arch='x86_64' machine='q35'>hvm</type>
@@ -2400,7 +2390,7 @@ public class LibvirtVmManager : IVmManager
                 </video>
                 <rng model='virtio'>
                   <backend model='random'>/dev/urandom</backend>
-                </rng>{gpuPassthroughXml}{vsockXml}{virtiofsXml}
+                </rng>{gpuPassthroughXml}{vsockXml}{sharedFsXml}
                 <channel type='unix'>
                   <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.Id}.org.qemu.guest_agent.0'/>
                   <target type='virtio' name='org.qemu.guest_agent.0'/>
@@ -2641,23 +2631,17 @@ public class LibvirtVmManager : IVmManager
             : "";
 
         // ========================================
-        // VIRTIOFS — GPU proxy shim delivery
+        // 9P SHARED FS — GPU proxy shim delivery
         // ========================================
-        var virtiofsXml = spec.GpuMode == GpuMode.Proxied
+        // Delivers the CUDA shim .so from host dir to guest via virtio-9p.
+        // 9p is built into QEMU — no external daemon, works on all distros.
+        var sharedFsXml = spec.GpuMode == GpuMode.Proxied
             ? $@"
                 <filesystem type='mount' accessmode='passthrough'>
-                  <driver type='virtiofs'/>
+                  <driver type='handle' wrpolicy='immediate'/>
                   <source dir='/usr/local/lib/decloud-gpu-shim'/>
                   <target dir='decloud-shim'/>
                 </filesystem>"
-            : "";
-
-        var memoryBackingXml = spec.GpuMode == GpuMode.Proxied
-            ? @"
-              <memoryBacking>
-                <source type='memfd'/>
-                <access mode='shared'/>
-              </memoryBacking>"
             : "";
 
         // ========================================
@@ -2668,7 +2652,7 @@ public class LibvirtVmManager : IVmManager
               <name>{spec.Id}</name>
               <uuid>{spec.Id}</uuid>
               <memory unit='bytes'>{spec.MemoryBytes}</memory>
-              <vcpu placement='static'>{spec.VirtualCpuCores}</vcpu>{memoryBackingXml}
+              <vcpu placement='static'>{spec.VirtualCpuCores}</vcpu>
               {cpuTune}
               {osSection}
               <features>
@@ -2711,7 +2695,7 @@ public class LibvirtVmManager : IVmManager
                 </video>
                 <rng model='virtio'>
                   <backend model='random'>/dev/urandom</backend>
-                </rng>{gpuPassthroughXml}{vsockXml}{virtiofsXml}
+                </rng>{gpuPassthroughXml}{vsockXml}{sharedFsXml}
                 <channel type='unix'>
                   <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.Id}.org.qemu.guest_agent.0'/>
                   <target type='virtio' name='org.qemu.guest_agent.0'/>
