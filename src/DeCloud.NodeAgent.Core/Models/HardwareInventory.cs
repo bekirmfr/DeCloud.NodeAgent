@@ -29,6 +29,12 @@ public class HardwareInventory
     /// so GPU access is provided via a host-side proxy daemon over virtio-vsock.
     /// </summary>
     public bool SupportsGpuProxy { get; set; }
+
+    /// <summary>
+    /// True if running inside WSL2. Affects GPU proxy transport:
+    /// vsock unavailable, TCP fallback required.
+    /// </summary>
+    public bool IsWsl2 { get; set; }
 }
 
 public class CpuInfo

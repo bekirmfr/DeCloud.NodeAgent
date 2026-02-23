@@ -48,8 +48,17 @@ public class VmSpec
     /// Used by the GPU proxy daemon to identify which VM is making requests.
     /// CID 0 = hypervisor, 1 = reserved, 2 = host, 3+ = guests.
     /// Set automatically by LibvirtVmManager when GpuMode is Proxied.
+    /// Null on WSL2 (vsock unavailable).
     /// </summary>
     public uint? VsockCid { get; set; }
+
+    /// <summary>
+    /// Per-VM auth token for GPU proxy TCP connections.
+    /// 32-byte hex string generated at VM creation, injected via cloud-init.
+    /// Used when vsock is unavailable (WSL2) to authenticate TCP connections
+    /// from the guest shim to the host GPU proxy daemon.
+    /// </summary>
+    public string? GpuProxyToken { get; set; }
 
     // Deployment mode (VM or Container)
     public DeploymentMode DeploymentMode { get; set; } = DeploymentMode.VirtualMachine;

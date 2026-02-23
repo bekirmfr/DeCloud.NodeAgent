@@ -679,7 +679,15 @@ install_libvirt() {
     
     # Load nbd module
     modprobe nbd max_part=8 2>/dev/null || true
+    # vhost_vsock: required for GPU proxy vsock communication (bare metal only)
+    if [ "$IS_WSL2" != true ]; then
+        modprobe vhost_vsock 2>/dev/null || true
+    fi
     echo "nbd" >> /etc/modules-load.d/decloud.conf 2>/dev/null || true
+    if [ "$IS_WSL2" != true ]; then
+        grep -q "vhost_vsock" /etc/modules-load.d/decloud.conf 2>/dev/null || \
+            echo "vhost_vsock" >> /etc/modules-load.d/decloud.conf
+    fi
     
     # Enable and start libvirtd
     systemctl enable libvirtd --quiet 2>/dev/null || true

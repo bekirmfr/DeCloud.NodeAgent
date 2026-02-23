@@ -15,9 +15,11 @@
 #include <stdint.h>
 
 #define GPU_PROXY_MAGIC     0x44435544  /* "DCUD" (DeCloud CUDA) */
-#define GPU_PROXY_VERSION   1
-#define GPU_PROXY_PORT      9999        /* vsock port the daemon listens on */
+#define GPU_PROXY_VERSION   2
+#define GPU_PROXY_PORT      9999        /* vsock/TCP port the daemon listens on */
+#define GPU_PROXY_TCP_BIND  "192.168.122.1"  /* virbr0 host IP for TCP fallback */
 #define GPU_PROXY_MAX_PAYLOAD (64 * 1024 * 1024)  /* 64 MB max transfer */
+#define GPU_PROXY_TOKEN_LEN 32          /* Auth token length in bytes */
 
 /* ================================================================
  * Command IDs — one per CUDA Runtime API function we intercept
@@ -101,6 +103,7 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint32_t shim_version;   /* Shim protocol version */
     uint32_t pid;            /* Guest PID (for logging) */
+    uint8_t  auth_token[GPU_PROXY_TOKEN_LEN]; /* Per-VM auth token (TCP only, zeroed for vsock) */
 } GpuHelloRequest;
 
 /* --- GPU_CMD_HELLO (response) --- */

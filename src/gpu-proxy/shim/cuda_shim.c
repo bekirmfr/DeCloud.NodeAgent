@@ -30,6 +30,8 @@
 #include <errno.h>
 #include <sys/socket.h>
 #include <linux/vm_sockets.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include "../proto/gpu_proxy_proto.h"
 
@@ -187,23 +189,53 @@ static int get_env_int(const char *name, int def)
     return val ? atoi(val) : def;
 }
 
-static int ensure_connected(void)
+/* Parse hex string from env var into byte array */
+static int parse_hex_token(const char *hex, uint8_t *out, int len)
 {
-    pthread_mutex_lock(&g_conn_lock);
-    if (g_conn_fd >= 0) {
-        pthread_mutex_unlock(&g_conn_lock);
-        return 0;
+    if (!hex || strlen(hex) != (size_t)(len * 2)) return -1;
+    for (int i = 0; i < len; i++) {
+        unsigned int byte;
+        if (sscanf(&hex[i * 2], "%02x", &byte) != 1) return -1;
+        out[i] = (uint8_t)byte;
     }
+    return 0;
+}
 
-    int cid = get_env_int("DECLOUD_GPU_PROXY_CID", VMADDR_CID_HOST);
-    int port = get_env_int("DECLOUD_GPU_PROXY_PORT", GPU_PROXY_PORT);
+/* Try connecting via TCP to host */
+static int try_tcp_connect(int port)
+{
+    const char *host = getenv("DECLOUD_GPU_PROXY_HOST");
+    if (!host) host = GPU_PROXY_TCP_BIND; /* default: 192.168.122.1 */
 
-    int fd = socket(AF_VSOCK, SOCK_STREAM, 0);
-    if (fd < 0) {
-        SHIM_LOG("socket(AF_VSOCK) failed: %s", strerror(errno));
-        pthread_mutex_unlock(&g_conn_lock);
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_port   = htons((uint16_t)port),
+    };
+    if (inet_aton(host, &addr.sin_addr) == 0) {
+        close(fd);
         return -1;
     }
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        SHIM_LOG("TCP connect(%s:%d) failed: %s", host, port, strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    SHIM_LOG("Connected via TCP to %s:%d", host, port);
+    return fd;
+}
+
+/* Try connecting via vsock to host */
+static int try_vsock_connect(int port)
+{
+    int cid = get_env_int("DECLOUD_GPU_PROXY_CID", VMADDR_CID_HOST);
+
+    int fd = socket(AF_VSOCK, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
 
     struct sockaddr_vm addr = {
         .svm_family = AF_VSOCK,
@@ -212,20 +244,55 @@ static int ensure_connected(void)
     };
 
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        SHIM_LOG("connect(vsock CID=%d port=%d) failed: %s",
+        SHIM_LOG("vsock connect(CID=%d port=%d) failed: %s",
                  cid, port, strerror(errno));
         close(fd);
-        pthread_mutex_unlock(&g_conn_lock);
         return -1;
+    }
+
+    SHIM_LOG("Connected via vsock (CID=%d port=%d)", cid, port);
+    return fd;
+}
+
+static int ensure_connected(void)
+{
+    pthread_mutex_lock(&g_conn_lock);
+    if (g_conn_fd >= 0) {
+        pthread_mutex_unlock(&g_conn_lock);
+        return 0;
+    }
+
+    int port = get_env_int("DECLOUD_GPU_PROXY_PORT", GPU_PROXY_PORT);
+    int is_tcp = 0;
+
+    /* Try vsock first (works on bare metal), then TCP fallback */
+    int fd = try_vsock_connect(port);
+    if (fd < 0) {
+        fd = try_tcp_connect(port);
+        if (fd < 0) {
+            SHIM_LOG("All transports failed — GPU proxy unavailable");
+            pthread_mutex_unlock(&g_conn_lock);
+            return -1;
+        }
+        is_tcp = 1;
     }
 
     g_conn_fd = fd;
 
-    /* Send HELLO */
+    /* Build HELLO with auth token (for TCP) */
     GpuHelloRequest hello = {
         .shim_version = GPU_PROXY_VERSION,
         .pid = (uint32_t)getpid(),
+        .auth_token = {0},
     };
+
+    if (is_tcp) {
+        const char *tok_hex = getenv("DECLOUD_GPU_PROXY_TOKEN");
+        if (tok_hex) {
+            parse_hex_token(tok_hex, hello.auth_token, GPU_PROXY_TOKEN_LEN);
+        }
+    }
+
     GpuProxyHeader hdr = {
         .magic = GPU_PROXY_MAGIC,
         .version = GPU_PROXY_VERSION,
@@ -240,12 +307,21 @@ static int ensure_connected(void)
     }
 
     GpuProxyHeader resp_hdr;
-    if (read(fd, &resp_hdr, sizeof(resp_hdr)) == sizeof(resp_hdr) &&
-        resp_hdr.payload_len >= sizeof(GpuHelloResponse)) {
-        GpuHelloResponse resp;
-        read(fd, &resp, sizeof(resp));
-        SHIM_LOG("Connected to GPU proxy (v%u, %u devices)",
-                 resp.daemon_version, resp.device_count);
+    if (read(fd, &resp_hdr, sizeof(resp_hdr)) == sizeof(resp_hdr)) {
+        if (resp_hdr.status != 0) {
+            SHIM_LOG("HELLO rejected (status=%d) — auth failed?", resp_hdr.status);
+            close(fd);
+            g_conn_fd = -1;
+            pthread_mutex_unlock(&g_conn_lock);
+            return -1;
+        }
+        if (resp_hdr.payload_len >= sizeof(GpuHelloResponse)) {
+            GpuHelloResponse resp;
+            read(fd, &resp, sizeof(resp));
+            SHIM_LOG("Connected to GPU proxy (v%u, %u devices, %s)",
+                     resp.daemon_version, resp.device_count,
+                     is_tcp ? "TCP" : "vsock");
+        }
     }
 
     g_initialized = 1;

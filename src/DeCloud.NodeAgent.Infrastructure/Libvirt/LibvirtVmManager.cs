@@ -84,6 +84,16 @@ public class LibvirtVmManager : IVmManager
         }
     }
 
+    /// <summary>
+    /// Generate a cryptographically random 32-byte hex token for GPU proxy auth.
+    /// </summary>
+    private static string GenerateGpuProxyToken()
+    {
+        var bytes = new byte[32];
+        System.Security.Cryptography.RandomNumberGenerator.Fill(bytes);
+        return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
     public async Task InitializeAsync(CancellationToken ct = default)
     {
         if (_initialized || _isWindows)
@@ -491,10 +501,42 @@ public class LibvirtVmManager : IVmManager
             // Assign vsock CID if GPU proxy mode is requested
             if (spec.GpuMode == GpuMode.Proxied)
             {
-                spec.VsockCid = _nextVsockCid++;
-                _logger.LogInformation(
-                    "VM {VmId}: GPU proxy mode — assigned vsock CID {Cid}",
-                    spec.Id, spec.VsockCid);
+                // Always generate auth token (needed for TCP fallback)
+                spec.GpuProxyToken = GenerateGpuProxyToken();
+
+                // Append token to daemon's registry file
+                // The daemon reloads on SIGHUP (sent after this write)
+                try
+                {
+                    var tokenLine = $"{spec.GpuProxyToken} {spec.Id}\n";
+                    await File.AppendAllTextAsync("/var/lib/decloud/gpu-proxy-tokens", tokenLine, ct);
+
+                    // Signal daemon to reload tokens
+                    var signalResult = await _executor.ExecuteAsync(
+                        "pkill", "-HUP -f gpu-proxy-daemon", ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "VM {VmId}: Failed to register GPU proxy token", spec.Id);
+                }
+
+                // Detect WSL2 — skip vsock (Hyper-V owns vsock layer)
+                var inventory = _nodeMetadata.Inventory;
+                var isWsl2 = inventory?.IsWsl2 ?? false;
+
+                if (!isWsl2)
+                {
+                    spec.VsockCid = _nextVsockCid++;
+                    _logger.LogInformation(
+                        "VM {VmId}: GPU proxy mode — assigned vsock CID {Cid}",
+                        spec.Id, spec.VsockCid);
+                }
+                else
+                {
+                    _logger.LogInformation(
+                        "VM {VmId}: GPU proxy mode (WSL2) — TCP transport, vsock skipped",
+                        spec.Id);
+                }
 
                 // Ensure the GPU proxy daemon is running before the VM boots.
                 // The daemon must be listening on vsock before the guest shim connects.
@@ -1008,6 +1050,28 @@ public class LibvirtVmManager : IVmManager
 
         // Remove from database
         await _repository.DeleteVmAsync(vmId);
+
+        // Remove GPU proxy token from daemon registry
+        if (!string.IsNullOrEmpty(instance.Spec.GpuProxyToken))
+        {
+            try
+            {
+                var tokenFile = "/var/lib/decloud/gpu-proxy-tokens";
+                if (File.Exists(tokenFile))
+                {
+                    var lines = await File.ReadAllLinesAsync(tokenFile, ct);
+                    var filtered = lines.Where(l => !l.Contains(instance.Spec.Id)).ToArray();
+                    await File.WriteAllLinesAsync(tokenFile, filtered, ct);
+
+                    // Signal daemon to reload
+                    await _executor.ExecuteAsync("pkill", "-HUP -f gpu-proxy-daemon", ct);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to cleanup GPU proxy token for VM {VmId}", instance.Spec.Id);
+            }
+        }
 
         // Clean up directory
         CleanupVmDirectory(vmId, orphaned: false);
@@ -1628,9 +1692,9 @@ public class LibvirtVmManager : IVmManager
             // =====================================================
             // STEP 6.6: Inject GPU proxy shim (for Proxied GPU mode)
             // =====================================================
-            if (spec.GpuMode == GpuMode.Proxied && spec.VsockCid.HasValue)
+            if (spec.GpuMode == GpuMode.Proxied)
             {
-                cloudInitYaml = EnsureGpuProxyShim(cloudInitYaml, spec.VsockCid.Value);
+                cloudInitYaml = EnsureGpuProxyShim(cloudInitYaml, spec.VsockCid, spec.GpuProxyToken);
                 _logger.LogInformation(
                     "VM {VmId}: Injected CUDA shim into cloud-init (vsock CID={Cid})",
                     spec.Id, spec.VsockCid.Value);
@@ -1768,7 +1832,7 @@ public class LibvirtVmManager : IVmManager
     /// The fetch uses a tiny bootstrap script that copies the .so from the host filesystem
     /// via the qemu-guest-agent file-read channel or a pre-seeded path.
     /// </summary>
-    private static string EnsureGpuProxyShim(string cloudInitYaml, uint vsockCid)
+    private static string EnsureGpuProxyShim(string cloudInitYaml, uint? vsockCid, string? gpuProxyToken)
     {
         // Guard: don't inject twice
         if (cloudInitYaml.Contains("gpu-proxy.sh"))
@@ -1777,6 +1841,16 @@ public class LibvirtVmManager : IVmManager
         var result = cloudInitYaml;
 
         // 1. Inject write_files entries for the GPU proxy environment
+        // Build env vars — include TCP fallback config when token is present
+        var tokenEnv = !string.IsNullOrEmpty(gpuProxyToken)
+            ? $"\n      export DECLOUD_GPU_PROXY_TOKEN={gpuProxyToken}" +
+              $"\n      export DECLOUD_GPU_PROXY_HOST=192.168.122.1"
+            : "";
+        var tokenEnvFile = !string.IsNullOrEmpty(gpuProxyToken)
+            ? $"\n      DECLOUD_GPU_PROXY_TOKEN={gpuProxyToken}" +
+              $"\n      DECLOUD_GPU_PROXY_HOST=192.168.122.1"
+            : "";
+
         var writeFilesBlock = $@"
   # GPU proxy: environment variables for CUDA shim
   - path: /etc/profile.d/gpu-proxy.sh
@@ -1784,17 +1858,17 @@ public class LibvirtVmManager : IVmManager
     content: |
       # DeCloud GPU Proxy — CUDA shim configuration
       export DECLOUD_GPU_PROXY_CID=2
-      export DECLOUD_GPU_PROXY_PORT=9999
+      export DECLOUD_GPU_PROXY_PORT=9999{tokenEnv}
       if [ -f /usr/local/lib/libdecloud_cuda_shim.so ]; then
         export LD_PRELOAD=/usr/local/lib/libdecloud_cuda_shim.so
       fi
 
   # GPU proxy: ensure LD_PRELOAD is active for non-interactive processes
   - path: /etc/decloud/gpu-proxy.env
-    permissions: '0644'
+    permissions: '0600'
     content: |
       DECLOUD_GPU_PROXY_CID=2
-      DECLOUD_GPU_PROXY_PORT=9999
+      DECLOUD_GPU_PROXY_PORT=9999{tokenEnvFile}
       LD_PRELOAD=/usr/local/lib/libdecloud_cuda_shim.so
 ";
 
@@ -2332,7 +2406,7 @@ public class LibvirtVmManager : IVmManager
         var sharedFsXml = spec.GpuMode == GpuMode.Proxied
             ? $@"
                 <filesystem type='mount' accessmode='passthrough'>
-                  <driver type='handle' wrpolicy='immediate'/>
+                  <driver type='path' wrpolicy='immediate'/>
                   <source dir='/usr/local/lib/decloud-gpu-shim'/>
                   <target dir='decloud-shim'/>
                 </filesystem>"

@@ -62,6 +62,99 @@ static int g_verbose = 0;
 static volatile sig_atomic_t g_running = 1;
 static uint64_t g_kernel_timeout_us = GPU_PROXY_DEFAULT_KERNEL_TIMEOUT_US;
 
+/* TCP fallback listener (for WSL2 and other non-vsock environments) */
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+static int g_tcp_enabled = 0;
+static const char *g_tcp_bind = GPU_PROXY_TCP_BIND;
+
+/* ================================================================
+ * Auth token registry — maps tokens to VM identifiers.
+ * Tokens are loaded from a file written by NodeAgent.
+ * File format: one line per VM: <hex_token> <vm_id>
+ * ================================================================ */
+#define MAX_TOKENS 256
+
+typedef struct {
+    uint8_t  token[GPU_PROXY_TOKEN_LEN];
+    char     vm_id[64];
+    int      active;
+} TokenEntry;
+
+static TokenEntry g_tokens[MAX_TOKENS];
+static pthread_mutex_t g_token_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Path to the token registry file managed by NodeAgent */
+static const char *g_token_file = "/var/lib/decloud/gpu-proxy-tokens";
+
+static void load_tokens(void)
+{
+    pthread_mutex_lock(&g_token_lock);
+    memset(g_tokens, 0, sizeof(g_tokens));
+
+    FILE *f = fopen(g_token_file, "r");
+    if (!f) {
+        LOG_DBG("No token file at %s (vsock-only mode)", g_token_file);
+        pthread_mutex_unlock(&g_token_lock);
+        return;
+    }
+
+    char line[256];
+    int count = 0;
+    while (fgets(line, sizeof(line), f) && count < MAX_TOKENS) {
+        char hex_token[65], vm_id[64];
+        if (sscanf(line, "%64s %63s", hex_token, vm_id) != 2) continue;
+
+        /* Parse hex string → bytes */
+        size_t tlen = strlen(hex_token);
+        if (tlen != GPU_PROXY_TOKEN_LEN * 2) continue;
+
+        TokenEntry *e = &g_tokens[count];
+        for (int i = 0; i < GPU_PROXY_TOKEN_LEN; i++) {
+            unsigned int byte;
+            sscanf(&hex_token[i * 2], "%02x", &byte);
+            e->token[i] = (uint8_t)byte;
+        }
+        strncpy(e->vm_id, vm_id, sizeof(e->vm_id) - 1);
+        e->active = 1;
+        count++;
+    }
+
+    fclose(f);
+    LOG_INFO("Loaded %d auth token(s) from %s", count, g_token_file);
+    pthread_mutex_unlock(&g_token_lock);
+}
+
+/* Reload tokens on SIGHUP — NodeAgent sends this after adding/removing VMs */
+static void sighup_handler(int sig)
+{
+    (void)sig;
+    load_tokens();
+}
+
+static int validate_token(const uint8_t *token, char *vm_id_out, size_t vm_id_size)
+{
+    /* All-zero token = vsock (no auth needed, CID is authoritative) */
+    int all_zero = 1;
+    for (int i = 0; i < GPU_PROXY_TOKEN_LEN; i++) {
+        if (token[i] != 0) { all_zero = 0; break; }
+    }
+    if (all_zero) return 0; /* Not a TCP auth attempt */
+
+    pthread_mutex_lock(&g_token_lock);
+    for (int i = 0; i < MAX_TOKENS; i++) {
+        if (!g_tokens[i].active) continue;
+        if (memcmp(g_tokens[i].token, token, GPU_PROXY_TOKEN_LEN) == 0) {
+            if (vm_id_out) strncpy(vm_id_out, g_tokens[i].vm_id, vm_id_size - 1);
+            pthread_mutex_unlock(&g_token_lock);
+            return 1; /* Valid */
+        }
+    }
+    pthread_mutex_unlock(&g_token_lock);
+    return -1; /* Invalid token */
+}
+
 /* Monotonic clock helper — returns microseconds since an arbitrary epoch */
 static uint64_t now_us(void)
 {
@@ -179,6 +272,8 @@ typedef struct {
 } AllocSlot;
 
 typedef struct {
+    int is_tcp;
+    char vm_id[64];
     int          fd;
     unsigned int peer_cid;
 
@@ -361,6 +456,20 @@ static int handle_hello(int fd, const void *payload, uint32_t len)
         .daemon_version = GPU_PROXY_VERSION,
         .device_count   = (uint32_t)count,
     };
+
+    /* Validate auth token for TCP connections */
+    if (ctx->is_tcp) {
+        char vm_id[64] = {0};
+        int tok_result = validate_token(hello.auth_token, vm_id, sizeof(vm_id));
+        if (tok_result < 0) {
+            LOG_ERR("TCP connection rejected: invalid auth token");
+            send_response(ctx->fd, GPU_CMD_HELLO, -1, NULL, 0);
+            return -1; /* Triggers disconnect */
+        }
+        strncpy(ctx->vm_id, vm_id, sizeof(ctx->vm_id) - 1);
+        LOG_INFO("TCP connection authenticated: VM %s (PID %u)", vm_id, hello.pid);
+    }
+
     return send_response(fd, GPU_CMD_HELLO, (int32_t)err,
                          &resp, sizeof(resp));
 }
@@ -1319,12 +1428,85 @@ static void sig_handler(int sig)
 
 static void usage(const char *prog)
 {
-    fprintf(stderr, "Usage: %s [-p port] [-t timeout_sec] [-v]\n", prog);
-    fprintf(stderr, "  -p port          vsock port to listen on (default: %d)\n", GPU_PROXY_PORT);
-    fprintf(stderr, "  -t timeout_sec   kernel execution timeout in seconds (default: %d, 0=disable)\n",
+    fprintf(stderr, "Usage: %s [-p port] [-t timeout_sec] [-T tcp_bind] [-v]\n", prog);
+    fprintf(stderr, "  -p port          vsock/TCP port (default: %d)\n", GPU_PROXY_PORT);
+    fprintf(stderr, "  -t timeout_sec   kernel timeout (default: %d, 0=disable)\n",
             (int)(GPU_PROXY_DEFAULT_KERNEL_TIMEOUT_US / 1000000));
+    fprintf(stderr, "  -T tcp_bind      enable TCP listener on addr (e.g. %s)\n", GPU_PROXY_TCP_BIND);
     fprintf(stderr, "  -v               verbose logging\n");
     exit(1);
+}
+
+/* ================================================================
+ * TCP listener thread — runs alongside vsock listener in main()
+ * ================================================================ */
+static void *tcp_listener_thread(void *arg)
+{
+    int port = *(int *)arg;
+
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd < 0) {
+        LOG_ERR("TCP socket() failed: %s", strerror(errno));
+        return NULL;
+    }
+
+    int opt = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_port   = htons((uint16_t)port),
+    };
+    inet_aton(g_tcp_bind, &addr.sin_addr);
+
+    if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        LOG_ERR("TCP bind(%s:%d) failed: %s", g_tcp_bind, port, strerror(errno));
+        close(listen_fd);
+        return NULL;
+    }
+
+    if (listen(listen_fd, 16) < 0) {
+        LOG_ERR("TCP listen() failed: %s", strerror(errno));
+        close(listen_fd);
+        return NULL;
+    }
+
+    LOG_INFO("TCP listener on %s:%d (auth-token required)", g_tcp_bind, port);
+
+    while (g_running) {
+        struct sockaddr_in peer;
+        socklen_t peer_len = sizeof(peer);
+        int client_fd = accept(listen_fd, (struct sockaddr *)&peer, &peer_len);
+        if (client_fd < 0) {
+            if (errno == EINTR) continue;
+            LOG_ERR("TCP accept() failed: %s", strerror(errno));
+            break;
+        }
+
+        ConnectionCtx *ctx = calloc(1, sizeof(ConnectionCtx));
+        if (!ctx) {
+            close(client_fd);
+            continue;
+        }
+        ctx->fd = client_fd;
+        ctx->peer_cid = 0;  /* No CID for TCP — identified by token */
+        ctx->is_tcp = 1;
+
+        LOG_INFO("TCP connection from %s:%d",
+                 inet_ntoa(peer.sin_addr), ntohs(peer.sin_port));
+
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, connection_handler, ctx) != 0) {
+            LOG_ERR("pthread_create failed for TCP client: %s", strerror(errno));
+            close(client_fd);
+            free(ctx);
+            continue;
+        }
+        pthread_detach(tid);
+    }
+
+    close(listen_fd);
+    return NULL;
 }
 
 int main(int argc, char **argv)
@@ -1332,10 +1514,11 @@ int main(int argc, char **argv)
     int port = GPU_PROXY_PORT;
     int opt;
 
-    while ((opt = getopt(argc, argv, "p:t:v")) != -1) {
+    while ((opt = getopt(argc, argv, "p:t:T:v")) != -1) {
         switch (opt) {
         case 'p': port = atoi(optarg); break;
         case 't': g_kernel_timeout_us = (uint64_t)atoi(optarg) * 1000000ULL; break;
+        case 'T': g_tcp_enabled = 1; g_tcp_bind = optarg; break;
         case 'v': g_verbose = 1; break;
         default: usage(argv[0]);
         }
@@ -1344,6 +1527,10 @@ int main(int argc, char **argv)
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
     signal(SIGPIPE, SIG_IGN);
+    signal(SIGHUP, sighup_handler);
+
+    /* Load auth tokens for TCP connections */
+    load_tokens();
 
     /* Initialize CUDA Driver API (required for cuModuleLoadData, cuLaunchKernel) */
     CUresult cr = cuInit(0);
@@ -1371,9 +1558,24 @@ int main(int argc, char **argv)
                  props.major, props.minor);
     }
 
-    /* Create vsock listener */
+    /* Create vsock listener (may fail on WSL2 — fall through to TCP-only) */
     int listen_fd = socket(AF_VSOCK, SOCK_STREAM, 0);
     if (listen_fd < 0) {
+        if (g_tcp_enabled) {
+            LOG_INFO("vsock unavailable (%s) — running TCP-only mode", strerror(errno));
+
+            /* Start TCP listener in foreground */
+            pthread_t tcp_tid;
+            if (pthread_create(&tcp_tid, NULL, tcp_listener_thread, &port) != 0) {
+                LOG_ERR("Failed to start TCP listener: %s", strerror(errno));
+                return 1;
+            }
+
+            /* Wait for shutdown signal */
+            while (g_running) sleep(1);
+            LOG_INFO("Shutting down (TCP-only mode)");
+            return 0;
+        }
         LOG_ERR("socket(AF_VSOCK) failed: %s", strerror(errno));
         return 1;
     }
@@ -1400,6 +1602,14 @@ int main(int argc, char **argv)
              "timeout=%lu s, quotas=enabled",
              port, (unsigned long)(g_kernel_timeout_us / 1000000));
 
+    /* Start TCP listener thread if enabled */
+    pthread_t tcp_tid = 0;
+    if (g_tcp_enabled) {
+        if (pthread_create(&tcp_tid, NULL, tcp_listener_thread, &port) != 0) {
+            LOG_ERR("Failed to start TCP listener thread: %s", strerror(errno));
+        }
+    }
+
     /* Accept loop */
     while (g_running) {
         struct sockaddr_vm peer;
@@ -1419,6 +1629,7 @@ int main(int argc, char **argv)
         }
         ctx->fd = client_fd;
         ctx->peer_cid = peer.svm_cid;
+        ctx->is_tcp = 0;
 
         pthread_t tid;
         if (pthread_create(&tid, NULL, connection_handler, ctx) != 0) {

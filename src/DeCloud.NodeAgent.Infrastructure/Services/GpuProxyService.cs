@@ -166,10 +166,11 @@ public class GpuProxyService
                 "Starting GPU proxy daemon: {Path} -p {Port}",
                 DaemonPath, DaemonPort);
 
+            // Always enable TCP listener — needed for WSL2 and as fallback
             var psi = new ProcessStartInfo
             {
                 FileName = DaemonPath,
-                Arguments = $"-p {DaemonPort} -t {KernelTimeoutSeconds} -v",
+                Arguments = $"-p {DaemonPort} -t {KernelTimeoutSeconds} -T 192.168.122.1 -v",
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,

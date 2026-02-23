@@ -61,9 +61,9 @@ TEST(magic_value)
     ASSERT_EQ(GPU_PROXY_MAGIC, 0x44435544);
 }
 
-TEST(version_is_one)
+TEST(version_is_two)
 {
-    ASSERT_EQ(GPU_PROXY_VERSION, 1);
+    ASSERT_EQ(GPU_PROXY_VERSION, 2);
 }
 
 TEST(default_port)
@@ -95,9 +95,9 @@ TEST(header_is_16_bytes)
     ASSERT_EQ(sizeof(GpuProxyHeader), 16);
 }
 
-TEST(hello_request_is_8_bytes)
+TEST(hello_request_is_40_bytes)
 {
-    ASSERT_EQ(sizeof(GpuHelloRequest), 8);
+    ASSERT_EQ(sizeof(GpuHelloRequest), 40);
 }
 
 TEST(hello_response_is_8_bytes)
@@ -374,7 +374,7 @@ int main(void)
 
     /* Constants */
     run_test_magic_value();
-    run_test_version_is_one();
+    run_test_version_is_two();
     run_test_default_port();
     run_test_max_payload_is_64mb();
     run_test_max_kernel_params();
@@ -382,7 +382,7 @@ int main(void)
 
     /* Struct sizes */
     run_test_header_is_16_bytes();
-    run_test_hello_request_is_8_bytes();
+    run_test_hello_request_is_40_bytes();
     run_test_hello_response_is_8_bytes();
     run_test_get_device_count_response_is_4_bytes();
     run_test_malloc_request_is_8_bytes();

@@ -112,6 +112,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             // GPU proxy mode: available when GPU exists but VFIO passthrough is not.
             // The GPU proxy daemon on the host bridges CUDA calls from VMs over virtio-vsock.
             var hasAnyPassthrough = gpus.Any(g => g.IsAvailableForPassthrough);
+            // GPU proxy works on bare metal (vsock) AND WSL2 (TCP fallback)
             var supportsGpuProxy = supportsGpu && !hasAnyPassthrough && !_isWindows;
             if (supportsGpuProxy)
             {
@@ -124,6 +125,8 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                     gpus.Count);
             }
 
+            var isWsl2 = await IsWslEnvironmentAsync(ct);
+
             var inventory = new HardwareInventory
             {
                 Cpu = cpu,
@@ -135,6 +138,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                 ContainerRuntimes = containerRuntimes,
                 SupportsGpuContainers = supportsGpuContainers,
                 SupportsGpuProxy = supportsGpuProxy,
+                IsWsl2 = isWsl2,
                 CollectedAt = DateTime.UtcNow
             };
 
