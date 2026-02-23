@@ -1,11 +1,14 @@
 /*
  * DeCloud GPU Proxy Daemon
  *
- * Host-side service that listens on virtio-vsock and proxies CUDA Runtime
- * API calls from guest VMs to the real GPU.
+ * Host-side service that proxies CUDA Runtime API calls from guest VMs
+ * to the real GPU. Supports two transports:
+ *   - virtio-vsock (bare metal, CID-authenticated)
+ *   - TCP over virbr0 (WSL2 fallback, token-authenticated)
  *
- * Each VM connects with its unique CID. The daemon maintains per-connection
- * state (loaded modules, registered functions, streams, events) for isolation.
+ * Each VM connects with its unique CID (vsock) or auth token (TCP).
+ * The daemon maintains per-connection state (loaded modules, registered
+ * functions, streams, events) for isolation.
  *
  * Kernel launch uses the CUDA Driver API (cuModuleLoadData, cuModuleGetFunction,
  * cuLaunchKernel) because the Runtime API's cudaLaunchKernel requires the
@@ -13,7 +16,7 @@
  * don't have — the guest sends us raw PTX/cubin instead.
  *
  * Build: gcc -o gpu-proxy-daemon gpu_proxy_daemon.c -lcuda -lcudart -lpthread
- * Run:   gpu-proxy-daemon [-p port] [-v]
+ * Run:   gpu-proxy-daemon [-p port] [-T 192.168.122.1] [-v]
  */
 
 #define _GNU_SOURCE
@@ -27,6 +30,8 @@
 #include <time.h>
 #include <sys/socket.h>
 #include <linux/vm_sockets.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include <dlfcn.h>
 
@@ -55,19 +60,36 @@ static pfn_cuFuncGetParamInfo resolve_cuFuncGetParamInfo(void)
 }
 
 /* ================================================================
- * Logging
+ * Globals
  * ================================================================ */
 
 static int g_verbose = 0;
 static volatile sig_atomic_t g_running = 1;
+static volatile sig_atomic_t g_reload_tokens = 0;
 static uint64_t g_kernel_timeout_us = GPU_PROXY_DEFAULT_KERNEL_TIMEOUT_US;
 
-/* TCP fallback listener (for WSL2 and other non-vsock environments) */
-#include <netinet/in.h>
-#include <arpa/inet.h>
-
+/* TCP fallback transport */
 static int g_tcp_enabled = 0;
 static const char *g_tcp_bind = GPU_PROXY_TCP_BIND;
+
+/* Monotonic clock helper — returns microseconds since an arbitrary epoch */
+static uint64_t now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
+/* ================================================================
+ * Logging (defined early — used by token registry and all handlers)
+ * ================================================================ */
+
+#define LOG_INFO(fmt, ...) \
+    fprintf(stdout, "[gpu-proxy] " fmt "\n", ##__VA_ARGS__)
+#define LOG_ERR(fmt, ...) \
+    fprintf(stderr, "[gpu-proxy] ERROR: " fmt "\n", ##__VA_ARGS__)
+#define LOG_DBG(fmt, ...) \
+    do { if (g_verbose) fprintf(stdout, "[gpu-proxy] DBG: " fmt "\n", ##__VA_ARGS__); } while(0)
 
 /* ================================================================
  * Auth token registry — maps tokens to VM identifiers.
@@ -126,13 +148,6 @@ static void load_tokens(void)
     pthread_mutex_unlock(&g_token_lock);
 }
 
-/* Reload tokens on SIGHUP — NodeAgent sends this after adding/removing VMs */
-static void sighup_handler(int sig)
-{
-    (void)sig;
-    load_tokens();
-}
-
 static int validate_token(const uint8_t *token, char *vm_id_out, size_t vm_id_size)
 {
     /* All-zero token = vsock (no auth needed, CID is authoritative) */
@@ -154,21 +169,6 @@ static int validate_token(const uint8_t *token, char *vm_id_out, size_t vm_id_si
     pthread_mutex_unlock(&g_token_lock);
     return -1; /* Invalid token */
 }
-
-/* Monotonic clock helper — returns microseconds since an arbitrary epoch */
-static uint64_t now_us(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-}
-
-#define LOG_INFO(fmt, ...) \
-    fprintf(stdout, "[gpu-proxy] " fmt "\n", ##__VA_ARGS__)
-#define LOG_ERR(fmt, ...) \
-    fprintf(stderr, "[gpu-proxy] ERROR: " fmt "\n", ##__VA_ARGS__)
-#define LOG_DBG(fmt, ...) \
-    do { if (g_verbose) fprintf(stdout, "[gpu-proxy] DBG: " fmt "\n", ##__VA_ARGS__); } while(0)
 
 /* ================================================================
  * I/O helpers — read/write exactly N bytes
@@ -272,8 +272,8 @@ typedef struct {
 } AllocSlot;
 
 typedef struct {
-    int is_tcp;
-    char vm_id[64];
+    int          is_tcp;
+    char         vm_id[64];
     int          fd;
     unsigned int peer_cid;
 
@@ -388,9 +388,10 @@ static void cleanup_connection(ConnectionCtx *ctx)
     /* Log final usage stats for billing */
     if (ctx->connect_time_us > 0) {
         uint64_t uptime = now_us() - ctx->connect_time_us;
-        LOG_INFO("CID %u final stats: mem_peak=%lu alloc_total=%lu "
+        LOG_INFO("%s %s final stats: mem_peak=%lu alloc_total=%lu "
                  "kernels=%u timeouts=%u ktime=%lu µs uptime=%lu µs",
-                 ctx->peer_cid,
+                 ctx->is_tcp ? "VM" : "CID",
+                 ctx->is_tcp ? ctx->vm_id : "vsock",
                  (unsigned long)ctx->peak_memory,
                  (unsigned long)ctx->total_alloc_bytes,
                  ctx->kernel_launches,
@@ -435,21 +436,36 @@ static void cleanup_connection(ConnectionCtx *ctx)
 }
 
 /* ================================================================
- * Command handlers — existing (device mgmt, memory, sync)
+ * Command handlers — HELLO (with TCP auth validation)
  * ================================================================ */
 
-static int handle_hello(int fd, const void *payload, uint32_t len)
+static int handle_hello(ConnectionCtx *ctx, const void *payload, uint32_t len)
 {
     GpuHelloRequest req;
     if (len < sizeof(req)) {
-        return send_response(fd, GPU_CMD_HELLO, -1, NULL, 0);
+        return send_response(ctx->fd, GPU_CMD_HELLO, -1, NULL, 0);
     }
     memcpy(&req, payload, sizeof(req));
+
+    /* Validate auth token for TCP connections BEFORE sending success */
+    if (ctx->is_tcp) {
+        char vm_id[64] = {0};
+        int tok_result = validate_token(req.auth_token, vm_id, sizeof(vm_id));
+        if (tok_result < 0) {
+            LOG_ERR("TCP connection rejected: invalid auth token (PID %u)", req.pid);
+            send_response(ctx->fd, GPU_CMD_HELLO, -1, NULL, 0);
+            return -1; /* Triggers disconnect */
+        }
+        strncpy(ctx->vm_id, vm_id, sizeof(ctx->vm_id) - 1);
+        LOG_INFO("TCP auth OK: VM %s (PID %u, shim v%u)",
+                 vm_id, req.pid, req.shim_version);
+    }
 
     int count = 0;
     cudaError_t err = cudaGetDeviceCount(&count);
 
-    LOG_INFO("HELLO from guest PID %u (shim v%u), %d GPU(s) available",
+    LOG_INFO("HELLO from %s PID %u (shim v%u), %d GPU(s) available",
+             ctx->is_tcp ? ctx->vm_id : "vsock CID",
              req.pid, req.shim_version, count);
 
     GpuHelloResponse resp = {
@@ -457,9 +473,13 @@ static int handle_hello(int fd, const void *payload, uint32_t len)
         .device_count   = (uint32_t)count,
     };
 
-    return send_response(fd, GPU_CMD_HELLO, (int32_t)err,
+    return send_response(ctx->fd, GPU_CMD_HELLO, (int32_t)err,
                          &resp, sizeof(resp));
 }
+
+/* ================================================================
+ * Command handlers — device management, memory, sync
+ * ================================================================ */
 
 static int handle_get_device_count(int fd)
 {
@@ -1244,7 +1264,8 @@ static void *connection_handler(void *arg)
     int fd = ctx->fd;
     unsigned int cid = ctx->peer_cid;
 
-    LOG_INFO("VM CID %u connected", cid);
+    LOG_INFO("%s %u connected",
+             ctx->is_tcp ? "TCP client" : "VM CID", cid);
 
     ctx->connect_time_us = now_us();
 
@@ -1294,25 +1315,8 @@ static void *connection_handler(void *arg)
         /* Dispatch */
         int rc = 0;
         switch (hdr.cmd) {
-        // In connection_handler, after GPU_CMD_HELLO case:
         case GPU_CMD_HELLO:
-            rc = handle_hello(fd, buf, hdr.payload_len);
-            /* Validate token for TCP connections after HELLO */
-            if (rc == 0 && ctx->is_tcp) {
-                GpuHelloRequest hello;
-                if (hdr.payload_len >= sizeof(hello)) {
-                    memcpy(&hello, buf, sizeof(hello));
-                    char vm_id[64] = {0};
-                    int tok_result = validate_token(hello.auth_token, vm_id, sizeof(vm_id));
-                    if (tok_result < 0) {
-                        LOG_ERR("TCP connection rejected: invalid auth token");
-                        rc = -1;
-                    } else {
-                        strncpy(ctx->vm_id, vm_id, sizeof(ctx->vm_id) - 1);
-                        LOG_INFO("TCP auth OK: VM %s (PID %u)", vm_id, hello.pid);
-                    }
-                }
-            }
+            rc = handle_hello(ctx, buf, hdr.payload_len);
             break;
         case GPU_CMD_GET_DEVICE_COUNT:
             rc = handle_get_device_count(fd);
@@ -1406,7 +1410,7 @@ static void *connection_handler(void *arg)
         }
 
         if (rc < 0) {
-            LOG_ERR("CID %u: write error, disconnecting", cid);
+            LOG_ERR("CID %u: handler error, disconnecting", cid);
             break;
         }
     }
@@ -1421,13 +1425,29 @@ done:
 }
 
 /* ================================================================
- * Main: vsock listener
+ * Signal handlers
  * ================================================================ */
 
 static void sig_handler(int sig)
 {
     (void)sig;
     g_running = 0;
+}
+
+/* SIGHUP: set flag for main loop to reload tokens (async-signal-safe) */
+static void sighup_handler(int sig)
+{
+    (void)sig;
+    g_reload_tokens = 1;
+}
+
+/* Check and reload tokens if signaled — call from accept loops */
+static void maybe_reload_tokens(void)
+{
+    if (g_reload_tokens) {
+        g_reload_tokens = 0;
+        load_tokens();
+    }
 }
 
 static void usage(const char *prog)
@@ -1478,6 +1498,8 @@ static void *tcp_listener_thread(void *arg)
     LOG_INFO("TCP listener on %s:%d (auth-token required)", g_tcp_bind, port);
 
     while (g_running) {
+        maybe_reload_tokens();
+
         struct sockaddr_in peer;
         socklen_t peer_len = sizeof(peer);
         int client_fd = accept(listen_fd, (struct sockaddr *)&peer, &peer_len);
@@ -1512,6 +1534,10 @@ static void *tcp_listener_thread(void *arg)
     close(listen_fd);
     return NULL;
 }
+
+/* ================================================================
+ * Main
+ * ================================================================ */
 
 int main(int argc, char **argv)
 {
@@ -1576,7 +1602,10 @@ int main(int argc, char **argv)
             }
 
             /* Wait for shutdown signal */
-            while (g_running) sleep(1);
+            while (g_running) {
+                maybe_reload_tokens();
+                sleep(1);
+            }
             LOG_INFO("Shutting down (TCP-only mode)");
             return 0;
         }
@@ -1614,8 +1643,10 @@ int main(int argc, char **argv)
         }
     }
 
-    /* Accept loop */
+    /* Accept loop (vsock) */
     while (g_running) {
+        maybe_reload_tokens();
+
         struct sockaddr_vm peer;
         socklen_t peer_len = sizeof(peer);
         int client_fd = accept(listen_fd, (struct sockaddr *)&peer, &peer_len);
