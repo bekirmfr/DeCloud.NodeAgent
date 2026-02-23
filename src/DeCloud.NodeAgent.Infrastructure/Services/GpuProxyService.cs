@@ -75,7 +75,7 @@ public class GpuProxyService
     }
 
     /// <summary>
-    /// Ensure the host-side virtiofs share directory exists and contains the shim .so.
+    /// Ensure the host-side 9p share directory exists and contains the shim .so.
     /// Called before starting the daemon so that VMs can mount the share at boot.
     /// </summary>
     private void EnsureShimShareDirectory()
@@ -94,7 +94,7 @@ public class GpuProxyService
             {
                 File.Copy(ShimPath, targetPath, overwrite: true);
                 _logger.LogInformation(
-                    "Copied CUDA shim to virtiofs share: {Src} -> {Dst}",
+                    "Copied CUDA shim to 9p share: {Src} -> {Dst}",
                     ShimPath, targetPath);
             }
             else if (!File.Exists(ShimPath))
@@ -136,7 +136,7 @@ public class GpuProxyService
                 return false;
             }
 
-            // Ensure the virtiofs share directory is ready
+            // Ensure the 9p share directory is ready
             EnsureShimShareDirectory();
 
             // Check daemon binary exists
