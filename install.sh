@@ -1077,15 +1077,6 @@ build_gpu_proxy() {
         log_error "CUDA shim build failed — output binary not found"
         return 0
     fi
-    if [ -f "$GPU_PROXY_SRC/build/libdecloud_cuda_shim.so" ]; then
-        log_success "CUDA shim built: $GPU_PROXY_SRC/build/libdecloud_cuda_shim.so"
-    else
-        log_error "CUDA shim build failed — output binary not found"
-        log_info "Check logs: $LOG_DIR/install.log"
-        # List what's in build dir for debugging
-        ls -la "$GPU_PROXY_SRC/build/" 2>/dev/null || log_info "Build directory does not exist"
-        return 0
-    fi
 
     # --- Build daemon (only in proxy mode — passthrough doesn't need it) ---
     local daemon_built=false
