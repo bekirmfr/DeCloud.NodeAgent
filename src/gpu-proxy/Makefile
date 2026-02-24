@@ -64,6 +64,7 @@ shim-static: $(SHIM_STATIC)
 
 $(SHIM_STATIC): shim/cuda_shim.c proto/gpu_proxy_proto.h | $(BUILD_DIR)
 	$(MUSL_CC) $(CFLAGS) -shared -fPIC -static-libgcc \
+		-I/usr/include \
 		-o $@ $< \
 		-lpthread
 	@echo "Static shim built: $@ (no glibc dependency)"
