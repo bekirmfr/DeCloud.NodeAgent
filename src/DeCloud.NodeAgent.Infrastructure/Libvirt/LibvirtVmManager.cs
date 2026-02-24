@@ -34,6 +34,7 @@ public class LibvirtVmManager : IVmManager
     private readonly IUserWireGuardManager _userWireGuardManager;
     private readonly GpuProxyService _gpuProxy;
     private readonly bool _isWindows;
+    private readonly bool _isWsl2;
 
     // Track our VMs in memory
     private readonly Dictionary<string, VmInstance> _vms = new();
@@ -73,6 +74,21 @@ public class LibvirtVmManager : IVmManager
         {
             Directory.CreateDirectory(_options.VmStoragePath);
             Directory.CreateDirectory(_options.ImageCachePath);
+
+            try
+            {
+                _isWsl2 = File.Exists("/proc/version") &&
+                          File.ReadAllText("/proc/version")
+                              .Contains("microsoft", StringComparison.OrdinalIgnoreCase)
+                          || File.Exists("/dev/dxg");
+            }
+            catch
+            {
+                _isWsl2 = false;
+            }
+
+            if (_isWsl2)
+                _logger.LogInformation("WSL2 environment detected — vsock disabled, TCP transport for GPU proxy");
 
             _logger.LogInformation("✓ LibvirtVmManager initialized with persistent storage");
         }
@@ -521,8 +537,7 @@ public class LibvirtVmManager : IVmManager
                 }
 
                 // Detect WSL2 — skip vsock (Hyper-V owns vsock layer)
-                var inventory = _nodeMetadata.Inventory;
-                var isWsl2 = inventory?.IsWsl2 ?? false;
+                var isWsl2 = _isWsl2;
 
                 if (!isWsl2)
                 {
