@@ -1838,16 +1838,18 @@ public class LibvirtVmManager : IVmManager
     /// Inject GPU proxy CUDA shim into cloud-init for VMs with GpuMode.Proxied.
     ///
     /// Adds:
-    ///   1. /etc/profile.d/gpu-proxy.sh — sets LD_PRELOAD and vsock env vars for login shells
-    ///   2. /etc/decloud/gpu-proxy.env — EnvironmentFile for systemd services needing GPU
-    ///   3. runcmd to mount 9p share and install the shim .so with GLIBC compatibility check
+    ///   1. /etc/profile.d/gpu-proxy.sh — sets LD_PRELOAD and transport env vars for login shells
+    ///   2. /etc/decloud/gpu-proxy.env  — same config for non-login processes (0600, token-bearing)
+    ///   3. runcmd to mount 9p share from host and install the shim .so into /usr/local/lib/
     ///
-    /// IMPORTANT: We NEVER use /etc/ld.so.preload. That file injects a library into every
-    /// process on the system (sshd, curl, systemctl, etc.). If the shim has a load-time
-    /// error (e.g., GLIBC version mismatch between host and guest), it bricks the entire VM.
-    /// Instead, only GPU-aware processes opt in via LD_PRELOAD in their environment.
+    /// Transport selection:
+    ///   - Bare metal (vsockCid set): shim tries vsock first, TCP fallback available
+    ///   - WSL2 (vsockCid null):      shim skips vsock, connects directly via TCP
     ///
-    /// The shim .so is fetched at first boot from a 9p shared mount exposed by the host.
+    /// The shim .so is delivered via 9p shared mount from the host rather than
+    /// embedded in cloud-init (base64 bloats the ISO, complicates templates).
+    /// GLIBC compatibility is verified before installation to prevent bricking
+    /// the VM if host and guest libc versions diverge.
     /// </summary>
     private static string EnsureGpuProxyShim(string cloudInitYaml, uint? vsockCid, string? gpuProxyToken)
     {
@@ -1857,37 +1859,64 @@ public class LibvirtVmManager : IVmManager
 
         var result = cloudInitYaml;
 
-        // 1. Inject write_files entries for the GPU proxy environment
-        // Build env vars — include TCP fallback config when token is present
-        var tokenEnv = !string.IsNullOrEmpty(gpuProxyToken)
-            ? $"\n      export DECLOUD_GPU_PROXY_TOKEN={gpuProxyToken}" +
-              $"\n      export DECLOUD_GPU_PROXY_HOST=192.168.122.1"
-            : "";
-        var tokenEnvFile = !string.IsNullOrEmpty(gpuProxyToken)
-            ? $"\n      DECLOUD_GPU_PROXY_TOKEN={gpuProxyToken}" +
-              $"\n      DECLOUD_GPU_PROXY_HOST=192.168.122.1"
-            : "";
+        // =====================================================
+        // Build transport-aware environment variables
+        // =====================================================
+        // vsock config: only when CID is assigned (bare metal)
+        // TCP config:   always when token is present (universal fallback)
+        //
+        // DECLOUD_GPU_PROXY_TRANSPORT tells the shim which path to try:
+        //   "vsock"  → try vsock first, TCP fallback
+        //   "tcp"    → skip vsock entirely, TCP only
+        var hasVsock = vsockCid.HasValue;
+        var hasTcp = !string.IsNullOrEmpty(gpuProxyToken);
+        var transport = hasVsock ? "vsock" : "tcp";
 
+        // profile.d — sourced by login shells (0644, NO secrets)
+        // Token must NOT appear here — it's world-readable
+        var profileVars = new System.Text.StringBuilder();
+        profileVars.AppendLine("      # DeCloud GPU Proxy — CUDA shim configuration");
+        profileVars.AppendLine($"      export DECLOUD_GPU_PROXY_TRANSPORT={transport}");
+        profileVars.AppendLine("      export DECLOUD_GPU_PROXY_PORT=9999");
+        if (hasVsock)
+            profileVars.AppendLine("      export DECLOUD_GPU_PROXY_CID=2");
+        if (hasTcp)
+            profileVars.AppendLine("      export DECLOUD_GPU_PROXY_HOST=192.168.122.1");
+        profileVars.AppendLine("      if [ -f /usr/local/lib/libdecloud_cuda_shim.so ]; then");
+        profileVars.AppendLine("        export LD_PRELOAD=/usr/local/lib/libdecloud_cuda_shim.so");
+        profileVars.AppendLine("      fi");
+        // Source the token from the protected env file (only for the current user's session)
+        if (hasTcp)
+            profileVars.AppendLine("      [ -r /etc/decloud/gpu-proxy.env ] && . /etc/decloud/gpu-proxy.env 2>/dev/null");
+
+        // env file — used by systemd services and non-login contexts (0600, root-only)
+        // This is the ONLY place the token lives on disk
+        var envFileVars = new System.Text.StringBuilder();
+        envFileVars.AppendLine($"      DECLOUD_GPU_PROXY_TRANSPORT={transport}");
+        envFileVars.AppendLine("      DECLOUD_GPU_PROXY_PORT=9999");
+        if (hasVsock)
+            envFileVars.AppendLine("      DECLOUD_GPU_PROXY_CID=2");
+        if (hasTcp)
+        {
+            envFileVars.AppendLine("      DECLOUD_GPU_PROXY_HOST=192.168.122.1");
+            envFileVars.AppendLine($"      DECLOUD_GPU_PROXY_TOKEN={gpuProxyToken}");
+        }
+        envFileVars.AppendLine("      LD_PRELOAD=/usr/local/lib/libdecloud_cuda_shim.so");
+
+        // =====================================================
+        // 1. Inject write_files
+        // =====================================================
         var writeFilesBlock = $@"
-  # GPU proxy: environment variables for CUDA shim
+  # GPU proxy: environment variables for CUDA shim ({transport} transport)
   - path: /etc/profile.d/gpu-proxy.sh
     permissions: '0644'
     content: |
-      # DeCloud GPU Proxy — CUDA shim configuration
-      export DECLOUD_GPU_PROXY_CID=2
-      export DECLOUD_GPU_PROXY_PORT=9999{tokenEnv}
-      if [ -f /usr/local/lib/libdecloud_cuda_shim.so ]; then
-        export LD_PRELOAD=/usr/local/lib/libdecloud_cuda_shim.so
-      fi
-
-  # GPU proxy: ensure LD_PRELOAD is active for non-interactive processes
+{profileVars}
+  # GPU proxy: protected env file with auth token (root-only, used by systemd/non-login)
   - path: /etc/decloud/gpu-proxy.env
     permissions: '0600'
     content: |
-      DECLOUD_GPU_PROXY_CID=2
-      DECLOUD_GPU_PROXY_PORT=9999{tokenEnvFile}
-      LD_PRELOAD=/usr/local/lib/libdecloud_cuda_shim.so
-";
+{envFileVars}";
 
         var writeFilesIndex = result.IndexOf("\nwrite_files:", StringComparison.Ordinal);
         if (writeFilesIndex >= 0)
@@ -1906,10 +1935,12 @@ public class LibvirtVmManager : IVmManager
                 result += $"\n\nwrite_files:{writeFilesBlock}";
         }
 
-        // 2. Inject runcmd steps to install the shim and configure the system.
-        //    The host exposes the shim .so via a 9p shared mount
-        //    (tag: decloud-shim → /usr/local/lib/decloud-gpu-shim/ on host).
-        //    We mount it and copy the .so into the guest's /usr/local/lib/.
+        // =====================================================
+        // 2. Inject runcmd steps to install the shim
+        // =====================================================
+        // The host exposes the shim .so via a 9p shared mount
+        // (tag: decloud-shim → /usr/local/lib/decloud-gpu-shim/ on host).
+        // We mount it and copy the .so into the guest's /usr/local/lib/.
         var runcmdSteps = @"
   # GPU proxy: mount 9p share and install CUDA shim from host
   - mkdir -p /usr/local/lib /etc/decloud /run/decloud
