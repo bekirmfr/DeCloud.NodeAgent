@@ -1838,14 +1838,16 @@ public class LibvirtVmManager : IVmManager
     /// Inject GPU proxy CUDA shim into cloud-init for VMs with GpuMode.Proxied.
     ///
     /// Adds:
-    ///   1. /etc/profile.d/gpu-proxy.sh — sets LD_PRELOAD and vsock env vars for all login shells
-    ///   2. /etc/ld.so.preload entry — ensures LD_PRELOAD is active for non-login processes (systemd services)
-    ///   3. runcmd to download the shim .so from the host via vsock-aware curl (or a simple bootstrap)
+    ///   1. /etc/profile.d/gpu-proxy.sh — sets LD_PRELOAD and vsock env vars for login shells
+    ///   2. /etc/decloud/gpu-proxy.env — EnvironmentFile for systemd services needing GPU
+    ///   3. runcmd to mount 9p share and install the shim .so with GLIBC compatibility check
     ///
-    /// The shim .so itself is fetched at first boot rather than embedded in cloud-init
-    /// (base64-encoding a binary bloats the ISO and complicates template management).
-    /// The fetch uses a tiny bootstrap script that copies the .so from the host filesystem
-    /// via the qemu-guest-agent file-read channel or a pre-seeded path.
+    /// IMPORTANT: We NEVER use /etc/ld.so.preload. That file injects a library into every
+    /// process on the system (sshd, curl, systemctl, etc.). If the shim has a load-time
+    /// error (e.g., GLIBC version mismatch between host and guest), it bricks the entire VM.
+    /// Instead, only GPU-aware processes opt in via LD_PRELOAD in their environment.
+    ///
+    /// The shim .so is fetched at first boot from a 9p shared mount exposed by the host.
     /// </summary>
     private static string EnsureGpuProxyShim(string cloudInitYaml, uint? vsockCid, string? gpuProxyToken)
     {
@@ -1917,16 +1919,24 @@ public class LibvirtVmManager : IVmManager
     mount -t 9p -o trans=virtio,version=9p2000.L decloud-shim /run/decloud 2>/dev/null || \
       mount -t virtiofs decloud-shim /run/decloud 2>/dev/null || true
   - |
-    # Copy the CUDA shim .so from the mounted share into the system library path
+    # Install CUDA shim ONLY if guest GLIBC is compatible.
+    # The shim is compiled on the host (e.g., Ubuntu 24.04 / GLIBC 2.38) but the
+    # guest may run an older distro (e.g., Ubuntu 22.04 / GLIBC 2.35).
+    # NEVER use /etc/ld.so.preload — it injects into every process on the system
+    # and bricks the VM if the shim fails to load (sshd, curl, systemctl all crash).
     if [ -f /run/decloud/libdecloud_cuda_shim.so ]; then
-      cp /run/decloud/libdecloud_cuda_shim.so /usr/local/lib/
-      chmod 755 /usr/local/lib/libdecloud_cuda_shim.so
-    fi
-  - |
-    # Ensure LD_PRELOAD is set for systemd services that use GPU
-    if [ -f /usr/local/lib/libdecloud_cuda_shim.so ]; then
-      grep -q 'libdecloud_cuda_shim' /etc/ld.so.preload 2>/dev/null || \
-        echo '/usr/local/lib/libdecloud_cuda_shim.so' >> /etc/ld.so.preload
+      if ldd /run/decloud/libdecloud_cuda_shim.so 2>&1 | grep -q 'not found'; then
+        echo 'WARNING: GPU shim has unresolved dependencies (likely GLIBC mismatch) — skipping'
+        echo 'GLIBC_COMPAT=false' > /etc/decloud/gpu-shim-status
+      else
+        cp /run/decloud/libdecloud_cuda_shim.so /usr/local/lib/
+        chmod 755 /usr/local/lib/libdecloud_cuda_shim.so
+        echo 'GLIBC_COMPAT=true' > /etc/decloud/gpu-shim-status
+        echo 'GPU shim installed — use LD_PRELOAD or source /etc/profile.d/gpu-proxy.sh'
+      fi
+    else
+      echo 'GPU shim not found in 9p share — GPU proxy not available'
+      echo 'SHIM_AVAILABLE=false' > /etc/decloud/gpu-shim-status
     fi
 ";
 
@@ -2014,28 +2024,27 @@ public class LibvirtVmManager : IVmManager
                 afterRuncmd = true;
                 continue;
             }
-            
+
             // If we just added runcmd, inject SSH setup commands as first runcmd items
             if (afterRuncmd && hasPassword && line.TrimStart().StartsWith("-"))
             {
-                // Add SSH configuration commands before other runcmd items
+                // Add SSH configuration commands before other runcmd items.
+                // NOTE: We use printf instead of heredoc (cat <<'EOF') because
+                // cloud-init runcmd items are indented, and heredoc closing
+                // delimiters MUST be at column 0 with <<'EOF' syntax.
+                // An indented closing delimiter silently fails, leaving the
+                // SSH config file empty and sshd rejecting all connections.
                 lines.Add("  # Enable password authentication for SSH");
                 lines.Add("  - mkdir -p /etc/ssh/sshd_config.d");
                 lines.Add("  - |");
-                lines.Add("    cat > /etc/ssh/sshd_config.d/99-decloud-password-auth.conf <<'SSHEOF'");
-                lines.Add("    # DeCloud: Enable password authentication");
-                lines.Add("    PasswordAuthentication yes");
-                lines.Add("    PermitRootLogin yes");
-                lines.Add("    ChallengeResponseAuthentication no");
-                lines.Add("    UsePAM yes");
-                lines.Add("    SSHEOF");
+                lines.Add("    printf '%s\\n' 'PasswordAuthentication yes' 'PermitRootLogin yes' 'ChallengeResponseAuthentication no' 'UsePAM yes' > /etc/ssh/sshd_config.d/99-decloud-password-auth.conf");
                 lines.Add("  - systemctl restart sshd || systemctl restart ssh");
                 lines.Add("");
-                
+
                 // Now add the first actual runcmd item
                 afterRuncmd = false;
             }
-            
+
             lines.Add(line);
         }
         

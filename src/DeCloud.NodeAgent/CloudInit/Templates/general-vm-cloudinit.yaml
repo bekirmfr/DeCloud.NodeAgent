@@ -140,12 +140,10 @@ runcmd:
   
   # Configure SSH Certificate Authority
   - |
-    cat >> /etc/ssh/sshd_config << 'DECLOUD_EOF'
-    
-    # DeCloud: SSH Certificate Authority
-    TrustedUserCAKeys /etc/ssh/decloud_ca.pub
-    AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
-    DECLOUD_EOF
+    echo '' >> /etc/ssh/sshd_config
+    echo '# DeCloud: SSH Certificate Authority' >> /etc/ssh/sshd_config
+    echo 'TrustedUserCAKeys /etc/ssh/decloud_ca.pub' >> /etc/ssh/sshd_config
+    echo 'AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u' >> /etc/ssh/sshd_config
   
   # Create SSH principals for certificate-based auth
   - mkdir -p /etc/ssh/auth_principals
