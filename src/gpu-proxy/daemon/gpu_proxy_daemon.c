@@ -1255,6 +1255,77 @@ static int handle_get_usage_stats(ConnectionCtx *ctx)
 }
 
 /* ================================================================
+ * CUDA Driver API handlers (Phase 2 — Ollama / ML framework support)
+ *
+ * These handle requests from the Driver API shim (libcuda.so.1) which
+ * is dlopen'd by Ollama, llama.cpp, vLLM, and other ML frameworks.
+ * ================================================================ */
+
+static int handle_get_driver_version(int fd)
+{
+    int version = 0;
+    CUresult cr = cuDriverGetVersion(&version);
+    GpuDriverVersionResponse resp = { .version = (int32_t)version };
+    return send_response(fd, GPU_CMD_GET_DRIVER_VERSION,
+                         (int32_t)cr, &resp, sizeof(resp));
+}
+
+static int handle_get_device_uuid(int fd, const void *payload, uint32_t len)
+{
+    GpuDeviceUuidRequest req;
+    if (len < sizeof(req))
+        return send_response(fd, GPU_CMD_GET_DEVICE_UUID, -1, NULL, 0);
+    memcpy(&req, payload, sizeof(req));
+
+    CUdevice dev;
+    CUresult cr = cuDeviceGet(&dev, req.device);
+    if (cr != CUDA_SUCCESS)
+        return send_response(fd, GPU_CMD_GET_DEVICE_UUID, (int32_t)cr, NULL, 0);
+
+    CUuuid uuid;
+    cr = cuDeviceGetUuid(&uuid, dev);
+    GpuDeviceUuidResponse resp;
+    memcpy(resp.uuid, uuid.bytes, 16);
+    return send_response(fd, GPU_CMD_GET_DEVICE_UUID,
+                         (int32_t)cr, &resp, sizeof(resp));
+}
+
+static int handle_ctx_create(int fd, const void *payload, uint32_t len)
+{
+    GpuCtxCreateRequest req;
+    if (len < sizeof(req))
+        return send_response(fd, GPU_CMD_CTX_CREATE, -1, NULL, 0);
+    memcpy(&req, payload, sizeof(req));
+
+    /* Use cudaSetDevice as implicit context creation —
+     * the CUDA runtime manages contexts per-device. */
+    cudaError_t err = cudaSetDevice(req.device);
+    GpuCtxCreateResponse resp = {
+        .ctx_handle = (uint64_t)(uintptr_t)(req.device + 1) /* non-null opaque */
+    };
+    return send_response(fd, GPU_CMD_CTX_CREATE,
+                         (int32_t)err, &resp, sizeof(resp));
+}
+
+static int handle_mem_get_info(int fd)
+{
+    size_t free_mem = 0, total_mem = 0;
+    cudaError_t err = cudaMemGetInfo(&free_mem, &total_mem);
+    GpuMemInfoResponse resp = {
+        .free  = (uint64_t)free_mem,
+        .total = (uint64_t)total_mem,
+    };
+    return send_response(fd, GPU_CMD_MEM_GET_INFO,
+                         (int32_t)err, &resp, sizeof(resp));
+}
+
+static int handle_ctx_destroy(int fd)
+{
+    /* No-op — context cleanup happens per-connection in cleanup_connection() */
+    return send_response(fd, GPU_CMD_CTX_DESTROY, 0, NULL, 0);
+}
+
+/* ================================================================
  * Per-connection handler (one thread per VM)
  * ================================================================ */
 
@@ -1393,6 +1464,23 @@ static void *connection_handler(void *arg)
             break;
         case GPU_CMD_GET_USAGE_STATS:
             rc = handle_get_usage_stats(ctx);
+            break;
+
+        /* CUDA Driver API (Phase 2 — Ollama / ML frameworks) */
+        case GPU_CMD_GET_DRIVER_VERSION:
+            rc = handle_get_driver_version(fd);
+            break;
+        case GPU_CMD_GET_DEVICE_UUID:
+            rc = handle_get_device_uuid(fd, buf, hdr.payload_len);
+            break;
+        case GPU_CMD_CTX_CREATE:
+            rc = handle_ctx_create(fd, buf, hdr.payload_len);
+            break;
+        case GPU_CMD_MEM_GET_INFO:
+            rc = handle_mem_get_info(fd);
+            break;
+        case GPU_CMD_CTX_DESTROY:
+            rc = handle_ctx_destroy(fd);
             break;
 
         case GPU_CMD_GOODBYE:

@@ -1049,21 +1049,26 @@ build_gpu_proxy() {
         }
     fi
 
-    # --- Build shim (for any GPU mode — guests may need it even alongside passthrough) ---
+    # --- Build shims (for any GPU mode — guests may need them even alongside passthrough) ---
     # Prefer compat build via Docker — compiles against Ubuntu 20.04 glibc 2.31,
     # which is forward-compatible with all modern distros (22.04, 24.04, etc.).
     # Falls back to dynamic host build if Docker is not available.
-    local shim_target="shim"
+    #
+    # Phase 2: builds all three shims:
+    #   - libdecloud_cuda_shim.so  (Runtime API, LD_PRELOAD)
+    #   - libcuda.so.1             (Driver API, dlopen target for Ollama/llama.cpp)
+    #   - libnvidia-ml.so.1        (NVML, dlopen target for VRAM monitoring)
+    local shim_target="all-shims"
     if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
-        log_info "Building CUDA shim (Docker compat — glibc 2.31, universal)..."
-        shim_target="shim-compat"
+        log_info "Building all GPU shims (Docker compat — glibc 2.31, universal)..."
+        shim_target="all-shims-compat"
     else
-        log_info "Docker not available — building dynamic shim (may have glibc compat issues)"
+        log_info "Docker not available — building dynamic shims (may have glibc compat issues)"
         log_info "For universal compatibility: install Docker and re-run"
     fi
     make -C "$GPU_PROXY_SRC" "$shim_target" 2>&1 | tee -a "$LOG_DIR/install.log"
 
-    # Detect whichever was built
+    # Detect whichever runtime API shim was built
     local built_shim=""
     if [ -f "$GPU_PROXY_SRC/build/libdecloud_cuda_shim-compat.so" ]; then
         built_shim="$GPU_PROXY_SRC/build/libdecloud_cuda_shim-compat.so"
@@ -1072,13 +1077,19 @@ build_gpu_proxy() {
     fi
 
     if [ -n "$built_shim" ]; then
-        log_success "CUDA shim built: $built_shim"
+        log_success "CUDA Runtime API shim built: $built_shim"
     else
         log_error "CUDA shim build failed — output binary not found"
         log_info "Check logs: $LOG_DIR/install.log"
         ls -la "$GPU_PROXY_SRC/build/" 2>/dev/null || log_info "Build directory does not exist"
         return 0
     fi
+
+    # Check Driver API and NVML shims
+    local built_driver_shim="$GPU_PROXY_SRC/build/libcuda.so.1"
+    local built_nvml_shim="$GPU_PROXY_SRC/build/libnvidia-ml.so.1"
+    [ -f "$built_driver_shim" ] && log_success "CUDA Driver API shim built: $built_driver_shim" || log_warn "Driver API shim not built"
+    [ -f "$built_nvml_shim" ] && log_success "NVML shim built: $built_nvml_shim" || log_warn "NVML shim not built"
 
     # --- Build daemon (only in proxy mode — passthrough doesn't need it) ---
     local daemon_built=false
@@ -1118,19 +1129,36 @@ build_gpu_proxy() {
     # --- Install built artifacts ---
     log_info "Installing GPU proxy artifacts to system paths..."
 
-    # Shim → /usr/local/lib (use $built_shim which may be static or dynamic)
+    # Runtime API Shim → /usr/local/lib (use $built_shim which may be static or dynamic)
     if [ -n "$built_shim" ] && [ -f "$built_shim" ]; then
         install -d /usr/local/lib
-        install -m 644 "$built_shim" /usr/local/lib/libdecloud_cuda_shim.so
-        ldconfig 2>/dev/null || true
-        log_success "Shim installed → /usr/local/lib/libdecloud_cuda_shim.so (from $built_shim)"
-
-        # Also copy to 9p share directory for guest VM delivery
         install -d /usr/local/lib/decloud-gpu-shim
+        install -m 644 "$built_shim" /usr/local/lib/libdecloud_cuda_shim.so
         install -m 644 "$built_shim" /usr/local/lib/decloud-gpu-shim/libdecloud_cuda_shim.so
+        log_success "Runtime API shim installed → /usr/local/lib/libdecloud_cuda_shim.so"
     else
-        log_warn "Shim binary not found at $GPU_PROXY_SRC/build/libdecloud_cuda_shim.so — skipping install"
+        log_warn "Runtime API shim binary not found — skipping install"
     fi
+
+    # Driver API Shim → /usr/local/lib (libcuda.so.1 for Ollama dlopen discovery)
+    if [ -f "$built_driver_shim" ]; then
+        install -m 644 "$built_driver_shim" /usr/local/lib/libcuda.so.1
+        ln -sf libcuda.so.1 /usr/local/lib/libcuda.so
+        install -m 644 "$built_driver_shim" /usr/local/lib/decloud-gpu-shim/libcuda.so.1
+        ln -sf libcuda.so.1 /usr/local/lib/decloud-gpu-shim/libcuda.so
+        log_success "Driver API shim installed → /usr/local/lib/libcuda.so.1"
+    fi
+
+    # NVML Shim → /usr/local/lib (libnvidia-ml.so.1 for VRAM monitoring)
+    if [ -f "$built_nvml_shim" ]; then
+        install -m 644 "$built_nvml_shim" /usr/local/lib/libnvidia-ml.so.1
+        ln -sf libnvidia-ml.so.1 /usr/local/lib/libnvidia-ml.so
+        install -m 644 "$built_nvml_shim" /usr/local/lib/decloud-gpu-shim/libnvidia-ml.so.1
+        ln -sf libnvidia-ml.so.1 /usr/local/lib/decloud-gpu-shim/libnvidia-ml.so
+        log_success "NVML shim installed → /usr/local/lib/libnvidia-ml.so.1"
+    fi
+
+    ldconfig 2>/dev/null || true
 
     # Daemon → /usr/local/bin
     if [ "$daemon_built" = true ] && [ -f "$GPU_PROXY_SRC/build/gpu-proxy-daemon" ]; then
@@ -1143,15 +1171,17 @@ build_gpu_proxy() {
 
     # --- Summary ---
     echo ""
-    log_info "┌─────────────────────────────────────────┐"
-    log_info "│ GPU Proxy Build Summary                  │"
-    log_info "├─────────────────────────────────────────┤"
-    log_info "│ GPU Mode:    ${GPU_MODE}"
-    log_info "│ WSL2:        ${IS_WSL2}"
-    log_info "│ CUDA Home:   ${CUDA_HOME:-not found}"
-    log_info "│ Shim:        $([ -f /usr/local/lib/libdecloud_cuda_shim.so ] && echo 'installed' || echo 'not built')"
-    log_info "│ Daemon:      $([ -f /usr/local/bin/gpu-proxy-daemon ] && echo 'installed' || echo 'not built')"
-    log_info "└─────────────────────────────────────────┘"
+    log_info "┌──────────────────────────────────────────────────┐"
+    log_info "│ GPU Proxy Build Summary                           │"
+    log_info "├──────────────────────────────────────────────────┤"
+    log_info "│ GPU Mode:       ${GPU_MODE}"
+    log_info "│ WSL2:           ${IS_WSL2}"
+    log_info "│ CUDA Home:      ${CUDA_HOME:-not found}"
+    log_info "│ Runtime Shim:   $([ -f /usr/local/lib/libdecloud_cuda_shim.so ] && echo 'installed' || echo 'not built')"
+    log_info "│ Driver Shim:    $([ -f /usr/local/lib/libcuda.so.1 ] && echo 'installed' || echo 'not built')"
+    log_info "│ NVML Shim:      $([ -f /usr/local/lib/libnvidia-ml.so.1 ] && echo 'installed' || echo 'not built')"
+    log_info "│ Daemon:         $([ -f /usr/local/bin/gpu-proxy-daemon ] && echo 'installed' || echo 'not built')"
+    log_info "└──────────────────────────────────────────────────┘"
     echo ""
 
     return 0

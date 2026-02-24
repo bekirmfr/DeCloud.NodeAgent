@@ -1969,6 +1969,35 @@ public class LibvirtVmManager : IVmManager
       echo 'GPU shim not found in 9p share — GPU proxy not available'
       echo 'SHIM_AVAILABLE=false' > /etc/decloud/gpu-shim-status
     fi
+  - |
+    # Install CUDA Driver API and NVML shims for framework GPU discovery (Phase 2).
+    # Ollama, llama.cpp, vLLM etc. use dlopen(""libcuda.so"") instead of LD_PRELOAD,
+    # so they need actual .so files at known search paths.
+    if [ -f /run/decloud/libcuda.so.1 ]; then
+      if ldd /run/decloud/libcuda.so.1 2>&1 | grep -q 'not found'; then
+        echo 'WARNING: libcuda shim has glibc mismatch — skipping'
+      else
+        cp /run/decloud/libcuda.so.1 /usr/local/lib/
+        ln -sf /usr/local/lib/libcuda.so.1 /usr/local/lib/libcuda.so
+        echo 'Driver API shim installed (libcuda.so.1)'
+      fi
+    fi
+    if [ -f /run/decloud/libnvidia-ml.so.1 ]; then
+      if ldd /run/decloud/libnvidia-ml.so.1 2>&1 | grep -q 'not found'; then
+        echo 'WARNING: NVML shim has glibc mismatch — skipping'
+      else
+        cp /run/decloud/libnvidia-ml.so.1 /usr/local/lib/
+        ln -sf /usr/local/lib/libnvidia-ml.so.1 /usr/local/lib/libnvidia-ml.so
+        echo 'NVML shim installed (libnvidia-ml.so.1)'
+      fi
+    fi
+    ldconfig 2>/dev/null || true
+  - |
+    # Create dummy NVIDIA device nodes (needed by frameworks that stat these).
+    # These are NOT backed by a real kernel driver — they just satisfy existence checks.
+    mknod -m 666 /dev/nvidia0 c 195 0 2>/dev/null || true
+    mknod -m 666 /dev/nvidiactl c 195 255 2>/dev/null || true
+    mknod -m 666 /dev/nvidia-uvm c 510 0 2>/dev/null || true
 ";
 
         var runcmdIndex = result.IndexOf("\nruncmd:", StringComparison.Ordinal);

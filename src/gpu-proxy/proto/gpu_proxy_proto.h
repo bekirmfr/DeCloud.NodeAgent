@@ -30,6 +30,10 @@ typedef enum {
     GPU_CMD_GET_DEVICE_PROPERTIES  = 0x02,
     GPU_CMD_SET_DEVICE             = 0x03,
 
+    /* CUDA Driver API (used by Ollama and ML frameworks via dlopen) */
+    GPU_CMD_GET_DRIVER_VERSION     = 0x04,  /* Returns CUDA driver version */
+    GPU_CMD_GET_DEVICE_UUID        = 0x05,  /* Returns 16-byte device UUID */
+
     /* Memory management */
     GPU_CMD_MALLOC                 = 0x10,
     GPU_CMD_FREE                   = 0x11,
@@ -39,6 +43,9 @@ typedef enum {
     /* Execution */
     GPU_CMD_LAUNCH_KERNEL          = 0x20,
     GPU_CMD_DEVICE_SYNCHRONIZE     = 0x21,
+    GPU_CMD_CTX_CREATE             = 0x22,  /* Create CUDA context (Driver API) */
+    GPU_CMD_MEM_GET_INFO           = 0x23,  /* Returns free + total VRAM */
+    GPU_CMD_CTX_DESTROY            = 0x24,  /* Destroy CUDA context */
 
     /* Stream management */
     GPU_CMD_STREAM_CREATE          = 0x30,
@@ -342,6 +349,45 @@ typedef struct __attribute__((packed)) {
 /* Default kernel execution timeout (microseconds). 0 = no timeout.
  * Can be overridden per-daemon via -t flag. */
 #define GPU_PROXY_DEFAULT_KERNEL_TIMEOUT_US  (30ULL * 1000000ULL)  /* 30 seconds */
+
+/* ================================================================
+ * CUDA Driver API payloads (Phase 2 — Ollama / ML framework support)
+ *
+ * These support the dlopen(libcuda.so) + dlsym() discovery path
+ * used by Ollama, llama.cpp, vLLM, and other inference frameworks.
+ * ================================================================ */
+
+/* --- GPU_CMD_GET_DRIVER_VERSION (response) --- */
+typedef struct __attribute__((packed)) {
+    int32_t version;          /* e.g., 12040 for CUDA 12.4 */
+} GpuDriverVersionResponse;
+
+/* --- GPU_CMD_GET_DEVICE_UUID (request) --- */
+typedef struct __attribute__((packed)) {
+    int32_t device;
+} GpuDeviceUuidRequest;
+
+/* --- GPU_CMD_GET_DEVICE_UUID (response) --- */
+typedef struct __attribute__((packed)) {
+    uint8_t uuid[16];
+} GpuDeviceUuidResponse;
+
+/* --- GPU_CMD_CTX_CREATE (request) --- */
+typedef struct __attribute__((packed)) {
+    int32_t device;
+    uint32_t flags;
+} GpuCtxCreateRequest;
+
+/* --- GPU_CMD_CTX_CREATE (response) --- */
+typedef struct __attribute__((packed)) {
+    uint64_t ctx_handle;      /* Opaque context handle */
+} GpuCtxCreateResponse;
+
+/* --- GPU_CMD_MEM_GET_INFO (response) --- */
+typedef struct __attribute__((packed)) {
+    uint64_t free;            /* Free VRAM in bytes */
+    uint64_t total;           /* Total VRAM in bytes */
+} GpuMemInfoResponse;
 
 /* ================================================================
  * Helpers
