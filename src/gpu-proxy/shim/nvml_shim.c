@@ -8,7 +8,7 @@
  * Ollama's NVML discovery:
  *   1. dlopen("libnvidia-ml.so.1")
  *   2. dlsym("nvmlInit_v2"), dlsym("nvmlDeviceGetHandleByIndex_v2"), etc.
- *   3. nvmlInit_v2() → nvmlDeviceGetHandleByIndex_v2() → nvmlDeviceGetMemoryInfo()
+ *   3. nvmlInit_v2() --> nvmlDeviceGetHandleByIndex_v2() --> nvmlDeviceGetMemoryInfo()
  *   4. Uses VRAM info to decide how many model layers to offload to GPU
  *
  * Each function forwards to the same GPU proxy daemon via TCP/vsock,
@@ -17,7 +17,7 @@
  * Build: gcc -shared -fPIC -o libnvidia-ml.so.1 nvml_shim.c -lpthread
  *        ln -sf libnvidia-ml.so.1 libnvidia-ml.so
  *
- * No CUDA or NVML dependency — this replaces libnvidia-ml.so entirely.
+ * No CUDA or NVML dependency -- this replaces libnvidia-ml.so entirely.
  */
 
 #define _GNU_SOURCE
@@ -41,7 +41,7 @@ typedef int nvmlReturn_t;
 #define NVML_ERROR_NOT_FOUND 6
 #define NVML_ERROR_UNINITIALIZED 1
 
-/* Device handle — we use (void *)(uintptr_t)(index + 1) as a non-NULL opaque */
+/* Device handle -- we use (void *)(uintptr_t)(index + 1) as a non-NULL opaque */
 typedef void *nvmlDevice_t;
 
 typedef struct {
