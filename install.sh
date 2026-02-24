@@ -1041,17 +1041,42 @@ build_gpu_proxy() {
     fi
 
     # Ensure build tools are available
-    if ! command -v gcc &>/dev/null || ! command -v make &>/dev/null; then
-        log_info "Installing build-essential for GPU proxy compilation..."
-        apt-get install -y build-essential 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null || {
+    if ! command -v gcc &>/dev/null || ! command -v make &>/dev/null || ! command -v musl-gcc &>/dev/null; then
+        log_info "Installing build tools for GPU proxy compilation..."
+        apt-get install -y build-essential musl-tools 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null || {
             log_error "Failed to install build-essential — cannot build GPU proxy"
             return 0
         }
     fi
 
     # --- Build shim (for any GPU mode — guests may need it even alongside passthrough) ---
-    log_info "Building CUDA shim (libdecloud_cuda_shim.so)..."
-    make -C "$GPU_PROXY_SRC" shim 2>&1 | tee -a "$LOG_DIR/install.log"
+    # Prefer static musl build — produces a glibc-independent .so that works
+    # in any guest VM regardless of distro version. Falls back to dynamic build
+    # if musl-tools is not installed.
+    local shim_target="shim"
+    if command -v musl-gcc &>/dev/null; then
+        log_info "Building CUDA shim (static musl — glibc-independent)..."
+        shim_target="shim-static"
+    else
+        log_info "musl-gcc not found — building dynamic shim (may have glibc compat issues)"
+        log_info "For universal compatibility: apt install musl-tools && make shim-static"
+    fi
+    make -C "$GPU_PROXY_SRC" "$shim_target" 2>&1 | tee -a "$LOG_DIR/install.log"
+
+    # Copy whichever was built
+    local built_shim=""
+    if [ -f "$GPU_PROXY_SRC/build/libdecloud_cuda_shim-static.so" ]; then
+        built_shim="$GPU_PROXY_SRC/build/libdecloud_cuda_shim-static.so"
+    elif [ -f "$GPU_PROXY_SRC/build/libdecloud_cuda_shim.so" ]; then
+        built_shim="$GPU_PROXY_SRC/build/libdecloud_cuda_shim.so"
+    fi
+
+    if [ -n "$built_shim" ]; then
+        log_success "CUDA shim built: $built_shim"
+    else
+        log_error "CUDA shim build failed — output binary not found"
+        return 0
+    fi
     if [ -f "$GPU_PROXY_SRC/build/libdecloud_cuda_shim.so" ]; then
         log_success "CUDA shim built: $GPU_PROXY_SRC/build/libdecloud_cuda_shim.so"
     else
@@ -1100,16 +1125,16 @@ build_gpu_proxy() {
     # --- Install built artifacts ---
     log_info "Installing GPU proxy artifacts to system paths..."
 
-    # Shim → /usr/local/lib
-    if [ -f "$GPU_PROXY_SRC/build/libdecloud_cuda_shim.so" ]; then
+    # Shim → /usr/local/lib (use $built_shim which may be static or dynamic)
+    if [ -n "$built_shim" ] && [ -f "$built_shim" ]; then
         install -d /usr/local/lib
-        install -m 644 "$GPU_PROXY_SRC/build/libdecloud_cuda_shim.so" /usr/local/lib/
+        install -m 644 "$built_shim" /usr/local/lib/libdecloud_cuda_shim.so
         ldconfig 2>/dev/null || true
-        log_success "Shim installed → /usr/local/lib/libdecloud_cuda_shim.so"
+        log_success "Shim installed → /usr/local/lib/libdecloud_cuda_shim.so (from $built_shim)"
 
-        # Also copy to a share directory for virtiofs delivery into guest VMs
+        # Also copy to 9p share directory for guest VM delivery
         install -d /usr/local/lib/decloud-gpu-shim
-        install -m 644 "$GPU_PROXY_SRC/build/libdecloud_cuda_shim.so" /usr/local/lib/decloud-gpu-shim/
+        install -m 644 "$built_shim" /usr/local/lib/decloud-gpu-shim/libdecloud_cuda_shim.so
     else
         log_warn "Shim binary not found at $GPU_PROXY_SRC/build/libdecloud_cuda_shim.so — skipping install"
     fi

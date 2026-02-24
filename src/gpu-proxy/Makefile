@@ -1,5 +1,6 @@
 # DeCloud GPU Proxy — build daemon + shim
 #
+# The shim can be built in two modes:
 # Prerequisites:
 #   Daemon: CUDA toolkit (nvcc, libcudart, libcuda)
 #   Shim:   Just a C compiler (no CUDA needed)
@@ -7,11 +8,13 @@
 # Usage:
 #   make              — build both
 #   make daemon       — build daemon only (requires CUDA)
-#   make shim         — build shim only (no CUDA needed)
+#   make shim         — build shim (dynamic, links host glibc)
+#   make shim-static  — build shim (static musl, runs on any Linux distro)
 #   make clean        — remove build artifacts
 #   make install      — install to /usr/local
 
 CC       ?= gcc
+MUSL_CC  ?= musl-gcc
 NVCC     ?= nvcc
 CFLAGS   := -Wall -Wextra -O2 -g
 LDFLAGS  :=
@@ -25,8 +28,9 @@ CUDA_LIB   = $(CUDA_HOME)/lib64
 BUILD_DIR := build
 DAEMON    := $(BUILD_DIR)/gpu-proxy-daemon
 SHIM      := $(BUILD_DIR)/libdecloud_cuda_shim.so
+SHIM_STATIC := $(BUILD_DIR)/libdecloud_cuda_shim-static.so
 
-.PHONY: all daemon shim test clean install
+.PHONY: all daemon shim shim-static test clean install
 
 all: daemon shim
 
@@ -51,6 +55,18 @@ $(SHIM): shim/cuda_shim.c proto/gpu_proxy_proto.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -shared -fPIC \
 		-o $@ $< \
 		-lpthread
+
+# ----------------------------------------------------------------
+# Shim (static musl): zero glibc dependency — runs on any Linux
+# Requires: musl-tools (apt install musl-tools)
+# ----------------------------------------------------------------
+shim-static: $(SHIM_STATIC)
+
+$(SHIM_STATIC): shim/cuda_shim.c proto/gpu_proxy_proto.h | $(BUILD_DIR)
+	$(MUSL_CC) $(CFLAGS) -shared -fPIC -static-libgcc \
+		-o $@ $< \
+		-lpthread
+	@echo "Static shim built: $@ (no glibc dependency)"
 
 # ----------------------------------------------------------------
 # Tests: no CUDA dependency — runs on any machine
@@ -81,3 +97,13 @@ install: all
 	install -d $(DESTDIR)$(PREFIX)/lib
 	install -m 755 $(DAEMON) $(DESTDIR)$(PREFIX)/bin/gpu-proxy-daemon
 	install -m 644 $(SHIM)   $(DESTDIR)$(PREFIX)/lib/libdecloud_cuda_shim.so
+
+# ----------------------------------------------------------------
+# Install static shim (preferred for 9p share distribution)
+# ----------------------------------------------------------------
+install-shim-static: shim-static
+	install -d $(DESTDIR)$(PREFIX)/lib
+	install -d $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim
+	install -m 644 $(SHIM_STATIC) $(DESTDIR)$(PREFIX)/lib/libdecloud_cuda_shim.so
+	install -m 644 $(SHIM_STATIC) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libdecloud_cuda_shim.so
+	@echo "Static shim installed to $(PREFIX)/lib and 9p share directory"
