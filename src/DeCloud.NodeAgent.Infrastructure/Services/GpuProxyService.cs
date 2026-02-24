@@ -105,6 +105,29 @@ public class GpuProxyService
                     "the shim is built and placed at this path.",
                     ShimPath);
             }
+
+            // Copy Driver API shim (libcuda.so.1) for Ollama/ML framework dlopen discovery
+            var shimDir = Path.GetDirectoryName(ShimPath)!;
+            var driverShimSrc = Path.Combine(shimDir, "libcuda.so.1");
+            var driverShimDst = Path.Combine(ShimShareDir, "libcuda.so.1");
+            if (File.Exists(driverShimSrc) && !File.Exists(driverShimDst))
+            {
+                File.Copy(driverShimSrc, driverShimDst, overwrite: true);
+                _logger.LogInformation(
+                    "Copied Driver API shim to 9p share: {Src} -> {Dst}",
+                    driverShimSrc, driverShimDst);
+            }
+
+            // Copy NVML shim (libnvidia-ml.so.1) for VRAM monitoring
+            var nvmlShimSrc = Path.Combine(shimDir, "libnvidia-ml.so.1");
+            var nvmlShimDst = Path.Combine(ShimShareDir, "libnvidia-ml.so.1");
+            if (File.Exists(nvmlShimSrc) && !File.Exists(nvmlShimDst))
+            {
+                File.Copy(nvmlShimSrc, nvmlShimDst, overwrite: true);
+                _logger.LogInformation(
+                    "Copied NVML shim to 9p share: {Src} -> {Dst}",
+                    nvmlShimSrc, nvmlShimDst);
+            }
         }
         catch (Exception ex)
         {

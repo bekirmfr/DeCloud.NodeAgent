@@ -192,6 +192,38 @@ TEST(usage_stats_response_size)
     ASSERT_EQ(sizeof(GpuUsageStatsResponse), 56);
 }
 
+/* Phase 2: CUDA Driver API struct sizes */
+
+TEST(driver_version_response_is_4_bytes)
+{
+    ASSERT_EQ(sizeof(GpuDriverVersionResponse), 4);
+}
+
+TEST(device_uuid_request_is_4_bytes)
+{
+    ASSERT_EQ(sizeof(GpuDeviceUuidRequest), 4);
+}
+
+TEST(device_uuid_response_is_16_bytes)
+{
+    ASSERT_EQ(sizeof(GpuDeviceUuidResponse), 16);
+}
+
+TEST(ctx_create_request_is_8_bytes)
+{
+    ASSERT_EQ(sizeof(GpuCtxCreateRequest), 8);
+}
+
+TEST(ctx_create_response_is_8_bytes)
+{
+    ASSERT_EQ(sizeof(GpuCtxCreateResponse), 8);
+}
+
+TEST(mem_info_response_is_16_bytes)
+{
+    ASSERT_EQ(sizeof(GpuMemInfoResponse), 16);
+}
+
 /* ================================================================
  * Tests — header field offsets (verify packing)
  * ================================================================ */
@@ -242,6 +274,13 @@ TEST(command_id_ranges)
     /* Resource mgmt: 0x60-0x61 */
     ASSERT_EQ(GPU_CMD_SET_MEMORY_QUOTA, 0x60);
     ASSERT_EQ(GPU_CMD_GET_USAGE_STATS, 0x61);
+
+    /* CUDA Driver API (Phase 2): 0x04-0x05, 0x22-0x24 */
+    ASSERT_EQ(GPU_CMD_GET_DRIVER_VERSION, 0x04);
+    ASSERT_EQ(GPU_CMD_GET_DEVICE_UUID, 0x05);
+    ASSERT_EQ(GPU_CMD_CTX_CREATE, 0x22);
+    ASSERT_EQ(GPU_CMD_MEM_GET_INFO, 0x23);
+    ASSERT_EQ(GPU_CMD_CTX_DESTROY, 0x24);
 
     /* Lifecycle: 0xF0-0xF1 */
     ASSERT_EQ(GPU_CMD_HELLO, 0xF0);
@@ -401,6 +440,14 @@ int main(void)
     run_test_event_elapsed_time_response_is_4_bytes();
     run_test_set_memory_quota_request_is_8_bytes();
     run_test_usage_stats_response_size();
+
+    /* Phase 2: CUDA Driver API struct sizes */
+    run_test_driver_version_response_is_4_bytes();
+    run_test_device_uuid_request_is_4_bytes();
+    run_test_device_uuid_response_is_16_bytes();
+    run_test_ctx_create_request_is_8_bytes();
+    run_test_ctx_create_response_is_8_bytes();
+    run_test_mem_info_response_is_16_bytes();
 
     /* Field offsets */
     run_test_header_field_offsets();
