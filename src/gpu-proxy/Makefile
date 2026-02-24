@@ -9,12 +9,11 @@
 #   make              — build both
 #   make daemon       — build daemon only (requires CUDA)
 #   make shim         — build shim (dynamic, links host glibc)
-#   make shim-static  — build shim (static musl, runs on any Linux distro)
+#   make shim-compat  — build shim (Docker Ubuntu 20.04, universal glibc compat)
 #   make clean        — remove build artifacts
 #   make install      — install to /usr/local
 
 CC       ?= gcc
-MUSL_CC  ?= musl-gcc
 NVCC     ?= nvcc
 CFLAGS   := -Wall -Wextra -O2 -g
 LDFLAGS  :=
@@ -30,7 +29,7 @@ DAEMON    := $(BUILD_DIR)/gpu-proxy-daemon
 SHIM      := $(BUILD_DIR)/libdecloud_cuda_shim.so
 SHIM_STATIC := $(BUILD_DIR)/libdecloud_cuda_shim-static.so
 
-.PHONY: all daemon shim shim-static test clean install
+.PHONY: all daemon shim shim-compat test clean install
 
 all: daemon shim
 
@@ -57,18 +56,21 @@ $(SHIM): shim/cuda_shim.c proto/gpu_proxy_proto.h | $(BUILD_DIR)
 		-lpthread
 
 # ----------------------------------------------------------------
-# Shim (static musl): zero glibc dependency — runs on any Linux
-# Requires: musl-tools (apt install musl-tools)
+# Shim (compat): built inside Ubuntu 20.04 container for universal
+# glibc compatibility. Requires: docker
 # ----------------------------------------------------------------
-shim-static: $(SHIM_STATIC)
+SHIM_COMPAT := $(BUILD_DIR)/libdecloud_cuda_shim-compat.so
 
-$(SHIM_STATIC): shim/cuda_shim.c proto/gpu_proxy_proto.h | $(BUILD_DIR)
-	$(MUSL_CC) $(CFLAGS) -shared -fPIC -static-libgcc \
-		-idirafter /usr/include \
-		-idirafter /usr/include/x86_64-linux-gnu \
-		-o $@ $< \
-		-lpthread
-	@echo "Static shim built: $@ (no glibc dependency)"
+.PHONY: shim-compat
+
+shim-compat: | $(BUILD_DIR)
+	docker run --rm -v $(CURDIR):/src -w /src ubuntu:20.04 \
+	    sh -c "apt-get update -qq && \
+	           apt-get install -y -qq gcc libc6-dev linux-libc-dev >/dev/null 2>&1 && \
+	           gcc -Wall -Wextra -O2 -g -shared -fPIC \
+	               -o build/libdecloud_cuda_shim-compat.so \
+	               shim/cuda_shim.c -lpthread"
+	@echo "Compat shim built: $(SHIM_COMPAT) (glibc 2.31+, universal)"
 
 # ----------------------------------------------------------------
 # Tests: no CUDA dependency — runs on any machine
@@ -103,9 +105,9 @@ install: all
 # ----------------------------------------------------------------
 # Install static shim (preferred for 9p share distribution)
 # ----------------------------------------------------------------
-install-shim-static: shim-static
+install-shim-compat: shim-compat
 	install -d $(DESTDIR)$(PREFIX)/lib
 	install -d $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim
-	install -m 644 $(SHIM_STATIC) $(DESTDIR)$(PREFIX)/lib/libdecloud_cuda_shim.so
-	install -m 644 $(SHIM_STATIC) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libdecloud_cuda_shim.so
-	@echo "Static shim installed to $(PREFIX)/lib and 9p share directory"
+	install -m 644 $(SHIM_COMPAT) $(DESTDIR)$(PREFIX)/lib/libdecloud_cuda_shim.so
+	install -m 644 $(SHIM_COMPAT) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libdecloud_cuda_shim.so
+	@echo "Compat shim installed to $(PREFIX)/lib and 9p share directory"

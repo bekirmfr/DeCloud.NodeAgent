@@ -1041,32 +1041,32 @@ build_gpu_proxy() {
     fi
 
     # Ensure build tools are available
-    if ! command -v gcc &>/dev/null || ! command -v make &>/dev/null || ! command -v musl-gcc &>/dev/null; then
+    if ! command -v gcc &>/dev/null || ! command -v make &>/dev/null; then
         log_info "Installing build tools for GPU proxy compilation..."
-        apt-get install -y build-essential musl-tools 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null || {
+        apt-get install -y build-essential 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null || {
             log_error "Failed to install build-essential — cannot build GPU proxy"
             return 0
         }
     fi
 
     # --- Build shim (for any GPU mode — guests may need it even alongside passthrough) ---
-    # Prefer static musl build — produces a glibc-independent .so that works
-    # in any guest VM regardless of distro version. Falls back to dynamic build
-    # if musl-tools is not installed.
+    # Prefer compat build via Docker — compiles against Ubuntu 20.04 glibc 2.31,
+    # which is forward-compatible with all modern distros (22.04, 24.04, etc.).
+    # Falls back to dynamic host build if Docker is not available.
     local shim_target="shim"
-    if command -v musl-gcc &>/dev/null; then
-        log_info "Building CUDA shim (static musl — glibc-independent)..."
-        shim_target="shim-static"
+    if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+        log_info "Building CUDA shim (Docker compat — glibc 2.31, universal)..."
+        shim_target="shim-compat"
     else
-        log_info "musl-gcc not found — building dynamic shim (may have glibc compat issues)"
-        log_info "For universal compatibility: apt install musl-tools && make shim-static"
+        log_info "Docker not available — building dynamic shim (may have glibc compat issues)"
+        log_info "For universal compatibility: install Docker and re-run"
     fi
     make -C "$GPU_PROXY_SRC" "$shim_target" 2>&1 | tee -a "$LOG_DIR/install.log"
 
-    # Copy whichever was built
+    # Detect whichever was built
     local built_shim=""
-    if [ -f "$GPU_PROXY_SRC/build/libdecloud_cuda_shim-static.so" ]; then
-        built_shim="$GPU_PROXY_SRC/build/libdecloud_cuda_shim-static.so"
+    if [ -f "$GPU_PROXY_SRC/build/libdecloud_cuda_shim-compat.so" ]; then
+        built_shim="$GPU_PROXY_SRC/build/libdecloud_cuda_shim-compat.so"
     elif [ -f "$GPU_PROXY_SRC/build/libdecloud_cuda_shim.so" ]; then
         built_shim="$GPU_PROXY_SRC/build/libdecloud_cuda_shim.so"
     fi
@@ -1075,6 +1075,8 @@ build_gpu_proxy() {
         log_success "CUDA shim built: $built_shim"
     else
         log_error "CUDA shim build failed — output binary not found"
+        log_info "Check logs: $LOG_DIR/install.log"
+        ls -la "$GPU_PROXY_SRC/build/" 2>/dev/null || log_info "Build directory does not exist"
         return 0
     fi
 
