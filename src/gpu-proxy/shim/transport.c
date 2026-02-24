@@ -304,7 +304,7 @@ void transport_disconnect(void)
             .payload_len = 0,
             .status = 0,
         };
-        write(g_transport_fd, &hdr, sizeof(hdr));
+        (void)!write(g_transport_fd, &hdr, sizeof(hdr));
         close(g_transport_fd);
         g_transport_fd = -1;
     }

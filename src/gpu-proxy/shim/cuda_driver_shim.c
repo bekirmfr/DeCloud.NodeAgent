@@ -3,19 +3,19 @@
  *
  * Drop-in replacement for libcuda.so that Ollama and other ML frameworks
  * find via dlopen(). When an application calls dlopen("libcuda.so") or
- * searches /usr/local/lib[arch]/libcuda.so, it finds this library and
- * uses dlsym() to resolve the CUDA Driver API symbols below.
+ * searches /usr/local/lib{*}/libcuda.so{*}, it finds this library and uses
+ * dlsym() to resolve the CUDA Driver API symbols below.
  *
  * Each function forwards the call to the host GPU proxy daemon over
  * TCP/vsock, reusing the same transport layer as the Runtime API shim.
  *
- * Ollama GPU discovery sequence:
- *   1. Glob /usr/local/lib[arch]/libcuda.so -- finds this file
- *   2. dlopen("libcuda.so.1") -- loads this library
+ * Ollama's GPU discovery sequence:
+ *   1. Glob /usr/local/lib{*}/libcuda.so{*} --> finds this file
+ *   2. dlopen("libcuda.so.1") --> loads this library
  *   3. dlsym("cuInit"), dlsym("cuDeviceGetCount"), etc.
  *   4. Calls cuInit(0), cuDeviceGetCount(), cuDeviceGetName(), etc.
- *   5. cuCtxCreate_v3() + cuMemGetInfo_v2() -- gets VRAM info
- *   6. Loads model layers to "GPU" -- inference runs on host GPU
+ *   5. cuCtxCreate_v3() + cuMemGetInfo_v2() --> gets VRAM info
+ *   6. Loads model layers to "GPU" --> inference runs on host GPU
  *
  * Build: gcc -shared -fPIC -o libcuda.so.1 cuda_driver_shim.c -lpthread
  *        ln -sf libcuda.so.1 libcuda.so

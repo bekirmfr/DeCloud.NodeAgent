@@ -5,10 +5,10 @@
  * frameworks find via dlopen(). NVML is NVIDIA's Management Library,
  * used for runtime VRAM monitoring and device enumeration.
  *
- * Ollama NVML discovery:
+ * Ollama's NVML discovery:
  *   1. dlopen("libnvidia-ml.so.1")
  *   2. dlsym("nvmlInit_v2"), dlsym("nvmlDeviceGetHandleByIndex_v2"), etc.
- *   3. nvmlInit_v2() -> nvmlDeviceGetHandleByIndex_v2() -> nvmlDeviceGetMemoryInfo()
+ *   3. nvmlInit_v2() --> nvmlDeviceGetHandleByIndex_v2() --> nvmlDeviceGetMemoryInfo()
  *   4. Uses VRAM info to decide how many model layers to offload to GPU
  *
  * Each function forwards to the same GPU proxy daemon via TCP/vsock,
