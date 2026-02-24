@@ -3,24 +3,24 @@
  *
  * Drop-in replacement for libcuda.so that Ollama and other ML frameworks
  * find via dlopen(). When an application calls dlopen("libcuda.so") or
- * searches /usr/local/lib*/libcuda.so*, it finds this library and uses
- * dlsym() to resolve the CUDA Driver API symbols below.
+ * searches /usr/local/lib[arch]/libcuda.so, it finds this library and
+ * uses dlsym() to resolve the CUDA Driver API symbols below.
  *
  * Each function forwards the call to the host GPU proxy daemon over
  * TCP/vsock, reusing the same transport layer as the Runtime API shim.
  *
- * Ollama's GPU discovery sequence:
- *   1. Glob /usr/local/lib*/libcuda.so* → finds this file
- *   2. dlopen("libcuda.so.1") → loads this library
+ * Ollama GPU discovery sequence:
+ *   1. Glob /usr/local/lib[arch]/libcuda.so -- finds this file
+ *   2. dlopen("libcuda.so.1") -- loads this library
  *   3. dlsym("cuInit"), dlsym("cuDeviceGetCount"), etc.
  *   4. Calls cuInit(0), cuDeviceGetCount(), cuDeviceGetName(), etc.
- *   5. cuCtxCreate_v3() + cuMemGetInfo_v2() → gets VRAM info
- *   6. Loads model layers to "GPU" → inference runs on host GPU
+ *   5. cuCtxCreate_v3() + cuMemGetInfo_v2() -- gets VRAM info
+ *   6. Loads model layers to "GPU" -- inference runs on host GPU
  *
  * Build: gcc -shared -fPIC -o libcuda.so.1 cuda_driver_shim.c -lpthread
  *        ln -sf libcuda.so.1 libcuda.so
  *
- * No CUDA dependency — this replaces libcuda.so entirely.
+ * No CUDA dependency -- this replaces libcuda.so entirely.
  */
 
 #define _GNU_SOURCE
@@ -128,7 +128,7 @@ CUresult cuDeviceGet(CUdevice *device, int ordinal)
 {
     if (!device) return CUDA_ERROR_INVALID_VALUE;
 
-    /* CUdevice is just the ordinal — no RPC needed */
+    /* CUdevice is just the ordinal -- no RPC needed */
     if (g_cached_device_count >= 0 && ordinal >= g_cached_device_count)
         return CUDA_ERROR_INVALID_VALUE;
 
@@ -295,7 +295,7 @@ CUresult cuGetErrorString(CUresult error, const char **pStr)
 {
     if (!pStr) return CUDA_ERROR_INVALID_VALUE;
 
-    /* Static string table — no RPC needed */
+    /* Static string table -- no RPC needed */
     switch (error) {
     case 0:   *pStr = "no error"; break;
     case 1:   *pStr = "invalid value"; break;
@@ -326,7 +326,7 @@ CUresult cuDeviceGetCount_v2(int *count)
     __attribute__((alias("cuDeviceGetCount")));
 
 /* ================================================================
- * cuDeviceTotalMem — some frameworks call this directly
+ * cuDeviceTotalMem -- some frameworks call this directly
  * ================================================================ */
 
 CUresult cuDeviceTotalMem_v2(size_t *bytes, CUdevice device)

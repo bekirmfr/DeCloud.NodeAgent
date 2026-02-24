@@ -1,14 +1,14 @@
 /*
- * DeCloud GPU Proxy — Shared Transport Implementation
+ * DeCloud GPU Proxy -- Shared Transport Implementation
  *
  * TCP/vsock connection, RPC call, and I/O helpers.
  * Included directly into each shim .so via the build system.
  *
  * Environment variables:
- *   DECLOUD_GPU_PROXY_CID   — vsock CID (default: VMADDR_CID_HOST = 2)
- *   DECLOUD_GPU_PROXY_PORT  — port (default: 9999)
- *   DECLOUD_GPU_PROXY_HOST  — TCP host (default: 192.168.122.1)
- *   DECLOUD_GPU_PROXY_TOKEN — hex-encoded auth token for TCP
+ *   DECLOUD_GPU_PROXY_CID   -- vsock CID (default: VMADDR_CID_HOST = 2)
+ *   DECLOUD_GPU_PROXY_PORT  -- port (default: 9999)
+ *   DECLOUD_GPU_PROXY_HOST  -- TCP host (default: 192.168.122.1)
+ *   DECLOUD_GPU_PROXY_TOKEN -- hex-encoded auth token for TCP
  */
 
 #define _GNU_SOURCE
@@ -58,7 +58,7 @@ int transport_parse_hex_token(const char *hex, uint8_t *out, int len)
 }
 
 /* ================================================================
- * I/O — read/write exactly N bytes
+ * I/O -- read/write exactly N bytes
  * ================================================================ */
 
 int transport_read_exact(int fd, void *buf, size_t len)
@@ -91,7 +91,7 @@ int transport_write_exact(int fd, const void *buf, size_t len)
 }
 
 /* ================================================================
- * Transport connect — vsock first, TCP fallback
+ * Transport connect -- vsock first, TCP fallback
  * ================================================================ */
 
 static int transport_try_tcp(int port)
@@ -161,7 +161,7 @@ int transport_ensure_connected(void)
     if (fd < 0) {
         fd = transport_try_tcp(port);
         if (fd < 0) {
-            TRANSPORT_LOG("All transports failed — GPU proxy unavailable");
+            TRANSPORT_LOG("All transports failed -- GPU proxy unavailable");
             pthread_mutex_unlock(&g_transport_lock);
             return -1;
         }
@@ -204,7 +204,7 @@ int transport_ensure_connected(void)
     GpuProxyHeader resp_hdr;
     if (transport_read_exact(fd, &resp_hdr, sizeof(resp_hdr)) == 0) {
         if (resp_hdr.status != 0) {
-            TRANSPORT_LOG("HELLO rejected (status=%d) — auth failed?", resp_hdr.status);
+            TRANSPORT_LOG("HELLO rejected (status=%d) -- auth failed?", resp_hdr.status);
             close(fd);
             g_transport_fd = -1;
             pthread_mutex_unlock(&g_transport_lock);
@@ -225,7 +225,7 @@ int transport_ensure_connected(void)
 }
 
 /* ================================================================
- * RPC call — send request, receive response
+ * RPC call -- send request, receive response
  * ================================================================ */
 
 int transport_rpc_call(uint8_t cmd,
@@ -290,7 +290,7 @@ err:
 }
 
 /* ================================================================
- * Disconnect — send GOODBYE and close
+ * Disconnect -- send GOODBYE and close
  * ================================================================ */
 
 void transport_disconnect(void)

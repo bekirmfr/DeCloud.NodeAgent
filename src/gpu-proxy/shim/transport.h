@@ -1,5 +1,5 @@
 /*
- * DeCloud GPU Proxy — Shared Transport Layer
+ * DeCloud GPU Proxy -- Shared Transport Layer
  *
  * Connection management, RPC call, and I/O helpers shared by all shim
  * libraries (Runtime API shim, Driver API shim, NVML shim).
@@ -15,7 +15,7 @@
 #include <stddef.h>
 #include "../proto/gpu_proxy_proto.h"
 
-/* Logging prefix — each shim defines TRANSPORT_LOG_PREFIX before including */
+/* Logging prefix -- each shim defines TRANSPORT_LOG_PREFIX before including */
 #ifndef TRANSPORT_LOG_PREFIX
 #define TRANSPORT_LOG_PREFIX "gpu-shim"
 #endif
@@ -60,7 +60,7 @@ void transport_disconnect(void);
 int transport_parse_hex_token(const char *hex, uint8_t *out, int len);
 
 /*
- * Exact I/O helpers — read/write exactly len bytes.
+ * Exact I/O helpers -- read/write exactly len bytes.
  * Return 0 on success, -1 on failure.
  */
 int transport_read_exact(int fd, void *buf, size_t len);
