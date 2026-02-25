@@ -43,6 +43,7 @@ typedef int CUresult;
 #define CUDA_ERROR_INVALID_VALUE 1
 #define CUDA_ERROR_NO_DEVICE 100
 #define CUDA_ERROR_INVALID_CONTEXT 201
+#define CUDA_ERROR_NOT_SUPPORTED 801
 
 typedef int CUdevice;
 typedef void *CUcontext;
@@ -50,6 +51,23 @@ typedef void *CUcontext;
 typedef struct {
     char bytes[16];
 } CUuuid;
+
+/* VMM (Virtual Memory Management) opaque types */
+typedef uint64_t CUmemGenericAllocationHandle;
+typedef uint64_t CUdeviceptr;
+
+typedef struct {
+    int dummy;
+} CUmemAllocationProp;
+
+typedef struct {
+    int dummy;
+} CUmemAccessDesc;
+
+typedef enum {
+    CU_MEM_ALLOC_GRANULARITY_MINIMUM     = 0,
+    CU_MEM_ALLOC_GRANULARITY_RECOMMENDED = 1,
+} CUmemAllocationGranularity_flags;
 
 /* ================================================================
  * Cached device properties (fetched once, reused)
@@ -197,6 +215,12 @@ CUresult cuDeviceGetAttribute(int *value, int attrib, CUdevice device)
         *value = 1; break;
     case 89: /* CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS */
         *value = 1; break;
+    case 100: /* CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED */
+        /*
+         * Return 0 to force ggml-cuda to use regular cudaMalloc instead of
+         * the VMM path. VMM operations cannot be proxied over the network.
+         */
+        *value = 0; break;
     default:
         *value = 0;
         break;
@@ -301,6 +325,7 @@ CUresult cuGetErrorString(CUresult error, const char **pStr)
     case 1:   *pStr = "invalid value"; break;
     case 100: *pStr = "no CUDA-capable device is detected"; break;
     case 201: *pStr = "invalid context"; break;
+    case 801: *pStr = "operation not supported"; break;
     default:  *pStr = "unknown error"; break;
     }
     return CUDA_SUCCESS;
@@ -345,6 +370,88 @@ CUresult cuDeviceTotalMem_v2(size_t *bytes, CUdevice device)
 
 CUresult cuDeviceTotalMem(size_t *bytes, CUdevice device)
     __attribute__((alias("cuDeviceTotalMem_v2")));
+
+/* ================================================================
+ * Virtual Memory Management (VMM) API Stubs
+ *
+ * Ollama's libggml-cuda.so links against these 8 symbols. Without them,
+ * dlopen("libggml-cuda.so", RTLD_NOW) fails with "undefined symbol:
+ * cuMemCreate" and Ollama silently falls back to CPU-only.
+ *
+ * These stubs return CUDA_ERROR_NOT_SUPPORTED to force ggml-cuda onto
+ * the regular cudaMalloc/cudaFree code path, which our Runtime API shim
+ * CAN proxy to the host GPU.
+ *
+ * Combined with attribute 100 (VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED)
+ * returning 0, ggml-cuda should never actually call these at runtime.
+ * They exist purely to satisfy the dynamic linker at dlopen time.
+ * ================================================================ */
+
+CUresult cuMemCreate(CUmemGenericAllocationHandle *handle,
+                     size_t size,
+                     const CUmemAllocationProp *prop,
+                     unsigned long long flags)
+{
+    (void)handle; (void)size; (void)prop; (void)flags;
+    TRANSPORT_LOG("cuMemCreate() → NOT_SUPPORTED (using cudaMalloc path)");
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+
+CUresult cuMemRelease(CUmemGenericAllocationHandle handle)
+{
+    (void)handle;
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+
+CUresult cuMemAddressReserve(CUdeviceptr *ptr,
+                              size_t size,
+                              size_t alignment,
+                              CUdeviceptr addr,
+                              unsigned long long flags)
+{
+    (void)ptr; (void)size; (void)alignment; (void)addr; (void)flags;
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+
+CUresult cuMemAddressFree(CUdeviceptr ptr, size_t size)
+{
+    (void)ptr; (void)size;
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+
+CUresult cuMemMap(CUdeviceptr ptr,
+                  size_t size,
+                  size_t offset,
+                  CUmemGenericAllocationHandle handle,
+                  unsigned long long flags)
+{
+    (void)ptr; (void)size; (void)offset; (void)handle; (void)flags;
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+
+CUresult cuMemUnmap(CUdeviceptr ptr, size_t size)
+{
+    (void)ptr; (void)size;
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+
+CUresult cuMemSetAccess(CUdeviceptr ptr,
+                        size_t size,
+                        const CUmemAccessDesc *desc,
+                        size_t count)
+{
+    (void)ptr; (void)size; (void)desc; (void)count;
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+
+CUresult cuMemGetAllocationGranularity(size_t *granularity,
+                                        const CUmemAllocationProp *prop,
+                                        CUmemAllocationGranularity_flags option)
+{
+    (void)prop; (void)option;
+    if (granularity) *granularity = 0;
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
 
 /* ================================================================
  * Cleanup on library unload
