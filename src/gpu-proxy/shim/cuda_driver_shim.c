@@ -71,6 +71,23 @@ typedef enum {
 } CUmemAllocationGranularity_flags;
 
 /* ================================================================
+ * Generic stub for unimplemented functions
+ *
+ * cuGetProcAddress returns a pointer to this for any function we
+ * don't explicitly implement. This tells libcudart the driver
+ * "supports" the function (non-NULL), but if actually called it
+ * returns CUDA_ERROR_NOT_SUPPORTED for graceful degradation.
+ *
+ * Without this, libcudart sees hundreds of NULL function pointers
+ * and concludes the driver is insufficient (cudaError 35/36).
+ * ================================================================ */
+
+static CUresult generic_not_supported_stub(void)
+{
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+
+/* ================================================================
  * Cached device properties (fetched once, reused)
  * ================================================================ */
 
@@ -80,6 +97,10 @@ static int g_cached_device_count = -1;
 /* Cache device properties from daemon to avoid repeated round-trips */
 static GpuDeviceProperties g_cached_props;
 static int g_cached_props_valid = 0;
+
+/* Global context tracking for libcudart's primary context management */
+static CUcontext g_primary_ctx = NULL;
+static CUcontext g_current_ctx = NULL;
 
 static int ensure_props_cached(int device)
 {
@@ -281,6 +302,7 @@ CUresult cuCtxCreate_v3(CUcontext *ctx, void *params, int nparams,
                                  &resp, sizeof(resp), NULL);
     if (err == 0) {
         *ctx = (CUcontext)(uintptr_t)resp.ctx_handle;
+        g_current_ctx = *ctx;
     } else {
         *ctx = NULL;
     }
@@ -313,6 +335,9 @@ CUresult cuCtxDestroy(CUcontext ctx)
     TRANSPORT_LOG("cuCtxDestroy(%p)", ctx);
 
     transport_rpc_call(GPU_CMD_CTX_DESTROY, NULL, 0, NULL, 0, NULL);
+
+    if (g_current_ctx == ctx) g_current_ctx = NULL;
+    if (g_primary_ctx == ctx) g_primary_ctx = NULL;
     return CUDA_SUCCESS;
 }
 
@@ -328,6 +353,21 @@ CUresult cuGetErrorString(CUresult error, const char **pStr)
     case 201: *pStr = "invalid context"; break;
     case 801: *pStr = "operation not supported"; break;
     default:  *pStr = "unknown error"; break;
+    }
+    return CUDA_SUCCESS;
+}
+
+CUresult cuGetErrorName(CUresult error, const char **pStr)
+{
+    if (!pStr) return CUDA_ERROR_INVALID_VALUE;
+
+    switch (error) {
+    case 0:   *pStr = "CUDA_SUCCESS"; break;
+    case 1:   *pStr = "CUDA_ERROR_INVALID_VALUE"; break;
+    case 100: *pStr = "CUDA_ERROR_NO_DEVICE"; break;
+    case 201: *pStr = "CUDA_ERROR_INVALID_CONTEXT"; break;
+    case 801: *pStr = "CUDA_ERROR_NOT_SUPPORTED"; break;
+    default:  *pStr = "CUDA_ERROR_UNKNOWN"; break;
     }
     return CUDA_SUCCESS;
 }
@@ -371,6 +411,137 @@ CUresult cuDeviceTotalMem_v2(size_t *bytes, CUdevice device)
 
 CUresult cuDeviceTotalMem(size_t *bytes, CUdevice device)
     __attribute__((alias("cuDeviceTotalMem_v2")));
+
+/* ================================================================
+ * Primary Context Management (CRITICAL for libcudart.so.12)
+ *
+ * libcudart uses the "primary context" API (not cuCtxCreate) for
+ * its default device context. Without these, cudaGetDeviceCount()
+ * and all other runtime API calls fail even though the driver
+ * reports devices correctly.
+ *
+ * The primary context is a singleton per device. cuDevicePrimaryCtxRetain
+ * creates it on first call, cuDevicePrimaryCtxRelease decrements a
+ * refcount. We proxy the actual context creation to the daemon.
+ * ================================================================ */
+
+CUresult cuDevicePrimaryCtxRetain(CUcontext *ctx, CUdevice device)
+{
+    if (!ctx) return CUDA_ERROR_INVALID_VALUE;
+
+    TRANSPORT_LOG("cuDevicePrimaryCtxRetain(device=%d)", device);
+
+    if (!g_primary_ctx) {
+        CUresult r = cuCtxCreate_v3(&g_primary_ctx, NULL, 0, 0, device);
+        if (r != CUDA_SUCCESS) return r;
+    }
+
+    *ctx = g_primary_ctx;
+    g_current_ctx = g_primary_ctx;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuDevicePrimaryCtxRelease(CUdevice device)
+{
+    (void)device;
+    /* Don't actually destroy — primary ctx lives for the process lifetime */
+    return CUDA_SUCCESS;
+}
+
+CUresult cuDevicePrimaryCtxSetFlags(CUdevice device, unsigned int flags)
+{
+    (void)device;
+    (void)flags;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuDevicePrimaryCtxGetState(CUdevice device, unsigned int *flags,
+                                     int *active)
+{
+    (void)device;
+    if (flags) *flags = 0;
+    if (active) *active = (g_primary_ctx != NULL) ? 1 : 0;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuDevicePrimaryCtxReset(CUdevice device)
+{
+    (void)device;
+    /* Could destroy and recreate, but for proxy mode just no-op */
+    return CUDA_SUCCESS;
+}
+
+/* ================================================================
+ * Context Stack Management
+ *
+ * libcudart uses these to track the "current" context. We maintain
+ * a simple single-context model (no real stack) since proxy mode
+ * only supports one device and one context at a time.
+ * ================================================================ */
+
+CUresult cuCtxSetCurrent(CUcontext ctx)
+{
+    g_current_ctx = ctx;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuCtxGetCurrent(CUcontext *ctx)
+{
+    if (!ctx) return CUDA_ERROR_INVALID_VALUE;
+    *ctx = g_current_ctx;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuCtxGetDevice(CUdevice *device)
+{
+    if (!device) return CUDA_ERROR_INVALID_VALUE;
+    *device = 0; /* We only support device 0 in proxy mode */
+    return CUDA_SUCCESS;
+}
+
+CUresult cuCtxGetFlags(unsigned int *flags)
+{
+    if (flags) *flags = 0;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuCtxGetApiVersion(CUcontext ctx, unsigned int *version)
+{
+    (void)ctx;
+    if (version) *version = 12;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuCtxSynchronize(void)
+{
+    /* No-op — proxy daemon handles synchronization */
+    return CUDA_SUCCESS;
+}
+
+CUresult cuCtxPushCurrent(CUcontext ctx)
+{
+    g_current_ctx = ctx;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuCtxPopCurrent(CUcontext *ctx)
+{
+    if (ctx) *ctx = g_current_ctx;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuCtxGetLimit(size_t *pvalue, int limit)
+{
+    (void)limit;
+    if (pvalue) *pvalue = 0;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuCtxSetLimit(int limit, size_t value)
+{
+    (void)limit; (void)value;
+    return CUDA_SUCCESS;
+}
 
 /* ================================================================
  * Virtual Memory Management (VMM) API Stubs
@@ -458,14 +629,19 @@ CUresult cuMemGetAllocationGranularity(size_t *granularity,
  * cuGetProcAddress — CUDA Driver function dispatch (CRITICAL)
  *
  * libcudart.so.12+ uses cuGetProcAddress as its PRIMARY method to
- * resolve all driver API functions. Without this, libcudart treats
- * the driver as incompatible and returns cudaErrorInsufficientDriver
- * (error 36), even if all individual cu* symbols are exported.
+ * resolve all driver API functions. It queries ~300 functions at
+ * init time and evaluates the results to decide driver capability.
  *
- * Our implementation resolves symbols from our own library using
- * dlsym(RTLD_DEFAULT), which finds our exported functions.
- * Functions we don't implement return NULL pfn, telling libcudart
- * the feature is unavailable (graceful degradation, not an error).
+ * Strategy:
+ *   1. Try dlsym(RTLD_DEFAULT, symbol) to find our real exports
+ *   2. If not found, return a pointer to generic_not_supported_stub
+ *
+ * Returning non-NULL for everything tells libcudart the driver is
+ * fully capable. Functions we haven't implemented will return
+ * CUDA_ERROR_NOT_SUPPORTED if actually called (graceful fallback).
+ *
+ * Without this, libcudart sees hundreds of NULL pointers and
+ * returns cudaErrorInsufficientDriver regardless of version.
  * ================================================================ */
 
 CUresult cuGetProcAddress(const char *symbol, void **pfn,
@@ -478,11 +654,17 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn,
 
     *pfn = dlsym(RTLD_DEFAULT, symbol);
 
-    TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p",
-                  symbol, cudaVersion, *pfn);
+    if (*pfn == NULL) {
+        /* Return generic stub instead of NULL — tells libcudart
+         * the driver supports this function. If actually called,
+         * the stub returns CUDA_ERROR_NOT_SUPPORTED. */
+        *pfn = (void *)generic_not_supported_stub;
+    }
 
-    /* Return success even if not found — NULL pfn tells caller
-     * the function is unavailable, which is not an error. */
+    TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p%s",
+                  symbol, cudaVersion, *pfn,
+                  (*pfn == (void *)generic_not_supported_stub) ? " [stub]" : "");
+
     return CUDA_SUCCESS;
 }
 
@@ -492,9 +674,9 @@ CUresult cuGetProcAddress_v2(const char *symbol, void **pfn,
 {
     CUresult r = cuGetProcAddress(symbol, pfn, cudaVersion, flags);
 
-    /* symbolStatus: 0 = found, 1 = not found */
+    /* Always report "found" since we always return non-NULL pfn */
     if (symbolStatus)
-        *(int *)symbolStatus = (pfn && *pfn) ? 0 : 1;
+        *(int *)symbolStatus = 0;
 
     return r;
 }
