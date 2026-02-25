@@ -413,6 +413,154 @@ CUresult cuDeviceTotalMem(size_t *bytes, CUdevice device)
     __attribute__((alias("cuDeviceTotalMem_v2")));
 
 /* ================================================================
+ * Base-name aliases for cuGetProcAddress dispatch
+ *
+ * libcudart calls cuGetProcAddress("cuCtxCreate", v3020) which does
+ * dlsym(RTLD_DEFAULT, "cuCtxCreate"). Without a bare "cuCtxCreate"
+ * symbol, dlsym returns NULL and falls to the generic stub, which
+ * returns CUDA_ERROR_NOT_SUPPORTED (801) when actually called.
+ *
+ * These aliases ensure dlsym finds our real implementations for
+ * base names that libcudart queries.
+ * ================================================================ */
+
+/* cuCtxCreate (base) → cuCtxCreate_v2 → cuCtxCreate_v3 */
+CUresult cuCtxCreate(CUcontext *ctx, unsigned int flags, CUdevice device)
+    __attribute__((alias("cuCtxCreate_v2")));
+
+/* cuCtxDestroy_v2 is the versioned name libcudart may ask for */
+CUresult cuCtxDestroy_v2(CUcontext ctx)
+    __attribute__((alias("cuCtxDestroy")));
+
+/* ================================================================
+ * Stream API Stubs (return SUCCESS, not NOT_SUPPORTED)
+ *
+ * libcudart creates internal streams during initialization.
+ * Returning NOT_SUPPORTED from these causes init to fail.
+ * These return opaque dummy handles and SUCCESS.
+ * ================================================================ */
+
+typedef void *CUstream;
+typedef void *CUevent;
+
+/* Dummy handle value — non-NULL to satisfy NULL checks */
+#define DUMMY_STREAM ((CUstream)(uintptr_t)0xDEC10001)
+#define DUMMY_EVENT  ((CUevent)(uintptr_t)0xDEC10002)
+
+CUresult cuStreamCreate(CUstream *phStream, unsigned int flags)
+{
+    (void)flags;
+    if (phStream) *phStream = DUMMY_STREAM;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuStreamCreateWithPriority(CUstream *phStream, unsigned int flags,
+                                     int priority)
+{
+    (void)flags; (void)priority;
+    if (phStream) *phStream = DUMMY_STREAM;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuStreamSynchronize(CUstream hStream)
+{
+    (void)hStream;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuStreamDestroy(CUstream hStream)
+{
+    (void)hStream;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuStreamQuery(CUstream hStream)
+{
+    (void)hStream;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuStreamWaitEvent(CUstream hStream, CUevent hEvent,
+                            unsigned int flags)
+{
+    (void)hStream; (void)hEvent; (void)flags;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuStreamGetCtx(CUstream hStream, CUcontext *pctx)
+{
+    (void)hStream;
+    if (pctx) *pctx = g_current_ctx;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuStreamGetFlags(CUstream hStream, unsigned int *flags)
+{
+    (void)hStream;
+    if (flags) *flags = 0;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuStreamGetPriority(CUstream hStream, int *priority)
+{
+    (void)hStream;
+    if (priority) *priority = 0;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuStreamAddCallback(CUstream hStream, void *callback,
+                              void *userData, unsigned int flags)
+{
+    (void)hStream; (void)callback; (void)userData; (void)flags;
+    return CUDA_SUCCESS;
+}
+
+/* ================================================================
+ * Event API Stubs (return SUCCESS)
+ *
+ * libcudart uses events for internal timing during init.
+ * ================================================================ */
+
+CUresult cuEventCreate(CUevent *phEvent, unsigned int flags)
+{
+    (void)flags;
+    if (phEvent) *phEvent = DUMMY_EVENT;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuEventDestroy(CUevent hEvent)
+{
+    (void)hEvent;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuEventRecord(CUevent hEvent, CUstream hStream)
+{
+    (void)hEvent; (void)hStream;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuEventSynchronize(CUevent hEvent)
+{
+    (void)hEvent;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuEventQuery(CUevent hEvent)
+{
+    (void)hEvent;
+    return CUDA_SUCCESS;
+}
+
+CUresult cuEventElapsedTime(float *pMilliseconds, CUevent hStart,
+                             CUevent hEnd)
+{
+    (void)hStart; (void)hEnd;
+    if (pMilliseconds) *pMilliseconds = 0.0f;
+    return CUDA_SUCCESS;
+}
+
+/* ================================================================
  * Primary Context Management (CRITICAL for libcudart.so.12)
  *
  * libcudart uses the "primary context" API (not cuCtxCreate) for
