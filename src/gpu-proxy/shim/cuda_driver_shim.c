@@ -17,7 +17,7 @@
  *   5. cuCtxCreate_v3() + cuMemGetInfo_v2() --> gets VRAM info
  *   6. Loads model layers to "GPU" --> inference runs on host GPU
  *
- * Build: gcc -shared -fPIC -o libcuda.so.1 cuda_driver_shim.c -lpthread
+ * Build: gcc -shared -fPIC -o libcuda.so.1 cuda_driver_shim.c -lpthread -ldl
  *        ln -sf libcuda.so.1 libcuda.so
  *
  * No CUDA dependency -- this replaces libcuda.so entirely.
@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <dlfcn.h>
 
 /* Set transport log prefix before including shared transport */
 #define TRANSPORT_LOG_PREFIX "cuda-driver-shim"
@@ -451,6 +452,51 @@ CUresult cuMemGetAllocationGranularity(size_t *granularity,
     (void)prop; (void)option;
     if (granularity) *granularity = 0;
     return CUDA_ERROR_NOT_SUPPORTED;
+}
+
+/* ================================================================
+ * cuGetProcAddress — CUDA Driver function dispatch (CRITICAL)
+ *
+ * libcudart.so.12+ uses cuGetProcAddress as its PRIMARY method to
+ * resolve all driver API functions. Without this, libcudart treats
+ * the driver as incompatible and returns cudaErrorInsufficientDriver
+ * (error 36), even if all individual cu* symbols are exported.
+ *
+ * Our implementation resolves symbols from our own library using
+ * dlsym(RTLD_DEFAULT), which finds our exported functions.
+ * Functions we don't implement return NULL pfn, telling libcudart
+ * the feature is unavailable (graceful degradation, not an error).
+ * ================================================================ */
+
+CUresult cuGetProcAddress(const char *symbol, void **pfn,
+                          int cudaVersion, uint64_t flags)
+{
+    (void)cudaVersion;
+    (void)flags;
+
+    if (!symbol || !pfn) return CUDA_ERROR_INVALID_VALUE;
+
+    *pfn = dlsym(RTLD_DEFAULT, symbol);
+
+    TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p",
+                  symbol, cudaVersion, *pfn);
+
+    /* Return success even if not found — NULL pfn tells caller
+     * the function is unavailable, which is not an error. */
+    return CUDA_SUCCESS;
+}
+
+CUresult cuGetProcAddress_v2(const char *symbol, void **pfn,
+                             int cudaVersion, uint64_t flags,
+                             void *symbolStatus)
+{
+    CUresult r = cuGetProcAddress(symbol, pfn, cudaVersion, flags);
+
+    /* symbolStatus: 0 = found, 1 = not found */
+    if (symbolStatus)
+        *(int *)symbolStatus = (pfn && *pfn) ? 0 : 1;
+
+    return r;
 }
 
 /* ================================================================
