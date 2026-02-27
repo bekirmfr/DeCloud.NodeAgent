@@ -59,10 +59,12 @@ $(DAEMON): daemon/gpu_proxy_daemon.c proto/gpu_proxy_proto.h | $(BUILD_DIR)
 # ----------------------------------------------------------------
 shim: $(SHIM)
 
-$(SHIM): shim/cuda_shim.c $(TRANSPORT_DEPS) | $(BUILD_DIR)
+$(SHIM): shim/cuda_shim.c shim/libcudart.version $(TRANSPORT_DEPS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -shared -fPIC \
 		-o $@ $< \
-		-lpthread
+		-Wl,-soname,libcudart.so.12 \
+		-Wl,--version-script=shim/libcudart.version \
+		-lpthread -ldl
 
 # ----------------------------------------------------------------
 # Driver API Shim (libcuda.so.1): no CUDA dependency
@@ -96,8 +98,10 @@ shim-compat: | $(BUILD_DIR)
 	    sh -c "apt-get update -qq && \
 	           apt-get install -y -qq gcc libc6-dev linux-libc-dev >/dev/null 2>&1 && \
 	           gcc -Wall -Wextra -O2 -shared -fPIC \
+	               -Wl,-soname,libcudart.so.12 \
+	               -Wl,--version-script=shim/libcudart.version \
 	               -o build/libdecloud_cuda_shim-compat.so \
-	               shim/cuda_shim.c -lpthread"
+	               shim/cuda_shim.c -lpthread -ldl"
 	@echo "Compat shim built: $(SHIM_COMPAT) (glibc 2.31+, universal)"
 
 # Build ALL three shims in container for maximum glibc compatibility.
@@ -107,8 +111,10 @@ all-shims-compat: | $(BUILD_DIR)
 	    sh -c "apt-get update -qq && \
 	           apt-get install -y -qq gcc libc6-dev linux-libc-dev >/dev/null 2>&1 && \
 	           gcc -Wall -Wextra -O2 -shared -fPIC \
+	               -Wl,-soname,libcudart.so.12 \
+	               -Wl,--version-script=shim/libcudart.version \
 	               -o build/libdecloud_cuda_shim-compat.so \
-	               shim/cuda_shim.c -lpthread && \
+	               shim/cuda_shim.c -lpthread -ldl && \
 	           gcc -Wall -Wextra -O2 -shared -fPIC \
 	               -o build/libcuda.so.1 \
 	               shim/cuda_driver_shim.c -lpthread -ldl && \
