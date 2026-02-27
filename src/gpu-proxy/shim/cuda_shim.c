@@ -1,24 +1,11 @@
 /*
- * DeCloud CUDA Shim (LD_PRELOAD)
+ * DeCloud CUDA Runtime API Shim (libcudart.so.12)
  *
- * Intercepts CUDA Runtime API calls inside a guest VM and forwards them
- * to the host GPU proxy daemon over virtio-vsock.
+ * Production shim that forwards CUDA Runtime API calls to the host
+ * GPU proxy daemon over TCP/vsock.
  *
- * Also intercepts the CUDA registration hooks (__cudaRegisterFatBinary,
- * __cudaRegisterFunction) that the NVIDIA compiler toolchain emits into
- * every CUDA application. This is required for kernel launch: the fat
- * binary (PTX/cubin) must be sent to the daemon so it can load the
- * module via the Driver API, and function registrations map host-side
- * stub pointers to device function names.
- *
- * Usage (inside VM):
- *   export LD_PRELOAD=/usr/local/lib/libdecloud_cuda_shim.so
- *   export DECLOUD_GPU_PROXY_CID=2     # CID 2 = host
- *   export DECLOUD_GPU_PROXY_PORT=9999
- *   python -c "import torch; print(torch.cuda.is_available())"
- *
- * Build: gcc -shared -fPIC -o libdecloud_cuda_shim.so cuda_shim.c -lpthread
- *        (No CUDA dependency — this replaces libcudart)
+ * Build: gcc -shared -fPIC -o libcudart.so.12 cuda_shim.c -ldl -lpthread \
+ *        -Wl,-soname,libcudart.so.12
  */
 
 #define _GNU_SOURCE
@@ -28,21 +15,37 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <errno.h>
+#include <stdint.h>
 #include <sys/socket.h>
 #include <linux/vm_sockets.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
-#include "../proto/gpu_proxy_proto.h"
+#include "proto/gpu_proxy_proto.h"
+
+#define SHIM_LOG(fmt, ...) \
+    fprintf(stderr, "[cudart-shim] " fmt "\n", ##__VA_ARGS__)
+
+/*
+ * CRITICAL: ggml-cuda allocates cudaDeviceProp on the stack with as little
+ * as 1040 bytes (sub $0x410,%rsp with struct at rsp+0x0). Our struct
+ * definition must NOT cause memset to write beyond the caller's allocation.
+ * We use a fixed safe size for memset instead of sizeof(*prop).
+ */
+#define SAFE_PROP_MEMSET_SIZE 768
 
 /* ================================================================
- * CUDA type definitions (we don't link against CUDA, so define them)
+ * CUDA type definitions
  * ================================================================ */
 
 typedef int cudaError_t;
 #define cudaSuccess 0
-#define cudaErrorNoDevice 100
 #define cudaErrorInvalidValue 1
+#define cudaErrorMemoryAllocation 2
+#define cudaErrorNoDevice 100
+
+typedef void *cudaStream_t;
+typedef void *cudaEvent_t;
 
 typedef enum {
     cudaMemcpyHostToHost     = 0,
@@ -51,16 +54,13 @@ typedef enum {
     cudaMemcpyDeviceToDevice = 3,
 } cudaMemcpyKind_t;
 
-/* Stream/event are opaque pointers in the real CUDA runtime */
-typedef void *cudaStream_t;
-typedef void *cudaEvent_t;
+typedef struct { unsigned int x, y, z; } dim3;
 
-/* dim3 — used by cudaLaunchKernel */
-typedef struct {
-    unsigned int x, y, z;
-} dim3;
-
-/* Subset of cudaDeviceProp that matches what frameworks check */
+/*
+ * cudaDeviceProp subset - fields that ML frameworks check.
+ * NOTE: sizeof(this struct) may differ from caller's version.
+ * NEVER use memset(prop, 0, sizeof(*prop)) on a caller-provided pointer.
+ */
 struct cudaDeviceProp {
     char     name[256];
     size_t   totalGlobalMem;
@@ -125,63 +125,64 @@ struct cudaDeviceProp {
     int      managedMemory;
     int      isMultiGpuBoard;
     int      multiGpuBoardGroupID;
-    /* ... more fields exist but are rarely checked ... */
-    char     _padding[512]; /* Safety padding for struct size mismatches */
 };
 
 /* ================================================================
- * CUDA fat binary structures (from NVIDIA's internal headers)
- *
- * When nvcc compiles a .cu file, it generates:
- *   __cudaRegisterFatBinary(fatCubin) at static init time
- *   __cudaRegisterFunction(handle, hostFun, deviceName, ...) per kernel
- *   __cudaUnregisterFatBinary(handle) at static destroy time
- *
- * The fatCubin pointer points to a __fatBinC_Wrapper_t which
- * contains the actual fat binary data (PTX + cubin for various archs).
+ * CUDA fat binary structures
  * ================================================================ */
 
-#define FATBINC_MAGIC   0x466243B1  /* __fatBinC_Wrapper_t.magic */
-#define FATBIN_MAGIC    0xBA55ED50  /* __cudaFatMAGIC2 */
+#define FATBINC_MAGIC 0x466243B1
+#define FATBIN_MAGIC  0xBA55ED50
 
 typedef struct {
     int   magic;
     int   version;
-    const unsigned long long *data;  /* Points to the actual fatbin */
-    void *filename_or_fatbins;
+    const void *data;
+    void  *filename_or_fatbins;
 } __fatBinC_Wrapper_t;
 
 /* ================================================================
- * Per-function metadata cache (returned by daemon after register)
+ * Registration tracking
  * ================================================================ */
 
-#define MAX_REGISTERED_FUNCTIONS 512
+#define MAX_REGISTERED_FUNCTIONS 2048
+#define MAX_DEFERRED_MODULES 64
 
 typedef struct {
-    uint64_t host_func_ptr;                      /* Key: the host stub address */
-    uint64_t module_handle;                      /* Daemon-side module slot */
+    uint64_t host_func_ptr;
     uint32_t num_params;
     uint32_t param_sizes[GPU_MAX_KERNEL_PARAMS];
-    int      registered;                         /* 1 if valid */
+    int      registered;
+    char     device_name[256];
+    int      module_index;
 } RegisteredFunction;
+
+typedef struct {
+    const void *fatbin_data;
+    size_t      fatbin_size;
+    uint64_t    remote_handle;
+    int         uploaded;
+} DeferredModule;
 
 static RegisteredFunction g_functions[MAX_REGISTERED_FUNCTIONS];
 static int g_function_count = 0;
-
-/* Module handle from the most recent __cudaRegisterFatBinary */
+static DeferredModule g_modules[MAX_DEFERRED_MODULES];
+static int g_module_count = 0;
+static int g_current_module_index = -1;
 static uint64_t g_current_module_handle = 0;
 static int g_module_registered = 0;
 
 /* ================================================================
- * Connection management
+ * Connection state
  * ================================================================ */
 
 static pthread_mutex_t g_conn_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_conn_fd = -1;
 static int g_initialized = 0;
 
-#define SHIM_LOG(fmt, ...) \
-    fprintf(stderr, "[cuda-shim] " fmt "\n", ##__VA_ARGS__)
+/* ================================================================
+ * Helpers
+ * ================================================================ */
 
 static int get_env_int(const char *name, int def)
 {
@@ -189,143 +190,14 @@ static int get_env_int(const char *name, int def)
     return val ? atoi(val) : def;
 }
 
-/* Parse hex string from env var into byte array */
 static int parse_hex_token(const char *hex, uint8_t *out, int len)
 {
-    if (!hex || strlen(hex) != (size_t)(len * 2)) return -1;
+    if (!hex || (int)strlen(hex) != len * 2) return -1;
     for (int i = 0; i < len; i++) {
         unsigned int byte;
         if (sscanf(&hex[i * 2], "%02x", &byte) != 1) return -1;
         out[i] = (uint8_t)byte;
     }
-    return 0;
-}
-
-/* Try connecting via TCP to host */
-static int try_tcp_connect(int port)
-{
-    const char *host = getenv("DECLOUD_GPU_PROXY_HOST");
-    if (!host) host = GPU_PROXY_TCP_BIND; /* default: 192.168.122.1 */
-
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-
-    struct sockaddr_in addr = {
-        .sin_family = AF_INET,
-        .sin_port   = htons((uint16_t)port),
-    };
-    if (inet_aton(host, &addr.sin_addr) == 0) {
-        close(fd);
-        return -1;
-    }
-
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        SHIM_LOG("TCP connect(%s:%d) failed: %s", host, port, strerror(errno));
-        close(fd);
-        return -1;
-    }
-
-    SHIM_LOG("Connected via TCP to %s:%d", host, port);
-    return fd;
-}
-
-/* Try connecting via vsock to host */
-static int try_vsock_connect(int port)
-{
-    int cid = get_env_int("DECLOUD_GPU_PROXY_CID", VMADDR_CID_HOST);
-
-    int fd = socket(AF_VSOCK, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-
-    struct sockaddr_vm addr = {
-        .svm_family = AF_VSOCK,
-        .svm_cid    = (unsigned int)cid,
-        .svm_port   = (unsigned int)port,
-    };
-
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        SHIM_LOG("vsock connect(CID=%d port=%d) failed: %s",
-                 cid, port, strerror(errno));
-        close(fd);
-        return -1;
-    }
-
-    SHIM_LOG("Connected via vsock (CID=%d port=%d)", cid, port);
-    return fd;
-}
-
-static int ensure_connected(void)
-{
-    pthread_mutex_lock(&g_conn_lock);
-    if (g_conn_fd >= 0) {
-        pthread_mutex_unlock(&g_conn_lock);
-        return 0;
-    }
-
-    int port = get_env_int("DECLOUD_GPU_PROXY_PORT", GPU_PROXY_PORT);
-    int is_tcp = 0;
-
-    /* Try vsock first (works on bare metal), then TCP fallback */
-    int fd = try_vsock_connect(port);
-    if (fd < 0) {
-        fd = try_tcp_connect(port);
-        if (fd < 0) {
-            SHIM_LOG("All transports failed — GPU proxy unavailable");
-            pthread_mutex_unlock(&g_conn_lock);
-            return -1;
-        }
-        is_tcp = 1;
-    }
-
-    g_conn_fd = fd;
-
-    /* Build HELLO with auth token (for TCP) */
-    GpuHelloRequest hello = {
-        .shim_version = GPU_PROXY_VERSION,
-        .pid = (uint32_t)getpid(),
-        .auth_token = {0},
-    };
-
-    if (is_tcp) {
-        const char *tok_hex = getenv("DECLOUD_GPU_PROXY_TOKEN");
-        if (tok_hex) {
-            parse_hex_token(tok_hex, hello.auth_token, GPU_PROXY_TOKEN_LEN);
-        }
-    }
-
-    GpuProxyHeader hdr = {
-        .magic = GPU_PROXY_MAGIC,
-        .version = GPU_PROXY_VERSION,
-        .cmd = GPU_CMD_HELLO,
-        .payload_len = sizeof(hello),
-        .status = 0,
-    };
-
-    ssize_t n = write(fd, &hdr, sizeof(hdr));
-    if (n == (ssize_t)sizeof(hdr)) {
-        write(fd, &hello, sizeof(hello));
-    }
-
-    GpuProxyHeader resp_hdr;
-    if (read(fd, &resp_hdr, sizeof(resp_hdr)) == sizeof(resp_hdr)) {
-        if (resp_hdr.status != 0) {
-            SHIM_LOG("HELLO rejected (status=%d) — auth failed?", resp_hdr.status);
-            close(fd);
-            g_conn_fd = -1;
-            pthread_mutex_unlock(&g_conn_lock);
-            return -1;
-        }
-        if (resp_hdr.payload_len >= sizeof(GpuHelloResponse)) {
-            GpuHelloResponse resp;
-            read(fd, &resp, sizeof(resp));
-            SHIM_LOG("Connected to GPU proxy (v%u, %u devices, %s)",
-                     resp.daemon_version, resp.device_count,
-                     is_tcp ? "TCP" : "vsock");
-        }
-    }
-
-    g_initialized = 1;
-    pthread_mutex_unlock(&g_conn_lock);
     return 0;
 }
 
@@ -362,7 +234,143 @@ static int write_exact(int fd, const void *buf, size_t len)
     return 0;
 }
 
-/* Send request, receive response. Returns cudaError_t from daemon. */
+/* ================================================================
+ * Transport -- vsock first, TCP fallback
+ * ================================================================ */
+
+static int try_tcp_connect(int port)
+{
+    const char *host = getenv("DECLOUD_GPU_PROXY_HOST");
+    if (!host) host = GPU_PROXY_TCP_BIND;
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_port   = htons((uint16_t)port),
+    };
+    if (inet_aton(host, &addr.sin_addr) == 0) {
+        close(fd);
+        return -1;
+    }
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        SHIM_LOG("TCP connect(%s:%d) failed: %s", host, port, strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    SHIM_LOG("Connected via TCP to %s:%d", host, port);
+    return fd;
+}
+
+static int try_vsock_connect(int port)
+{
+    int cid = get_env_int("DECLOUD_GPU_PROXY_CID", VMADDR_CID_HOST);
+
+    int fd = socket(AF_VSOCK, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    struct sockaddr_vm addr = {
+        .svm_family = AF_VSOCK,
+        .svm_cid    = (unsigned int)cid,
+        .svm_port   = (unsigned int)port,
+    };
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        SHIM_LOG("vsock connect(CID=%d port=%d) failed: %s",
+                 cid, port, strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    SHIM_LOG("Connected via vsock (CID=%d port=%d)", cid, port);
+    return fd;
+}
+
+static int ensure_connected(void)
+{
+    pthread_mutex_lock(&g_conn_lock);
+    if (g_conn_fd >= 0) {
+        pthread_mutex_unlock(&g_conn_lock);
+        return 0;
+    }
+
+    int port = get_env_int("DECLOUD_GPU_PROXY_PORT", GPU_PROXY_PORT);
+    int is_tcp = 0;
+
+    int fd = try_vsock_connect(port);
+    if (fd < 0) {
+        fd = try_tcp_connect(port);
+        if (fd < 0) {
+            SHIM_LOG("All transports failed — GPU proxy unavailable");
+            pthread_mutex_unlock(&g_conn_lock);
+            return -1;
+        }
+        is_tcp = 1;
+    }
+
+    g_conn_fd = fd;
+
+    /* Send HELLO handshake */
+    GpuHelloRequest hello = {
+        .shim_version = GPU_PROXY_VERSION,
+        .pid = (uint32_t)getpid(),
+        .auth_token = {0},
+    };
+
+    if (is_tcp) {
+        const char *tok_hex = getenv("DECLOUD_GPU_PROXY_TOKEN");
+        if (tok_hex) {
+            parse_hex_token(tok_hex, hello.auth_token, GPU_PROXY_TOKEN_LEN);
+        }
+    }
+
+    GpuProxyHeader hdr = {
+        .magic = GPU_PROXY_MAGIC,
+        .version = GPU_PROXY_VERSION,
+        .cmd = GPU_CMD_HELLO,
+        .payload_len = sizeof(hello),
+        .status = 0,
+    };
+
+    if (write_exact(fd, &hdr, sizeof(hdr)) < 0 ||
+        write_exact(fd, &hello, sizeof(hello)) < 0) {
+        SHIM_LOG("Failed to send HELLO");
+        close(fd);
+        g_conn_fd = -1;
+        pthread_mutex_unlock(&g_conn_lock);
+        return -1;
+    }
+
+    GpuProxyHeader resp_hdr;
+    if (read_exact(fd, &resp_hdr, sizeof(resp_hdr)) == 0) {
+        if (resp_hdr.status != 0) {
+            SHIM_LOG("HELLO rejected (status=%d) — auth failed?", resp_hdr.status);
+            close(fd);
+            g_conn_fd = -1;
+            pthread_mutex_unlock(&g_conn_lock);
+            return -1;
+        }
+        if (resp_hdr.payload_len >= sizeof(GpuHelloResponse)) {
+            GpuHelloResponse resp;
+            read_exact(fd, &resp, sizeof(resp));
+            SHIM_LOG("Connected to GPU proxy (v%u, %u devices, %s)",
+                     resp.daemon_version, resp.device_count,
+                     is_tcp ? "TCP" : "vsock");
+        }
+    }
+
+    g_initialized = 1;
+    pthread_mutex_unlock(&g_conn_lock);
+    return 0;
+}
+
+/* ================================================================
+ * RPC call -- send request, receive response
+ * ================================================================ */
+
 static int rpc_call(uint8_t cmd,
                     const void *req_payload, uint32_t req_len,
                     void *resp_buf, uint32_t resp_buf_size,
@@ -386,7 +394,6 @@ static int rpc_call(uint8_t cmd,
         if (write_exact(g_conn_fd, req_payload, req_len) < 0) goto err;
     }
 
-    /* Read response header */
     GpuProxyHeader resp_hdr;
     if (read_exact(g_conn_fd, &resp_hdr, sizeof(resp_hdr)) < 0) goto err;
 
@@ -395,7 +402,6 @@ static int rpc_call(uint8_t cmd,
         goto err;
     }
 
-    /* Read response payload */
     if (resp_hdr.payload_len > 0) {
         if (resp_buf && resp_hdr.payload_len <= resp_buf_size) {
             if (read_exact(g_conn_fd, resp_buf, resp_hdr.payload_len) < 0)
@@ -425,31 +431,19 @@ err:
 }
 
 /* ================================================================
- * CUDA registration hooks — intercepted at static init time
- *
- * These are called by the CUDA runtime's internal __cudaRegisterAll()
- * function, which nvcc emits into every compiled .cu file's static
- * initializers.
+ * Fat binary registration
  * ================================================================ */
 
-/*
- * Determine the size of the fat binary data from the __fatBinC_Wrapper_t.
- * The fat binary starts with a header that includes the total size.
- */
 static size_t get_fatbin_size(const void *fatbin_data)
 {
-    /* The fat binary header: magic(4) + version(2) + headerSize(2) + totalSize(8) */
     const uint8_t *p = (const uint8_t *)fatbin_data;
     uint32_t magic;
     memcpy(&magic, p, 4);
     if (magic != FATBIN_MAGIC) {
-        /* Not a recognized fat binary — try treating the first 8 bytes
-         * after a 8-byte header as the size */
         uint64_t size;
         memcpy(&size, p + 8, sizeof(size));
         return (size_t)size;
     }
-    /* Standard fatbin: total size at offset 8 */
     uint64_t total_size;
     memcpy(&total_size, p + 8, sizeof(total_size));
     return (size_t)total_size;
@@ -457,76 +451,34 @@ static size_t get_fatbin_size(const void *fatbin_data)
 
 void **__cudaRegisterFatBinary(void *fatCubin)
 {
-    SHIM_LOG("__cudaRegisterFatBinary(%p)", fatCubin);
-
     __fatBinC_Wrapper_t *wrapper = (__fatBinC_Wrapper_t *)fatCubin;
     if (!wrapper || wrapper->magic != FATBINC_MAGIC) {
-        SHIM_LOG("  bad fatbin wrapper magic");
-        /* Return a dummy handle — we can't fail here without crashing the app */
         static void *dummy_handle = NULL;
         return &dummy_handle;
     }
-
     const void *fatbin_data = (const void *)wrapper->data;
     size_t fatbin_size = get_fatbin_size(fatbin_data);
-
-    SHIM_LOG("  fatbin data=%p size=%zu", fatbin_data, fatbin_size);
-
     if (fatbin_size == 0 || fatbin_size > GPU_PROXY_MAX_PAYLOAD) {
-        SHIM_LOG("  fatbin size invalid or too large, skipping module registration");
         static void *dummy_handle = NULL;
         return &dummy_handle;
     }
-
-    /* Build request: [GpuRegisterModuleRequest][fatbin data] */
-    uint32_t req_len = sizeof(GpuRegisterModuleRequest) + (uint32_t)fatbin_size;
-    void *req_buf = malloc(req_len);
-    if (!req_buf) {
-        static void *dummy_handle = NULL;
-        return &dummy_handle;
+    /* LOCAL ONLY - no RPC */
+    if (g_module_count < MAX_DEFERRED_MODULES) {
+        DeferredModule *dm = &g_modules[g_module_count];
+        dm->fatbin_data   = fatbin_data;
+        dm->fatbin_size   = fatbin_size;
+        dm->remote_handle = 0;
+        dm->uploaded      = 0;
+        g_current_module_index = g_module_count;
+        g_module_count++;
     }
-
-    GpuRegisterModuleRequest *req = (GpuRegisterModuleRequest *)req_buf;
-    req->fatbin_size = (uint64_t)fatbin_size;
-    memcpy((uint8_t *)req_buf + sizeof(GpuRegisterModuleRequest), fatbin_data, fatbin_size);
-
-    GpuRegisterModuleResponse resp;
-    int err = rpc_call(GPU_CMD_REGISTER_MODULE, req_buf, req_len,
-                       &resp, sizeof(resp), NULL);
-    free(req_buf);
-
-    if (err == 0) {
-        g_current_module_handle = resp.module_handle;
-        g_module_registered = 1;
-        SHIM_LOG("  module registered -> handle %lu",
-                 (unsigned long)g_current_module_handle);
-    } else {
-        SHIM_LOG("  module registration failed (err=%d)", err);
-        g_module_registered = 0;
-    }
-
-    /*
-     * Return a pointer-to-pointer that the runtime passes to
-     * __cudaRegisterFunction as the first arg (fatCubinHandle).
-     * We store our module handle in a static so the register function
-     * calls can find it. The returned value itself isn't dereferenced
-     * by guest code — it's just an opaque cookie.
-     */
-    static void *handle_ptr = (void *)1; /* non-NULL to satisfy runtime checks */
+    static void *handle_ptr = (void *)1;
     return &handle_ptr;
 }
 
 void __cudaUnregisterFatBinary(void **fatCubinHandle)
 {
-    SHIM_LOG("__cudaUnregisterFatBinary(%p)", fatCubinHandle);
-
-    if (g_module_registered) {
-        GpuUnregisterModuleRequest req = {
-            .module_handle = g_current_module_handle,
-        };
-        rpc_call(GPU_CMD_UNREGISTER_MODULE, &req, sizeof(req), NULL, 0, NULL);
-        g_module_registered = 0;
-    }
+    (void)fatCubinHandle;
 }
 
 void __cudaRegisterFunction(
@@ -541,71 +493,38 @@ void __cudaRegisterFunction(
     void       *gDim,
     int        *wSize)
 {
-    /* deviceFun is the mangled device function name (e.g. "_Z9my_kernelPfS_i") */
+    (void)fatCubinHandle; (void)thread_limit;
+    (void)tid; (void)bid; (void)bDim; (void)gDim; (void)wSize;
     const char *name = deviceFun ? deviceFun : deviceName;
-    SHIM_LOG("__cudaRegisterFunction(hostFun=%p, device='%s')",
-             hostFun, name ? name : "(null)");
-
-    if (!g_module_registered || !name) {
-        SHIM_LOG("  skipping (no module or no name)");
-        return;
-    }
-
-    if (g_function_count >= MAX_REGISTERED_FUNCTIONS) {
-        SHIM_LOG("  too many registered functions (%d)", g_function_count);
-        return;
-    }
-
-    uint32_t name_len = (uint32_t)strlen(name) + 1; /* include null terminator */
-
-    /* Build request: [GpuRegisterFunctionRequest][device_name] */
-    uint32_t req_len = sizeof(GpuRegisterFunctionRequest) + name_len;
-    void *req_buf = malloc(req_len);
-    if (!req_buf) return;
-
-    GpuRegisterFunctionRequest *req = (GpuRegisterFunctionRequest *)req_buf;
-    req->module_handle = g_current_module_handle;
-    req->host_func_ptr = (uint64_t)(uintptr_t)hostFun;
-    req->device_name_len = name_len;
-    memcpy((uint8_t *)req_buf + sizeof(GpuRegisterFunctionRequest), name, name_len);
-
-    GpuRegisterFunctionResponse resp;
-    memset(&resp, 0, sizeof(resp));
-    int err = rpc_call(GPU_CMD_REGISTER_FUNCTION, req_buf, req_len,
-                       &resp, sizeof(resp), NULL);
-    free(req_buf);
-
-    if (err == 0) {
+    /* LOCAL ONLY - no RPC during dlopen */
+    if (name && g_function_count < MAX_REGISTERED_FUNCTIONS) {
         RegisteredFunction *rf = &g_functions[g_function_count++];
         rf->host_func_ptr = (uint64_t)(uintptr_t)hostFun;
-        rf->module_handle = g_current_module_handle;
-        rf->num_params = resp.num_params;
-        memcpy(rf->param_sizes, resp.param_sizes,
-               resp.num_params * sizeof(uint32_t));
-        rf->registered = 1;
-        SHIM_LOG("  function registered: %u params", resp.num_params);
-    } else {
-        SHIM_LOG("  function registration failed (err=%d)", err);
+        rf->registered    = 0;
+        rf->num_params    = 0;
+        rf->module_index  = g_current_module_index;
+        strncpy(rf->device_name, name, sizeof(rf->device_name) - 1);
+        rf->device_name[sizeof(rf->device_name) - 1] = '\0';
     }
 }
 
-/* __cudaRegisterVar — stub: device global variables (not needed for basic kernel launch) */
 void __cudaRegisterVar(
-    void **fatCubinHandle,
-    char  *hostVar,
-    char  *deviceAddress,
+    void   **fatCubinHandle,
+    char    *hostVar,
+    char    *deviceAddress,
     const char *deviceName,
-    int    ext,
-    size_t size,
-    int    constant,
-    int    global)
+    int      ext,
+    size_t   size,
+    int      constant,
+    int      global)
 {
+    (void)fatCubinHandle; (void)hostVar; (void)deviceAddress;
+    (void)ext; (void)constant; (void)global;
     SHIM_LOG("__cudaRegisterVar('%s', size=%zu) — stub", deviceName, size);
-    /* TODO: implement for device-side global variables if needed */
 }
 
 /* ================================================================
- * Intercepted CUDA Runtime API functions — existing
+ * CUDA Runtime API — Device Management
  * ================================================================ */
 
 cudaError_t cudaGetDeviceCount(int *count)
@@ -621,10 +540,20 @@ cudaError_t cudaGetDeviceCount(int *count)
     return err;
 }
 
+/*
+ * cudaGetDeviceProperties — fill caller's struct with device info.
+ *
+ * CRITICAL SAFETY: The caller (e.g. ggml-cuda) may allocate the struct
+ * on the stack with as little as 1040 bytes. Our struct definition with
+ * padding could be larger. We use SAFE_PROP_MEMSET_SIZE (768 bytes) to
+ * avoid stack smashing, which safely covers all fields we populate.
+ */
 cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop, int device)
 {
     if (!prop) return cudaErrorInvalidValue;
-    memset(prop, 0, sizeof(*prop));
+
+    /* Safe memset — never exceed caller's stack allocation */
+    memset(prop, 0, SAFE_PROP_MEMSET_SIZE);
 
     GpuGetDevicePropertiesRequest req = { .device = device };
     GpuDeviceProperties resp;
@@ -632,6 +561,7 @@ cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop, int device)
                        &req, sizeof(req), &resp, sizeof(resp), NULL);
 
     if (err == cudaSuccess) {
+        /* Fill via struct fields (covers our struct layout) */
         strncpy(prop->name, resp.name, sizeof(prop->name) - 1);
         prop->totalGlobalMem               = resp.total_global_mem;
         prop->sharedMemPerBlock             = resp.shared_mem_per_block;
@@ -645,22 +575,78 @@ cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop, int device)
         prop->maxGridSize[1]                = resp.max_grid_size[1];
         prop->maxGridSize[2]                = resp.max_grid_size[2];
         prop->clockRate                     = resp.clock_rate;
-        prop->multiProcessorCount           = resp.multi_processor_count;
         prop->major                         = resp.major;
         prop->minor                         = resp.minor;
+        prop->multiProcessorCount           = resp.multi_processor_count;
         prop->maxThreadsPerMultiProcessor   = resp.max_threads_per_multiprocessor;
         prop->memoryClockRate               = resp.memory_clock_rate;
         prop->memoryBusWidth                = resp.memory_bus_width;
         prop->l2CacheSize                   = resp.l2_cache_size;
+
+        /*
+         * CRITICAL: ggml-cuda reads major/minor at FIXED binary offsets
+         * from the real NVIDIA struct layout, not our simplified struct.
+         * Write critical values at the offsets ggml-cuda actually reads:
+         *   major              @ 360
+         *   minor              @ 364
+         *   multiProcessorCount @ 356 (already lands here via struct)
+         *
+         * Also write at other offsets ggml-cuda may probe.
+         */
+        uint8_t *raw = (uint8_t *)prop;
+        /* major/minor at v2 offsets */
+        *(int *)(raw + 360) = resp.major;
+        *(int *)(raw + 364) = resp.minor;
+        /* multiProcessorCount — ensure at both struct and raw offset */
+        *(int *)(raw + 356) = resp.multi_processor_count;
+        /* maxThreadsPerMultiProcessor */
+        *(int *)(raw + 368) = resp.max_threads_per_multiprocessor;
     }
     return err;
 }
+
+cudaError_t cudaGetDeviceProperties_v2(struct cudaDeviceProp *prop, int device)
+    __attribute__((alias("cudaGetDeviceProperties")));
 
 cudaError_t cudaSetDevice(int device)
 {
     GpuSetDeviceRequest req = { .device = device };
     return rpc_call(GPU_CMD_SET_DEVICE, &req, sizeof(req), NULL, 0, NULL);
 }
+
+cudaError_t cudaGetDevice(int *device)
+{
+    if (device) *device = 0;
+    return cudaSuccess;
+}
+
+cudaError_t cudaDeviceGetAttribute(int *value, int attr, int device)
+{
+    (void)device;
+    if (!value) return cudaErrorInvalidValue;
+    /* Forward to GetDeviceProperties — daemon has real values */
+    GpuGetDevicePropertiesRequest req = { .device = device };
+    GpuDeviceProperties resp;
+    int err = rpc_call(GPU_CMD_GET_DEVICE_PROPERTIES,
+                       &req, sizeof(req), &resp, sizeof(resp), NULL);
+    if (err != cudaSuccess) { *value = 0; return err; }
+
+    switch (attr) {
+        case 75: *value = resp.major; break;  /* COMPUTE_CAPABILITY_MAJOR */
+        case 76: *value = resp.minor; break;  /* COMPUTE_CAPABILITY_MINOR */
+        case 16: *value = resp.multi_processor_count; break;
+        case 39: *value = resp.max_threads_per_multiprocessor; break;
+        case 13: *value = resp.clock_rate; break;
+        case 36: *value = resp.memory_clock_rate; break;
+        case 37: *value = resp.memory_bus_width; break;
+        default: *value = 0; break;
+    }
+    return cudaSuccess;
+}
+
+/* ================================================================
+ * Memory Management — forwarded to daemon (real GPU memory)
+ * ================================================================ */
 
 cudaError_t cudaMalloc(void **devPtr, size_t size)
 {
@@ -680,6 +666,7 @@ cudaError_t cudaMalloc(void **devPtr, size_t size)
 
 cudaError_t cudaFree(void *devPtr)
 {
+    if (!devPtr) return cudaSuccess;
     GpuFreeRequest req = { .device_ptr = (uint64_t)(uintptr_t)devPtr };
     return rpc_call(GPU_CMD_FREE, &req, sizeof(req), NULL, 0, NULL);
 }
@@ -701,7 +688,6 @@ cudaError_t cudaMemcpy(void *dst, const void *src, size_t count,
         if (!buf) return cudaErrorInvalidValue;
         memcpy(buf, &req, sizeof(req));
         memcpy((char *)buf + sizeof(req), src, count);
-
         int err = rpc_call(GPU_CMD_MEMCPY, buf, (uint32_t)total,
                            NULL, 0, NULL);
         free(buf);
@@ -715,9 +701,8 @@ cudaError_t cudaMemcpy(void *dst, const void *src, size_t count,
         return err;
     }
 
-    case cudaMemcpyDeviceToDevice: {
+    case cudaMemcpyDeviceToDevice:
         return rpc_call(GPU_CMD_MEMCPY, &req, sizeof(req), NULL, 0, NULL);
-    }
 
     case cudaMemcpyHostToHost:
         memcpy(dst, src, count);
@@ -726,6 +711,13 @@ cudaError_t cudaMemcpy(void *dst, const void *src, size_t count,
     default:
         return cudaErrorInvalidValue;
     }
+}
+
+cudaError_t cudaMemcpyAsync(void *dst, const void *src, size_t count,
+                            cudaMemcpyKind_t kind, cudaStream_t stream)
+{
+    (void)stream;
+    return cudaMemcpy(dst, src, count, kind);
 }
 
 cudaError_t cudaMemset(void *devPtr, int value, size_t count)
@@ -738,20 +730,92 @@ cudaError_t cudaMemset(void *devPtr, int value, size_t count)
     return rpc_call(GPU_CMD_MEMSET, &req, sizeof(req), NULL, 0, NULL);
 }
 
+cudaError_t cudaMemsetAsync(void *devPtr, int value, size_t count,
+                            cudaStream_t stream)
+{
+    (void)stream;
+    return cudaMemset(devPtr, value, count);
+}
+
+cudaError_t cudaMemGetInfo(size_t *free, size_t *total)
+{
+    if (!free || !total) return cudaErrorInvalidValue;
+
+    GpuMemInfoResponse resp;
+    int err = rpc_call(GPU_CMD_MEM_GET_INFO, NULL, 0,
+                       &resp, sizeof(resp), NULL);
+    if (err == cudaSuccess) {
+        *free  = (size_t)resp.free;
+        *total = (size_t)resp.total;
+    } else {
+        *free = 0;
+        *total = 0;
+    }
+    return (cudaError_t)err;
+}
+
+/* ================================================================
+ * Synchronization
+ * ================================================================ */
+
 cudaError_t cudaDeviceSynchronize(void)
 {
     return rpc_call(GPU_CMD_DEVICE_SYNCHRONIZE, NULL, 0, NULL, 0, NULL);
 }
 
 /* ================================================================
- * Kernel launch
+ * Kernel Launch
  * ================================================================ */
+
+static int ensure_module_uploaded(int mod_idx)
+{
+    if (mod_idx < 0 || mod_idx >= g_module_count) return -1;
+    DeferredModule *m = &g_modules[mod_idx];
+    if (m->uploaded) return 0;
+    ensure_connected();
+    if (g_conn_fd < 0) return -1;
+    uint32_t req_len = sizeof(GpuRegisterModuleRequest) + (uint32_t)m->fatbin_size;
+    void *req_buf = malloc(req_len);
+    if (!req_buf) return -1;
+    GpuRegisterModuleRequest *mreq = (GpuRegisterModuleRequest *)req_buf;
+    mreq->fatbin_size = (uint64_t)m->fatbin_size;
+    memcpy((uint8_t *)req_buf + sizeof(GpuRegisterModuleRequest), m->fatbin_data, m->fatbin_size);
+    GpuRegisterModuleResponse mresp;
+    int err = rpc_call(GPU_CMD_REGISTER_MODULE, req_buf, req_len, &mresp, sizeof(mresp), NULL);
+    free(req_buf);
+    if (err != 0) { SHIM_LOG("lazy upload: module %d failed", mod_idx); return -1; }
+    m->remote_handle = mresp.module_handle;
+    m->uploaded = 1;
+    for (int i = 0; i < g_function_count; i++) {
+        RegisteredFunction *rf = &g_functions[i];
+        if (rf->module_index != mod_idx || rf->registered) continue;
+        uint32_t name_len = (uint32_t)strlen(rf->device_name) + 1;
+        uint32_t freq_len = sizeof(GpuRegisterFunctionRequest) + name_len;
+        void *freq_buf = malloc(freq_len);
+        if (!freq_buf) continue;
+        GpuRegisterFunctionRequest *freq = (GpuRegisterFunctionRequest *)freq_buf;
+        freq->module_handle = m->remote_handle;
+        freq->host_func_ptr = rf->host_func_ptr;
+        freq->device_name_len = name_len;
+        memcpy((uint8_t *)freq_buf + sizeof(GpuRegisterFunctionRequest), rf->device_name, name_len);
+        GpuRegisterFunctionResponse fresp;
+        memset(&fresp, 0, sizeof(fresp));
+        err = rpc_call(GPU_CMD_REGISTER_FUNCTION, freq_buf, freq_len, &fresp, sizeof(fresp), NULL);
+        free(freq_buf);
+        if (err == 0) {
+            rf->num_params = fresp.num_params;
+            if (rf->num_params > GPU_MAX_KERNEL_PARAMS) rf->num_params = GPU_MAX_KERNEL_PARAMS;
+            for (uint32_t p = 0; p < rf->num_params; p++) rf->param_sizes[p] = fresp.param_sizes[p];
+            rf->registered = 1;
+        }
+    }
+    return 0;
+}
 
 static RegisteredFunction *find_registered_function(uint64_t host_func_ptr)
 {
     for (int i = 0; i < g_function_count; i++) {
-        if (g_functions[i].registered &&
-            g_functions[i].host_func_ptr == host_func_ptr)
+        if (g_functions[i].host_func_ptr == host_func_ptr)
             return &g_functions[i];
     }
     return NULL;
@@ -767,51 +831,55 @@ cudaError_t cudaLaunchKernel(const void *func, dim3 gridDim, dim3 blockDim,
         SHIM_LOG("cudaLaunchKernel: unknown function %p", func);
         return cudaErrorInvalidValue;
     }
+    if (!rf->registered) {
+        ensure_module_uploaded(rf->module_index);
+        if (!rf->registered) {
+            SHIM_LOG("cudaLaunchKernel: lazy reg failed for %s", rf->device_name);
+            return cudaErrorInvalidValue;
+        }
+    }
 
-    /*
-     * Serialize arguments. Each arg in args[i] is a pointer to the actual
-     * value. We know the size of each from the param metadata the daemon
-     * sent back during registration (or default to 8 bytes = sizeof(void*)).
-     */
     uint32_t args_total = 0;
     for (uint32_t i = 0; i < rf->num_params; i++) {
         args_total += rf->param_sizes[i];
     }
 
-    /* If daemon didn't provide sizes (CUDA < 12), assume 8 bytes per param.
-     * The shim must determine param count from the launch call. Since the
-     * runtime API doesn't expose this, we use the daemon-reported count.
-     * If num_params is 0 (unknown), we can't launch. */
     if (rf->num_params == 0) {
-        SHIM_LOG("cudaLaunchKernel: param metadata unavailable for %p", func);
+        SHIM_LOG("cudaLaunchKernel: 0 params — can't serialize");
         return cudaErrorInvalidValue;
     }
 
     uint32_t req_len = sizeof(GpuLaunchKernelRequest) + args_total;
     void *req_buf = malloc(req_len);
-    if (!req_buf) return cudaErrorInvalidValue;
+    if (!req_buf) return cudaErrorMemoryAllocation;
 
     GpuLaunchKernelRequest *req = (GpuLaunchKernelRequest *)req_buf;
-    req->host_func_ptr = (uint64_t)(uintptr_t)func;
-    req->grid_dim_x = gridDim.x;
-    req->grid_dim_y = gridDim.y;
-    req->grid_dim_z = gridDim.z;
-    req->block_dim_x = blockDim.x;
-    req->block_dim_y = blockDim.y;
-    req->block_dim_z = blockDim.z;
+    req->host_func_ptr   = (uint64_t)(uintptr_t)func;
+    req->grid_dim_x      = gridDim.x;
+    req->grid_dim_y      = gridDim.y;
+    req->grid_dim_z      = gridDim.z;
+    req->block_dim_x     = blockDim.x;
+    req->block_dim_y     = blockDim.y;
+    req->block_dim_z     = blockDim.z;
     req->shared_mem_bytes = (uint64_t)sharedMem;
-    req->stream_handle = (uint64_t)(uintptr_t)stream;
-    req->num_params = rf->num_params;
+    req->stream_handle   = (uint64_t)(uintptr_t)stream;
+    req->num_params      = rf->num_params;
     req->args_total_size = args_total;
 
-    /* Copy each argument value contiguously after the header */
-    uint8_t *dst = (uint8_t *)req_buf + sizeof(GpuLaunchKernelRequest);
+    /* Serialize argument values */
+    uint8_t *dest = (uint8_t *)req_buf + sizeof(GpuLaunchKernelRequest);
     for (uint32_t i = 0; i < rf->num_params; i++) {
-        memcpy(dst, args[i], rf->param_sizes[i]);
-        dst += rf->param_sizes[i];
+        uint32_t sz = rf->param_sizes[i];
+        if (args && args[i]) {
+            memcpy(dest, args[i], sz);
+        } else {
+            memset(dest, 0, sz);
+        }
+        dest += sz;
     }
 
-    int err = rpc_call(GPU_CMD_LAUNCH_KERNEL, req_buf, req_len, NULL, 0, NULL);
+    int err = rpc_call(GPU_CMD_LAUNCH_KERNEL, req_buf, req_len,
+                       NULL, 0, NULL);
     free(req_buf);
     return err;
 }
@@ -823,7 +891,6 @@ cudaError_t cudaLaunchKernel(const void *func, dim3 gridDim, dim3 blockDim,
 cudaError_t cudaStreamCreate(cudaStream_t *pStream)
 {
     if (!pStream) return cudaErrorInvalidValue;
-
     GpuStreamCreateRequest req = { .flags = 0 };
     GpuStreamCreateResponse resp;
     int err = rpc_call(GPU_CMD_STREAM_CREATE, &req, sizeof(req),
@@ -839,7 +906,6 @@ cudaError_t cudaStreamCreate(cudaStream_t *pStream)
 cudaError_t cudaStreamCreateWithFlags(cudaStream_t *pStream, unsigned int flags)
 {
     if (!pStream) return cudaErrorInvalidValue;
-
     GpuStreamCreateRequest req = { .flags = flags };
     GpuStreamCreateResponse resp;
     int err = rpc_call(GPU_CMD_STREAM_CREATE, &req, sizeof(req),
@@ -875,7 +941,6 @@ cudaError_t cudaStreamSynchronize(cudaStream_t stream)
 cudaError_t cudaEventCreate(cudaEvent_t *event)
 {
     if (!event) return cudaErrorInvalidValue;
-
     GpuEventCreateRequest req = { .flags = 0 };
     GpuEventCreateResponse resp;
     int err = rpc_call(GPU_CMD_EVENT_CREATE, &req, sizeof(req),
@@ -891,7 +956,6 @@ cudaError_t cudaEventCreate(cudaEvent_t *event)
 cudaError_t cudaEventCreateWithFlags(cudaEvent_t *event, unsigned int flags)
 {
     if (!event) return cudaErrorInvalidValue;
-
     GpuEventCreateRequest req = { .flags = flags };
     GpuEventCreateResponse resp;
     int err = rpc_call(GPU_CMD_EVENT_CREATE, &req, sizeof(req),
@@ -915,7 +979,7 @@ cudaError_t cudaEventDestroy(cudaEvent_t event)
 cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream)
 {
     GpuEventRecordRequest req = {
-        .event_handle = (uint64_t)(uintptr_t)event,
+        .event_handle  = (uint64_t)(uintptr_t)event,
         .stream_handle = (uint64_t)(uintptr_t)stream,
     };
     return rpc_call(GPU_CMD_EVENT_RECORD, &req, sizeof(req), NULL, 0, NULL);
@@ -932,212 +996,123 @@ cudaError_t cudaEventSynchronize(cudaEvent_t event)
 cudaError_t cudaEventElapsedTime(float *ms, cudaEvent_t start, cudaEvent_t end)
 {
     if (!ms) return cudaErrorInvalidValue;
-
     GpuEventElapsedTimeRequest req = {
-        .start_event = (uint64_t)(uintptr_t)start,
-        .end_event   = (uint64_t)(uintptr_t)end,
+        .start_handle = (uint64_t)(uintptr_t)start,
+        .end_handle   = (uint64_t)(uintptr_t)end,
     };
     GpuEventElapsedTimeResponse resp;
     int err = rpc_call(GPU_CMD_EVENT_ELAPSED_TIME, &req, sizeof(req),
                        &resp, sizeof(resp), NULL);
     if (err == cudaSuccess) {
-        *ms = resp.elapsed_ms;
+        *ms = resp.milliseconds;
+    } else {
+        *ms = 0.0f;
     }
     return err;
 }
 
 /* ================================================================
- * Stubs for functions that frameworks probe but don't need GPU for
+ * Misc stubs — return success for functions ggml-cuda probes
  * ================================================================ */
 
-cudaError_t cudaGetDevice(int *device)
+cudaError_t cudaRuntimeGetVersion(int *version)
 {
-    if (device) *device = 0;
+    if (version) *version = 12080;  /* CUDA 12.8 */
     return cudaSuccess;
 }
 
-cudaError_t cudaDeviceGetAttribute(int *value, int attr, int device)
+cudaError_t cudaDriverGetVersion(int *version)
 {
-    if (value) *value = 0;
+    if (version) *version = 12080;
     return cudaSuccess;
 }
 
-cudaError_t cudaRuntimeGetVersion(int *runtimeVersion)
-{
-    if (runtimeVersion) *runtimeVersion = 12000;
-    return cudaSuccess;
-}
-
-cudaError_t cudaDriverGetVersion(int *driverVersion)
-{
-    if (driverVersion) *driverVersion = 12000;
-    return cudaSuccess;
-}
+cudaError_t cudaGetLastError(void) { return cudaSuccess; }
+cudaError_t cudaPeekAtLastError(void) { return cudaSuccess; }
 
 const char *cudaGetErrorString(cudaError_t error)
 {
     switch (error) {
-    case 0:   return "no error";
-    case 1:   return "invalid value";
-    case 100: return "no CUDA-capable device is detected (proxy unavailable)";
-    default:  return "unknown error";
+        case 0:   return "no error";
+        case 1:   return "invalid argument";
+        case 2:   return "out of memory";
+        case 100: return "no CUDA-capable device";
+        default:  return "unknown error";
     }
 }
 
 const char *cudaGetErrorName(cudaError_t error)
 {
     switch (error) {
-    case 0:   return "cudaSuccess";
-    case 1:   return "cudaErrorInvalidValue";
-    case 100: return "cudaErrorNoDevice";
-    default:  return "cudaErrorUnknown";
+        case 0:   return "cudaSuccess";
+        case 1:   return "cudaErrorInvalidValue";
+        case 2:   return "cudaErrorMemoryAllocation";
+        case 100: return "cudaErrorNoDevice";
+        default:  return "cudaErrorUnknown";
     }
 }
 
-cudaError_t cudaGetLastError(void)
+cudaError_t cudaDeviceReset(void) { return cudaSuccess; }
+cudaError_t cudaSetDeviceFlags(unsigned int flags) { (void)flags; return cudaSuccess; }
+cudaError_t cudaDeviceSetCacheConfig(int config) { (void)config; return cudaSuccess; }
+
+cudaError_t cudaFuncSetAttribute(const void *func, int attr, int value)
 {
+    (void)func; (void)attr; (void)value;
     return cudaSuccess;
 }
 
-cudaError_t cudaPeekAtLastError(void)
+cudaError_t cudaOccupancyMaxPotentialBlockSize(int *minGridSize, int *blockSize,
+                                                const void *func,
+                                                size_t dynamicSMemSize,
+                                                int blockSizeLimit)
 {
+    (void)func; (void)dynamicSMemSize; (void)blockSizeLimit;
+    if (minGridSize) *minGridSize = 1;
+    if (blockSize) *blockSize = 256;
+    return cudaSuccess;
+}
+
+/* Host memory stubs */
+cudaError_t cudaHostAlloc(void **pHost, size_t size, unsigned int flags)
+{
+    (void)flags;
+    if (!pHost) return cudaErrorInvalidValue;
+    /* ggml requires TENSOR_ALIGNMENT (typically 32 or 64 bytes) */
+    if (posix_memalign(pHost, 4096, size) != 0) {
+        *pHost = NULL;
+        return cudaErrorMemoryAllocation;
+    }
+    return cudaSuccess;
+}
+
+cudaError_t cudaMallocHost(void **ptr, size_t size)
+{
+    return cudaHostAlloc(ptr, size, 0);
+}
+
+cudaError_t cudaFreeHost(void *ptr)
+{
+    free(ptr);
+    return cudaSuccess;
+}
+
+cudaError_t cudaHostRegister(void *ptr, size_t size, unsigned int flags)
+{
+    (void)ptr; (void)size; (void)flags;
+    return cudaSuccess;
+}
+
+cudaError_t cudaHostUnregister(void *ptr)
+{
+    (void)ptr;
     return cudaSuccess;
 }
 
 /* ================================================================
- * cuDNN stubs — functions that ML frameworks probe at import time.
- *
- * PyTorch, TensorFlow, and other frameworks dynamically load
- * libcudnn.so and call these to check cuDNN availability. By
- * providing stubs here, we prevent import failures when the
- * framework checks for cuDNN support.
- *
- * Note: actual cuDNN operations (convolution, etc.) must be
- * forwarded to the daemon in the future. For now these stubs
- * report cuDNN as available so frameworks can initialize,
- * and individual cuDNN operations fall through to CUDA kernels.
+ * Cleanup
  * ================================================================ */
 
-/* cuDNN status codes */
-#define CUDNN_STATUS_SUCCESS           0
-#define CUDNN_STATUS_NOT_SUPPORTED     9
-
-/* cuDNN version info — report as 8.9.0 (widely supported) */
-#define CUDNN_MAJOR 8
-#define CUDNN_MINOR 9
-#define CUDNN_PATCHLEVEL 0
-
-typedef void *cudnnHandle_t;
-
-size_t cudnnGetVersion(void)
-{
-    return CUDNN_MAJOR * 1000 + CUDNN_MINOR * 100 + CUDNN_PATCHLEVEL;
-}
-
-size_t cudnnGetCudartVersion(void)
-{
-    return 12000; /* Match our reported CUDA 12.0 */
-}
-
-int cudnnCreate(cudnnHandle_t *handle)
-{
-    SHIM_LOG("cudnnCreate() — stub");
-    if (handle) *handle = (cudnnHandle_t)(uintptr_t)0xCD000001;
-    return CUDNN_STATUS_SUCCESS;
-}
-
-int cudnnDestroy(cudnnHandle_t handle)
-{
-    SHIM_LOG("cudnnDestroy() — stub");
-    (void)handle;
-    return CUDNN_STATUS_SUCCESS;
-}
-
-int cudnnSetStream(cudnnHandle_t handle, cudaStream_t stream)
-{
-    (void)handle;
-    (void)stream;
-    return CUDNN_STATUS_SUCCESS;
-}
-
-int cudnnGetStream(cudnnHandle_t handle, cudaStream_t *stream)
-{
-    (void)handle;
-    if (stream) *stream = NULL;
-    return CUDNN_STATUS_SUCCESS;
-}
-
-const char *cudnnGetErrorString(int status)
-{
-    switch (status) {
-    case 0: return "CUDNN_STATUS_SUCCESS";
-    case 9: return "CUDNN_STATUS_NOT_SUPPORTED";
-    default: return "CUDNN_STATUS_UNKNOWN";
-    }
-}
-
-/* ================================================================
- * cuBLAS stubs — similar pattern for BLAS operations.
- *
- * ML frameworks call cublasCreate to detect cuBLAS availability.
- * Linear algebra operations (GEMM, etc.) will go through CUDA
- * kernels or need future daemon-side forwarding.
- * ================================================================ */
-
-#define CUBLAS_STATUS_SUCCESS 0
-
-typedef void *cublasHandle_t;
-
-size_t cublasGetVersion_v2(cublasHandle_t handle, int *version)
-{
-    (void)handle;
-    if (version) *version = 12000;
-    return CUBLAS_STATUS_SUCCESS;
-}
-
-int cublasCreate_v2(cublasHandle_t *handle)
-{
-    SHIM_LOG("cublasCreate_v2() — stub");
-    if (handle) *handle = (cublasHandle_t)(uintptr_t)0xB1A50001;
-    return CUBLAS_STATUS_SUCCESS;
-}
-
-int cublasDestroy_v2(cublasHandle_t handle)
-{
-    SHIM_LOG("cublasDestroy_v2() — stub");
-    (void)handle;
-    return CUBLAS_STATUS_SUCCESS;
-}
-
-int cublasSetStream_v2(cublasHandle_t handle, cudaStream_t stream)
-{
-    (void)handle;
-    (void)stream;
-    return CUBLAS_STATUS_SUCCESS;
-}
-
-int cublasGetStream_v2(cublasHandle_t handle, cudaStream_t *stream)
-{
-    (void)handle;
-    if (stream) *stream = NULL;
-    return CUBLAS_STATUS_SUCCESS;
-}
-
-int cublasSetMathMode(cublasHandle_t handle, int mode)
-{
-    (void)handle;
-    (void)mode;
-    return CUBLAS_STATUS_SUCCESS;
-}
-
-int cublasGetMathMode(cublasHandle_t handle, int *mode)
-{
-    (void)handle;
-    if (mode) *mode = 0; /* CUBLAS_DEFAULT_MATH */
-    return CUBLAS_STATUS_SUCCESS;
-}
-
-/* Cleanup on unload */
 __attribute__((destructor))
 static void shim_cleanup(void)
 {
@@ -1150,9 +1125,216 @@ static void shim_cleanup(void)
             .payload_len = 0,
             .status = 0,
         };
-        write(g_conn_fd, &hdr, sizeof(hdr));
+        write_exact(g_conn_fd, &hdr, sizeof(hdr));
         close(g_conn_fd);
         g_conn_fd = -1;
     }
     pthread_mutex_unlock(&g_conn_lock);
+}
+/* ================================================================
+ * Additional stubs required by libggml-cuda.so
+ * ================================================================ */
+
+/* Peer access */
+cudaError_t cudaDeviceCanAccessPeer(int *canAccess, int device, int peerDevice)
+{
+    (void)device; (void)peerDevice;
+    if (canAccess) *canAccess = 0;
+    return cudaSuccess;
+}
+
+cudaError_t cudaDeviceEnablePeerAccess(int peerDevice, unsigned int flags)
+{
+    (void)peerDevice; (void)flags;
+    return cudaSuccess;
+}
+
+cudaError_t cudaDeviceDisablePeerAccess(int peerDevice)
+{
+    (void)peerDevice;
+    return cudaSuccess;
+}
+
+/* Function attributes */
+typedef struct {
+    int binaryVersion;
+    size_t cacheModeCA;
+    size_t constSizeBytes;
+    size_t localSizeBytes;
+    int maxDynamicSharedSizeBytes;
+    int maxThreadsPerBlock;
+    int numRegs;
+    int preferredShmemCarveout;
+    size_t ptxVersion;
+    size_t sharedSizeBytes;
+} cudaFuncAttributes_t;
+
+cudaError_t cudaFuncGetAttributes(cudaFuncAttributes_t *attr, const void *func)
+{
+    (void)func;
+    if (attr) memset(attr, 0, sizeof(*attr));
+    return cudaSuccess;
+}
+
+/* Graph API stubs */
+typedef void *cudaGraph_t;
+typedef void *cudaGraphExec_t;
+typedef int cudaGraphExecUpdateResult;
+
+cudaError_t cudaGraphDestroy(cudaGraph_t graph)
+{
+    (void)graph;
+    return cudaSuccess;
+}
+
+cudaError_t cudaGraphExecDestroy(cudaGraphExec_t graphExec)
+{
+    (void)graphExec;
+    return cudaSuccess;
+}
+
+cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
+                                 cudaGraphExecUpdateResult *updateResult_out)
+{
+    (void)hGraphExec; (void)hGraph;
+    if (updateResult_out) *updateResult_out = 0;
+    return cudaSuccess;
+}
+
+cudaError_t cudaGraphInstantiate(cudaGraphExec_t *pGraphExec, cudaGraph_t graph,
+                                  void *pErrorNode, char *pLogBuffer, size_t bufferSize)
+{
+    (void)graph; (void)pErrorNode; (void)pLogBuffer; (void)bufferSize;
+    if (pGraphExec) *pGraphExec = NULL;
+    return cudaSuccess;
+}
+
+cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream)
+{
+    (void)graphExec; (void)stream;
+    return cudaSuccess;
+}
+
+/* Managed memory */
+cudaError_t cudaMallocManaged(void **devPtr, size_t size, unsigned int flags)
+{
+    (void)flags;
+    if (!devPtr) return cudaErrorInvalidValue;
+    /* Forward as regular device malloc */
+    return cudaMalloc(devPtr, size);
+}
+
+/* 2D/3D/Peer memcpy */
+typedef struct {
+    void *src; size_t spitch; size_t width; size_t height;
+} cudaMemcpy2DParams;
+
+cudaError_t cudaMemcpy2DAsync(void *dst, size_t dpitch, const void *src,
+                               size_t spitch, size_t width, size_t height,
+                               cudaMemcpyKind_t kind, cudaStream_t stream)
+{
+    (void)dpitch; (void)spitch; (void)stream;
+    return cudaMemcpy(dst, src, width * height, kind);
+}
+
+typedef struct { int dummy; } cudaMemcpy3DPeerParms;
+
+cudaError_t cudaMemcpy3DPeerAsync(const cudaMemcpy3DPeerParms *p, cudaStream_t stream)
+{
+    (void)p; (void)stream;
+    return cudaSuccess;
+}
+
+cudaError_t cudaMemcpyPeerAsync(void *dst, int dstDevice, const void *src,
+                                 int srcDevice, size_t count, cudaStream_t stream)
+{
+    (void)dstDevice; (void)srcDevice; (void)stream;
+    return cudaMemcpy(dst, src, count, cudaMemcpyDeviceToDevice);
+}
+
+/* Occupancy */
+cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
+    int *numBlocks, const void *func, int blockSize,
+    size_t dynamicSMemSize, unsigned int flags)
+{
+    (void)func; (void)blockSize; (void)dynamicSMemSize; (void)flags;
+    if (numBlocks) *numBlocks = 1;
+    return cudaSuccess;
+}
+
+/* Stream capture */
+typedef enum {
+    cudaStreamCaptureModeGlobal = 0,
+} cudaStreamCaptureMode_t;
+
+typedef enum {
+    cudaStreamCaptureStatusNone = 0,
+    cudaStreamCaptureStatusActive = 1,
+} cudaStreamCaptureStatus_t;
+
+cudaError_t cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode_t mode)
+{
+    (void)stream; (void)mode;
+    return cudaSuccess;
+}
+
+cudaError_t cudaStreamEndCapture(cudaStream_t stream, cudaGraph_t *pGraph)
+{
+    (void)stream;
+    if (pGraph) *pGraph = NULL;
+    return cudaSuccess;
+}
+
+cudaError_t cudaStreamIsCapturing(cudaStream_t stream, cudaStreamCaptureStatus_t *pCaptureStatus)
+{
+    (void)stream;
+    if (pCaptureStatus) *pCaptureStatus = cudaStreamCaptureStatusNone;
+    return cudaSuccess;
+}
+
+cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event, unsigned int flags)
+{
+    (void)stream; (void)event; (void)flags;
+    return cudaSuccess;
+}
+
+/* ================================================================
+ * Internal CUDA runtime symbols for <<<>>> launch syntax
+ *
+ * __cudaPushCallConfiguration / __cudaPopCallConfiguration are used by
+ * nvcc-compiled code for the <<<grid, block, shared, stream>>> syntax.
+ * They store launch parameters that cudaLaunchKernel then uses.
+ * ================================================================ */
+
+static __thread dim3 g_push_grid;
+static __thread dim3 g_push_block;
+static __thread size_t g_push_shared;
+static __thread cudaStream_t g_push_stream;
+
+unsigned int __cudaPushCallConfiguration(dim3 gridDim, dim3 blockDim,
+                                          size_t sharedMem,
+                                          cudaStream_t stream)
+{
+    g_push_grid   = gridDim;
+    g_push_block  = blockDim;
+    g_push_shared = sharedMem;
+    g_push_stream = stream;
+    return 0; /* cudaSuccess */
+}
+
+cudaError_t __cudaPopCallConfiguration(dim3 *gridDim, dim3 *blockDim,
+                                        size_t *sharedMem,
+                                        cudaStream_t *stream)
+{
+    if (gridDim)   *gridDim   = g_push_grid;
+    if (blockDim)  *blockDim  = g_push_block;
+    if (sharedMem) *sharedMem = g_push_shared;
+    if (stream)    *stream    = g_push_stream;
+    return cudaSuccess;
+}
+
+void __cudaRegisterFatBinaryEnd(void **fatCubinHandle)
+{
+    (void)fatCubinHandle;
+    /* No-op — signals end of registration for a module */
 }

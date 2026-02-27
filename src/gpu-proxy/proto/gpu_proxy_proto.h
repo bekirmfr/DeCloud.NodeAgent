@@ -5,8 +5,6 @@
  * (via the CUDA shim) and the host GPU proxy daemon over virtio-vsock.
  *
  * All multi-byte integers are little-endian.
- * All messages are request/response pairs: shim sends GpuProxyRequest,
- * daemon replies with GpuProxyResponse.
  */
 
 #ifndef DECLOUD_GPU_PROXY_PROTO_H
@@ -16,13 +14,15 @@
 
 #define GPU_PROXY_MAGIC     0x44435544  /* "DCUD" (DeCloud CUDA) */
 #define GPU_PROXY_VERSION   2
-#define GPU_PROXY_PORT      9999        /* vsock/TCP port the daemon listens on */
-#define GPU_PROXY_TCP_BIND  "192.168.122.1"  /* virbr0 host IP for TCP fallback */
+#define GPU_PROXY_PORT      9999
+#define GPU_PROXY_TCP_BIND  "192.168.122.1"
 #define GPU_PROXY_MAX_PAYLOAD (64 * 1024 * 1024)  /* 64 MB max transfer */
-#define GPU_PROXY_TOKEN_LEN 32          /* Auth token length in bytes */
+#define GPU_PROXY_TOKEN_LEN 32
+#define GPU_MAX_KERNEL_PARAMS 64
+#define GPU_DEFAULT_KERNEL_TIMEOUT_US 30000000  /* 30 seconds */
 
 /* ================================================================
- * Command IDs — one per CUDA Runtime API function we intercept
+ * Command IDs
  * ================================================================ */
 typedef enum {
     /* Device management */
@@ -30,9 +30,9 @@ typedef enum {
     GPU_CMD_GET_DEVICE_PROPERTIES  = 0x02,
     GPU_CMD_SET_DEVICE             = 0x03,
 
-    /* CUDA Driver API (used by Ollama and ML frameworks via dlopen) */
-    GPU_CMD_GET_DRIVER_VERSION     = 0x04,  /* Returns CUDA driver version */
-    GPU_CMD_GET_DEVICE_UUID        = 0x05,  /* Returns 16-byte device UUID */
+    /* CUDA Driver API */
+    GPU_CMD_GET_DRIVER_VERSION     = 0x04,
+    GPU_CMD_GET_DEVICE_UUID        = 0x05,
 
     /* Memory management */
     GPU_CMD_MALLOC                 = 0x10,
@@ -43,9 +43,9 @@ typedef enum {
     /* Execution */
     GPU_CMD_LAUNCH_KERNEL          = 0x20,
     GPU_CMD_DEVICE_SYNCHRONIZE     = 0x21,
-    GPU_CMD_CTX_CREATE             = 0x22,  /* Create CUDA context (Driver API) */
-    GPU_CMD_MEM_GET_INFO           = 0x23,  /* Returns free + total VRAM */
-    GPU_CMD_CTX_DESTROY            = 0x24,  /* Destroy CUDA context */
+    GPU_CMD_CTX_CREATE             = 0x22,
+    GPU_CMD_MEM_GET_INFO           = 0x23,
+    GPU_CMD_CTX_DESTROY            = 0x24,
 
     /* Stream management */
     GPU_CMD_STREAM_CREATE          = 0x30,
@@ -59,19 +59,19 @@ typedef enum {
     GPU_CMD_EVENT_SYNCHRONIZE      = 0x43,
     GPU_CMD_EVENT_ELAPSED_TIME     = 0x44,
 
-    /* Module/function registration (required for kernel launch) */
-    GPU_CMD_REGISTER_MODULE        = 0x50,  /* Send fat binary → load CUmodule */
-    GPU_CMD_UNREGISTER_MODULE      = 0x51,  /* Unload CUmodule */
-    GPU_CMD_REGISTER_FUNCTION      = 0x52,  /* Map host ptr → device function name */
-    GPU_CMD_REGISTER_VAR           = 0x53,  /* Register device variable */
+    /* Module/function registration */
+    GPU_CMD_REGISTER_MODULE        = 0x50,
+    GPU_CMD_UNREGISTER_MODULE      = 0x51,
+    GPU_CMD_REGISTER_FUNCTION      = 0x52,
+    GPU_CMD_REGISTER_VAR           = 0x53,
 
     /* Resource management */
-    GPU_CMD_SET_MEMORY_QUOTA       = 0x60,  /* Set per-VM GPU memory quota */
-    GPU_CMD_GET_USAGE_STATS        = 0x61,  /* Query cumulative GPU usage */
+    GPU_CMD_SET_MEMORY_QUOTA       = 0x60,
+    GPU_CMD_GET_USAGE_STATS        = 0x61,
 
     /* Lifecycle */
-    GPU_CMD_HELLO                  = 0xF0,  /* Handshake: shim → daemon */
-    GPU_CMD_GOODBYE                = 0xF1,  /* Graceful disconnect */
+    GPU_CMD_HELLO                  = 0xF0,
+    GPU_CMD_GOODBYE                = 0xF1,
 } GpuProxyCmd;
 
 /* cudaMemcpyKind equivalent */
@@ -83,54 +83,44 @@ typedef enum {
 } GpuMemcpyKind;
 
 /* ================================================================
- * Wire format
- * ================================================================
- *
- * Request:  [GpuProxyHeader][payload bytes...]
- * Response: [GpuProxyHeader][payload bytes...]
- *
- * The header is fixed-size (16 bytes). Payload is variable and
- * command-specific.
- */
+ * Wire format header (16 bytes)
+ * ================================================================ */
 
 typedef struct __attribute__((packed)) {
-    uint32_t magic;          /* GPU_PROXY_MAGIC */
-    uint8_t  version;        /* GPU_PROXY_VERSION */
-    uint8_t  cmd;            /* GpuProxyCmd */
-    uint16_t flags;          /* Reserved, must be 0 */
-    uint32_t payload_len;    /* Bytes following this header */
-    int32_t  status;         /* Request: 0. Response: cudaError_t */
+    uint32_t magic;
+    uint8_t  version;
+    uint8_t  cmd;
+    uint16_t flags;
+    uint32_t payload_len;
+    int32_t  status;
 } GpuProxyHeader;
 
 /* ================================================================
  * Per-command payload structures
  * ================================================================ */
 
-/* --- GPU_CMD_HELLO (request) --- */
+/* --- HELLO --- */
 typedef struct __attribute__((packed)) {
-    uint32_t shim_version;   /* Shim protocol version */
-    uint32_t pid;            /* Guest PID (for logging) */
-    uint8_t  auth_token[GPU_PROXY_TOKEN_LEN]; /* Per-VM auth token (TCP only, zeroed for vsock) */
+    uint32_t shim_version;
+    uint32_t pid;
+    uint8_t  auth_token[GPU_PROXY_TOKEN_LEN];
 } GpuHelloRequest;
 
-/* --- GPU_CMD_HELLO (response) --- */
 typedef struct __attribute__((packed)) {
-    uint32_t daemon_version; /* Daemon protocol version */
-    uint32_t device_count;   /* Number of GPUs available */
+    uint32_t daemon_version;
+    uint32_t device_count;
 } GpuHelloResponse;
 
-/* --- GPU_CMD_GET_DEVICE_COUNT (response) --- */
+/* --- GET_DEVICE_COUNT --- */
 typedef struct __attribute__((packed)) {
     int32_t count;
 } GpuGetDeviceCountResponse;
 
-/* --- GPU_CMD_GET_DEVICE_PROPERTIES (request) --- */
+/* --- GET_DEVICE_PROPERTIES --- */
 typedef struct __attribute__((packed)) {
     int32_t device;
 } GpuGetDevicePropertiesRequest;
 
-/* --- GPU_CMD_GET_DEVICE_PROPERTIES (response) ---
- * Subset of cudaDeviceProp that ML frameworks typically check */
 typedef struct __attribute__((packed)) {
     char     name[256];
     uint64_t total_global_mem;
@@ -142,109 +132,77 @@ typedef struct __attribute__((packed)) {
     int32_t  max_grid_size[3];
     int32_t  clock_rate;
     int32_t  multi_processor_count;
-    int32_t  major;          /* Compute capability major */
-    int32_t  minor;          /* Compute capability minor */
+    int32_t  major;
+    int32_t  minor;
     int32_t  max_threads_per_multiprocessor;
     int32_t  memory_clock_rate;
     int32_t  memory_bus_width;
     int32_t  l2_cache_size;
 } GpuDeviceProperties;
 
-/* --- GPU_CMD_SET_DEVICE (request) --- */
+/* --- SET_DEVICE --- */
 typedef struct __attribute__((packed)) {
     int32_t device;
 } GpuSetDeviceRequest;
 
-/* --- GPU_CMD_MALLOC (request) --- */
+/* --- MALLOC --- */
 typedef struct __attribute__((packed)) {
     uint64_t size;
 } GpuMallocRequest;
 
-/* --- GPU_CMD_MALLOC (response) --- */
 typedef struct __attribute__((packed)) {
-    uint64_t device_ptr;     /* Opaque handle (daemon-side pointer) */
+    uint64_t device_ptr;
 } GpuMallocResponse;
 
-/* --- GPU_CMD_FREE (request) --- */
+/* --- FREE --- */
 typedef struct __attribute__((packed)) {
     uint64_t device_ptr;
 } GpuFreeRequest;
 
-/* --- GPU_CMD_MEMCPY (request) ---
- * For H2D: payload follows this struct (payload_len - sizeof = data size)
- * For D2H: no trailing data, response carries the data
- * For D2D: no trailing data */
+/* --- MEMCPY --- */
 typedef struct __attribute__((packed)) {
-    uint64_t dst;            /* Device ptr (H2D, D2D) or ignored (D2H) */
-    uint64_t src;            /* Device ptr (D2H, D2D) or ignored (H2D) */
-    uint64_t count;          /* Bytes to copy */
-    int32_t  kind;           /* GpuMemcpyKind */
+    uint64_t dst;
+    uint64_t src;
+    uint64_t count;
+    int32_t  kind;
 } GpuMemcpyRequest;
 
-/* --- GPU_CMD_MEMSET (request) --- */
+/* --- MEMSET --- */
 typedef struct __attribute__((packed)) {
     uint64_t device_ptr;
     int32_t  value;
     uint64_t count;
 } GpuMemsetRequest;
 
-/* ================================================================
- * Module / function registration (for kernel launch)
- * ================================================================
- *
- * CUDA kernel launch flow:
- * 1. __cudaRegisterFatBinary(fatCubin)  → GPU_CMD_REGISTER_MODULE
- *    Sends the fat binary (PTX/cubin) to the daemon, which loads it
- *    via cuModuleLoadData and returns a module handle.
- *
- * 2. __cudaRegisterFunction(fatHandle, hostFun, deviceName, ...)
- *    → GPU_CMD_REGISTER_FUNCTION
- *    Maps a host-side function pointer to a device function name.
- *    Daemon calls cuModuleGetFunction and returns parameter metadata
- *    (count + sizes) so the shim can serialize args at launch time.
- *
- * 3. cudaLaunchKernel(func, grid, block, args, sharedMem, stream)
- *    → GPU_CMD_LAUNCH_KERNEL
- *    Shim looks up the function's param metadata, serializes the
- *    argument values, and sends them to the daemon which calls
- *    cuLaunchKernel on the real GPU.
- */
-
-/* --- GPU_CMD_REGISTER_MODULE (request) ---
- * Payload: [GpuRegisterModuleRequest][fat binary data...] */
+/* --- REGISTER_MODULE --- */
 typedef struct __attribute__((packed)) {
-    uint64_t fatbin_size;    /* Size of fat binary data following this struct */
+    uint64_t fatbin_size;
 } GpuRegisterModuleRequest;
 
-/* --- GPU_CMD_REGISTER_MODULE (response) --- */
 typedef struct __attribute__((packed)) {
-    uint64_t module_handle;  /* Opaque handle (daemon-side CUmodule index) */
+    uint64_t module_handle;
 } GpuRegisterModuleResponse;
 
-/* --- GPU_CMD_UNREGISTER_MODULE (request) --- */
+/* --- UNREGISTER_MODULE --- */
 typedef struct __attribute__((packed)) {
     uint64_t module_handle;
 } GpuUnregisterModuleRequest;
 
-/* --- GPU_CMD_REGISTER_FUNCTION (request) ---
- * Payload: [GpuRegisterFunctionRequest][device_name string (null-terminated)] */
+/* --- REGISTER_FUNCTION --- */
 typedef struct __attribute__((packed)) {
-    uint64_t module_handle;       /* From GPU_CMD_REGISTER_MODULE response */
-    uint64_t host_func_ptr;       /* Shim-side key for this function */
-    uint32_t device_name_len;     /* Length of device function name including null */
+    uint64_t module_handle;
+    uint64_t host_func_ptr;
+    uint32_t device_name_len;
 } GpuRegisterFunctionRequest;
 
-/* --- GPU_CMD_REGISTER_FUNCTION (response) --- */
-#define GPU_MAX_KERNEL_PARAMS 64
 typedef struct __attribute__((packed)) {
-    uint32_t num_params;                        /* Number of kernel parameters */
-    uint32_t param_sizes[GPU_MAX_KERNEL_PARAMS]; /* Size (bytes) of each param */
+    uint32_t num_params;
+    uint32_t param_sizes[GPU_MAX_KERNEL_PARAMS];
 } GpuRegisterFunctionResponse;
 
-/* --- GPU_CMD_LAUNCH_KERNEL (request) ---
- * Payload: [GpuLaunchKernelRequest][serialized arg data...] */
+/* --- LAUNCH_KERNEL --- */
 typedef struct __attribute__((packed)) {
-    uint64_t host_func_ptr;       /* Identifies the function (shim-side key) */
+    uint64_t host_func_ptr;
     uint32_t grid_dim_x;
     uint32_t grid_dim_y;
     uint32_t grid_dim_z;
@@ -252,150 +210,100 @@ typedef struct __attribute__((packed)) {
     uint32_t block_dim_y;
     uint32_t block_dim_z;
     uint64_t shared_mem_bytes;
-    uint64_t stream_handle;       /* 0 = default stream */
-    uint32_t num_params;          /* Number of parameters */
-    uint32_t args_total_size;     /* Total bytes of serialized arg data following */
+    uint64_t stream_handle;
+    uint32_t num_params;
+    uint32_t args_total_size;
 } GpuLaunchKernelRequest;
 
-/* ================================================================
- * Stream operations
- * ================================================================ */
-
-/* --- GPU_CMD_STREAM_CREATE (request) --- */
+/* --- STREAM --- */
 typedef struct __attribute__((packed)) {
-    uint32_t flags;              /* cudaStreamDefault=0, cudaStreamNonBlocking=1 */
+    uint32_t flags;
 } GpuStreamCreateRequest;
 
-/* --- GPU_CMD_STREAM_CREATE (response) --- */
 typedef struct __attribute__((packed)) {
-    uint64_t stream_handle;      /* Opaque handle (daemon-side cudaStream_t) */
+    uint64_t stream_handle;
 } GpuStreamCreateResponse;
 
-/* --- GPU_CMD_STREAM_DESTROY (request) --- */
 typedef struct __attribute__((packed)) {
     uint64_t stream_handle;
 } GpuStreamDestroyRequest;
 
-/* --- GPU_CMD_STREAM_SYNCHRONIZE (request) --- */
 typedef struct __attribute__((packed)) {
     uint64_t stream_handle;
 } GpuStreamSynchronizeRequest;
 
-/* ================================================================
- * Event operations
- * ================================================================ */
-
-/* --- GPU_CMD_EVENT_CREATE (request) --- */
+/* --- EVENTS --- */
 typedef struct __attribute__((packed)) {
-    uint32_t flags;              /* cudaEventDefault=0, cudaEventDisableTiming=2, etc. */
+    uint32_t flags;
 } GpuEventCreateRequest;
 
-/* --- GPU_CMD_EVENT_CREATE (response) --- */
 typedef struct __attribute__((packed)) {
-    uint64_t event_handle;       /* Opaque handle (daemon-side cudaEvent_t) */
+    uint64_t event_handle;
 } GpuEventCreateResponse;
 
-/* --- GPU_CMD_EVENT_DESTROY (request) --- */
 typedef struct __attribute__((packed)) {
     uint64_t event_handle;
 } GpuEventDestroyRequest;
 
-/* --- GPU_CMD_EVENT_RECORD (request) --- */
 typedef struct __attribute__((packed)) {
     uint64_t event_handle;
-    uint64_t stream_handle;      /* 0 = default stream */
+    uint64_t stream_handle;
 } GpuEventRecordRequest;
 
-/* --- GPU_CMD_EVENT_SYNCHRONIZE (request) --- */
 typedef struct __attribute__((packed)) {
     uint64_t event_handle;
 } GpuEventSynchronizeRequest;
 
-/* --- GPU_CMD_EVENT_ELAPSED_TIME (request) --- */
 typedef struct __attribute__((packed)) {
-    uint64_t start_event;
-    uint64_t end_event;
+    uint64_t start_handle;
+    uint64_t end_handle;
 } GpuEventElapsedTimeRequest;
 
-/* --- GPU_CMD_EVENT_ELAPSED_TIME (response) --- */
 typedef struct __attribute__((packed)) {
-    float elapsed_ms;
+    float milliseconds;
 } GpuEventElapsedTimeResponse;
 
-/* ================================================================
- * Resource management — memory quotas & usage metering
- * ================================================================ */
-
-/* --- GPU_CMD_SET_MEMORY_QUOTA (request) ---
- * Sent by the orchestrator (via daemon CLI or config) to cap per-VM
- * GPU memory usage. The daemon enforces this on cudaMalloc. */
+/* --- DRIVER API --- */
 typedef struct __attribute__((packed)) {
-    uint64_t quota_bytes;        /* 0 = unlimited */
-} GpuSetMemoryQuotaRequest;
-
-/* --- GPU_CMD_GET_USAGE_STATS (response) ---
- * Cumulative GPU usage for a single VM connection, used for billing. */
-typedef struct __attribute__((packed)) {
-    uint64_t memory_allocated;   /* Current GPU memory in use (bytes) */
-    uint64_t memory_quota;       /* Configured quota (0 = unlimited) */
-    uint64_t peak_memory;        /* High-water mark (bytes) */
-    uint64_t total_alloc_bytes;  /* Cumulative bytes allocated */
-    uint32_t kernel_launches;    /* Total kernel launches */
-    uint32_t kernel_timeouts;    /* Kernels killed by timeout */
-    uint64_t kernel_time_us;     /* Cumulative kernel execution time (µs) */
-    uint64_t connect_time_us;    /* Time since connection (µs) */
-} GpuUsageStatsResponse;
-
-/* Default kernel execution timeout (microseconds). 0 = no timeout.
- * Can be overridden per-daemon via -t flag. */
-#define GPU_PROXY_DEFAULT_KERNEL_TIMEOUT_US  (30ULL * 1000000ULL)  /* 30 seconds */
-
-/* ================================================================
- * CUDA Driver API payloads (Phase 2 — Ollama / ML framework support)
- *
- * These support the dlopen(libcuda.so) + dlsym() discovery path
- * used by Ollama, llama.cpp, vLLM, and other inference frameworks.
- * ================================================================ */
-
-/* --- GPU_CMD_GET_DRIVER_VERSION (response) --- */
-typedef struct __attribute__((packed)) {
-    int32_t version;          /* e.g., 12040 for CUDA 12.4 */
+    int32_t version;
 } GpuDriverVersionResponse;
 
-/* --- GPU_CMD_GET_DEVICE_UUID (request) --- */
 typedef struct __attribute__((packed)) {
     int32_t device;
 } GpuDeviceUuidRequest;
 
-/* --- GPU_CMD_GET_DEVICE_UUID (response) --- */
 typedef struct __attribute__((packed)) {
     uint8_t uuid[16];
 } GpuDeviceUuidResponse;
 
-/* --- GPU_CMD_CTX_CREATE (request) --- */
 typedef struct __attribute__((packed)) {
-    int32_t device;
+    int32_t  device;
     uint32_t flags;
 } GpuCtxCreateRequest;
 
-/* --- GPU_CMD_CTX_CREATE (response) --- */
 typedef struct __attribute__((packed)) {
-    uint64_t ctx_handle;      /* Opaque context handle */
+    uint64_t ctx_handle;
 } GpuCtxCreateResponse;
 
-/* --- GPU_CMD_MEM_GET_INFO (response) --- */
 typedef struct __attribute__((packed)) {
-    uint64_t free;            /* Free VRAM in bytes */
-    uint64_t total;           /* Total VRAM in bytes */
+    uint64_t free;
+    uint64_t total;
 } GpuMemInfoResponse;
 
-/* ================================================================
- * Helpers
- * ================================================================ */
+/* --- RESOURCE MANAGEMENT --- */
+typedef struct __attribute__((packed)) {
+    uint64_t quota_bytes;
+} GpuSetMemoryQuotaRequest;
 
-static inline uint32_t gpu_memcpy_h2d_payload_len(uint64_t data_size)
-{
-    return (uint32_t)(sizeof(GpuMemcpyRequest) + data_size);
-}
+typedef struct __attribute__((packed)) {
+    uint64_t memory_allocated;
+    uint64_t memory_quota;
+    uint64_t peak_memory;
+    uint64_t total_alloc_bytes;
+    uint32_t kernel_launches;
+    uint32_t kernel_timeouts;
+    uint64_t kernel_time_us;
+    uint64_t connect_time_us;
+} GpuUsageStatsResponse;
 
 #endif /* DECLOUD_GPU_PROXY_PROTO_H */
