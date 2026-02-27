@@ -162,37 +162,29 @@ PREFIX ?= /usr/local
 
 install: all
 	install -d $(DESTDIR)$(PREFIX)/bin
-	install -d $(DESTDIR)$(PREFIX)/lib
+	install -d $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim
 	install -m 755 $(DAEMON) $(DESTDIR)$(PREFIX)/bin/gpu-proxy-daemon
-	install -m 644 $(SHIM)   $(DESTDIR)$(PREFIX)/lib/libdecloud_cuda_shim.so
+	install -m 644 $(SHIM) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libdecloud_cuda_shim.so
 
 # ----------------------------------------------------------------
 # Install compat shim (runtime API only)
 # ----------------------------------------------------------------
 install-shim-compat: shim-compat
-	install -d $(DESTDIR)$(PREFIX)/lib
 	install -d $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim
-	install -m 644 $(SHIM_COMPAT) $(DESTDIR)$(PREFIX)/lib/libdecloud_cuda_shim.so
 	install -m 644 $(SHIM_COMPAT) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libdecloud_cuda_shim.so
-	@echo "Compat shim installed to $(PREFIX)/lib and 9p share directory"
+	@echo "Compat shim installed to $(PREFIX)/lib/decloud-gpu-shim (9p share only)"
 
 # ----------------------------------------------------------------
 # Install ALL shims (preferred for 9p share distribution)
 # ----------------------------------------------------------------
 install-all-shims-compat: all-shims-compat
-	install -d $(DESTDIR)$(PREFIX)/lib
 	install -d $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim
-	# Runtime API shim
-	install -m 644 $(SHIM_COMPAT) $(DESTDIR)$(PREFIX)/lib/libdecloud_cuda_shim.so
+	# Runtime API shim (VM delivery only — NEVER install to system lib paths)
 	install -m 644 $(SHIM_COMPAT) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libdecloud_cuda_shim.so
 	# Driver API shim (libcuda.so.1)
-	install -m 644 $(DRIVER_SHIM) $(DESTDIR)$(PREFIX)/lib/libcuda.so.1
 	install -m 644 $(DRIVER_SHIM) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcuda.so.1
-	ln -sf libcuda.so.1 $(DESTDIR)$(PREFIX)/lib/libcuda.so
 	ln -sf libcuda.so.1 $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcuda.so
 	# NVML shim (libnvidia-ml.so.1)
-	install -m 644 $(NVML_SHIM) $(DESTDIR)$(PREFIX)/lib/libnvidia-ml.so.1
 	install -m 644 $(NVML_SHIM) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libnvidia-ml.so.1
-	ln -sf libnvidia-ml.so.1 $(DESTDIR)$(PREFIX)/lib/libnvidia-ml.so
 	ln -sf libnvidia-ml.so.1 $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libnvidia-ml.so
-	@echo "All compat shims installed to $(PREFIX)/lib and 9p share directory"
+	@echo "All compat shims installed to $(PREFIX)/lib/decloud-gpu-shim (VM delivery only)"
