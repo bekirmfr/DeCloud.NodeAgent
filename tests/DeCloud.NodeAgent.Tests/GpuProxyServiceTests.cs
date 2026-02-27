@@ -30,7 +30,7 @@ public class GpuProxyServiceTests
     public void DefaultProperties_HaveExpectedValues()
     {
         Assert.Equal("/usr/local/bin/gpu-proxy-daemon", _service.DaemonPath);
-        Assert.Equal("/usr/local/lib/libdecloud_cuda_shim.so", _service.ShimPath);
+        Assert.Equal("/usr/local/lib/decloud-gpu-shim/libdecloud_cuda_shim.so", _service.ShimPath);
         Assert.Equal("/usr/local/lib/decloud-gpu-shim", _service.ShimShareDir);
         Assert.Equal(9999, _service.DaemonPort);
         Assert.Equal(5, _service.MaxCrashRestarts);
@@ -61,9 +61,9 @@ public class GpuProxyServiceTests
     }
 
     [Fact]
-    public void HealthCheck_ReturnsFalse_WhenNotRunning()
+    public async Task HealthCheckAsync_ReturnsFalse_WhenNotRunning()
     {
-        Assert.False(_service.HealthCheck());
+        Assert.False(await _service.HealthCheckAsync());
     }
 
     [Fact]

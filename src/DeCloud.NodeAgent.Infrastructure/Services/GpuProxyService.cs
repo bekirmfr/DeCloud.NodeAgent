@@ -32,7 +32,7 @@ public class GpuProxyService
     /// <summary>
     /// Path to the CUDA shim .so (injected into VMs via cloud-init).
     /// </summary>
-    public string ShimPath { get; set; } = "/usr/local/lib/libdecloud_cuda_shim.so";
+    public string ShimPath { get; set; } = "/usr/local/lib/decloud-gpu-shim/libdecloud_cuda_shim.so";
 
     /// <summary>
     /// Host-side directory exposed to VMs via virtiofs for shim delivery.
@@ -317,16 +317,18 @@ public class GpuProxyService
 
     /// <summary>
     /// Check if the daemon is healthy (still running).
-    /// If it has crashed, attempt automatic restart with backoff.
+    /// Handles both locally-started daemons (tracked via _daemonProcess)
+    /// and externally-started ones (detected via pgrep).
     /// </summary>
-    public bool HealthCheck()
+    public async Task<bool> HealthCheckAsync(CancellationToken ct = default)
     {
         if (!_isRunning) return false;
 
+        // Case 1: We started the daemon ourselves — check the Process object
         if (_daemonProcess is { HasExited: false })
             return true;
 
-        // Daemon crashed — mark as not running
+        // Case 2: Daemon we started has exited
         if (_daemonProcess?.HasExited == true)
         {
             _logger.LogWarning(
@@ -334,8 +336,24 @@ public class GpuProxyService
                 _daemonProcess.ExitCode);
             _daemonProcess = null;
             _isRunning = false;
+            return false;
         }
 
+        // Case 3: Daemon was started externally (_daemonProcess is null,
+        // _isRunning is true). Verify it's still alive via pgrep.
+        try
+        {
+            var result = await _executor.ExecuteAsync(
+                "pgrep", "-f gpu-proxy-daemon", ct);
+            if (result.Success && !string.IsNullOrWhiteSpace(result.StandardOutput))
+                return true;
+        }
+        catch
+        {
+            // pgrep failed — treat as unhealthy
+        }
+
+        _isRunning = false;
         return false;
     }
 
@@ -348,7 +366,7 @@ public class GpuProxyService
     /// </summary>
     public async Task<bool> EnsureHealthyAsync(CancellationToken ct = default)
     {
-        if (HealthCheck())
+        if (await HealthCheckAsync(ct))
             return true;
 
         if (_consecutiveCrashes >= MaxCrashRestarts)

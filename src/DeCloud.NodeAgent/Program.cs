@@ -449,7 +449,7 @@ public class GpuProxyStartupService : BackgroundService
             {
                 await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
 
-                if (!_gpuProxy.HealthCheck())
+                if (!await _gpuProxy.HealthCheckAsync(stoppingToken))
                 {
                     _logger.LogWarning("GPU proxy daemon health check failed — attempting recovery");
                     await _gpuProxy.EnsureHealthyAsync(stoppingToken);
