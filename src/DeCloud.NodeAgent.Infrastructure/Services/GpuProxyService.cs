@@ -200,6 +200,24 @@ public class GpuProxyService
                 CreateNoWindow = true,
             };
 
+            // WSL2: The daemon binary has -rpath=/usr/local/cuda/lib baked in from the build,
+            // which points to nvidia-cuda-toolkit stubs that can't see the real GPU.
+            // The actual WSL2 CUDA driver lives at /usr/lib/wsl/lib/libcuda.so.1.
+            // LD_LIBRARY_PATH is searched BEFORE rpath, so prepending it here ensures
+            // the daemon loads the real driver and can see the GPU.
+            const string wslCudaLibPath = "/usr/lib/wsl/lib";
+            if (Directory.Exists(wslCudaLibPath))
+            {
+                var existingLdPath = Environment.GetEnvironmentVariable("LD_LIBRARY_PATH") ?? "";
+                psi.Environment["LD_LIBRARY_PATH"] = string.IsNullOrEmpty(existingLdPath)
+                    ? wslCudaLibPath
+                    : $"{wslCudaLibPath}:{existingLdPath}";
+
+                _logger.LogInformation(
+                    "WSL2 CUDA driver detected at {Path} — prepending to LD_LIBRARY_PATH",
+                    wslCudaLibPath);
+            }
+
             _daemonProcess = Process.Start(psi);
             if (_daemonProcess == null)
             {
@@ -234,8 +252,8 @@ public class GpuProxyService
             _isRunning = true;
             _consecutiveCrashes = 0;
             _logger.LogInformation(
-                "GPU proxy daemon started (PID: {Pid}, vsock port: {Port})",
-                _daemonProcess.Id, DaemonPort);
+                "Starting GPU proxy daemon: {Path} {Args}",
+                DaemonPath, psi.Arguments);
 
             return true;
         }
