@@ -153,19 +153,34 @@ int transport_ensure_connected(void)
         return 0;
     }
 
+    /* Respect DECLOUD_GPU_PROXY_TRANSPORT env:
+     *   "tcp"   → skip vsock (essential in Docker/containers where vsock hangs)
+     *   "vsock" → skip TCP
+     *   unset   → try vsock first, TCP fallback
+     */
+    const char *transport_mode = getenv("DECLOUD_GPU_PROXY_TRANSPORT");
     int port = transport_get_env_int("DECLOUD_GPU_PROXY_PORT", GPU_PROXY_PORT);
+    int try_vsock = 1, try_tcp = 1;
+
+    if (transport_mode) {
+        if (strcmp(transport_mode, "tcp") == 0)   try_vsock = 0;
+        if (strcmp(transport_mode, "vsock") == 0)  try_tcp = 0;
+    }
+
+    int fd = -1;
     int is_tcp = 0;
 
-    /* Try vsock first (bare metal), then TCP fallback */
-    int fd = transport_try_vsock(port);
-    if (fd < 0) {
+    if (try_vsock) {
+        fd = transport_try_vsock(port);
+    }
+    if (fd < 0 && try_tcp) {
         fd = transport_try_tcp(port);
-        if (fd < 0) {
-            TRANSPORT_LOG("All transports failed -- GPU proxy unavailable");
-            pthread_mutex_unlock(&g_transport_lock);
-            return -1;
-        }
-        is_tcp = 1;
+        if (fd >= 0) is_tcp = 1;
+    }
+    if (fd < 0) {
+        TRANSPORT_LOG("All transports failed -- GPU proxy unavailable");
+        pthread_mutex_unlock(&g_transport_lock);
+        return -1;
     }
 
     g_transport_fd = fd;
