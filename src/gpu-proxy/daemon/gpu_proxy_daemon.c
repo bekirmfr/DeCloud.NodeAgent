@@ -1543,7 +1543,7 @@ static void usage(const char *prog)
     fprintf(stderr, "Usage: %s [-p port] [-t timeout_sec] [-T tcp_bind] [-v]\n", prog);
     fprintf(stderr, "  -p port          vsock/TCP port (default: %d)\n", GPU_PROXY_PORT);
     fprintf(stderr, "  -t timeout_sec   kernel timeout (default: %d, 0=disable)\n",
-            (int)(GPU_PROXY_DEFAULT_KERNEL_TIMEOUT_US / 1000000));
+            (int)(GPU_DEFAULT_KERNEL_TIMEOUT_US / 1000000));
     fprintf(stderr, "  -T tcp_bind      enable TCP listener on addr (e.g. %s)\n", GPU_PROXY_TCP_BIND);
     fprintf(stderr, "  -v               verbose logging\n");
     exit(1);

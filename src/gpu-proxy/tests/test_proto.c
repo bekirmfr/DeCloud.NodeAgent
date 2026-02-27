@@ -83,7 +83,7 @@ TEST(max_kernel_params)
 
 TEST(default_kernel_timeout)
 {
-    ASSERT_EQ(GPU_PROXY_DEFAULT_KERNEL_TIMEOUT_US, 30ULL * 1000000ULL);
+    ASSERT_EQ(GPU_DEFAULT_KERNEL_TIMEOUT_US, 30ULL * 1000000ULL);
 }
 
 /* ================================================================
