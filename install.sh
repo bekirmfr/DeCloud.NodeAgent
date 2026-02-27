@@ -1127,40 +1127,38 @@ build_gpu_proxy() {
     fi
 
     # --- Install built artifacts ---
-    log_info "Installing GPU proxy artifacts to system paths..."
+    # CRITICAL: Shims go ONLY to decloud-gpu-shim/ (for VM delivery via 9p share).
+    # NEVER install to /usr/local/lib/ directly — that poisons the host's ldconfig
+    # cache and causes the daemon to load our shim instead of the real CUDA runtime
+    # (circular dependency: daemon → shim → tries to connect to daemon → timeout).
+    log_info "Installing GPU proxy artifacts..."
 
-    # Runtime API Shim → /usr/local/lib (use $built_shim which may be static or dynamic)
+    local SHIM_DIR="/usr/local/lib/decloud-gpu-shim"
+    install -d "$SHIM_DIR"
+
+    # Runtime API Shim → decloud-gpu-shim/ only
     if [ -n "$built_shim" ] && [ -f "$built_shim" ]; then
-        install -d /usr/local/lib
-        install -d /usr/local/lib/decloud-gpu-shim
-        install -m 644 "$built_shim" /usr/local/lib/libdecloud_cuda_shim.so
-        install -m 644 "$built_shim" /usr/local/lib/decloud-gpu-shim/libdecloud_cuda_shim.so
-        log_success "Runtime API shim installed → /usr/local/lib/libdecloud_cuda_shim.so"
+        install -m 644 "$built_shim" "$SHIM_DIR/libdecloud_cuda_shim.so"
+        log_success "Runtime API shim installed → $SHIM_DIR/libdecloud_cuda_shim.so"
     else
         log_warn "Runtime API shim binary not found — skipping install"
     fi
 
-    # Driver API Shim → /usr/local/lib (libcuda.so.1 for Ollama dlopen discovery)
+    # Driver API Shim → decloud-gpu-shim/ only (NOT /usr/local/lib/)
     if [ -f "$built_driver_shim" ]; then
-        install -m 644 "$built_driver_shim" /usr/local/lib/libcuda.so.1
-        ln -sf libcuda.so.1 /usr/local/lib/libcuda.so
-        install -m 644 "$built_driver_shim" /usr/local/lib/decloud-gpu-shim/libcuda.so.1
-        ln -sf libcuda.so.1 /usr/local/lib/decloud-gpu-shim/libcuda.so
-        log_success "Driver API shim installed → /usr/local/lib/libcuda.so.1"
+        install -m 644 "$built_driver_shim" "$SHIM_DIR/libcuda.so.1"
+        ln -sf libcuda.so.1 "$SHIM_DIR/libcuda.so"
+        log_success "Driver API shim installed → $SHIM_DIR/libcuda.so.1"
     fi
 
-    # NVML Shim → /usr/local/lib (libnvidia-ml.so.1 for VRAM monitoring)
+    # NVML Shim → decloud-gpu-shim/ only (NOT /usr/local/lib/)
     if [ -f "$built_nvml_shim" ]; then
-        install -m 644 "$built_nvml_shim" /usr/local/lib/libnvidia-ml.so.1
-        ln -sf libnvidia-ml.so.1 /usr/local/lib/libnvidia-ml.so
-        install -m 644 "$built_nvml_shim" /usr/local/lib/decloud-gpu-shim/libnvidia-ml.so.1
-        ln -sf libnvidia-ml.so.1 /usr/local/lib/decloud-gpu-shim/libnvidia-ml.so
-        log_success "NVML shim installed → /usr/local/lib/libnvidia-ml.so.1"
+        install -m 644 "$built_nvml_shim" "$SHIM_DIR/libnvidia-ml.so.1"
+        ln -sf libnvidia-ml.so.1 "$SHIM_DIR/libnvidia-ml.so"
+        log_success "NVML shim installed → $SHIM_DIR/libnvidia-ml.so.1"
     fi
 
-    ldconfig 2>/dev/null || true
-
-    # Daemon → /usr/local/bin
+    # Daemon → /usr/local/bin (this is fine — daemon is a standalone binary)
     if [ "$daemon_built" = true ] && [ -f "$GPU_PROXY_SRC/build/gpu-proxy-daemon" ]; then
         install -d /usr/local/bin
         install -m 755 "$GPU_PROXY_SRC/build/gpu-proxy-daemon" /usr/local/bin/
@@ -1177,9 +1175,9 @@ build_gpu_proxy() {
     log_info "│ GPU Mode:       ${GPU_MODE}"
     log_info "│ WSL2:           ${IS_WSL2}"
     log_info "│ CUDA Home:      ${CUDA_HOME:-not found}"
-    log_info "│ Runtime Shim:   $([ -f /usr/local/lib/libdecloud_cuda_shim.so ] && echo 'installed' || echo 'not built')"
-    log_info "│ Driver Shim:    $([ -f /usr/local/lib/libcuda.so.1 ] && echo 'installed' || echo 'not built')"
-    log_info "│ NVML Shim:      $([ -f /usr/local/lib/libnvidia-ml.so.1 ] && echo 'installed' || echo 'not built')"
+    log_info "│ Runtime Shim:   $([ -f $SHIM_DIR/libdecloud_cuda_shim.so ] && echo 'installed' || echo 'not built')"
+    log_info "│ Driver Shim:    $([ -f $SHIM_DIR/libcuda.so.1 ] && echo 'installed' || echo 'not built')"
+    log_info "│ NVML Shim:      $([ -f $SHIM_DIR/libnvidia-ml.so.1 ] && echo 'installed' || echo 'not built')"
     log_info "│ Daemon:         $([ -f /usr/local/bin/gpu-proxy-daemon ] && echo 'installed' || echo 'not built')"
     log_info "└──────────────────────────────────────────────────┘"
     echo ""
