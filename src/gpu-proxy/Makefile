@@ -17,7 +17,11 @@
 CC       ?= gcc
 MUSL_CC  ?= musl-gcc
 NVCC     ?= nvcc
-CFLAGS   := -Wall -Wextra -O2 -g
+# -I. ensures #include "proto/..." resolves from project root, not source
+# file directory. Critical for shim/cuda_shim.c which includes
+# "proto/gpu_proxy_proto.h" — without -I., gcc only searches shim/proto/
+# (relative to source file), which doesn't exist.
+CFLAGS   := -Wall -Wextra -O2 -g -I.
 LDFLAGS  :=
 
 # CUDA paths (override with CUDA_HOME=/path/to/cuda)
@@ -60,7 +64,8 @@ $(DAEMON): daemon/gpu_proxy_daemon.c proto/gpu_proxy_proto.h | $(BUILD_DIR)
 shim: $(SHIM)
 
 $(SHIM): shim/cuda_shim.c shim/libcudart.version $(TRANSPORT_DEPS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -shared -fPIC \
+	$(CC) $(CFLAGS) -shared \
+		-fPIC \
 		-o $@ $< \
 		-Wl,-soname,libcudart.so.12 \
 		-Wl,--version-script=shim/libcudart.version \
@@ -91,13 +96,16 @@ $(NVML_SHIM): shim/nvml_shim.c $(TRANSPORT_DEPS) | $(BUILD_DIR)
 # ----------------------------------------------------------------
 # Compat shims: built inside Ubuntu 20.04 container for universal
 # glibc compatibility (glibc 2.31+). Requires: docker
+#
+# -I/src is the container equivalent of -I. — ensures
+# "proto/gpu_proxy_proto.h" resolves from the mounted project root.
 # ----------------------------------------------------------------
 
 shim-compat: | $(BUILD_DIR)
 	docker run --rm -v $(CURDIR):/src -w /src ubuntu:20.04 \
 	    sh -c "apt-get update -qq && \
 	           apt-get install -y -qq gcc libc6-dev linux-libc-dev >/dev/null 2>&1 && \
-	           gcc -Wall -Wextra -O2 -shared -fPIC \
+	           gcc -Wall -Wextra -O2 -I/src -shared -fPIC \
 	               -Wl,-soname,libcudart.so.12 \
 	               -Wl,--version-script=shim/libcudart.version \
 	               -o build/libdecloud_cuda_shim-compat.so \
@@ -110,16 +118,16 @@ all-shims-compat: | $(BUILD_DIR)
 	docker run --rm -v $(CURDIR):/src -w /src ubuntu:20.04 \
 	    sh -c "apt-get update -qq && \
 	           apt-get install -y -qq gcc libc6-dev linux-libc-dev >/dev/null 2>&1 && \
-	           gcc -Wall -Wextra -O2 -shared -fPIC \
+	           gcc -Wall -Wextra -O2 -I/src -shared -fPIC \
 	               -Wl,-soname,libcudart.so.12 \
 	               -Wl,--version-script=shim/libcudart.version \
 	               -o build/libdecloud_cuda_shim-compat.so \
 	               shim/cuda_shim.c -lpthread -ldl && \
-	           gcc -Wall -Wextra -O2 -shared -fPIC \
+	           gcc -Wall -Wextra -O2 -I/src -shared -fPIC \
 	               -o build/libcuda.so.1 \
 	               shim/cuda_driver_shim.c -lpthread -ldl && \
 	           ln -sf libcuda.so.1 build/libcuda.so && \
-	           gcc -Wall -Wextra -O2 -shared -fPIC \
+	           gcc -Wall -Wextra -O2 -I/src -shared -fPIC \
 	               -o build/libnvidia-ml.so.1 \
 	               shim/nvml_shim.c -lpthread && \
 	           ln -sf libnvidia-ml.so.1 build/libnvidia-ml.so"
