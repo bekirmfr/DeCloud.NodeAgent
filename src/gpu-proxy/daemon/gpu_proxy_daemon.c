@@ -66,7 +66,7 @@ static pfn_cuFuncGetParamInfo resolve_cuFuncGetParamInfo(void)
 static int g_verbose = 0;
 static volatile sig_atomic_t g_running = 1;
 static volatile sig_atomic_t g_reload_tokens = 0;
-static uint64_t g_kernel_timeout_us = GPU_PROXY_DEFAULT_KERNEL_TIMEOUT_US;
+static uint64_t g_kernel_timeout_us = GPU_DEFAULT_KERNEL_TIMEOUT_US;
 
 /* TCP fallback transport */
 static int g_tcp_enabled = 0;
@@ -1188,8 +1188,8 @@ static int handle_event_elapsed_time(ConnectionCtx *ctx, const void *payload, ui
     GpuEventElapsedTimeRequest req;
     memcpy(&req, payload, sizeof(req));
 
-    cudaEvent_t start = resolve_event(ctx, req.start_event);
-    cudaEvent_t end   = resolve_event(ctx, req.end_event);
+    cudaEvent_t start = resolve_event(ctx, req.start_handle);
+    cudaEvent_t end   = resolve_event(ctx, req.end_handle);
     if (!start || !end) {
         return send_response(ctx->fd, GPU_CMD_EVENT_ELAPSED_TIME, -1, NULL, 0);
     }
@@ -1197,7 +1197,7 @@ static int handle_event_elapsed_time(ConnectionCtx *ctx, const void *payload, ui
     float ms = 0.0f;
     cudaError_t err = cudaEventElapsedTime(&ms, start, end);
 
-    GpuEventElapsedTimeResponse resp = { .elapsed_ms = ms };
+    GpuEventElapsedTimeResponse resp = { .milliseconds = ms };
     return send_response(ctx->fd, GPU_CMD_EVENT_ELAPSED_TIME, (int32_t)err,
                          &resp, sizeof(resp));
 }
