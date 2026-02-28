@@ -42,14 +42,30 @@ static int g_transport_initialized = 0;
 
 /* Config file fallback path -- read when env vars are missing.
  * Ollama's runner subprocess strips non-OLLAMA_ env vars, so
- * DECLOUD_GPU_PROXY_* are lost. This file provides a fallback. */
+ * DECLOUD_GPU_PROXY_* are lost. This file provides a fallback.
+ *
+ * CRITICAL: We MUST NOT call setenv() here. Go's runtime runs
+ * multiple OS threads and setenv() modifies the global `environ`
+ * array without synchronization, causing SIGSEGV in cgo context.
+ * Instead, we store config values in local static buffers and
+ * provide transport_getenv() that checks local config first. */
 #define GPU_PROXY_CONFIG_FILE "/etc/decloud/gpu-proxy.env"
 
+#define MAX_CONFIG_ENTRIES 16
+#define MAX_CONFIG_KEY_LEN 64
+#define MAX_CONFIG_VAL_LEN 256
+
+typedef struct {
+    char key[MAX_CONFIG_KEY_LEN];
+    char val[MAX_CONFIG_VAL_LEN];
+} ConfigEntry;
+
+static ConfigEntry g_config_entries[MAX_CONFIG_ENTRIES];
+static int g_config_count = 0;
 static int g_config_file_loaded = 0;
 
-/* Load KEY=VALUE pairs from the config file into the environment.
- * Only sets vars that are NOT already in the environment, so
- * explicit env vars always take precedence. */
+/* Load KEY=VALUE pairs from the config file into local storage.
+ * Thread-safe: only reads, never calls setenv(). */
 static void transport_load_config_file(void)
 {
     if (g_config_file_loaded) return;
@@ -59,7 +75,7 @@ static void transport_load_config_file(void)
     if (!f) return;
 
     char line[512];
-    while (fgets(line, sizeof(line), f)) {
+    while (fgets(line, sizeof(line), f) && g_config_count < MAX_CONFIG_ENTRIES) {
         /* Strip leading whitespace */
         char *p = line;
         while (*p == ' ' || *p == '\t') p++;
@@ -80,18 +96,36 @@ static void transport_load_config_file(void)
         char *key = p;
         char *val = eq + 1;
 
-        /* Only set if not already in environment (env takes precedence) */
-        if (!getenv(key)) {
-            setenv(key, val, 0);
-        }
+        /* Store locally (env vars still take precedence at lookup time) */
+        ConfigEntry *ce = &g_config_entries[g_config_count++];
+        strncpy(ce->key, key, MAX_CONFIG_KEY_LEN - 1);
+        ce->key[MAX_CONFIG_KEY_LEN - 1] = '\0';
+        strncpy(ce->val, val, MAX_CONFIG_VAL_LEN - 1);
+        ce->val[MAX_CONFIG_VAL_LEN - 1] = '\0';
     }
     fclose(f);
 }
 
+/* Thread-safe getenv: checks real env first, then local config file.
+ * NEVER calls setenv(). Safe for use in Go cgo context. */
+static const char *transport_getenv(const char *name)
+{
+    /* Real env takes precedence */
+    const char *val = getenv(name);
+    if (val) return val;
+
+    /* Fall back to config file entries */
+    transport_load_config_file();
+    for (int i = 0; i < g_config_count; i++) {
+        if (strcmp(g_config_entries[i].key, name) == 0)
+            return g_config_entries[i].val;
+    }
+    return NULL;
+}
+
 static int transport_get_env_int(const char *name, int def)
 {
-    transport_load_config_file();
-    const char *val = getenv(name);
+    const char *val = transport_getenv(name);
     return val ? atoi(val) : def;
 }
 
@@ -145,7 +179,7 @@ int transport_write_exact(int fd, const void *buf, size_t len)
 
 static int transport_try_tcp(int port)
 {
-    const char *host = getenv("DECLOUD_GPU_PROXY_HOST");
+    const char *host = transport_getenv("DECLOUD_GPU_PROXY_HOST");
     if (!host) host = GPU_PROXY_TCP_BIND;
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -213,7 +247,7 @@ int transport_ensure_connected(void)
      *             so we rely on defaults: 192.168.122.1:9999 with empty token.
      *             vsock can hang in containers and adds 500ms+ timeout.)
      */
-    const char *transport_mode = getenv("DECLOUD_GPU_PROXY_TRANSPORT");
+    const char *transport_mode = transport_getenv("DECLOUD_GPU_PROXY_TRANSPORT");
     int port = transport_get_env_int("DECLOUD_GPU_PROXY_PORT", GPU_PROXY_PORT);
     int try_vsock = 1, try_tcp = 1;
 
@@ -250,7 +284,7 @@ int transport_ensure_connected(void)
     };
 
     if (is_tcp) {
-        const char *tok_hex = getenv("DECLOUD_GPU_PROXY_TOKEN");
+        const char *tok_hex = transport_getenv("DECLOUD_GPU_PROXY_TOKEN");
         if (tok_hex) {
             transport_parse_hex_token(tok_hex, hello.auth_token, GPU_PROXY_TOKEN_LEN);
         }
