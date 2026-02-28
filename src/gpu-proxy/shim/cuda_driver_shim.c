@@ -88,6 +88,12 @@ typedef enum {
  * and concludes the driver is insufficient (cudaError 35/36).
  * ================================================================ */
 
+/* Graph operations cannot work through RPC proxy */
+static CUresult graph_not_supported_stub(void)
+{
+    return CUDA_SUCCESS;
+}
+
 static CUresult generic_not_supported_stub(void)
 {
     return CUDA_SUCCESS;
@@ -549,6 +555,45 @@ CUresult cuStreamGetPriority(CUstream hStream, int *priority)
     return CUDA_SUCCESS;
 }
 
+
+/* Capture query stubs — always report "not capturing" */
+CUresult cuStreamIsCapturing(CUstream hStream, int *captureStatus)
+{
+    (void)hStream;
+    if (captureStatus) *captureStatus = 0; /* CU_STREAM_CAPTURE_STATUS_NONE */
+    return CUDA_SUCCESS;
+}
+CUresult cuStreamGetCaptureInfo(CUstream hStream, int *captureStatus,
+                                 unsigned long long *id)
+{
+    (void)hStream;
+    if (captureStatus) *captureStatus = 0;
+    if (id) *id = 0;
+    return CUDA_SUCCESS;
+}
+CUresult cuStreamGetCaptureInfo_v2(CUstream hStream, int *captureStatus,
+                                    unsigned long long *id, void **graph,
+                                    void **deps, size_t *numDeps)
+{
+    (void)hStream;
+    if (captureStatus) *captureStatus = 0;
+    if (id) *id = 0;
+    if (graph) *graph = NULL;
+    if (deps) *deps = NULL;
+    if (numDeps) *numDeps = 0;
+    return CUDA_SUCCESS;
+}
+CUresult cuStreamUpdateCaptureDependencies(CUstream hStream, void *deps,
+                                            size_t numDeps, unsigned int flags)
+{
+    (void)hStream; (void)deps; (void)numDeps; (void)flags;
+    return CUDA_SUCCESS;
+}
+CUresult cuThreadExchangeStreamCaptureMode(int *mode)
+{
+    if (mode) *mode = 0; /* CU_STREAM_CAPTURE_MODE_GLOBAL */
+    return CUDA_SUCCESS;
+}
 CUresult cuStreamAddCallback(CUstream hStream, void *callback,
                               void *userData, unsigned int flags)
 {
@@ -599,6 +644,16 @@ CUresult cuEventElapsedTime(float *pMilliseconds, CUevent hStart,
     (void)hStart; (void)hEnd;
     if (pMilliseconds) *pMilliseconds = 0.0f;
     return CUDA_SUCCESS;
+}
+
+/* cuGetExportTable — cuBLAS uses this for internal function tables.
+ * Returning CUDA_SUCCESS without setting ppExportTable causes crash
+ * at offset 0x10 (NULL dereference). Return NOT_FOUND instead. */
+CUresult cuGetExportTable(const void **ppExportTable, const void *pExportTableId)
+{
+    (void)pExportTableId;
+    if (ppExportTable) *ppExportTable = NULL;
+    return CUDA_ERROR_NOT_FOUND;
 }
 
 /* ================================================================
@@ -1656,6 +1711,9 @@ static const DriverDispatchEntry g_driver_dispatch[] = {
     { "cuKernelGetName",                  (void *)generic_not_supported_stub },
     { "cuKernelGetParamInfo",             (void *)generic_not_supported_stub },
 
+
+    /* Export table */
+    { "cuGetExportTable",                 (void *)cuGetExportTable },
     /* Sentinel */
     { NULL, NULL },
 };
@@ -1696,6 +1754,17 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn,
                           symbol, cudaVersion, *pfn);
             return CUDA_SUCCESS;
         }
+    }
+
+    /* Graph creation/execution cannot work through network proxy.
+     * Only block graph mutation ops; let query ops through with safe defaults. */
+    if (strncmp(symbol, "cuGraph", 7) == 0 ||
+        strncmp(symbol, "cuStreamBeginCapture", 20) == 0 ||
+        strncmp(symbol, "cuStreamEndCapture", 18) == 0) {
+        *pfn = (void *)graph_not_supported_stub;
+        TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-blocked]",
+                      symbol, cudaVersion, *pfn);
+        return CUDA_SUCCESS;
     }
 
     /* Fall back to dlsym for our exported symbols */
