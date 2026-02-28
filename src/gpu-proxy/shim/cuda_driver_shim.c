@@ -42,12 +42,18 @@
 typedef int CUresult;
 #define CUDA_SUCCESS 0
 #define CUDA_ERROR_INVALID_VALUE 1
+#define CUDA_ERROR_OUT_OF_MEMORY 2
+#define CUDA_ERROR_NOT_FOUND 500
 #define CUDA_ERROR_NO_DEVICE 100
 #define CUDA_ERROR_INVALID_CONTEXT 201
+#define CUDA_ERROR_INVALID_SOURCE 300
+#define CUDA_ERROR_FILE_NOT_FOUND 301
 #define CUDA_ERROR_NOT_SUPPORTED 801
 
 typedef int CUdevice;
 typedef void *CUcontext;
+typedef void *CUmodule;
+typedef void *CUfunction;
 
 typedef struct {
     char bytes[16];
