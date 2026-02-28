@@ -674,35 +674,75 @@ cudaError_t cudaFree(void *devPtr)
 cudaError_t cudaMemcpy(void *dst, const void *src, size_t count,
                        cudaMemcpyKind_t kind)
 {
-    GpuMemcpyRequest req = {
-        .dst   = (uint64_t)(uintptr_t)dst,
-        .src   = (uint64_t)(uintptr_t)src,
-        .count = (uint64_t)count,
-        .kind  = (int32_t)kind,
-    };
-
     switch (kind) {
     case cudaMemcpyHostToDevice: {
-        size_t total = sizeof(req) + count;
-        void *buf = malloc(total);
-        if (!buf) return cudaErrorInvalidValue;
-        memcpy(buf, &req, sizeof(req));
-        memcpy((char *)buf + sizeof(req), src, count);
-        int err = rpc_call(GPU_CMD_MEMCPY, buf, (uint32_t)total,
-                           NULL, 0, NULL);
-        free(buf);
-        return err;
+        /*
+         * Chunk large H2D transfers to stay under GPU_PROXY_MAX_PAYLOAD (64 MB).
+         * Each RPC carries sizeof(GpuMemcpyRequest) + chunk_bytes as payload.
+         * Use 32 MB chunks for comfortable headroom.
+         */
+        const size_t MAX_CHUNK = 32UL * 1024 * 1024;
+        size_t offset = 0;
+        while (offset < count) {
+            size_t chunk = count - offset;
+            if (chunk > MAX_CHUNK) chunk = MAX_CHUNK;
+
+            GpuMemcpyRequest req = {
+                .dst   = (uint64_t)((uintptr_t)dst + offset),
+                .src   = 0,
+                .count = (uint64_t)chunk,
+                .kind  = GPU_MEMCPY_HOST_TO_DEVICE,
+            };
+
+            size_t total = sizeof(req) + chunk;
+            void *buf = malloc(total);
+            if (!buf) return cudaErrorInvalidValue;
+            memcpy(buf, &req, sizeof(req));
+            memcpy((char *)buf + sizeof(req), (const char *)src + offset, chunk);
+            int err = rpc_call(GPU_CMD_MEMCPY, buf, (uint32_t)total,
+                               NULL, 0, NULL);
+            free(buf);
+            if (err != cudaSuccess) return err;
+            offset += chunk;
+        }
+        return cudaSuccess;
     }
 
     case cudaMemcpyDeviceToHost: {
-        uint32_t actual = 0;
-        int err = rpc_call(GPU_CMD_MEMCPY, &req, sizeof(req),
-                           dst, (uint32_t)count, &actual);
-        return err;
+        /*
+         * Chunk large D2H transfers similarly — each response payload
+         * must stay under GPU_PROXY_MAX_PAYLOAD.
+         */
+        const size_t MAX_CHUNK = 32UL * 1024 * 1024;
+        size_t offset = 0;
+        while (offset < count) {
+            size_t chunk = count - offset;
+            if (chunk > MAX_CHUNK) chunk = MAX_CHUNK;
+
+            GpuMemcpyRequest req = {
+                .dst   = 0,
+                .src   = (uint64_t)((uintptr_t)src + offset),
+                .count = (uint64_t)chunk,
+                .kind  = GPU_MEMCPY_DEVICE_TO_HOST,
+            };
+            uint32_t actual = 0;
+            int err = rpc_call(GPU_CMD_MEMCPY, &req, sizeof(req),
+                               (char *)dst + offset, (uint32_t)chunk, &actual);
+            if (err != cudaSuccess) return err;
+            offset += chunk;
+        }
+        return cudaSuccess;
     }
 
-    case cudaMemcpyDeviceToDevice:
+    case cudaMemcpyDeviceToDevice: {
+        GpuMemcpyRequest req = {
+            .dst   = (uint64_t)(uintptr_t)dst,
+            .src   = (uint64_t)(uintptr_t)src,
+            .count = (uint64_t)count,
+            .kind  = GPU_MEMCPY_DEVICE_TO_DEVICE,
+        };
         return rpc_call(GPU_CMD_MEMCPY, &req, sizeof(req), NULL, 0, NULL);
+    }
 
     case cudaMemcpyHostToHost:
         memcpy(dst, src, count);

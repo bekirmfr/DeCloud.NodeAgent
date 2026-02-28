@@ -818,169 +818,81 @@ static CUresult cu_memcpy_HtoD(CUdeviceptr dst, const void *src, size_t byteCoun
 {
     if (!src && byteCount > 0) return CUDA_ERROR_INVALID_VALUE;
 
-    GpuMemcpyRequest req = {
-        .dst   = (uint64_t)dst,
-        .src   = 0,  /* host data follows header */
-        .count = (uint64_t)byteCount,
-        .kind  = GPU_MEMCPY_HOST_TO_DEVICE,
-    };
+    /*
+     * Chunk large H2D transfers to stay under GPU_PROXY_MAX_PAYLOAD (64 MB).
+     * Each RPC carries sizeof(GpuMemcpyRequest) + chunk_bytes as payload.
+     * Use 32 MB chunks for comfortable headroom.
+     */
+    const size_t MAX_CHUNK = 32UL * 1024 * 1024;
+    size_t offset = 0;
 
-    /* For H2D, send header + host data as a single payload */
-    uint32_t total_len = (uint32_t)(sizeof(req) + byteCount);
-    uint8_t *payload = malloc(total_len);
-    if (!payload) return CUDA_ERROR_INVALID_VALUE;
+    while (offset < byteCount) {
+        size_t chunk = byteCount - offset;
+        if (chunk > MAX_CHUNK) chunk = MAX_CHUNK;
 
-    memcpy(payload, &req, sizeof(req));
-    if (byteCount > 0)
-        memcpy(payload + sizeof(req), src, byteCount);
+        GpuMemcpyRequest req = {
+            .dst   = (uint64_t)(dst + offset),
+            .src   = 0,  /* host data follows header */
+            .count = (uint64_t)chunk,
+            .kind  = GPU_MEMCPY_HOST_TO_DEVICE,
+        };
 
-    /* Send raw RPC: header + combined payload */
-    pthread_mutex_lock(&g_transport_lock);
+        uint32_t total_len = (uint32_t)(sizeof(req) + chunk);
+        uint8_t *payload = malloc(total_len);
+        if (!payload) return CUDA_ERROR_INVALID_VALUE;
 
-    int result = CUDA_ERROR_INVALID_VALUE;
-    if (transport_ensure_connected() < 0) {
-        pthread_mutex_unlock(&g_transport_lock);
+        memcpy(payload, &req, sizeof(req));
+        memcpy(payload + sizeof(req), (const uint8_t *)src + offset, chunk);
+
+        int err = transport_rpc_call(GPU_CMD_MEMCPY, payload, total_len,
+                                     NULL, 0, NULL);
         free(payload);
-        return CUDA_ERROR_NO_DEVICE;
-    }
-
-    /* Re-lock (ensure_connected may have released/reacquired) */
-    /* Actually, transport_rpc_call handles locking internally.
-     * We need to use the raw send/recv to send the combined payload. */
-    pthread_mutex_unlock(&g_transport_lock);
-
-    /* Use transport_rpc_call with the combined payload */
-    GpuProxyHeader hdr = {
-        .magic = GPU_PROXY_MAGIC,
-        .version = GPU_PROXY_VERSION,
-        .cmd = GPU_CMD_MEMCPY,
-        .payload_len = total_len,
-        .status = 0,
-    };
-
-    pthread_mutex_lock(&g_transport_lock);
-    if (g_transport_fd < 0) {
-        pthread_mutex_unlock(&g_transport_lock);
-        free(payload);
-        return CUDA_ERROR_NO_DEVICE;
-    }
-
-    if (transport_write_exact(g_transport_fd, &hdr, sizeof(hdr)) < 0 ||
-        transport_write_exact(g_transport_fd, payload, total_len) < 0) {
-        close(g_transport_fd);
-        g_transport_fd = -1;
-        g_transport_initialized = 0;
-        pthread_mutex_unlock(&g_transport_lock);
-        free(payload);
-        return CUDA_ERROR_NO_DEVICE;
-    }
-
-    GpuProxyHeader resp_hdr;
-    if (transport_read_exact(g_transport_fd, &resp_hdr, sizeof(resp_hdr)) < 0) {
-        close(g_transport_fd);
-        g_transport_fd = -1;
-        g_transport_initialized = 0;
-        pthread_mutex_unlock(&g_transport_lock);
-        free(payload);
-        return CUDA_ERROR_NO_DEVICE;
-    }
-
-    /* Drain any response payload */
-    if (resp_hdr.payload_len > 0) {
-        char drain[4096];
-        uint32_t remaining = resp_hdr.payload_len;
-        while (remaining > 0) {
-            uint32_t chunk = remaining < sizeof(drain) ? remaining : (uint32_t)sizeof(drain);
-            if (transport_read_exact(g_transport_fd, drain, chunk) < 0) break;
-            remaining -= chunk;
+        if (err != 0) {
+            TRANSPORT_LOG("cuMemcpyHtoD chunk at offset %zu FAILED (err=%d)",
+                          offset, err);
+            return (CUresult)err;
         }
+        offset += chunk;
     }
 
-    result = resp_hdr.status;
-    pthread_mutex_unlock(&g_transport_lock);
-    free(payload);
-    return (CUresult)result;
+    return CUDA_SUCCESS;
 }
+
 
 static CUresult cu_memcpy_DtoH(void *dst, CUdeviceptr src, size_t byteCount)
 {
     if (!dst && byteCount > 0) return CUDA_ERROR_INVALID_VALUE;
 
-    GpuMemcpyRequest req = {
-        .dst   = 0,  /* host buffer, not a device ptr */
-        .src   = (uint64_t)src,
-        .count = (uint64_t)byteCount,
-        .kind  = GPU_MEMCPY_DEVICE_TO_HOST,
-    };
+    /*
+     * Chunk large D2H transfers to stay under GPU_PROXY_MAX_PAYLOAD (64 MB).
+     * Each RPC returns up to MAX_CHUNK bytes of device data.
+     */
+    const size_t MAX_CHUNK = 32UL * 1024 * 1024;
+    size_t offset = 0;
 
-    /* For D2H, send the request and expect byteCount bytes back as payload */
-    GpuProxyHeader hdr = {
-        .magic = GPU_PROXY_MAGIC,
-        .version = GPU_PROXY_VERSION,
-        .cmd = GPU_CMD_MEMCPY,
-        .payload_len = sizeof(req),
-        .status = 0,
-    };
+    while (offset < byteCount) {
+        size_t chunk = byteCount - offset;
+        if (chunk > MAX_CHUNK) chunk = MAX_CHUNK;
 
-    pthread_mutex_lock(&g_transport_lock);
-    if (g_transport_fd < 0) {
-        if (transport_ensure_connected() < 0) {
-            pthread_mutex_unlock(&g_transport_lock);
-            return CUDA_ERROR_NO_DEVICE;
+        GpuMemcpyRequest chunk_req = {
+            .dst   = 0,
+            .src   = (uint64_t)(src + offset),
+            .count = (uint64_t)chunk,
+            .kind  = GPU_MEMCPY_DEVICE_TO_HOST,
+        };
+
+        uint32_t actual = 0;
+        int err = transport_rpc_call(GPU_CMD_MEMCPY, &chunk_req, sizeof(chunk_req),
+                                     (uint8_t *)dst + offset, (uint32_t)chunk, &actual);
+        if (err != 0) {
+            TRANSPORT_LOG("cuMemcpyDtoH chunk at offset %zu FAILED (err=%d)",
+                          offset, err);
+            return (CUresult)err;
         }
+        offset += chunk;
     }
 
-    if (transport_write_exact(g_transport_fd, &hdr, sizeof(hdr)) < 0 ||
-        transport_write_exact(g_transport_fd, &req, sizeof(req)) < 0) {
-        close(g_transport_fd);
-        g_transport_fd = -1;
-        g_transport_initialized = 0;
-        pthread_mutex_unlock(&g_transport_lock);
-        return CUDA_ERROR_NO_DEVICE;
-    }
-
-    GpuProxyHeader resp_hdr;
-    if (transport_read_exact(g_transport_fd, &resp_hdr, sizeof(resp_hdr)) < 0) {
-        close(g_transport_fd);
-        g_transport_fd = -1;
-        g_transport_initialized = 0;
-        pthread_mutex_unlock(&g_transport_lock);
-        return CUDA_ERROR_NO_DEVICE;
-    }
-
-    if (resp_hdr.status == 0 && resp_hdr.payload_len > 0 && dst) {
-        uint32_t to_read = resp_hdr.payload_len < (uint32_t)byteCount
-                             ? resp_hdr.payload_len : (uint32_t)byteCount;
-        if (transport_read_exact(g_transport_fd, dst, to_read) < 0) {
-            close(g_transport_fd);
-            g_transport_fd = -1;
-            g_transport_initialized = 0;
-            pthread_mutex_unlock(&g_transport_lock);
-            return CUDA_ERROR_NO_DEVICE;
-        }
-        /* Drain excess if any */
-        if (resp_hdr.payload_len > to_read) {
-            char drain[4096];
-            uint32_t remaining = resp_hdr.payload_len - to_read;
-            while (remaining > 0) {
-                uint32_t chunk = remaining < sizeof(drain) ? remaining : (uint32_t)sizeof(drain);
-                if (transport_read_exact(g_transport_fd, drain, chunk) < 0) break;
-                remaining -= chunk;
-            }
-        }
-    } else if (resp_hdr.payload_len > 0) {
-        /* Drain unexpected payload */
-        char drain[4096];
-        uint32_t remaining = resp_hdr.payload_len;
-        while (remaining > 0) {
-            uint32_t chunk = remaining < sizeof(drain) ? remaining : (uint32_t)sizeof(drain);
-            if (transport_read_exact(g_transport_fd, drain, chunk) < 0) break;
-            remaining -= chunk;
-        }
-    }
-
-    pthread_mutex_unlock(&g_transport_lock);
-    return (CUresult)resp_hdr.status;
+    return CUDA_SUCCESS;
 }
 
 static CUresult cu_memcpy_DtoD(CUdeviceptr dst, CUdeviceptr src, size_t byteCount)
