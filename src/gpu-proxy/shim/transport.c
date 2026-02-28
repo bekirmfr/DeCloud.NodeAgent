@@ -208,7 +208,10 @@ int transport_ensure_connected(void)
     /* Respect DECLOUD_GPU_PROXY_TRANSPORT env:
      *   "tcp"   → skip vsock (essential in Docker/containers where vsock hangs)
      *   "vsock" → skip TCP
-     *   unset   → try vsock first, TCP fallback
+     *   unset   → try TCP first, vsock fallback
+     *            (TCP-first because Ollama's runner subprocess strips env vars,
+     *             so we rely on defaults: 192.168.122.1:9999 with empty token.
+     *             vsock can hang in containers and adds 500ms+ timeout.)
      */
     const char *transport_mode = getenv("DECLOUD_GPU_PROXY_TRANSPORT");
     int port = transport_get_env_int("DECLOUD_GPU_PROXY_PORT", GPU_PROXY_PORT);
@@ -222,12 +225,14 @@ int transport_ensure_connected(void)
     int fd = -1;
     int is_tcp = 0;
 
-    if (try_vsock) {
-        fd = transport_try_vsock(port);
-    }
-    if (fd < 0 && try_tcp) {
+    /* Try TCP first (default for VM→host communication) */
+    if (try_tcp) {
         fd = transport_try_tcp(port);
         if (fd >= 0) is_tcp = 1;
+    }
+    /* Fall back to vsock if TCP failed */
+    if (fd < 0 && try_vsock) {
+        fd = transport_try_vsock(port);
     }
     if (fd < 0) {
         TRANSPORT_LOG("All transports failed -- GPU proxy unavailable");
