@@ -1238,7 +1238,7 @@ cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
 {
     (void)hGraphExec; (void)hGraph;
     if (updateResult_out) *updateResult_out = 0;
-    return cudaSuccess;
+    return cudaErrorNotSupported;
 }
 
 cudaError_t cudaGraphInstantiate(cudaGraphExec_t *pGraphExec, cudaGraph_t graph,
@@ -1246,13 +1246,13 @@ cudaError_t cudaGraphInstantiate(cudaGraphExec_t *pGraphExec, cudaGraph_t graph,
 {
     (void)graph; (void)pErrorNode; (void)pLogBuffer; (void)bufferSize;
     if (pGraphExec) *pGraphExec = NULL;
-    return cudaSuccess;
+    return cudaErrorNotSupported;
 }
 
 cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream)
 {
     (void)graphExec; (void)stream;
-    return cudaSuccess;
+    return cudaErrorNotSupported;
 }
 
 /* Managed memory */
@@ -1315,14 +1315,14 @@ typedef enum {
 cudaError_t cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode_t mode)
 {
     (void)stream; (void)mode;
-    return cudaSuccess;
+    return cudaErrorNotSupported;
 }
 
 cudaError_t cudaStreamEndCapture(cudaStream_t stream, cudaGraph_t *pGraph)
 {
     (void)stream;
     if (pGraph) *pGraph = NULL;
-    return cudaSuccess;
+    return cudaErrorNotSupported;
 }
 
 cudaError_t cudaStreamIsCapturing(cudaStream_t stream, cudaStreamCaptureStatus_t *pCaptureStatus)
