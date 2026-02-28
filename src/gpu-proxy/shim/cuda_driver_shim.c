@@ -84,7 +84,7 @@ typedef enum {
 
 static CUresult generic_not_supported_stub(void)
 {
-    return CUDA_ERROR_NOT_SUPPORTED;
+    return CUDA_SUCCESS;
 }
 
 /* ================================================================
