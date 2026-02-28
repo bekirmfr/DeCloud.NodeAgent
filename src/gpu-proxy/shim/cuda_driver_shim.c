@@ -102,6 +102,41 @@ static int g_cached_props_valid = 0;
 static CUcontext g_primary_ctx = NULL;
 static CUcontext g_current_ctx = NULL;
 
+/* ================================================================
+ * Module/Function state tracking for Driver API forwarding
+ *
+ * cuBLAS loads GEMM kernels via cuModuleLoadFatBinary →
+ * cuModuleGetFunction → cuLaunchKernel. We track the daemon's
+ * module/function slot indices locally so we can map opaque
+ * CUmodule/CUfunction handles back to the correct daemon-side
+ * resources.
+ * ================================================================ */
+
+#define MAX_DRIVER_MODULES    128
+#define MAX_DRIVER_FUNCTIONS  512
+
+typedef struct {
+    uint64_t daemon_handle;  /* Module slot index on daemon */
+    int      in_use;
+} DriverModuleSlot;
+
+typedef struct {
+    uint64_t opaque_handle;  /* Our generated handle (returned as CUfunction) */
+    uint64_t module_slot;    /* Index into g_driver_modules[] */
+    char     name[256];      /* Kernel name (for debug logging) */
+    uint32_t num_params;
+    uint32_t param_sizes[GPU_MAX_KERNEL_PARAMS];
+    int      in_use;
+} DriverFunctionSlot;
+
+static DriverModuleSlot    g_driver_modules[MAX_DRIVER_MODULES];
+static DriverFunctionSlot  g_driver_functions[MAX_DRIVER_FUNCTIONS];
+static pthread_mutex_t     g_module_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t            g_next_func_handle = 0x1000;
+
+/* Last-used function cache for hot-path optimization */
+static DriverFunctionSlot *g_last_func_cache = NULL;
+
 static int ensure_props_cached(int device)
 {
     if (g_cached_props_valid && device == 0)
@@ -1039,12 +1074,489 @@ static CUresult cu_memset_D32_async(CUdeviceptr dptr, unsigned int ui,
 }
 
 /* ================================================================
- * cuGetProcAddress dispatch table for Driver API memory functions
+ * Driver API Module/Function/Kernel Forwarding
+ *
+ * cuBLAS uses the CUDA Driver API to load its GEMM kernels:
+ *   cuModuleLoadFatBinary → cuModuleGetFunction → cuLaunchKernel
+ * These forward through the daemon's existing GPU_CMD_REGISTER_MODULE,
+ * GPU_CMD_REGISTER_FUNCTION, and GPU_CMD_LAUNCH_KERNEL handlers.
+ * No daemon or protocol changes needed.
+ * ================================================================ */
+
+static CUresult cu_module_load_data(CUmodule *module, const void *image)
+{
+    if (!module || !image) return CUDA_ERROR_INVALID_VALUE;
+
+    /* Detect image format and size */
+    uint32_t magic = *(const uint32_t *)image;
+    uint64_t data_size = 0;
+
+    if (magic == 0xBA55ED50) {
+        /* NVIDIA fatbin container:
+         * struct { uint32_t magic; uint16_t version; uint16_t header_size; uint64_t size; }
+         * 'size' is total size of all data AFTER the header.
+         * Total blob size = header_size + size
+         */
+        uint16_t version = *(const uint16_t *)((const uint8_t *)image + 4);
+        uint16_t header_size = *(const uint16_t *)((const uint8_t *)image + 6);
+        uint64_t payload_size = *(const uint64_t *)((const uint8_t *)image + 8);
+
+        if (version == 0x0001 && header_size > 0) {
+            /* Newer fatbin_header: size = data after header */
+            data_size = (uint64_t)header_size + payload_size;
+        } else {
+            /* Older __cudaFatCudaBinaryRec: size field is total including header */
+            data_size = payload_size;
+        }
+
+        if (data_size == 0 || data_size > GPU_PROXY_MAX_PAYLOAD) {
+            TRANSPORT_LOG("cuModuleLoadData: suspicious fatbin size %lu, using 4MB fallback",
+                          (unsigned long)data_size);
+            data_size = 4 * 1024 * 1024;
+        }
+    } else if (magic == 0x464C457F) {
+        /* ELF cubin: parse ELF64 header for total size */
+        const uint8_t *elf = (const uint8_t *)image;
+        uint64_t shoff = *(const uint64_t *)(elf + 40);      /* e_shoff */
+        uint16_t shentsize = *(const uint16_t *)(elf + 58);   /* e_shentsize */
+        uint16_t shnum = *(const uint16_t *)(elf + 60);       /* e_shnum */
+        data_size = shoff + (uint64_t)shentsize * shnum;
+        if (data_size == 0 || data_size > GPU_PROXY_MAX_PAYLOAD)
+            data_size = 4 * 1024 * 1024;
+    } else if (image && ((const char *)image)[0] == '.') {
+        /* PTX text (starts with ".version") */
+        data_size = strlen((const char *)image) + 1;
+    } else if (magic == 0x466243B1) {
+        /* __fatBinC_Wrapper_t (FATBINC_MAGIC) — dereference .data pointer */
+        const void *inner = *(const void *const *)((const uint8_t *)image + 8);
+        if (inner) return cu_module_load_data(module, inner);
+        return CUDA_ERROR_INVALID_SOURCE;
+    } else {
+        /* Unknown format — try conservative size */
+        TRANSPORT_LOG("cuModuleLoadData: unknown magic 0x%08x, using 4MB fallback", magic);
+        data_size = 4 * 1024 * 1024;
+    }
+
+    TRANSPORT_LOG("cuModuleLoadData: sending %lu bytes (magic=0x%08x)",
+                  (unsigned long)data_size, magic);
+
+    /* Build RPC request: GpuRegisterModuleRequest + fatbin data */
+    uint32_t req_len = (uint32_t)(sizeof(GpuRegisterModuleRequest) + data_size);
+    void *req_buf = malloc(req_len);
+    if (!req_buf) return CUDA_ERROR_OUT_OF_MEMORY;
+
+    GpuRegisterModuleRequest *req = (GpuRegisterModuleRequest *)req_buf;
+    req->fatbin_size = data_size;
+    memcpy((uint8_t *)req_buf + sizeof(GpuRegisterModuleRequest), image, data_size);
+
+    GpuRegisterModuleResponse resp;
+    int err = transport_rpc_call(GPU_CMD_REGISTER_MODULE, req_buf, req_len,
+                                 &resp, sizeof(resp), NULL);
+    free(req_buf);
+
+    if (err != 0) {
+        TRANSPORT_LOG("cuModuleLoadData FAILED (err=%d)", err);
+        *module = NULL;
+        return (CUresult)err;
+    }
+
+    /* Store in local tracking table */
+    pthread_mutex_lock(&g_module_lock);
+    int slot = -1;
+    for (int i = 0; i < MAX_DRIVER_MODULES; i++) {
+        if (!g_driver_modules[i].in_use) { slot = i; break; }
+    }
+    if (slot >= 0) {
+        g_driver_modules[slot].daemon_handle = resp.module_handle;
+        g_driver_modules[slot].in_use = 1;
+        *module = (CUmodule)(uintptr_t)(slot + 1);  /* 1-based opaque handle */
+    } else {
+        *module = NULL;
+        err = CUDA_ERROR_OUT_OF_MEMORY;
+    }
+    pthread_mutex_unlock(&g_module_lock);
+
+    TRANSPORT_LOG("cuModuleLoadData → module=%p (local_slot=%d, daemon_slot=%lu)",
+                  *module, slot, (unsigned long)resp.module_handle);
+    return (CUresult)err;
+}
+
+static CUresult cu_module_load_fat_binary(CUmodule *module, const void *fatbin)
+{
+    /* Same wire format — daemon handles both fatbin and cubin */
+    return cu_module_load_data(module, fatbin);
+}
+
+static CUresult cu_module_load(CUmodule *module, const char *filename)
+{
+    if (!module || !filename) return CUDA_ERROR_INVALID_VALUE;
+
+    FILE *f = fopen(filename, "rb");
+    if (!f) return CUDA_ERROR_FILE_NOT_FOUND;
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (size <= 0 || size > (long)GPU_PROXY_MAX_PAYLOAD) {
+        fclose(f);
+        return CUDA_ERROR_INVALID_SOURCE;
+    }
+
+    void *data = malloc((size_t)size);
+    if (!data) { fclose(f); return CUDA_ERROR_OUT_OF_MEMORY; }
+
+    if (fread(data, 1, (size_t)size, f) != (size_t)size) {
+        free(data);
+        fclose(f);
+        return CUDA_ERROR_INVALID_SOURCE;
+    }
+    fclose(f);
+
+    CUresult r = cu_module_load_data(module, data);
+    free(data);
+    return r;
+}
+
+/* cuModuleLoadDataEx — same as cuModuleLoadData but with JIT options we ignore */
+static CUresult cu_module_load_data_ex(CUmodule *module, const void *image,
+                                        unsigned int numOptions, void *options,
+                                        void **optionValues)
+{
+    (void)numOptions; (void)options; (void)optionValues;
+    return cu_module_load_data(module, image);
+}
+
+static CUresult cu_module_unload(CUmodule module)
+{
+    int slot = (int)(uintptr_t)module - 1;  /* Convert 1-based handle to 0-based slot */
+    if (slot < 0 || slot >= MAX_DRIVER_MODULES) return CUDA_ERROR_INVALID_VALUE;
+
+    pthread_mutex_lock(&g_module_lock);
+    if (!g_driver_modules[slot].in_use) {
+        pthread_mutex_unlock(&g_module_lock);
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+
+    GpuUnregisterModuleRequest req = {
+        .module_handle = g_driver_modules[slot].daemon_handle,
+    };
+    int err = transport_rpc_call(GPU_CMD_UNREGISTER_MODULE, &req, sizeof(req),
+                                 NULL, 0, NULL);
+
+    /* Clear local state */
+    g_driver_modules[slot].in_use = 0;
+
+    /* Invalidate all functions belonging to this module */
+    for (int i = 0; i < MAX_DRIVER_FUNCTIONS; i++) {
+        if (g_driver_functions[i].in_use &&
+            g_driver_functions[i].module_slot == (uint64_t)slot) {
+            g_driver_functions[i].in_use = 0;
+        }
+    }
+    g_last_func_cache = NULL;  /* Invalidate cache */
+    pthread_mutex_unlock(&g_module_lock);
+
+    TRANSPORT_LOG("cuModuleUnload(slot=%d) → %d", slot, err);
+    return (CUresult)err;
+}
+
+static CUresult cu_module_get_function(CUfunction *func, CUmodule module,
+                                        const char *name)
+{
+    if (!func || !name) return CUDA_ERROR_INVALID_VALUE;
+
+    int mod_slot = (int)(uintptr_t)module - 1;
+    if (mod_slot < 0 || mod_slot >= MAX_DRIVER_MODULES)
+        return CUDA_ERROR_INVALID_VALUE;
+
+    pthread_mutex_lock(&g_module_lock);
+    if (!g_driver_modules[mod_slot].in_use) {
+        pthread_mutex_unlock(&g_module_lock);
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+
+    uint64_t daemon_module = g_driver_modules[mod_slot].daemon_handle;
+
+    /* Find a free local function slot */
+    int func_slot = -1;
+    for (int i = 0; i < MAX_DRIVER_FUNCTIONS; i++) {
+        if (!g_driver_functions[i].in_use) { func_slot = i; break; }
+    }
+    if (func_slot < 0) {
+        pthread_mutex_unlock(&g_module_lock);
+        return CUDA_ERROR_OUT_OF_MEMORY;
+    }
+
+    /* Generate unique opaque handle (protected by g_module_lock) */
+    uint64_t handle = g_next_func_handle++;
+
+    /* Build RPC: GpuRegisterFunctionRequest + null-terminated name */
+    uint32_t name_len = (uint32_t)strlen(name) + 1;
+    uint32_t req_len = (uint32_t)(sizeof(GpuRegisterFunctionRequest) + name_len);
+    void *req_buf = malloc(req_len);
+    if (!req_buf) {
+        pthread_mutex_unlock(&g_module_lock);
+        return CUDA_ERROR_OUT_OF_MEMORY;
+    }
+
+    GpuRegisterFunctionRequest *req = (GpuRegisterFunctionRequest *)req_buf;
+    req->module_handle = daemon_module;
+    req->host_func_ptr = handle;  /* Daemon stores this as the lookup key */
+    req->device_name_len = name_len;
+    memcpy((uint8_t *)req_buf + sizeof(GpuRegisterFunctionRequest), name, name_len);
+
+    GpuRegisterFunctionResponse resp;
+    memset(&resp, 0, sizeof(resp));
+    int err = transport_rpc_call(GPU_CMD_REGISTER_FUNCTION, req_buf, req_len,
+                                 &resp, sizeof(resp), NULL);
+    free(req_buf);
+
+    if (err != 0) {
+        pthread_mutex_unlock(&g_module_lock);
+        *func = NULL;
+        TRANSPORT_LOG("cuModuleGetFunction('%s') FAILED (err=%d)", name, err);
+        return (CUresult)err;
+    }
+
+    /* Store function metadata locally */
+    DriverFunctionSlot *fs = &g_driver_functions[func_slot];
+    fs->opaque_handle = handle;
+    fs->module_slot = (uint64_t)mod_slot;
+    strncpy(fs->name, name, sizeof(fs->name) - 1);
+    fs->name[sizeof(fs->name) - 1] = '\0';
+    fs->num_params = resp.num_params;
+    if (fs->num_params > GPU_MAX_KERNEL_PARAMS)
+        fs->num_params = GPU_MAX_KERNEL_PARAMS;
+    for (uint32_t p = 0; p < fs->num_params; p++)
+        fs->param_sizes[p] = resp.param_sizes[p];
+    fs->in_use = 1;
+
+    *func = (CUfunction)(uintptr_t)handle;
+    pthread_mutex_unlock(&g_module_lock);
+
+    TRANSPORT_LOG("cuModuleGetFunction('%s') → handle=0x%lx, %u params",
+                  name, (unsigned long)handle, fs->num_params);
+    return CUDA_SUCCESS;
+}
+
+static DriverFunctionSlot *find_driver_function(uint64_t handle)
+{
+    /* Fast path: check last-used cache (same kernel launched repeatedly) */
+    DriverFunctionSlot *cached = g_last_func_cache;
+    if (cached && cached->in_use && cached->opaque_handle == handle)
+        return cached;
+
+    /* Linear scan fallback */
+    for (int i = 0; i < MAX_DRIVER_FUNCTIONS; i++) {
+        if (g_driver_functions[i].in_use &&
+            g_driver_functions[i].opaque_handle == handle) {
+            g_last_func_cache = &g_driver_functions[i];
+            return &g_driver_functions[i];
+        }
+    }
+    return NULL;
+}
+
+static CUresult cu_launch_kernel_driver(CUfunction f,
+                                         unsigned int gridDimX, unsigned int gridDimY,
+                                         unsigned int gridDimZ,
+                                         unsigned int blockDimX, unsigned int blockDimY,
+                                         unsigned int blockDimZ,
+                                         unsigned int sharedMemBytes,
+                                         CUstream hStream,
+                                         void **kernelParams,
+                                         void **extra)
+{
+    (void)extra;
+
+    uint64_t handle = (uint64_t)(uintptr_t)f;
+    DriverFunctionSlot *fs = find_driver_function(handle);
+    if (!fs) {
+        TRANSPORT_LOG("cuLaunchKernel: unknown function handle 0x%lx",
+                      (unsigned long)handle);
+        return CUDA_ERROR_INVALID_VALUE;
+    }
+
+    if (fs->num_params == 0) {
+        /* Daemon couldn't introspect params (cuFuncGetParamInfo unavailable).
+         * Launch with zero-length args — some kernels have no params,
+         * and the daemon handles the zero-param case. */
+        TRANSPORT_LOG("cuLaunchKernel('%s'): 0 introspected params, launching with no args",
+                      fs->name);
+
+        GpuLaunchKernelRequest req = {
+            .host_func_ptr   = handle,
+            .grid_dim_x      = gridDimX,
+            .grid_dim_y      = gridDimY,
+            .grid_dim_z      = gridDimZ,
+            .block_dim_x     = blockDimX,
+            .block_dim_y     = blockDimY,
+            .block_dim_z     = blockDimZ,
+            .shared_mem_bytes = (uint64_t)sharedMemBytes,
+            .stream_handle   = (uint64_t)(uintptr_t)hStream,
+            .num_params      = 0,
+            .args_total_size = 0,
+        };
+        int err = transport_rpc_call(GPU_CMD_LAUNCH_KERNEL, &req, sizeof(req),
+                                     NULL, 0, NULL);
+        TRANSPORT_LOG("cuLaunchKernel('%s', grid=[%u,%u,%u], block=[%u,%u,%u], 0 args) → %d",
+                      fs->name, gridDimX, gridDimY, gridDimZ,
+                      blockDimX, blockDimY, blockDimZ, err);
+        return (CUresult)err;
+    }
+
+    /* Calculate total serialized args size */
+    uint32_t args_total = 0;
+    for (uint32_t i = 0; i < fs->num_params; i++)
+        args_total += fs->param_sizes[i];
+
+    /* Build request: header + serialized args */
+    uint32_t req_len = (uint32_t)(sizeof(GpuLaunchKernelRequest) + args_total);
+    void *req_buf = malloc(req_len);
+    if (!req_buf) return CUDA_ERROR_OUT_OF_MEMORY;
+
+    GpuLaunchKernelRequest *req = (GpuLaunchKernelRequest *)req_buf;
+    req->host_func_ptr   = handle;
+    req->grid_dim_x      = gridDimX;
+    req->grid_dim_y      = gridDimY;
+    req->grid_dim_z      = gridDimZ;
+    req->block_dim_x     = blockDimX;
+    req->block_dim_y     = blockDimY;
+    req->block_dim_z     = blockDimZ;
+    req->shared_mem_bytes = (uint64_t)sharedMemBytes;
+    req->stream_handle   = (uint64_t)(uintptr_t)hStream;
+    req->num_params      = fs->num_params;
+    req->args_total_size = args_total;
+
+    /* Serialize each param value contiguously */
+    uint8_t *dest = (uint8_t *)req_buf + sizeof(GpuLaunchKernelRequest);
+    for (uint32_t i = 0; i < fs->num_params; i++) {
+        uint32_t sz = fs->param_sizes[i];
+        if (kernelParams && kernelParams[i]) {
+            memcpy(dest, kernelParams[i], sz);
+        } else {
+            memset(dest, 0, sz);
+        }
+        dest += sz;
+    }
+
+    int err = transport_rpc_call(GPU_CMD_LAUNCH_KERNEL, req_buf, req_len,
+                                 NULL, 0, NULL);
+    free(req_buf);
+
+    TRANSPORT_LOG("cuLaunchKernel('%s', grid=[%u,%u,%u], block=[%u,%u,%u], args=%u bytes) → %d",
+                  fs->name, gridDimX, gridDimY, gridDimZ,
+                  blockDimX, blockDimY, blockDimZ, args_total, err);
+    return (CUresult)err;
+}
+
+/* cuLaunchKernelEx — CUDA 11.6+, extended config struct.
+ * cuBLAS typically uses the non-Ex version, but we provide this
+ * as a fallback that forwards with default dimensions. */
+static CUresult cu_launch_kernel_ex(const void *config,
+                                     CUfunction f,
+                                     void **kernelParams,
+                                     void **extra)
+{
+    /* TODO: Parse CUlaunchConfig struct for grid/block/stream if cuBLAS
+     * actually uses this path. For now, forward with 1x1x1 defaults.
+     * Evidence from logs: "cuLaunchKernelEx: forwarding with defaults" */
+    TRANSPORT_LOG("cuLaunchKernelEx: forwarding with default dims");
+    (void)config;
+    return cu_launch_kernel_driver(f, 1, 1, 1, 1, 1, 1, 0, NULL, kernelParams, extra);
+}
+
+/* ================================================================
+ * Function attribute stubs — cuBLAS checks these before launching
+ * ================================================================ */
+
+static CUresult cu_func_get_attribute(int *value, int attrib, CUfunction func)
+{
+    if (!value) return CUDA_ERROR_INVALID_VALUE;
+    (void)func;
+
+    /* Return reasonable defaults for RTX 4060 (sm_89)
+     * TODO: Query daemon for actual values if multi-GPU support is added */
+    switch (attrib) {
+    case 0:  *value = 1024; break;      /* CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK */
+    case 1:  *value = 48 * 1024; break;  /* CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES */
+    case 2:  *value = 0; break;          /* CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES */
+    case 3:  *value = 0; break;          /* CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES */
+    case 4:  *value = 32; break;         /* CU_FUNC_ATTRIBUTE_NUM_REGS */
+    case 5:  *value = 80; break;         /* CU_FUNC_ATTRIBUTE_PTX_VERSION */
+    case 6:  *value = 89; break;         /* CU_FUNC_ATTRIBUTE_BINARY_VERSION (sm_89) */
+    case 7:  *value = 0; break;          /* CU_FUNC_ATTRIBUTE_CACHE_MODE_CA */
+    case 8:  *value = 100 * 1024; break; /* CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES */
+    case 9:  *value = 0; break;          /* CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT */
+    default: *value = 0; break;
+    }
+    return CUDA_SUCCESS;
+}
+
+static CUresult cu_func_set_attribute(CUfunction func, int attrib, int value)
+{
+    (void)func; (void)attrib; (void)value;
+    return CUDA_SUCCESS;  /* Silently accept */
+}
+
+static CUresult cu_func_set_cache_config(CUfunction func, int config)
+{
+    (void)func; (void)config;
+    return CUDA_SUCCESS;
+}
+
+static CUresult cu_module_get_global(CUdeviceptr *dptr, size_t *bytes,
+                                      CUmodule module, const char *name)
+{
+    (void)module; (void)name;
+    if (dptr) *dptr = 0;
+    if (bytes) *bytes = 0;
+    return CUDA_ERROR_NOT_FOUND;  /* Safe — cuBLAS handles this gracefully */
+}
+
+static CUresult cu_module_get_loading_mode(int *mode)
+{
+    if (mode) *mode = 0;  /* CU_MODULE_EAGER_LOADING */
+    return CUDA_SUCCESS;
+}
+
+/* cuLaunchHostFunc — launches a host callback, not a GPU kernel */
+static CUresult cu_launch_host_func(CUstream hStream, void (*fn)(void *), void *userData)
+{
+    (void)hStream;
+    if (fn) fn(userData);
+    return CUDA_SUCCESS;
+}
+
+/* Library API stubs (CUDA 12.0+) — cuBLAS may probe these */
+static CUresult cu_library_get_module(CUmodule *module, void *library)
+{
+    (void)library;
+    if (module) *module = NULL;
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+
+static CUresult cu_library_get_kernel(void *kernel, void *library, const char *name)
+{
+    (void)kernel; (void)library; (void)name;
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+
+static CUresult cu_kernel_get_function(CUfunction *func, void *kernel)
+{
+    (void)kernel;
+    if (func) *func = NULL;
+    return CUDA_ERROR_NOT_SUPPORTED;
+}
+
+/* ================================================================
+ * cuGetProcAddress dispatch table for Driver API functions
  *
  * This table is checked BEFORE the dlsym fallback in cuGetProcAddress.
- * Without this, cuMemAlloc/cuMemFree/cuMemcpy resolve to the generic
- * NOT_SUPPORTED stub, causing libcublas memory operations to fail
- * and inference to crash with "CUDA error".
+ * Without this, cuMemAlloc/cuMemFree/cuMemcpy and module/kernel
+ * functions resolve to the generic NOT_SUPPORTED stub, causing
+ * libcublas operations to fail and inference to crash.
  * ================================================================ */
 
 typedef struct {
@@ -1093,6 +1605,50 @@ static const DriverDispatchEntry g_driver_dispatch[] = {
     { "cuMemsetD32_v2",         (void *)cu_memset_D32 },
     { "cuMemsetD8Async",        (void *)cu_memset_D8_async },
     { "cuMemsetD32Async",       (void *)cu_memset_D32_async },
+
+    /* ---- Module loading ---- */
+    { "cuModuleLoad",                     (void *)cu_module_load },
+    { "cuModuleLoadData",                 (void *)cu_module_load_data },
+    { "cuModuleLoadData_v2",              (void *)cu_module_load_data },
+    { "cuModuleLoadDataEx",               (void *)cu_module_load_data_ex },
+    { "cuModuleLoadFatBinary",            (void *)cu_module_load_fat_binary },
+    { "cuModuleUnload",                   (void *)cu_module_unload },
+    { "cuModuleGetFunction",              (void *)cu_module_get_function },
+    { "cuModuleGetFunction_v2",           (void *)cu_module_get_function },
+    { "cuModuleGetGlobal",                (void *)cu_module_get_global },
+    { "cuModuleGetGlobal_v2",             (void *)cu_module_get_global },
+    { "cuModuleGetTexRef",                (void *)generic_not_supported_stub },
+    { "cuModuleGetSurfRef",               (void *)generic_not_supported_stub },
+    { "cuModuleGetLoadingMode",           (void *)cu_module_get_loading_mode },
+
+    /* ---- Kernel launch ---- */
+    { "cuLaunchKernel",                   (void *)cu_launch_kernel_driver },
+    { "cuLaunchKernel_ptsz",              (void *)cu_launch_kernel_driver },
+    { "cuLaunchCooperativeKernel",        (void *)cu_launch_kernel_driver },
+    { "cuLaunchCooperativeKernel_ptsz",   (void *)cu_launch_kernel_driver },
+    { "cuLaunchCooperativeKernelMultiDevice", (void *)generic_not_supported_stub },
+    { "cuLaunchHostFunc",                 (void *)cu_launch_host_func },
+    { "cuLaunchHostFunc_ptsz",            (void *)cu_launch_host_func },
+    { "cuLaunchKernelEx",                 (void *)cu_launch_kernel_ex },
+    { "cuLaunchKernelEx_ptsz",            (void *)cu_launch_kernel_ex },
+
+    /* ---- Function attributes ---- */
+    { "cuFuncGetAttribute",               (void *)cu_func_get_attribute },
+    { "cuFuncSetAttribute",               (void *)cu_func_set_attribute },
+    { "cuFuncSetCacheConfig",             (void *)cu_func_set_cache_config },
+
+    /* ---- Library API stubs (CUDA 12.0+) ---- */
+    { "cuLibraryGetModule",               (void *)cu_library_get_module },
+    { "cuLibraryGetKernel",               (void *)cu_library_get_kernel },
+    { "cuKernelGetFunction",              (void *)cu_kernel_get_function },
+    { "cuLibraryGetUnifiedFunction",      (void *)generic_not_supported_stub },
+    { "cuLibraryGetKernelCount",          (void *)generic_not_supported_stub },
+    { "cuLibraryEnumerateKernels",        (void *)generic_not_supported_stub },
+    { "cuKernelGetAttribute",             (void *)cu_func_get_attribute },
+    { "cuKernelSetAttribute",             (void *)cu_func_set_attribute },
+    { "cuKernelSetCacheConfig",           (void *)cu_func_set_cache_config },
+    { "cuKernelGetName",                  (void *)generic_not_supported_stub },
+    { "cuKernelGetParamInfo",             (void *)generic_not_supported_stub },
 
     /* Sentinel */
     { NULL, NULL },
