@@ -23,6 +23,27 @@
 
 #include "proto/gpu_proxy_proto.h"
 
+/* ================================================================
+ * Constructor — force GPU proxy env vars for subprocess propagation.
+ *
+ * Ollama (and potentially other multi-process frameworks) spawns runner
+ * subprocesses with a filtered environment that strips non-OLLAMA_ vars.
+ * Since this shim loads via LD_PRELOAD before main(), we can setenv()
+ * the critical ggml flags here so they're present when ggml reads them.
+ * ================================================================ */
+
+__attribute__((constructor))
+static void shim_init(void)
+{
+    /* Force ggml to use its own CUDA matmul kernels instead of cuBLAS.
+     * cuBLAS requires cuGetExportTable (private driver internals) which
+     * cannot be proxied at function level. */
+    setenv("GGML_CUDA_FORCE_MMQ",      "1", 0);  /* 0 = don't override if already set */
+    setenv("GGML_CUDA_DISABLE_GRAPHS",  "1", 0);
+    setenv("GGML_CUDA_NO_PEER_COPY",    "1", 0);
+    setenv("CUDA_LAUNCH_BLOCKING",       "1", 0);
+}
+
 #define SHIM_LOG(fmt, ...) \
     fprintf(stderr, "[cudart-shim] " fmt "\n", ##__VA_ARGS__)
 
@@ -1147,6 +1168,104 @@ cudaError_t cudaHostUnregister(void *ptr)
 {
     (void)ptr;
     return cudaSuccess;
+}
+
+/* ================================================================
+ * cuBLAS stub functions
+ *
+ * ggml unconditionally creates cuBLAS handles during CUDA backend init,
+ * even when GGML_CUDA_FORCE_MMQ=1. Without these stubs, cublasCreate_v2()
+ * calls into the real cuBLAS which needs cuGetExportTable → crash.
+ *
+ * With MMQ mode active, cuBLAS compute functions (gemm, etc.) are never
+ * called, so dummy handles are safe. If any compute function IS called,
+ * we return an error rather than silently producing wrong results.
+ * ================================================================ */
+
+typedef void *cublasHandle_t;
+typedef int cublasStatus_t;
+#define CUBLAS_STATUS_SUCCESS          0
+#define CUBLAS_STATUS_NOT_INITIALIZED  1
+#define CUBLAS_STATUS_NOT_SUPPORTED   15
+
+static int g_cublas_dummy_handle = 0xDEC10BD;  /* DECloud cuBLAS Dummy */
+
+cublasStatus_t cublasCreate_v2(cublasHandle_t *handle)
+{
+    SHIM_LOG("cublasCreate_v2 → stub (dummy handle)");
+    if (handle) *handle = &g_cublas_dummy_handle;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasDestroy_v2(cublasHandle_t handle)
+{
+    (void)handle;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasSetStream_v2(cublasHandle_t handle, cudaStream_t stream)
+{
+    (void)handle; (void)stream;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasSetMathMode(cublasHandle_t handle, int mode)
+{
+    (void)handle; (void)mode;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasGetMathMode(cublasHandle_t handle, int *mode)
+{
+    (void)handle;
+    if (mode) *mode = 0;  /* CUBLAS_DEFAULT_MATH */
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+/* Safety net: if any actual cuBLAS compute function is called despite MMQ mode,
+ * return NOT_SUPPORTED rather than silently producing wrong results. */
+cublasStatus_t cublasSgemm_v2(cublasHandle_t h, int ta, int tb,
+    int m, int n, int k, const float *alpha,
+    const float *A, int lda, const float *B, int ldb,
+    const float *beta, float *C, int ldc)
+{
+    (void)h;(void)ta;(void)tb;(void)m;(void)n;(void)k;
+    (void)alpha;(void)A;(void)lda;(void)B;(void)ldb;
+    (void)beta;(void)C;(void)ldc;
+    SHIM_LOG("cublasSgemm_v2 called — MMQ bypass should prevent this!");
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasGemmEx(cublasHandle_t h, int ta, int tb,
+    int m, int n, int k, const void *alpha,
+    const void *A, int Atype, int lda,
+    const void *B, int Btype, int ldb,
+    const void *beta, void *C, int Ctype, int ldc,
+    int computeType, int algo)
+{
+    (void)h;(void)ta;(void)tb;(void)m;(void)n;(void)k;
+    (void)alpha;(void)A;(void)Atype;(void)lda;
+    (void)B;(void)Btype;(void)ldb;
+    (void)beta;(void)C;(void)Ctype;(void)ldc;
+    (void)computeType;(void)algo;
+    SHIM_LOG("cublasGemmEx called — MMQ bypass should prevent this!");
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t h, int ta, int tb,
+    int m, int n, int k, const void *alpha,
+    const void *A, int Atype, int lda, long long strideA,
+    const void *B, int Btype, int ldb, long long strideB,
+    const void *beta, void *C, int Ctype, int ldc, long long strideC,
+    int batchCount, int computeType, int algo)
+{
+    (void)h;(void)ta;(void)tb;(void)m;(void)n;(void)k;
+    (void)alpha;(void)A;(void)Atype;(void)lda;(void)strideA;
+    (void)B;(void)Btype;(void)ldb;(void)strideB;
+    (void)beta;(void)C;(void)Ctype;(void)ldc;(void)strideC;
+    (void)batchCount;(void)computeType;(void)algo;
+    SHIM_LOG("cublasGemmStridedBatchedEx called — MMQ bypass should prevent this!");
+    return CUBLAS_STATUS_NOT_SUPPORTED;
 }
 
 /* ================================================================
