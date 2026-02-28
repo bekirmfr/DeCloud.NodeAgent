@@ -40,8 +40,57 @@ static int g_transport_initialized = 0;
  * Helpers
  * ================================================================ */
 
+/* Config file fallback path -- read when env vars are missing.
+ * Ollama's runner subprocess strips non-OLLAMA_ env vars, so
+ * DECLOUD_GPU_PROXY_* are lost. This file provides a fallback. */
+#define GPU_PROXY_CONFIG_FILE "/etc/decloud/gpu-proxy.env"
+
+static int g_config_file_loaded = 0;
+
+/* Load KEY=VALUE pairs from the config file into the environment.
+ * Only sets vars that are NOT already in the environment, so
+ * explicit env vars always take precedence. */
+static void transport_load_config_file(void)
+{
+    if (g_config_file_loaded) return;
+    g_config_file_loaded = 1;
+
+    FILE *f = fopen(GPU_PROXY_CONFIG_FILE, "r");
+    if (!f) return;
+
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        /* Strip leading whitespace */
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+
+        /* Skip empty lines and comments */
+        if (*p == '\0' || *p == '\n' || *p == '#') continue;
+
+        /* Strip trailing newline */
+        char *nl = strchr(p, '\n');
+        if (nl) *nl = '\0';
+
+        /* Find '=' separator */
+        char *eq = strchr(p, '=');
+        if (!eq) continue;
+
+        /* Split into key and value */
+        *eq = '\0';
+        char *key = p;
+        char *val = eq + 1;
+
+        /* Only set if not already in environment (env takes precedence) */
+        if (!getenv(key)) {
+            setenv(key, val, 0);
+        }
+    }
+    fclose(f);
+}
+
 static int transport_get_env_int(const char *name, int def)
 {
+    transport_load_config_file();
     const char *val = getenv(name);
     return val ? atoi(val) : def;
 }
@@ -147,6 +196,9 @@ static int transport_try_vsock(int port)
 
 int transport_ensure_connected(void)
 {
+    /* Load config from file if env vars are missing (Ollama strips them) */
+    transport_load_config_file();
+
     pthread_mutex_lock(&g_transport_lock);
     if (g_transport_fd >= 0) {
         pthread_mutex_unlock(&g_transport_lock);
