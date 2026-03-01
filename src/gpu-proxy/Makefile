@@ -187,4 +187,6 @@ install-all-shims-compat: all-shims-compat
 	# NVML shim (libnvidia-ml.so.1)
 	install -m 644 $(NVML_SHIM) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libnvidia-ml.so.1
 	ln -sf libnvidia-ml.so.1 $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libnvidia-ml.so
+	cp $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libdecloud_cuda_shim.so \
+	   $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcudart.so.12
 	@echo "All compat shims installed to $(PREFIX)/lib/decloud-gpu-shim (VM delivery only)"
