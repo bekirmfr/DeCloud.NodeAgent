@@ -41,6 +41,11 @@ public class GpuProxyService
     public string ShimShareDir { get; set; } = "/usr/local/lib/decloud-gpu-shim";
 
     /// <summary>
+    /// Path to the gpu-proxy source tree for auto-rebuilding missing shims.
+    /// </summary>
+    public string GpuProxySrcDir { get; set; } = "/opt/decloud/DeCloud.NodeAgent/src/gpu-proxy";
+
+    /// <summary>
     /// Port the daemon listens on (vsock port, must match proto/gpu_proxy_proto.h).
     /// </summary>
     public int DaemonPort { get; set; } = 9999;
@@ -75,10 +80,23 @@ public class GpuProxyService
     }
 
     /// <summary>
-    /// Ensure the host-side 9p share directory exists and contains the shim .so.
-    /// Called before starting the daemon so that VMs can mount the share at boot.
+    /// Expected shim artifacts in the 9p share directory.
+    /// If any are missing, triggers a rebuild from source.
     /// </summary>
-    private void EnsureShimShareDirectory()
+    private static readonly string[] RequiredShimFiles =
+    {
+        "libdecloud_cuda_shim.so",
+        "libcuda.so.1",
+        "libnvidia-ml.so.1",
+        "libcublas_stub.so"
+    };
+
+    /// <summary>
+    /// Ensure the host-side 9p share directory exists and contains all shim artifacts.
+    /// Self-healing: if any artifacts are missing and gpu-proxy source is available,
+    /// triggers 'make install-all-shims-compat' to rebuild and install automatically.
+    /// </summary>
+    private async Task EnsureShimShareDirectoryAsync()
     {
         try
         {
@@ -89,58 +107,64 @@ public class GpuProxyService
                     "Created GPU shim share directory: {Dir}", ShimShareDir);
             }
 
-            var targetPath = Path.Combine(ShimShareDir, "libdecloud_cuda_shim.so");
-            if (File.Exists(ShimPath) && !File.Exists(targetPath))
+            // Check which artifacts are missing
+            var missing = RequiredShimFiles
+                .Where(f => !File.Exists(Path.Combine(ShimShareDir, f)))
+                .ToList();
+
+            if (missing.Count == 0)
             {
-                File.Copy(ShimPath, targetPath, overwrite: true);
-                _logger.LogInformation(
-                    "Copied CUDA shim to 9p share: {Src} -> {Dst}",
-                    ShimPath, targetPath);
+                _logger.LogDebug("All GPU shim artifacts present in {Dir}", ShimShareDir);
+                return;
             }
-            else if (!File.Exists(ShimPath))
+
+            // Check if gpu-proxy source is available for rebuild
+            var makefilePath = Path.Combine(GpuProxySrcDir, "Makefile");
+            if (!File.Exists(makefilePath))
             {
                 _logger.LogWarning(
-                    "CUDA shim .so not found at {Path}. " +
-                    "VMs in proxy mode will not have GPU access until " +
-                    "the shim is built and placed at this path.",
-                    ShimPath);
+                    "GPU shim artifacts missing: {Missing}. " +
+                    "Source not found at {Src} — cannot auto-rebuild.",
+                    string.Join(", ", missing), GpuProxySrcDir);
+                return;
             }
 
-            // Copy Driver API shim (libcuda.so.1) for Ollama/ML framework dlopen discovery
-            var shimDir = Path.GetDirectoryName(ShimPath)!;
-            var driverShimSrc = Path.Combine(shimDir, "libcuda.so.1");
-            var driverShimDst = Path.Combine(ShimShareDir, "libcuda.so.1");
-            if (File.Exists(driverShimSrc) && !File.Exists(driverShimDst))
-            {
-                File.Copy(driverShimSrc, driverShimDst, overwrite: true);
-                _logger.LogInformation(
-                    "Copied Driver API shim to 9p share: {Src} -> {Dst}",
-                    driverShimSrc, driverShimDst);
-            }
+            _logger.LogInformation(
+                "GPU shim artifacts missing from 9p share: {Missing}. Triggering rebuild...",
+                string.Join(", ", missing));
 
-            // Copy NVML shim (libnvidia-ml.so.1) for VRAM monitoring
-            var nvmlShimSrc = Path.Combine(shimDir, "libnvidia-ml.so.1");
-            var nvmlShimDst = Path.Combine(ShimShareDir, "libnvidia-ml.so.1");
-            if (File.Exists(nvmlShimSrc) && !File.Exists(nvmlShimDst))
-            {
-                File.Copy(nvmlShimSrc, nvmlShimDst, overwrite: true);
-                _logger.LogInformation(
-                    "Copied NVML shim to 9p share: {Src} -> {Dst}",
-                    nvmlShimSrc, nvmlShimDst);
-            }
+            // Detect Docker availability for compat builds
+            var dockerCheck = await _executor.ExecuteAsync(
+                "docker", "info", CancellationToken.None);
+            var makeTarget = dockerCheck.Success
+                ? "install-all-shims-compat"
+                : "install";
 
-            // Copy cuBLAS stub (libcublas_stub.so) — separate build with correct
-            // @@libcublas.so.12 version tags. Copying the cuda shim as libcublas.so.12
-            // gives wrong tags (@@libcudart.so.12) causing silent dlopen failure.
-            // See: GPU_PROXY_DEBUGGING_JOURNAL.md, Problem 17 (Day 4)
-            var cublasStubSrc = Path.Combine(shimDir, "libcublas_stub.so");
-            var cublasStubDst = Path.Combine(ShimShareDir, "libcublas_stub.so");
-            if (File.Exists(cublasStubSrc) && !File.Exists(cublasStubDst))
+            // 'make install-all-shims-compat' builds ALL shims in Docker (glibc 2.31)
+            // and installs directly to /usr/local/lib/decloud-gpu-shim/ (= ShimShareDir).
+            var result = await _executor.ExecuteAsync(
+                "make", $"-C {GpuProxySrcDir} {makeTarget}",
+                CancellationToken.None);
+
+            if (result.Success)
             {
-                File.Copy(cublasStubSrc, cublasStubDst, overwrite: true);
-                _logger.LogInformation(
-                    "Copied cuBLAS stub to 9p share: {Src} -> {Dst}",
-                    cublasStubSrc, cublasStubDst);
+                var stillMissing = RequiredShimFiles
+                    .Where(f => !File.Exists(Path.Combine(ShimShareDir, f)))
+                    .ToList();
+
+                if (stillMissing.Count == 0)
+                    _logger.LogInformation(
+                        "GPU shims rebuilt and installed to {Dir}", ShimShareDir);
+                else
+                    _logger.LogWarning(
+                        "GPU shim rebuild completed but still missing: {Missing}",
+                        string.Join(", ", stillMissing));
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "GPU shim rebuild failed (exit={Exit}): {Err}",
+                    result.ExitCode, result.StandardError?.Trim());
             }
         }
         catch (Exception ex)
@@ -173,8 +197,8 @@ public class GpuProxyService
                 return false;
             }
 
-            // Ensure the 9p share directory is ready
-            EnsureShimShareDirectory();
+            // Ensure the 9p share directory is ready (auto-rebuilds missing shims)
+            await EnsureShimShareDirectoryAsync();
 
             // Check daemon binary exists
             if (!File.Exists(DaemonPath))
