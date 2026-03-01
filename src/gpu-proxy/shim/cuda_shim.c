@@ -39,9 +39,13 @@ static void shim_init(void)
      * cuBLAS requires cuGetExportTable (private driver internals) which
      * cannot be proxied at function level. */
     setenv("GGML_CUDA_FORCE_MMQ",      "1", 0);  /* 0 = don't override if already set */
+
+    /* Hint only — Ollama v0.17 ignores this (USE_GRAPHS=1 hardcoded).
+     * Graph stubs below handle this by returning cudaSuccess as no-ops. */
     setenv("GGML_CUDA_DISABLE_GRAPHS",  "1", 1);
+
+    /* Peer copies can't work across proxy boundaries */
     setenv("GGML_CUDA_NO_PEER_COPY",    "1", 0);
-    setenv("CUDA_LAUNCH_BLOCKING",       "1", 0);
 }
 
 #define SHIM_LOG(fmt, ...) \
@@ -192,8 +196,6 @@ static int g_function_count = 0;
 static DeferredModule g_modules[MAX_DEFERRED_MODULES];
 static int g_module_count = 0;
 static int g_current_module_index = -1;
-static uint64_t g_current_module_handle = 0;
-static int g_module_registered = 0;
 
 /* ================================================================
  * Connection state
@@ -1385,10 +1387,20 @@ cudaError_t cudaFuncGetAttributes(cudaFuncAttributes_t *attr, const void *func)
     return cudaSuccess;
 }
 
-/* Graph API stubs */
+/* Graph API stubs — ALL return cudaSuccess (no-ops).
+ *
+ * Ollama v0.17 hardcodes USE_GRAPHS=1, ignoring GGML_CUDA_DISABLE_GRAPHS.
+ * ggml wraps graph calls in CUDA_CHECK() which aborts on ANY non-zero return.
+ * Since kernels execute eagerly via RPC (not deferred), graph capture is
+ * meaningless — we let the entire graph lifecycle succeed as silent no-ops.
+ */
 typedef void *cudaGraph_t;
 typedef void *cudaGraphExec_t;
 typedef int cudaGraphExecUpdateResult;
+
+/* Dummy handles — must be non-NULL so ggml doesn't treat as allocation failure */
+static int g_dummy_graph = 0xDEC1GRAF;
+static int g_dummy_graph_exec = 0xDEC1GEXE;
 
 cudaError_t cudaGraphDestroy(cudaGraph_t graph)
 {
@@ -1406,22 +1418,23 @@ cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
                                  cudaGraphExecUpdateResult *updateResult_out)
 {
     (void)hGraphExec; (void)hGraph;
-    if (updateResult_out) *updateResult_out = 0;
-    return 801;
+    if (updateResult_out) *updateResult_out = 0;  /* success */
+    return cudaSuccess;
 }
 
 cudaError_t cudaGraphInstantiate(cudaGraphExec_t *pGraphExec, cudaGraph_t graph,
                                   void *pErrorNode, char *pLogBuffer, size_t bufferSize)
 {
     (void)graph; (void)pErrorNode; (void)pLogBuffer; (void)bufferSize;
-    if (pGraphExec) *pGraphExec = NULL;
-    return 801;
+    if (pGraphExec) *pGraphExec = (cudaGraphExec_t)&g_dummy_graph_exec;
+    return cudaSuccess;
 }
 
 cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream)
 {
     (void)graphExec; (void)stream;
-    return 801;
+    /* No-op: kernels already executed eagerly via RPC during "capture" */
+    return cudaSuccess;
 }
 
 /* Managed memory */
@@ -1526,15 +1539,15 @@ typedef enum {
 cudaError_t cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode_t mode)
 {
     (void)stream; (void)mode;
-    SHIM_LOG("cudaStreamBeginCapture: returning error to force non-graph path");
-    return cudaErrorNotSupported;
+    /* No-op: kernels will execute eagerly via RPC regardless of capture state */
+    return cudaSuccess;
 }
 
 cudaError_t cudaStreamEndCapture(cudaStream_t stream, cudaGraph_t *pGraph)
 {
     (void)stream;
-    if (pGraph) *pGraph = NULL;
-    return 801;
+    if (pGraph) *pGraph = (cudaGraph_t)&g_dummy_graph;
+    return cudaSuccess;
 }
 
 cudaError_t cudaStreamIsCapturing(cudaStream_t stream, cudaStreamCaptureStatus_t *pCaptureStatus)
