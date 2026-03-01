@@ -128,6 +128,20 @@ public class GpuProxyService
                     "Copied NVML shim to 9p share: {Src} -> {Dst}",
                     nvmlShimSrc, nvmlShimDst);
             }
+
+            // Copy cuBLAS stub (libcublas_stub.so) — separate build with correct
+            // @@libcublas.so.12 version tags. Copying the cuda shim as libcublas.so.12
+            // gives wrong tags (@@libcudart.so.12) causing silent dlopen failure.
+            // See: GPU_PROXY_DEBUGGING_JOURNAL.md, Problem 17 (Day 4)
+            var cublasStubSrc = Path.Combine(shimDir, "libcublas_stub.so");
+            var cublasStubDst = Path.Combine(ShimShareDir, "libcublas_stub.so");
+            if (File.Exists(cublasStubSrc) && !File.Exists(cublasStubDst))
+            {
+                File.Copy(cublasStubSrc, cublasStubDst, overwrite: true);
+                _logger.LogInformation(
+                    "Copied cuBLAS stub to 9p share: {Src} -> {Dst}",
+                    cublasStubSrc, cublasStubDst);
+            }
         }
         catch (Exception ex)
         {

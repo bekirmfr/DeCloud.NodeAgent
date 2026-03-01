@@ -1991,6 +1991,13 @@ public class LibvirtVmManager : IVmManager
         echo 'NVML shim installed (libnvidia-ml.so.1)'
       fi
     fi
+    # Install cuBLAS stub (separate build with correct @@libcublas.so.12 version tags)
+    # The cuda shim has @@libcudart.so.12 tags — using it as libcublas.so.12 causes
+    # silent dlopen failure of libggml-cuda.so due to version tag mismatch.
+    if [ -f /run/decloud/libcublas_stub.so ]; then
+      cp /run/decloud/libcublas_stub.so /usr/local/lib/
+      echo 'cuBLAS stub installed (libcublas_stub.so)'
+    fi
     ldconfig 2>/dev/null || true
   - |
     # Create dummy NVIDIA device nodes (needed by frameworks that stat these).
