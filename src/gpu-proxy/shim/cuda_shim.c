@@ -1399,8 +1399,8 @@ typedef void *cudaGraphExec_t;
 typedef int cudaGraphExecUpdateResult;
 
 /* Dummy handles — must be non-NULL so ggml doesn't treat as allocation failure */
-static int g_dummy_graph = 0xDEC1GRAF;
-static int g_dummy_graph_exec = 0xDEC1GEXE;
+static int g_dummy_graph = 0xDEC10001;
+static int g_dummy_graph_exec = 0xDEC10002;
 
 cudaError_t cudaGraphDestroy(cudaGraph_t graph)
 {
