@@ -63,6 +63,7 @@ typedef int cudaError_t;
 #define cudaSuccess 0
 #define cudaErrorInvalidValue 1
 #define cudaErrorMemoryAllocation 2
+#define cudaErrorInvalidDeviceFunction 8
 #define cudaErrorNoDevice 100
 
 typedef void *cudaStream_t;
