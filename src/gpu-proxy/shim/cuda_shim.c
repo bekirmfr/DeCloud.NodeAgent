@@ -39,7 +39,7 @@ static void shim_init(void)
      * cuBLAS requires cuGetExportTable (private driver internals) which
      * cannot be proxied at function level. */
     setenv("GGML_CUDA_FORCE_MMQ",      "1", 0);  /* 0 = don't override if already set */
-    setenv("GGML_CUDA_DISABLE_GRAPHS",  "1", 0);
+    setenv("GGML_CUDA_DISABLE_GRAPHS",  "1", 1);
     setenv("GGML_CUDA_NO_PEER_COPY",    "1", 0);
     setenv("CUDA_LAUNCH_BLOCKING",       "1", 0);
 }
@@ -64,6 +64,7 @@ typedef int cudaError_t;
 #define cudaErrorInvalidValue 1
 #define cudaErrorMemoryAllocation 2
 #define cudaErrorInvalidDeviceFunction 8
+#define cudaErrorNotSupported 71
 #define cudaErrorNoDevice 100
 
 typedef void *cudaStream_t;
@@ -1525,7 +1526,8 @@ typedef enum {
 cudaError_t cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode_t mode)
 {
     (void)stream; (void)mode;
-    return 801;
+    SHIM_LOG("cudaStreamBeginCapture: returning error to force non-graph path");
+    return cudaErrorNotSupported;
 }
 
 cudaError_t cudaStreamEndCapture(cudaStream_t stream, cudaGraph_t *pGraph)
