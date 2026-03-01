@@ -37,11 +37,12 @@ SHIM_STATIC := $(BUILD_DIR)/libdecloud_cuda_shim-static.so
 SHIM_COMPAT := $(BUILD_DIR)/libdecloud_cuda_shim-compat.so
 DRIVER_SHIM := $(BUILD_DIR)/libcuda.so.1
 NVML_SHIM   := $(BUILD_DIR)/libnvidia-ml.so.1
+CUBLAS_STUB := $(BUILD_DIR)/libcublas_stub.so
 
 # Transport header dependency (shared by all shims)
 TRANSPORT_DEPS := shim/transport.h shim/transport.c proto/gpu_proxy_proto.h
 
-.PHONY: all daemon shim shim-compat all-shims-compat test clean install \
+.PHONY: all daemon shim shim-compat all-shims-compat cublas-stub test clean install \
         install-shim-compat install-all-shims-compat
 
 all: daemon shim
@@ -94,6 +95,22 @@ $(NVML_SHIM): shim/nvml_shim.c $(TRANSPORT_DEPS) | $(BUILD_DIR)
 		-lpthread
 
 # ----------------------------------------------------------------
+# cuBLAS Stub (libcublas.so.12): separate library with correct
+# @@libcublas.so.12 version tags. Required because libggml-cuda.so
+# has DT_NEEDED: libcublas.so.12 with versioned symbol imports.
+# Copying the cuda_shim binary as libcublas.so.12 gives wrong tags
+# (@@libcudart.so.12) causing silent dlopen failure.
+# See: GPU_PROXY_DEBUGGING_JOURNAL.md, Problem 17 (Day 4)
+# ----------------------------------------------------------------
+cublas-stub: $(CUBLAS_STUB)
+
+$(CUBLAS_STUB): stubs/cublas_stub.c stubs/libcublas.version | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -shared -fPIC \
+		-o $@ $< \
+		-Wl,-soname,libcublas.so.12 \
+		-Wl,--version-script=stubs/libcublas.version
+
+# ----------------------------------------------------------------
 # Compat shims: built inside Ubuntu 20.04 container for universal
 # glibc compatibility (glibc 2.31+). Requires: docker
 #
@@ -130,11 +147,17 @@ all-shims-compat: | $(BUILD_DIR)
 	           gcc -Wall -Wextra -O2 -I/src -shared -fPIC \
 	               -o build/libnvidia-ml.so.1 \
 	               shim/nvml_shim.c -lpthread && \
-	           ln -sf libnvidia-ml.so.1 build/libnvidia-ml.so"
+	           ln -sf libnvidia-ml.so.1 build/libnvidia-ml.so && \
+	           gcc -Wall -Wextra -O2 -shared -fPIC \
+	               -Wl,-soname,libcublas.so.12 \
+	               -Wl,--version-script=stubs/libcublas.version \
+	               -o build/libcublas_stub.so \
+	               stubs/cublas_stub.c"
 	@echo "All compat shims built (glibc 2.31+, universal):"
 	@echo "  $(BUILD_DIR)/libdecloud_cuda_shim-compat.so  (Runtime API, LD_PRELOAD)"
 	@echo "  $(BUILD_DIR)/libcuda.so.1                    (Driver API, dlopen target)"
 	@echo "  $(BUILD_DIR)/libnvidia-ml.so.1               (NVML, dlopen target)"
+	@echo "  $(BUILD_DIR)/libcublas_stub.so               (cuBLAS stub, @@libcublas.so.12 tags)"
 
 # ----------------------------------------------------------------
 # Tests: no CUDA dependency — runs on any machine
@@ -187,6 +210,9 @@ install-all-shims-compat: all-shims-compat
 	# NVML shim (libnvidia-ml.so.1)
 	install -m 644 $(NVML_SHIM) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libnvidia-ml.so.1
 	ln -sf libnvidia-ml.so.1 $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libnvidia-ml.so
+	# cuBLAS stub (separate build with correct @@libcublas.so.12 version tags)
+	install -m 644 $(CUBLAS_STUB) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcublas_stub.so
+	# Convenience copies for VM deployment
 	cp $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libdecloud_cuda_shim.so \
 	   $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcudart.so.12
 	@echo "All compat shims installed to $(PREFIX)/lib/decloud-gpu-shim (VM delivery only)"

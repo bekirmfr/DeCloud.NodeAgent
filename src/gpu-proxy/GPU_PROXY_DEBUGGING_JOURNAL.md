@@ -2,17 +2,19 @@
 
 **Date Range:** 2026-02-27 through 2026-03-01
 **Authors:** BMA + Claude AI assistant
-**Status:** Active — "True GPU Presence" design ready for implementation
+**Status:** Active — "True GPU Presence" implementation is the final remaining step
 
 ---
 
 ## Executive Summary
 
-Over three days of intensive debugging, we advanced the DeCloud GPU proxy from initial prototype to near-functional GPU inference. Day 1-2 solved foundational issues (symbol versioning, transport, GLIBC compat, CUDA graph blocking) and hit the `cuGetExportTable` wall — cuBLAS requires private NVIDIA driver internals that cannot be proxied at function level.
+Over four days of intensive debugging, we advanced the DeCloud GPU proxy from initial prototype to near-functional GPU inference. Days 1-2 solved foundational issues (symbol versioning, transport, GLIBC compat, CUDA graph blocking) and hit the `cuGetExportTable` wall — cuBLAS requires private NVIDIA driver internals that cannot be proxied at function level.
 
 Day 3 broke through the cuBLAS wall by combining three techniques: (1) constructor-based `setenv()` to force ggml's MMQ code path, (2) cuBLAS stub libraries replacing the bundled NVIDIA binaries via DT_NEEDED resolution, and (3) CUDA graph no-op stubs. This achieved **model loading with all 17 layers offloaded to GPU VRAM** — a major milestone proving the proxy infrastructure works end-to-end for memory management.
 
-**Final blocker:** `cudaFuncGetAttributes` returns fake values because fat binaries are stored locally but never uploaded to the daemon until `cudaLaunchKernel`. The MMQ kernel selector queries kernel attributes before any launch, gets zeros, and crashes (`mmq_x_best=0`). The fix is to proxy `cudaFuncGetAttributes` through the daemon where real kernel attributes can be queried — documented in `GPU_PROXY_TRUE_PRESENCE.md`.
+**Day 4 (Session 2, 2026-03-01)** resolved a critical silent failure: the CUDA backend wasn't loading in Ollama's runner subprocess because the cuBLAS stub had wrong ELF version tags (`@@libcudart.so.12` instead of `@@libcublas.so.12`). Building a separate `cublas_stub.c` with proper version script and soname fixed this. GPU discovery now works fully through systemd — Ollama detects "NVIDIA GeForce RTX 4060 Laptop GPU" with 6.9 GiB available at every restart. End-to-end inference remains blocked by `mmq_x_best=0` — the final blocker requiring True GPU Presence.
+
+**Final blocker:** `cudaFuncGetAttributes` returns fake values because fat binaries are stored locally but never uploaded to the daemon until `cudaLaunchKernel`. The MMQ kernel selector queries kernel attributes before any launch, gets identical fake values for all variants, and crashes (`mmq_x_best=0`). The fix is to proxy `cudaFuncGetAttributes` through the daemon where real kernel attributes can be queried — documented in `GPU_PROXY_TRUE_PRESENCE.md`.
 
 **Key conclusion:** The API-level shimming approach works for ~95% of the CUDA surface. The remaining 5% (kernel attribute queries, occupancy calculations) requires proxying fat binary registration eagerly rather than lazily, plus two new protocol commands. This is a surgical fix, not a rewrite.
 
@@ -49,110 +51,20 @@ Day 3 broke through the cuBLAS wall by combining three techniques: (1) construct
 | CUDA Driver Shim | `shim/cuda_driver_shim.c` | Intercepts `cu*()` API calls, device enumeration |
 | NVML Shim | `shim/nvml_shim.c` | Fakes GPU management/monitoring info |
 | GPU Proxy Daemon | `daemon/gpu_proxy_daemon.c` | Host-side daemon executing real CUDA operations |
-| Transport Layer | `shim/transport.{c,h}` | TCP/vsock RPC communication |
-| Protocol | `proto/gpu_proxy_proto.h` | Binary wire protocol definitions |
-| cuBLAS Stub | (standalone .c) | Minimal stub replacing bundled libcublas.so.12 |
-
-### Test Environment
-
-- **Host:** MSI laptop, Ubuntu 24.04, NVIDIA RTX 4060 Laptop GPU (8GB, compute 8.9), GLIBC 2.39
-- **VM:** ai-chatbot-a813, Ubuntu 22.04, GLIBC 2.35, no physical GPU
-- **Node Agent:** srv022010 running DeCloud.NodeAgent
-- **Test App:** Ollama v0.17 with llama3.2:1b and llama3.2:3b models
+| Transport Layer | `shim/transport.{c,h}` | vsock/TCP connection management |
+| Protocol | `proto/gpu_proxy_proto.h` | Wire protocol structs and command IDs |
+| cuBLAS Stub | `stubs/cublas_stub.c` | Separate library with correct `@@libcublas.so.12` version tags |
 
 ---
 
-## 2. Chronological Problem Log
+## 2. Problem Log
 
-### Day 1 (2026-02-27): Foundation
+### Day 1-2 (2026-02-27 through 2026-02-28): Foundation
 
-#### Problem 1: Symbol Versioning Mismatch
-- **Symptom:** `initial_count=0` — Ollama bootstrap found zero GPUs despite shim loading
-- **Root Cause:** cudart shim built without `--version-script`, so symbols lacked `@@libcudart.so.12` version tags. libggml-cuda.so requires versioned symbols.
-- **Fix:** Added `libcudart.version` linker script with version tags
-- **Lesson:** ELF symbol versioning is mandatory for drop-in library replacement
+#### Problem 1-13: [See previous journal entries]
+Issues covering: transport initialization, vsock configuration, GLIBC 2.38 compatibility, symbol versioning, LD_PRELOAD mechanics, CUDA graph API conflicts, cuGetExportTable wall.
 
-#### Problem 2: Stack Buffer Overflow in Device Properties
-- **Symptom:** Stack corruption / crash during `cudaGetDeviceProperties`
-- **Root Cause:** ggml allocates only 1096 bytes for `cudaDeviceProp` on the stack. Our shim memset the full struct (848+ bytes) which overflowed
-- **Fix:** Added `SAFE_PROP_MEMSET_SIZE` (768 bytes), fill only safe region
-- **Lesson:** ggml uses hardcoded byte offsets (major@360, minor@364, etc.), not the full struct
-
-#### Problem 3: Bootstrap Timeout
-- **Symptom:** Ollama killed bootstrap subprocess before GPU detection completed
-- **Root Cause:** RPC connection during `dlopen` added latency exceeding Ollama's 30-second bootstrap timeout
-- **Fix:** Lazy initialization — zero RPC during library load, connect on first actual call
-- **Lesson:** Shim initialization must be zero-cost at load time
-
-### Day 2 Morning (2026-02-28): Deployment & Connectivity
-
-#### Problem 4: Library Poisoning on Host
-- **Symptom:** GPU proxy daemon crash loop on srv022010
-- **Root Cause:** Shim `.so` files installed to host system paths (`/usr/local/lib/`) instead of VM-only paths, poisoning the daemon's own CUDA library resolution
-- **Fix:** Isolated shims to VM-only deployment via 9p filesystem share at `/usr/local/lib/decloud-gpu-shim/`
-- **Lesson:** Shims must NEVER be installed on the host — they're VM-only components
-
-#### Problem 5: LD_PRELOAD Not Reaching Ollama
-- **Symptom:** GPU detected manually but not through systemd service
-- **Root Cause:** `LD_PRELOAD` environment variable not configured in systemd service override
-- **Fix:** Added `gpu-proxy.conf` systemd drop-in with all required environment variables
-- **Lesson:** Ollama's bootstrap subprocess strips non-OLLAMA prefixed env vars; shim must read config from `/etc/decloud/gpu-proxy.env` as fallback
-
-#### Problem 6: TCP Firewall Blocking Proxy
-- **Symptom:** Shim connected but received no data from daemon
-- **Root Cause:** Missing `iptables` rule for port 9999 between VM network (192.168.122.0/24) and host
-- **Fix:** Added `iptables -I INPUT -s 192.168.122.0/24 -p tcp --dport 9999 -j ACCEPT`
-- **Lesson:** KVM bridge networking requires explicit firewall rules for VM↔host communication
-
-#### Problem 7: Config File Permissions
-- **Symptom:** Shim couldn't read proxy config as ollama user
-- **Root Cause:** `/etc/decloud/gpu-proxy.env` had restrictive permissions (600)
-- **Fix:** Changed to 644 (world-readable, since it contains only connection info, not secrets)
-- **Lesson:** Config files read by service users need appropriate permissions
-
-### Day 2 Afternoon: The CUDA Graph Saga
-
-#### Problem 8: SIGSEGV at addr=0x10 During Compute Warmup
-- **Symptom:** GPU detected, model loaded, KV cache allocated, then SIGSEGV during graph reservation
-- **Root Cause (initial theory):** CUDA graph API stubs returning `cudaSuccess` with NULL handles
-- **Partial Fix:** Changed cudart graph stubs to return error code 801 (`cudaErrorNotSupported`)
-
-#### Problem 9: Driver API Graph Functions Bypassing cudart Stubs
-- **Symptom:** SIGSEGV persisted even with cudart graph stubs fixed
-- **Root Cause:** ggml-cuda calls driver API (`cu*`) graph functions through `cuGetProcAddress`, bypassing our cudart stubs entirely. The generic stub in `cuGetProcAddress` returned `CUDA_SUCCESS` for all unknown functions.
-- **Fix:** Added `graph_not_supported_stub()` returning 801, intercepted `cuGraph*`, `cuStreamBeginCapture`, `cuStreamEndCapture` in `cuGetProcAddress`
-- **Lesson:** CUDA has TWO parallel API layers (Runtime and Driver). Both must be handled.
-
-#### Problem 10: GLIBC 2.39 vs 2.35 Incompatibility
-- **Symptom:** `LD_PRELOAD` caused immediate crash: `GLIBC_2.38 not found`
-- **Root Cause:** Shim compiled on MSI (Ubuntu 24.04, GLIBC 2.39) used `__isoc23_sscanf` (C23 function). VM runs Ubuntu 22.04 (GLIBC 2.35). LD_PRELOAD forces eager symbol resolution, exposing the mismatch.
-- **Fix:** Docker-based compat build (`make all-shims-compat`) using Ubuntu 20.04 container (GLIBC 2.31+)
-- **Lesson:** Cross-compilation between GLIBC versions requires explicit targeting. Docker compat builds solve this permanently.
-
-#### Problem 11: Capture-Query Functions Need Specific Stubs
-- **Symptom:** After blocking graph creation, `cublasCreate_v2` failed with "library was not initialized"
-- **Root Cause:** Blocking `cuStreamIsCapturing` and `cuStreamGetCaptureInfo` with error codes broke cuBLAS initialization, which legitimately queries capture state during setup
-- **Fix:** Added specific stubs returning "not capturing" status instead of errors
-- **Lesson:** Must distinguish between "this operation is not supported" vs "this operation succeeds trivially"
-
-#### Problem 12: cuGraphics* vs cuGraph* Name Collision
-- **Symptom:** Graph blocking `strncmp(symbol, "cuGraph", 7)` also blocked OpenGL/EGL interop functions
-- **Fix:** Added exclusion: `strncmp(symbol, "cuGraphics", 10) != 0` before blocking
-- **Lesson:** CUDA namespace has overlapping prefixes — filtering must be precise
-
-### Day 2 Evening: The cuGetExportTable Wall
-
-#### Problem 13: cuGetExportTable — The Unproxiable API ⭐
-- **Symptom:** After fixing all graph and capture stubs, SIGSEGV persisted at addr=0x10
-- **Root Cause:** `cuGetExportTable` hit the generic stub, returning `CUDA_SUCCESS` without setting the output pointer. cuBLAS calls this to get internal NVIDIA function tables. With success but NULL pointer, cuBLAS dereferenced `NULL+0x10` → crash.
-- **Fix attempted:** Return `CUDA_ERROR_NOT_FOUND` from `cuGetExportTable`
-- **Result:** cuBLAS then failed with "library was not initialized" — it requires the internal function tables and has no fallback
-- **Fix attempted:** `GGML_CUDA_FORCE_MMQ=1` to bypass cuBLAS entirely
-- **Result:** Environment variable not propagated to runner subprocess; ggml reported `FORCE_MMQ: no`
-
-**Day 2 conclusion:** cuBLAS requires internal driver function tables that are not part of any public API, contain host-local function pointers, are version-specific and undocumented, and essential for initialization with no fallback.
-
-### Day 3 (2026-03-01): Breakthrough and True GPU Presence
+### Day 3 (2026-03-01, Session 1): Breakthrough and True GPU Presence
 
 #### Problem 14: Environment Variables Not Reaching Runner Subprocess
 - **Symptom:** `GGML_CUDA_FORCE_MMQ=1` set in systemd but ggml reports `FORCE_MMQ: no`
@@ -177,22 +89,94 @@ Day 3 broke through the cuBLAS wall by combining three techniques: (1) construct
 #### Problem 16: CUDA Graph Capture Returning Error 801
 - **Symptom:** `cudaStreamBeginCapture` returning 801 caused ggml to abort via CUDA_CHECK macro
 - **Root Cause:** Despite `GGML_CUDA_DISABLE_GRAPHS=1` in the constructor, Ollama v0.17's `ggml_cuda_init` still showed `CUDA.0.USE_GRAPHS=1`. The Ollama binary may override or ignore the env var.
-- **Fix:** Changed all graph stubs from returning 801 to returning `cudaSuccess` (no-op). Graph capture becomes a no-op sequence: BeginCapture→Success, EndCapture→Success (returns dummy handle), Instantiate→Success (returns dummy exec), Launch→Success (no-op, kernels already ran eagerly during "capture").
-- **Lesson:** For proxy architecture, graph stubs returning success as no-ops is safe because the proxy executes kernels eagerly during the "capture" phase. Graph "replay" is just a no-op since work was already done.
+- **Fix:** Changed all graph stubs from returning 801 to returning `cudaSuccess` (no-op). Graph capture becomes a silent no-op since kernels execute eagerly via RPC anyway.
+- **Lesson:** Never return error codes from graph APIs when the caller wraps them in CUDA_CHECK. No-op success is always safer.
 
-#### Problem 17: MMQ Kernel Selection Crash — `mmq_x_best=0` ⭐⭐
-- **Symptom:** After all previous fixes, model loads successfully to GPU (all 17 layers offloaded, 1252 MiB buffer), but crashes during first inference with `mmq_x_best=0` fatal error
-- **Root Cause:** ggml's MMQ kernel selector calls `cudaFuncGetAttributes(attr, func_ptr)` on each candidate kernel to read `binaryVersion`, `maxThreadsPerBlock`, `numRegs`. Our shim returned all zeros (`memset(attr, 0, sizeof(*attr))`). With `maxThreadsPerBlock=0`, no kernel qualifies → `mmq_x_best` remains 0 → fatal assertion at `mmq.cuh:3884`.
-- **Fix attempted:** Set hardcoded values: `binaryVersion=89`, `maxThreadsPerBlock=1024`, `numRegs=32`, `maxDynamicSharedSizeBytes=65536`
-- **Result:** Still crashed — values need to match actual kernel properties. The kernel selector also checks occupancy via `cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags`. With fake attributes, the selection algorithm can't find valid kernel variants.
-- **Fix attempted:** `setenv(..., 1)` (force overwrite) for `GGML_CUDA_FORCE_MMQ`
-- **Result:** Log still shows `GGML_CUDA_FORCE_MMQ: no`. Ollama v0.17 may read the flag through a different mechanism than `getenv()`.
+### Day 4 (2026-03-01, Session 2): cuBLAS Version Tag Fix ⭐⭐
 
-#### Problem 18: The Fundamental Realization — Fake Attributes Cannot Work
-- **Symptom:** All hardcoded `cudaFuncGetAttributes` values fail
-- **Root Cause:** The fat binary registration path (`__cudaRegisterFatBinary` → `__cudaRegisterFunction`) stores data locally but defers upload to the daemon until `cudaLaunchKernel`. However, `cudaFuncGetAttributes` is called BEFORE any launch, so the module isn't uploaded yet, and the daemon has no function handle to query real attributes from.
-- **Solution designed:** "True GPU Presence" — trigger `ensure_module_uploaded()` eagerly from `cudaFuncGetAttributes`, then RPC to the daemon for real attributes. The daemon already has `cuModuleLoadData` + `cuModuleGetFunction` working. Two new protocol commands: `GPU_CMD_FUNC_GET_ATTRIBUTES` (0x54) and `GPU_CMD_OCCUPANCY_MAX_BLOCKS` (0x55). See `GPU_PROXY_TRUE_PRESENCE.md` for complete design.
-- **Lesson:** The deferred (lazy) upload pattern was designed for `cudaLaunchKernel`-first workflows. Real applications query kernel attributes during initialization, before any launch. Eager upload on first attribute/occupancy query is the correct design.
+#### Problem 17: cuBLAS Stub Has Wrong ELF Version Tags (Silent CUDA Backend Load Failure)
+- **Symptom:** Ollama's runner subprocess loads CPU backend but silently skips CUDA backend. `/info` endpoint returns `[]` (empty device list). No error messages — completely silent failure.
+- **Discovery Method:** Manual runner subprocess test (`ollama runner --ollama-engine --port 12345`) showed CPU backend loaded but no "loaded CUDA backend" message. strace would have revealed `dlopen(libggml-cuda.so)` failing, but symbol analysis with `nm` was more targeted.
+- **Root Cause:** The cloud-init template copies the same `libdecloud_cuda_shim.so` binary to three locations:
+  ```
+  cuda_v12/libcudart.so.12   → cuda_shim (38KB, correct @@libcudart.so.12 tags)
+  cuda_v12/libcublas.so.12   → cuda_shim (38KB, WRONG @@libcudart.so.12 tags)
+  cuda_v12/libcublasLt.so.12 → cuda_shim (38KB, WRONG @@libcudart.so.12 tags)
+  ```
+  All three inherit `libcudart.so.12` version script. When `dlopen(libggml-cuda.so)` resolves DT_NEEDED, the dynamic linker looks for `cublasCreate_v2@libcublas.so.12` but only finds `cublasCreate_v2@@libcudart.so.12` — version tag mismatch causes symbol resolution failure → `dlopen` returns NULL → CUDA backend silently not loaded.
+- **Symbol Evidence:**
+  ```
+  # What libggml-cuda.so needs:
+  U cublasCreate_v2@libcublas.so.12        ← requires libcublas.so.12 version tag
+  U cublasGemmBatchedEx@libcublas.so.12
+  U cublasGetStatusString@libcublas.so.12
+  U cublasStrsmBatched@libcublas.so.12
+
+  # What our broken stub exported:
+  T cublasCreate_v2@@libcudart.so.12       ← WRONG version tag
+  ```
+- **Fix:** Built a separate `cublas_stub.c` with its own version script:
+  ```bash
+  # Version script (libcublas.version):
+  libcublas.so.12 {
+      global: cublasCreate_v2; cublasDestroy_v2; cublasSetStream_v2;
+              cublasSetMathMode; cublasGetMathMode; cublasGetStatusString;
+              cublasSgemm_v2; cublasGemmEx; cublasGemmStridedBatchedEx;
+              cublasGemmBatchedEx; cublasStrsmBatched;
+      local: *;
+  };
+
+  # Build:
+  gcc -shared -fPIC -o libcublas_stub.so cublas_stub.c \
+      -Wl,-soname,libcublas.so.12 \
+      -Wl,--version-script=libcublas.version
+
+  # Deploy:
+  cp libcublas_stub.so /usr/local/lib/ollama/cuda_v12/libcublas.so.12
+  ```
+- **Verification:**
+  ```bash
+  # Symbol tags now correct:
+  nm -D --defined-only libcublas_stub.so | grep cublas
+  # T cublasCreate_v2@@libcublas.so.12     ← CORRECT
+
+  # libggml-cuda.so loads:
+  LD_LIBRARY_PATH=... python3 -c "ctypes.CDLL('libggml-cuda.so')"
+  # SUCCESS: libggml-cuda.so loaded ✅
+  ```
+- **Lesson:** ELF version tags (`@@soname`) are part of symbol identity. `cublasCreate_v2@libcublas.so.12` ≠ `cublasCreate_v2@@libcudart.so.12` even though the function name is identical. You CANNOT reuse the same binary for libraries with different sonames if the consumer requires versioned symbols. Each library needs its own version script and soname.
+
+#### Problem 18: GPU Discovery Now Works Through Systemd ✅
+- **Symptom (before fix):** `systemctl restart ollama` → `library=cpu`, `initial_count=0`
+- **Fix Applied:** Problem 17 fix (correct cuBLAS version tags)
+- **Result After Fix:** Full GPU discovery through systemd service:
+  ```
+  inference compute: id=GPU-0000b8ff-0100-0000-00c0-000000000000
+    library=CUDA compute=8.9 name=CUDA0
+    description="NVIDIA GeForce RTX 4060 Laptop GPU"
+    driver=12.8 type=discrete total="8.0 GiB" available="6.9 GiB"
+  ```
+- **Confirmed:** Ollama detects the GPU at every `systemctl restart ollama` — this is now reliable and repeatable.
+- **Lesson:** The GPU discovery path requires `dlopen(libggml-cuda.so)` to succeed, which requires ALL DT_NEEDED dependencies to resolve with correct version tags. One wrong tag = total silent failure.
+
+#### Problem 19: End-to-End Inference Still Crashes (`mmq_x_best=0`) — Confirmed Blocker
+- **Symptom:** `ollama run llama3.2:1b "Say hello" → Error: 500 Internal Server Error: llama runner process has terminated: exit status 2`
+- **Crash Trace:**
+  ```
+  llama_kv_cache: CUDA0 KV buffer size = 128.00 MiB
+  mmq_x_best=0
+  //ml/backend/ggml/ggml/src/ggml-cuda/template-instances/../mmq.cuh:3884: fatal error
+  SIGABRT: abort
+  signal arrived during cgo execution
+  ```
+- **Root Cause:** Confirmed same as documented — `cudaFuncGetAttributes` returns fake hardcoded values. The MMQ kernel selector gets identical attributes for all variants, can't distinguish them, rejects all → `mmq_x_best=0`.
+- **Key Insight:** This is NOT a library loading issue anymore. The runner:
+  1. ✅ Loads CUDA backend successfully
+  2. ✅ Detects GPU with correct properties
+  3. ✅ Allocates model buffer (1252 MiB) on GPU
+  4. ✅ Allocates KV cache (128 MiB) on GPU
+  5. ❌ Crashes during first inference when MMQ kernel selector calls `cudaFuncGetAttributes`
+- **Fix Required:** True GPU Presence — see `GPU_PROXY_TRUE_PRESENCE.md`
 
 ---
 
@@ -200,67 +184,43 @@ Day 3 broke through the cuBLAS wall by combining three techniques: (1) construct
 
 This was a major time-sink and a key lesson for generic proxy design.
 
-### The Observation
+### The Observation (Updated Day 4)
 
-| Execution Method | GPU Detected? | Model Loaded to GPU? | Inference? |
-|-----------------|--------------|---------------------|-----------|
-| Manual: `sudo -u ollama` with env vars directly | ✅ Yes (CUDA0, 7096 MiB) | ✅ Yes (1918 MiB buffer) | ❌ SIGSEGV at compute |
-| systemd service (no LD_PRELOAD) | ❌ No (`library=cpu`, `initial_count=0`) | N/A | CPU only |
-| systemd + LD_PRELOAD (MSI-compiled shim) | ❌ Crash at startup | N/A | GLIBC_2.38 not found |
-| systemd + LD_PRELOAD (VM-compiled shim) | ✅ Yes (found 1 CUDA device) | ✅ Yes | ❌ SIGSEGV at compute |
-| systemd + LD_PRELOAD + cuBLAS stubs (Day 3) | ✅ Yes | ✅ Yes (17/17 layers) | ❌ mmq_x_best=0 |
+| Execution Method | CUDA Backend Loaded? | GPU Detected? | Model Loaded to GPU? | Inference? |
+|-----------------|---------------------|--------------|---------------------|-----------|
+| Manual runner with env vars (before cuBLAS fix) | ❌ Silent failure | ❌ Empty [] | N/A | N/A |
+| Manual runner with env vars (after cuBLAS fix) | ✅ Yes | ✅ Yes (CUDA0, 7440 MiB free) | ✅ Yes | ❌ mmq_x_best=0 |
+| systemd (before cuBLAS fix) | ❌ Silent failure | ❌ `library=cpu` | N/A | CPU only |
+| systemd (after cuBLAS fix) | ✅ Yes | ✅ Yes (CUDA0, 6.9 GiB) | ✅ Yes | ❌ mmq_x_best=0 |
 
-### Root Cause Chain
+### Root Cause Chain (Complete)
 
-The strace analysis (PID 7911, bootstrap subprocess) proved:
+The full chain from library deployment to crash:
 
-1. **Bootstrap subprocess loads our cudart shim** via dlopen from `cuda_v12/` → succeeds (fd=9)
-2. **Bootstrap NEVER calls `cudaGetDeviceCount`** — zero `connect()` syscalls, zero `openat` for `gpu-proxy.env`
-3. **Bootstrap only checks library loadability** — it verifies the `.so` files are valid ELF, symbols resolve, then exits
-4. **Main Go process does the actual GPU enumeration** — but it needs cudart/NVML symbols globally available
-5. **Without LD_PRELOAD, main process has no access to our shim symbols** → reports 0 GPUs
-6. **With LD_PRELOAD, shim symbols are globally available** → GPU detected, model loaded
+1. Cloud-init installs `libdecloud_cuda_shim.so` as all three CUDA libraries
+2. **Day 3 issue (fixed):** DT_NEEDED loaded real cuBLAS → cuGetExportTable crash. Fix: replace with stubs.
+3. **Day 4 issue (fixed):** Stubs had wrong version tags → silent dlopen failure. Fix: separate cuBLAS stub with correct version script.
+4. **Current blocker:** Kernel attribute query returns fake values → MMQ selector fails → crash.
 
-### Why Manual Worked Differently
+### Key Lesson: ELF Dynamic Linking Resolution Priority
+```
+  1. DT_NEEDED from same directory (RPATH/RUNPATH) ← WINS
+  2. LD_LIBRARY_PATH
+  3. LD_PRELOAD ← TOO LATE for dependencies
 
-When running `sudo -u ollama OLLAMA_DEBUG=1 OLLAMA_LLM_LIBRARY=cuda_v12 ... ollama serve` with `DECLOUD_GPU_PROXY_*` env vars explicitly set, the manual invocation passed all environment variables directly to the process. The `LD_PRELOAD` was also set in the gpu-proxy.conf at that point, making cudart symbols available globally.
-
-Under systemd, the environment propagation is more restrictive:
-- Ollama strips non-`OLLAMA_` prefixed vars when spawning runner subprocesses
-- The shim falls back to reading `/etc/decloud/gpu-proxy.env` for connection details
-- But the bootstrap never invokes any CUDA functions, so the fallback config is never read
-- The main Go binary never loads `libnvidia-ml.so.1` either (confirmed via strace)
-
-### Implication for Generic Proxy Design
-
-**Any application that uses a multi-process architecture with library compatibility checks will exhibit this same problem.** The shim approach requires `LD_PRELOAD` to work, which means:
-
-1. The shim must be compiled for the target VM's GLIBC version (not the build host)
-2. `LD_PRELOAD` forces eager symbol resolution — every symbol in the shim must resolve at load time
-3. The shim must be a single file deployed consistently (same soname matching) to avoid dual-instance conflicts
-4. Applications that gate GPU discovery on device nodes (e.g., `/dev/nvidiactl`) need those nodes present even without a real driver
+  Version tag matching is REQUIRED for versioned symbol references.
+  Unversioned exports CANNOT satisfy versioned import requirements.
+```
 
 ---
 
-## 4. Fundamental Technical Findings
-
-### Why Function-Level Shimming Is Harder Than Expected
-
-1. **Internal APIs:** NVIDIA libraries (cuBLAS, cuDNN, cuFFT) use `cuGetExportTable` to access private driver functions. These are undocumented, version-specific, and contain host-side function pointers that cannot be proxied over a network.
-
-2. **DT_NEEDED Resolution Order:** When a shared library has `DT_NEEDED` entries, the dynamic linker resolves them from co-located directories BEFORE consulting LD_PRELOAD. This defeats LD_PRELOAD-based interception for library dependencies.
-
-3. **Two-Layer API:** CUDA has both Runtime API (`cuda*`) and Driver API (`cu*`). Libraries freely mix both layers. cuBLAS primarily uses the Driver API internally, bypassing any Runtime API shims.
-
-4. **Deferred vs Eager Registration:** CUDA's `__cudaRegisterFatBinary` / `__cudaRegisterFunction` are called at library load time (static constructors), but `cudaFuncGetAttributes` queries must return real data. Deferring module upload until kernel launch breaks applications that query attributes first.
-
-5. **Multi-Process Environment Filtering:** Applications like Ollama whitelist specific env var prefixes when spawning subprocesses. The `__attribute__((constructor))` pattern solves this but adds complexity.
+## 4. Current Status Matrix (Updated Day 4)
 
 ### What DOES Work Through the Proxy (Proven)
 
 | Capability | Status | Evidence |
 |------------|--------|----------|
-| GPU detection | ✅ Working | RTX 4060, compute 8.9, 7096 MiB free |
+| GPU detection via systemd | ✅ Working | RTX 4060, compute 8.9, 6.9 GiB free — every restart |
 | Device properties via RPC | ✅ Working | Name, memory, SM count, all correct |
 | Memory allocation (`cudaMalloc`) | ✅ Working | 1252 MiB model buffer allocated |
 | Memory transfers (`cudaMemcpy`) | ✅ Working | H2D/D2H proven in Phase 2 tests |
@@ -268,9 +228,11 @@ Under systemd, the environment propagation is more restrictive:
 | KV cache allocation | ✅ Working | 128 MiB on CUDA0 |
 | Stream management | ✅ Working | Create/sync/destroy all working |
 | cuBLAS stub interception | ✅ Working | `cublasCreate_v2 → dummy handle` logged |
+| cuBLAS version tags | ✅ Fixed (Day 4) | Separate stub with `@@libcublas.so.12` |
 | CUDA graph no-ops | ✅ Working | Returns success, no crash |
 | Fat binary deferred upload | ✅ Working | Modules upload on first `cudaLaunchKernel` |
 | Kernel launch via RPC | ✅ Working | Proven in Phase 2 synthetic tests |
+| libggml-cuda.so loading | ✅ Fixed (Day 4) | `dlopen()` succeeds, CUDA backend registered |
 | End-to-end inference | ❌ Blocked | `mmq_x_best=0` — needs real `cudaFuncGetAttributes` |
 
 ### What Needs "True GPU Presence" (Next Step)
@@ -311,67 +273,56 @@ For 100% compatibility (cuBLAS compute, cuDNN, cuFFT), the ioctl-level proxy app
 1. **Constructor** (lines 26-45): `__attribute__((constructor))` calling `setenv()` with overwrite flag=1 for `GGML_CUDA_FORCE_MMQ`, `GGML_CUDA_DISABLE_GRAPHS`, `GGML_CUDA_NO_PEER_COPY`, `CUDA_LAUNCH_BLOCKING`
 2. **cuBLAS stubs** (lines 1185-1269): `cublasCreate_v2` → dummy handle, `cublasDestroy_v2`, `cublasSetStream_v2`, `cublasSetMathMode`, `cublasGetStatusString`, plus compute stubs (`cublasSgemm_v2`, `cublasGemmEx`, `cublasGemmStridedBatchedEx`, `cublasGemmBatchedEx`, `cublasStrsmBatched`) returning NOT_SUPPORTED
 3. **Graph stubs** (lines 1360-1452): Changed from returning 801 to returning `cudaSuccess` with static dummy handles
-4. **cudaFuncGetAttributes** (line 1334): Now sets `binaryVersion=89`, `maxThreadsPerBlock=1024`, `numRegs=32`, `maxDynamicSharedSizeBytes=65536` (still fake — True GPU Presence will replace with RPC)
-5. **Occupancy** (line 1420): Returns `numBlocks=1` (safe fallback, True GPU Presence will replace with RPC)
+4. **cudaFuncGetAttributes**: Now has eager upload + RPC call structure ready for True GPU Presence (currently falls back to fake values until daemon commands implemented)
+5. **Occupancy**: Has eager upload + RPC structure ready (currently returns safe fallback of 2)
 
 #### `shim/cuda_driver_shim.c` — Changes (Day 2):
 1. `graph_not_supported_stub()` returning 801 for graph operations
 2. Graph interception in `cuGetProcAddress` blocking `cuGraph*` (excluding `cuGraphics*`)
 3. Capture-query stubs (`cuStreamIsCapturing`, `cuStreamGetCaptureInfo`, etc.)
-4. `cuGetExportTable()` returning `CUDA_ERROR_NOT_FOUND`
+4. `cuGetExportTable` returning CUDA_ERROR_NOT_FOUND (blocks cuBLAS private internals)
+5. `/proc/driver/nvidia/version` creation (later proven unnecessary with OLLAMA_LLM_LIBRARY)
 
-### On VM (`ai-chatbot-a813`)
+#### `stubs/cublas_stub.c` — NEW (Day 4):
+Separate cuBLAS stub library with correct `@@libcublas.so.12` version tags. Contains 11 symbols: `cublasCreate_v2`, `cublasDestroy_v2`, `cublasSetStream_v2`, `cublasSetMathMode`, `cublasGetMathMode`, `cublasGetStatusString`, `cublasSgemm_v2`, `cublasGemmEx`, `cublasGemmStridedBatchedEx`, `cublasGemmBatchedEx`, `cublasStrsmBatched`. Init/handle functions return SUCCESS, compute functions return NOT_SUPPORTED.
 
-#### `/etc/systemd/system/ollama.service.d/gpu-proxy.conf`:
-```ini
-[Service]
-Environment="LD_PRELOAD=/usr/local/lib/libdecloud_cuda_shim.so"
-Environment="GGML_CUDA_DISABLE_GRAPHS=1"
-Environment="GGML_CUDA_FORCE_MMQ=1"
-Environment="CUDA_LAUNCH_BLOCKING=1"
-Environment="OLLAMA_HOST=0.0.0.0:11434"
-Environment="OLLAMA_LLM_LIBRARY=cuda_v12"
-Environment="OLLAMA_FLASH_ATTENTION=0"
-Environment="DECLOUD_GPU_PROXY_TRANSPORT=tcp"
-Environment="DECLOUD_GPU_PROXY_PORT=9999"
-Environment="DECLOUD_GPU_PROXY_HOST=192.168.122.1"
-Environment="DECLOUD_GPU_PROXY_TOKEN=<token>"
-```
+#### `stubs/libcublas.version` — NEW (Day 4):
+Version script for cuBLAS stub that exports symbols under `libcublas.so.12` version namespace.
 
-#### Library layout in VM:
-```
-/usr/local/lib/libdecloud_cuda_shim.so              ← LD_PRELOAD target
-/usr/local/lib/ollama/cuda_v12/libcudart.so.12       ← our shim (DT_NEEDED intercept)
-/usr/local/lib/ollama/cuda_v12/libcublas.so.12       ← cuBLAS stub
-/usr/local/lib/ollama/cuda_v12/libcublasLt.so.12     ← cublasLt stub
-/usr/local/lib/ollama/cuda_v12/libcublas.so.12.real   ← backed up real library
-/usr/local/lib/ollama/cuda_v12/libcublasLt.so.12.real ← backed up real library
-/usr/local/lib/ollama/cuda_v12/libcudart.so.12.real   ← backed up real library
-```
+### On VM (`/usr/local/lib/ollama/cuda_v12/`)
+
+| File | Source | Size | Purpose |
+|------|--------|------|---------|
+| `libcudart.so.12` | `libdecloud_cuda_shim.so` (copy) | 38KB | CUDA Runtime shim |
+| `libcublas.so.12` | `cublas_stub.so` (separate build) | 17KB | cuBLAS stub with correct version tags |
+| `libcublasLt.so.12` | `libdecloud_cuda_shim.so` (copy) | 38KB | cublasLt placeholder (no versioned symbols needed) |
 
 ---
 
-## 7. Key Technical Reference
+## 7. Quick Reference
 
-### CUDA API Layering (Updated Understanding)
-```
-Application (Ollama)
-    ↓ dlopen("libggml-cuda.so")
-libggml-cuda.so
-    ├── DT_NEEDED: libcudart.so.12  ← our shim (replaced in-place)
-    ├── DT_NEEDED: libcublas.so.12  ← our stub (replaced in-place)
-    └── DT_NEEDED: libcublasLt.so.12 ← our stub (replaced in-place)
-    ↓ cuda*() calls
-Our cuda_shim.c (via LD_PRELOAD + DT_NEEDED)
-    ↓ RPC over TCP
-gpu-proxy-daemon (host)
-    ↓ real CUDA Driver API
-Real NVIDIA Driver + GPU
+### Key Environment Variables
+```bash
+OLLAMA_LLM_LIBRARY=cuda_v12       # Bypasses /proc/driver/nvidia/version check
+OLLAMA_DEBUG=INFO                   # Enable debug logging
+GGML_CUDA_FORCE_MMQ=1             # Set by constructor (bypasses cuBLAS)
+GGML_CUDA_DISABLE_GRAPHS=1        # Set by constructor (safety net)
+GGML_CUDA_NO_PEER_COPY=1          # Set by constructor (prevent multi-GPU attempts)
 ```
 
-### DT_NEEDED Resolution Order (Critical Discovery)
+### Key Library Paths
 ```
-dlopen("libggml-cuda.so") →
+/usr/local/lib/libcuda.so.1                          → driver shim
+/usr/local/lib/libnvidia-ml.so.1                     → NVML shim
+/usr/local/lib/ollama/cuda_v12/libcudart.so.12       → cudart shim (copy)
+/usr/local/lib/ollama/cuda_v12/libcublas.so.12       → cuBLAS stub (SEPARATE BUILD)
+/usr/local/lib/ollama/cuda_v12/libcublasLt.so.12     → placeholder shim (copy)
+/usr/local/lib/ollama/cuda_v12/libggml-cuda.so       → Ollama's CUDA backend (original)
+/usr/local/lib/ollama/libggml-base.so.0              → Ollama's base backend (original)
+```
+
+### DT_NEEDED Resolution Priority
+```
   1. DT_NEEDED from same directory (RPATH/RUNPATH) ← WINS
   2. LD_LIBRARY_PATH
   3. LD_PRELOAD ← TOO LATE for dependencies
@@ -390,26 +341,33 @@ dlopen("libggml-cuda.so") →
 cd /opt/decloud/DeCloud.NodeAgent/src/gpu-proxy
 make all-shims-compat
 
+# Build cuBLAS stub separately
+make cublas-stub
+
 # Deploy to 9p share
 sudo cp build/libdecloud_cuda_shim-compat.so /usr/local/lib/decloud-gpu-shim/libdecloud_cuda_shim.so
+sudo cp build/libcublas_stub.so /usr/local/lib/decloud-gpu-shim/libcublas_stub.so
 
 # On VM — copy via 9p mount
 sudo mount -t 9p -o trans=virtio,version=9p2000.L decloud-shim /run/decloud
 sudo cp /run/decloud/libdecloud_cuda_shim.so /usr/local/lib/
 sudo cp /run/decloud/libdecloud_cuda_shim.so /usr/local/lib/ollama/cuda_v12/libcudart.so.12
+sudo cp /run/decloud/libcublas_stub.so /usr/local/lib/ollama/cuda_v12/libcublas.so.12
 sudo systemctl restart ollama
 ```
 
 ---
 
-## 8. Recommendations (Updated)
+## 8. Recommendations (Updated Day 4)
 
 1. **Implement True GPU Presence first.** Two new protocol commands + eager module upload. Surgical change to existing code, high probability of solving the `mmq_x_best=0` crash for ggml/Ollama workloads.
 
 2. **Keep cuBLAS stubs and graph no-ops as safety nets.** Even with real `cudaFuncGetAttributes`, cuBLAS compute functions can't work through the proxy. The stubs prevent crashes; MMQ provides the actual compute.
 
-3. **Evaluate ioctl-level proxy for phase 2.** For workloads that need real cuBLAS/cuDNN compute (PyTorch, TensorFlow), the ioctl approach is the only viable path. But 90%+ of DeCloud's target use case (uncensored AI hosting with Ollama/ggml) is served by the MMQ path.
+3. **Update cloud-init template.** The TemplateSeederService.cs must deploy the separate cuBLAS stub (with correct version tags) instead of copying the same shim binary for all three libraries. The cuBLAS stub is only ~17KB and can be embedded as base64 or distributed via 9p share.
 
-4. **Automate the library replacement.** The DT_NEEDED stub replacement in `/usr/local/lib/ollama/cuda_v12/` should be automated in the node agent's VM provisioning. Include cuBLAS stub generation in install.sh.
+4. **Update Makefile.** Add `cublas-stub` and `cublaslt-stub` build targets that compile stubs with their respective version scripts and sonames.
 
-5. **Preserve current shim infrastructure.** The transport layer, auth, quota tracking, deferred module upload, and kernel launch RPC are all proven. They form the foundation for both True GPU Presence and any future enhancements.
+5. **Evaluate ioctl-level proxy for phase 2.** For workloads that need real cuBLAS/cuDNN compute (PyTorch, TensorFlow), the ioctl approach is the only viable path. But 90%+ of DeCloud's target use case (uncensored AI hosting with Ollama/ggml) is served by the MMQ path.
+
+6. **Preserve current shim infrastructure.** The transport layer, auth, quota tracking, deferred module upload, and kernel launch RPC are all proven. They form the foundation for both True GPU Presence and any future enhancements.
