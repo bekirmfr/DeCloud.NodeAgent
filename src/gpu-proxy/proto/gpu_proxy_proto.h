@@ -69,6 +69,10 @@ typedef enum {
     GPU_CMD_FUNC_GET_ATTRIBUTES    = 0x54,
     GPU_CMD_OCCUPANCY_MAX_BLOCKS   = 0x55,
 
+    /* cuBLAS GEMM proxy (GQA attention requires real cuBLAS on host) */
+    GPU_CMD_CUBLAS_GEMM_BATCHED    = 0x56,
+    GPU_CMD_CUBLAS_GEMM_STRIDED    = 0x57,
+
     /* Resource management */
     GPU_CMD_SET_MEMORY_QUOTA       = 0x60,
     GPU_CMD_GET_USAGE_STATS        = 0x61,
@@ -170,6 +174,11 @@ typedef struct __attribute__((packed)) {
     uint64_t count;
     int32_t  kind;
 } GpuMemcpyRequest;
+
+/* Helper: calculate total H2D payload including embedded data */
+static inline uint32_t gpu_memcpy_h2d_payload_len(uint64_t count) {
+    return (uint32_t)(sizeof(GpuMemcpyRequest) + count);
+}
 
 /* --- MEMSET --- */
 typedef struct __attribute__((packed)) {
@@ -300,28 +309,86 @@ typedef struct __attribute__((packed)) {
 } GpuFuncGetAttributesRequest;
 
 typedef struct __attribute__((packed)) {
-    int32_t  binaryVersion;          /* Compute capability (e.g., 89 for sm_89) */
-    int32_t  maxThreadsPerBlock;     /* Max threads per block for this kernel */
-    int32_t  numRegs;                /* Registers used per thread */
-    int32_t  sharedSizeBytes;        /* Static shared memory per block */
-    int32_t  constSizeBytes;         /* Constant memory used */
-    int32_t  localSizeBytes;         /* Local memory per thread */
-    int32_t  maxDynamicSharedSizeBytes; /* Max dynamic shared memory */
-    int32_t  preferredShmemCarveout; /* Preferred L1/shared split */
-    int32_t  ptxVersion;             /* PTX version */
+    int32_t  binaryVersion;
+    int32_t  maxThreadsPerBlock;
+    int32_t  numRegs;
+    int32_t  sharedSizeBytes;
+    int32_t  constSizeBytes;
+    int32_t  localSizeBytes;
+    int32_t  maxDynamicSharedSizeBytes;
+    int32_t  preferredShmemCarveout;
+    int32_t  ptxVersion;
 } GpuFuncGetAttributesResponse;
 
 /* --- TRUE GPU PRESENCE: OCCUPANCY_MAX_BLOCKS (0x55) --- */
 typedef struct __attribute__((packed)) {
-    uint64_t host_func_ptr;   /* VM-side function pointer (lookup key) */
-    int32_t  blockSize;       /* Block size to query */
-    uint64_t dynamicSMemSize; /* Dynamic shared memory per block */
-    uint32_t flags;           /* Flags (usually 0) */
+    uint64_t host_func_ptr;
+    int32_t  blockSize;
+    uint64_t dynamicSMemSize;
+    uint32_t flags;
 } GpuOccupancyMaxBlocksRequest;
 
 typedef struct __attribute__((packed)) {
-    int32_t numBlocks;        /* Max active blocks per SM */
+    int32_t numBlocks;
 } GpuOccupancyMaxBlocksResponse;
+
+/* --- CUBLAS GEMM BATCHED (0x56) ---
+ *
+ * Proxies cublasGemmBatchedEx for GQA attention Q×K multiplication.
+ * Fixed header followed by (3 * batchCount) uint64_t device pointers:
+ *   Aarray[batchCount], Barray[batchCount], Carray[batchCount]
+ *
+ * Device pointers come from the same connection's cudaMalloc calls.
+ * Daemon calls real cublasGemmBatchedEx on the host GPU.
+ */
+typedef struct __attribute__((packed)) {
+    int32_t  transa;         /* CUBLAS_OP_N=0, CUBLAS_OP_T=1, CUBLAS_OP_C=2 */
+    int32_t  transb;
+    int32_t  m;
+    int32_t  n;
+    int32_t  k;
+    int32_t  Atype;          /* CUDA_R_16F=2, CUDA_R_32F=0, etc. */
+    int32_t  lda;
+    int32_t  Btype;
+    int32_t  ldb;
+    int32_t  Ctype;
+    int32_t  ldc;
+    int32_t  batchCount;
+    int32_t  computeType;
+    int32_t  algo;           /* CUBLAS_GEMM_DEFAULT=(-1), _TENSOR_OP=99 */
+    uint8_t  alpha[16];      /* Up to 128-bit scalar (covers double complex) */
+    uint8_t  beta[16];
+    /* Followed by: uint64_t Aarray[batchCount]
+     *              uint64_t Barray[batchCount]
+     *              uint64_t Carray[batchCount]
+     */
+} GpuCublasGemmBatchedRequest;
+
+/* --- CUBLAS GEMM STRIDED BATCHED (0x57) --- */
+typedef struct __attribute__((packed)) {
+    int32_t  transa;
+    int32_t  transb;
+    int32_t  m;
+    int32_t  n;
+    int32_t  k;
+    int32_t  Atype;
+    int32_t  lda;
+    int64_t  strideA;
+    int32_t  Btype;
+    int32_t  ldb;
+    int64_t  strideB;
+    int32_t  Ctype;
+    int32_t  ldc;
+    int64_t  strideC;
+    int32_t  batchCount;
+    int32_t  computeType;
+    int32_t  algo;
+    uint8_t  alpha[16];
+    uint8_t  beta[16];
+    uint64_t A_ptr;          /* Single device pointer + stride */
+    uint64_t B_ptr;
+    uint64_t C_ptr;
+} GpuCublasGemmStridedRequest;
 
 /* --- RESOURCE MANAGEMENT --- */
 typedef struct __attribute__((packed)) {

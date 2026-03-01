@@ -37,6 +37,7 @@
 
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <cublas_v2.h>
 
 #include "../proto/gpu_proxy_proto.h"
 
@@ -279,6 +280,7 @@ typedef struct {
 
     /* Per-connection CUDA Driver API context */
     CUcontext    cu_ctx;
+    cublasHandle_t cublas_handle;   /* Lazy-init on first GEMM RPC */
 
     ModuleSlot   modules[MAX_MODULES];
     FunctionSlot functions[MAX_FUNCTIONS];
@@ -428,6 +430,11 @@ static void cleanup_connection(ConnectionCtx *ctx)
             cuModuleUnload(ctx->modules[i].module);
             ctx->modules[i].in_use = 0;
         }
+    }
+    /* Destroy cuBLAS handle before CUDA context */
+    if (ctx->cublas_handle) {
+        cublasDestroy_v2(ctx->cublas_handle);
+        ctx->cublas_handle = NULL;
     }
     if (ctx->cu_ctx) {
         cuCtxDestroy(ctx->cu_ctx);
@@ -958,6 +965,206 @@ static int handle_func_get_attributes(ConnectionCtx *ctx,
 
     return send_response(ctx->fd, GPU_CMD_FUNC_GET_ATTRIBUTES, 0,
                          &resp, sizeof(resp));
+}
+
+/* ================================================================
+ * cuBLAS lazy initialization and GEMM RPC handlers
+ *
+ * GQA (Grouped Query Attention) requires cublasGemmBatchedEx for Q×K
+ * matrix multiplication — this is NOT covered by GGML_CUDA_FORCE_MMQ.
+ * The shim sends GEMM parameters + device pointers via RPC, and the
+ * daemon executes on the real GPU using the real cuBLAS library.
+ * ================================================================ */
+
+/* Lazy-initialize cuBLAS handle for this connection.
+ * Called on first GEMM RPC — not at connection time, because cuBLAS
+ * needs an active CUDA context which only exists after module load. */
+static int ensure_cublas(ConnectionCtx *ctx)
+{
+    if (ctx->cublas_handle) return 0;
+
+    /* Ensure correct CUDA context is active on this thread */
+    if (ctx->cu_ctx)
+        cuCtxSetCurrent(ctx->cu_ctx);
+
+    cublasStatus_t cs = cublasCreate_v2(&ctx->cublas_handle);
+    if (cs != CUBLAS_STATUS_SUCCESS) {
+        LOG_ERR("%s %s: cublasCreate_v2 failed (%d)",
+                ctx->is_tcp ? "VM" : "CID",
+                ctx->is_tcp ? ctx->vm_id : "vsock",
+                (int)cs);
+        ctx->cublas_handle = NULL;
+        return -1;
+    }
+
+    LOG_INFO("%s %s: cuBLAS handle initialized",
+             ctx->is_tcp ? "VM" : "CID",
+             ctx->is_tcp ? ctx->vm_id : "vsock");
+    return 0;
+}
+
+/* Determine scalar size (alpha/beta) from CUDA compute type */
+static int cublas_scalar_size(int computeType)
+{
+    /* CUBLAS_COMPUTE_16F=64, 32F=68, 32F_FAST_16F=74, 64F=70 */
+    switch (computeType) {
+        case 64: return 2;  /* half */
+        case 70: return 8;  /* double */
+        default: return 4;  /* float (most common) */
+    }
+}
+
+/* ----------------------------------------------------------------
+ * handle_cublas_gemm_batched (GPU_CMD_CUBLAS_GEMM_BATCHED = 0x56)
+ *
+ * Payload: GpuCublasGemmBatchedRequest header
+ *        + 3 * batchCount * uint64_t device pointers (A[], B[], C[])
+ * ---------------------------------------------------------------- */
+static int handle_cublas_gemm_batched(ConnectionCtx *ctx,
+                                       const void *payload, uint32_t payload_len)
+{
+    if (payload_len < sizeof(GpuCublasGemmBatchedRequest)) {
+        LOG_ERR("CID %u: gemm_batched: payload too small (%u < %zu)",
+                ctx->peer_cid, payload_len, sizeof(GpuCublasGemmBatchedRequest));
+        return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_BATCHED, -1, NULL, 0);
+    }
+
+    GpuCublasGemmBatchedRequest req;
+    memcpy(&req, payload, sizeof(req));
+
+    int bc = req.batchCount;
+    if (bc <= 0 || bc > 65536) {
+        LOG_ERR("CID %u: gemm_batched: invalid batchCount=%d", ctx->peer_cid, bc);
+        return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_BATCHED, -1, NULL, 0);
+    }
+
+    uint32_t ptrs_size = 3 * bc * (uint32_t)sizeof(uint64_t);
+    uint32_t expected = (uint32_t)sizeof(GpuCublasGemmBatchedRequest) + ptrs_size;
+    if (payload_len < expected) {
+        LOG_ERR("CID %u: gemm_batched: payload truncated (%u < %u)",
+                ctx->peer_cid, payload_len, expected);
+        return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_BATCHED, -1, NULL, 0);
+    }
+
+    /* Lazy-init cuBLAS */
+    if (ensure_cublas(ctx) < 0) {
+        return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_BATCHED,
+                             CUBLAS_STATUS_NOT_INITIALIZED, NULL, 0);
+    }
+
+    /* Extract device pointer arrays from payload */
+    const uint64_t *ptrs = (const uint64_t *)((const uint8_t *)payload
+                            + sizeof(GpuCublasGemmBatchedRequest));
+
+    /* Convert uint64 device pointers to void* arrays for cuBLAS */
+    const void **Aarray = (const void **)malloc(bc * sizeof(void *));
+    const void **Barray = (const void **)malloc(bc * sizeof(void *));
+    void **Carray = (void **)malloc(bc * sizeof(void *));
+    if (!Aarray || !Barray || !Carray) {
+        free((void *)Aarray); free((void *)Barray); free(Carray);
+        return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_BATCHED, -1, NULL, 0);
+    }
+
+    for (int i = 0; i < bc; i++) {
+        Aarray[i] = (const void *)(uintptr_t)ptrs[i];
+        Barray[i] = (const void *)(uintptr_t)ptrs[bc + i];
+        Carray[i] = (void *)(uintptr_t)ptrs[2 * bc + i];
+    }
+
+    if (ctx->cu_ctx) cuCtxSetCurrent(ctx->cu_ctx);
+
+    cublasStatus_t cs = cublasGemmBatchedEx(
+        ctx->cublas_handle,
+        (cublasOperation_t)req.transa,
+        (cublasOperation_t)req.transb,
+        req.m, req.n, req.k,
+        req.alpha,
+        Aarray, (cudaDataType_t)req.Atype, req.lda,
+        Barray, (cudaDataType_t)req.Btype, req.ldb,
+        req.beta,
+        Carray, (cudaDataType_t)req.Ctype, req.ldc,
+        bc,
+        (cublasComputeType_t)req.computeType,
+        (cublasGemmAlgo_t)req.algo);
+
+    /* Sync to ensure GEMM completes before we respond */
+    cudaDeviceSynchronize();
+
+    free((void *)Aarray);
+    free((void *)Barray);
+    free(Carray);
+
+    if (cs != CUBLAS_STATUS_SUCCESS) {
+        LOG_ERR("CID %u: cublasGemmBatchedEx failed: %d (m=%d n=%d k=%d bc=%d "
+                "Atype=%d Ctype=%d compute=%d)",
+                ctx->peer_cid, (int)cs, req.m, req.n, req.k, bc,
+                req.Atype, req.Ctype, req.computeType);
+    } else {
+        LOG_DBG("CID %u: cublasGemmBatchedEx OK (m=%d n=%d k=%d bc=%d)",
+                ctx->peer_cid, req.m, req.n, req.k, bc);
+    }
+
+    return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_BATCHED,
+                         (int32_t)cs, NULL, 0);
+}
+
+/* ----------------------------------------------------------------
+ * handle_cublas_gemm_strided (GPU_CMD_CUBLAS_GEMM_STRIDED = 0x57)
+ *
+ * Payload: GpuCublasGemmStridedRequest (fixed size, includes ptrs)
+ * ---------------------------------------------------------------- */
+static int handle_cublas_gemm_strided(ConnectionCtx *ctx,
+                                       const void *payload, uint32_t payload_len)
+{
+    if (payload_len < sizeof(GpuCublasGemmStridedRequest)) {
+        return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_STRIDED, -1, NULL, 0);
+    }
+
+    GpuCublasGemmStridedRequest req;
+    memcpy(&req, payload, sizeof(req));
+
+    if (req.batchCount <= 0 || req.batchCount > 65536) {
+        return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_STRIDED, -1, NULL, 0);
+    }
+
+    /* Lazy-init cuBLAS */
+    if (ensure_cublas(ctx) < 0) {
+        return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_STRIDED,
+                             CUBLAS_STATUS_NOT_INITIALIZED, NULL, 0);
+    }
+
+    if (ctx->cu_ctx) cuCtxSetCurrent(ctx->cu_ctx);
+
+    cublasStatus_t cs = cublasGemmStridedBatchedEx(
+        ctx->cublas_handle,
+        (cublasOperation_t)req.transa,
+        (cublasOperation_t)req.transb,
+        req.m, req.n, req.k,
+        req.alpha,
+        (const void *)(uintptr_t)req.A_ptr, (cudaDataType_t)req.Atype,
+            req.lda, req.strideA,
+        (const void *)(uintptr_t)req.B_ptr, (cudaDataType_t)req.Btype,
+            req.ldb, req.strideB,
+        req.beta,
+        (void *)(uintptr_t)req.C_ptr, (cudaDataType_t)req.Ctype,
+            req.ldc, req.strideC,
+        req.batchCount,
+        (cublasComputeType_t)req.computeType,
+        (cublasGemmAlgo_t)req.algo);
+
+    /* Sync to ensure GEMM completes before we respond */
+    cudaDeviceSynchronize();
+
+    if (cs != CUBLAS_STATUS_SUCCESS) {
+        LOG_ERR("CID %u: cublasGemmStridedBatchedEx failed: %d (m=%d n=%d k=%d bc=%d)",
+                ctx->peer_cid, (int)cs, req.m, req.n, req.k, req.batchCount);
+    } else {
+        LOG_DBG("CID %u: cublasGemmStridedBatchedEx OK (m=%d n=%d k=%d bc=%d)",
+                ctx->peer_cid, req.m, req.n, req.k, req.batchCount);
+    }
+
+    return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_STRIDED,
+                         (int32_t)cs, NULL, 0);
 }
 
 /* ----------------------------------------------------------------
@@ -1550,6 +1757,7 @@ static void *connection_handler(void *arg)
         case GPU_CMD_OCCUPANCY_MAX_BLOCKS:
             rc = handle_occupancy_max_blocks(ctx, buf, hdr.payload_len);
             break;
+
         /* Kernel launch */
         case GPU_CMD_LAUNCH_KERNEL:
             rc = handle_launch_kernel(ctx, buf, hdr.payload_len);
@@ -1607,6 +1815,12 @@ static void *connection_handler(void *arg)
         case GPU_CMD_CTX_DESTROY:
             rc = handle_ctx_destroy(fd);
             break;
+
+        /* cuBLAS GEMM proxy */
+        case GPU_CMD_CUBLAS_GEMM_BATCHED:
+            return handle_cublas_gemm_batched(ctx, payload, payload_len);
+        case GPU_CMD_CUBLAS_GEMM_STRIDED:
+            return handle_cublas_gemm_strided(ctx, payload, payload_len);
 
         case GPU_CMD_GOODBYE:
             LOG_INFO("CID %u: graceful disconnect (mem=%lu kernels=%u ktime=%lu µs)",

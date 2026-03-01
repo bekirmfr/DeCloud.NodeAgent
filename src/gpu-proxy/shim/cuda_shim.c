@@ -607,30 +607,32 @@ cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop, int device)
         prop->l2CacheSize                   = resp.l2_cache_size;
 
         /*
-         * CRITICAL: ggml-cuda reads major/minor at FIXED binary offsets
-         * from the real NVIDIA struct layout, not our simplified struct.
-         * Write critical values at the offsets ggml-cuda actually reads:
-         *   major              @ 360
-         *   minor              @ 364
-         *   multiProcessorCount @ 356 (already lands here via struct)
+         * CRITICAL: ggml-cuda reads cudaDeviceProp at REAL NVIDIA binary
+         * offsets, not our simplified struct layout. Our struct fields above
+         * land at WRONG offsets. We must overwrite at the exact offsets the
+         * real CUDA 12 struct uses.
          *
-         * Also write at other offsets ggml-cuda may probe.
+         * Offsets determined by dumping a real RTX 4060 cudaDeviceProp:
+         *   288: totalGlobalMem (size_t)         296: sharedMemPerBlock (size_t)
+         *   304: regsPerBlock (int)              308: warpSize (int)  ← 0 = SIGFPE!
+         *   320: maxThreadsPerBlock (int)        324-332: maxThreadsDim[3]
+         *   336-344: maxGridSize[3]              348: clockRate (int)
+         *   352: totalConstMem (size_t)          360: major  364: minor
+         *   368: textureAlignment (size_t)       388: multiProcessorCount (int)
+         *   608: memoryClockRate (int)           612: memoryBusWidth (int)
+         *   616: l2CacheSize (int)               624: maxThreadsPerMP (int)
+         *   640: sharedMemPerMultiprocessor      696: sharedMemPerBlockOptin
          */
         uint8_t *raw = (uint8_t *)prop;
 
-        /*
-         * Write fields at REAL CUDA 12 cudaDeviceProp offsets.
-         * These were determined by dumping the struct from a real GPU.
-         * Getting these wrong causes SIGFPE (warpSize=0 → divide by zero)
-         * or mmq_x_best=0 (sharedMem fields = 0).
-         */
-
-        /* Memory */
+        /* Memory specs */
         *(size_t *)(raw + 288) = resp.total_global_mem;
         *(size_t *)(raw + 296) = resp.shared_mem_per_block;
-        *(int *)(raw + 304) = resp.regs_per_block;
-        *(int *)(raw + 308) = resp.warp_size;          /* CRITICAL: 0 = SIGFPE */
-        *(size_t *)(raw + 312) = 2147483647;           /* memPitch */
+        *(int *)  (raw + 304) = resp.regs_per_block;
+        *(int *)  (raw + 308) = resp.warp_size;             /* 0 → SIGFPE */
+        *(size_t *)(raw + 312) = 2147483647;                /* memPitch */
+
+        /* Thread/block dims */
         *(int *)(raw + 320) = resp.max_threads_per_block;
         *(int *)(raw + 324) = resp.max_threads_dim[0];
         *(int *)(raw + 328) = resp.max_threads_dim[1];
@@ -638,44 +640,52 @@ cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop, int device)
         *(int *)(raw + 336) = resp.max_grid_size[0];
         *(int *)(raw + 340) = resp.max_grid_size[1];
         *(int *)(raw + 344) = resp.max_grid_size[2];
-        *(int *)(raw + 348) = resp.clock_rate;
-        *(size_t *)(raw + 352) = 65536;                /* totalConstMem */
+
+        /* Clock & constant memory */
+        *(int *)  (raw + 348) = resp.clock_rate;
+        *(size_t *)(raw + 352) = 65536;                     /* totalConstMem */
 
         /* Compute capability */
         *(int *)(raw + 360) = resp.major;
         *(int *)(raw + 364) = resp.minor;
-        *(size_t *)(raw + 368) = 512;                  /* textureAlignment */
+        *(size_t *)(raw + 368) = 512;                       /* textureAlignment */
+        *(size_t *)(raw + 376) = 32;                        /* texturePitchAlignment */
 
-        /* Processor info (NOTE: offset 388, NOT 356!) */
+        /* Processor info — NOTE: real offset 388, NOT 356 */
+        *(int *)(raw + 384) = 1;                            /* deviceOverlap */
         *(int *)(raw + 388) = resp.multi_processor_count;
 
-        /* Memory bus */
+        /* Memory bus info */
         *(int *)(raw + 608) = resp.memory_clock_rate;
         *(int *)(raw + 612) = resp.memory_bus_width;
         *(int *)(raw + 616) = resp.l2_cache_size;
 
-        /* maxThreadsPerMultiprocessor (NOTE: offset 624, NOT 368!) */
+        /* maxThreadsPerMultiprocessor — NOTE: real offset 624, NOT 368 */
         *(int *)(raw + 624) = resp.max_threads_per_multiprocessor;
 
-        /* Shared memory limits (derived from compute capability) */
-        /* sharedMemPerMultiprocessor @ 640 */
-        if (resp.major == 8 && resp.minor == 0) *(int *)(raw + 640) = 167936;
-        else if (resp.major >= 8)               *(int *)(raw + 640) = 102400;
+        /* Shared memory limits (derived from compute capability).
+         * These are per-architecture constants from NVIDIA documentation.
+         * Without correct values: mmq_x_best=0 → SIGABRT.
+         */
+        /* sharedMemPerMultiprocessor @ offset 640 */
+        if      (resp.major == 8 && resp.minor == 0) *(int *)(raw + 640) = 167936;
+        else if (resp.major >= 8)                    *(int *)(raw + 640) = 102400;
         else if (resp.major == 7 && resp.minor >= 5) *(int *)(raw + 640) = 65536;
-        else if (resp.major == 7)               *(int *)(raw + 640) = 98304;
-        else                                    *(int *)(raw + 640) = 49152;
-        /* sharedMemPerBlockOptin @ 696 (critical for MMQ kernel selection) */
-        if (resp.major == 8 && resp.minor == 0) *(int *)(raw + 696) = 167936;
-        else if (resp.major >= 8)               *(int *)(raw + 696) = 101376;
-        else if (resp.major == 7 && resp.minor >= 5) *(int *)(raw + 696) = 65536;
-        else if (resp.major == 7)               *(int *)(raw + 696) = 98304;
-        else                                    *(int *)(raw + 696) = 49152;
+        else if (resp.major == 7)                    *(int *)(raw + 640) = 98304;
+        else                                         *(int *)(raw + 640) = 49152;
 
-        /* Boolean capabilities ggml may check */
-        *(int *)(raw + 384) = 1;  /* deviceOverlap */
-        *(int *)(raw + 576) = 1;  /* unifiedAddressing */
-        *(int *)(raw + 600) = 1;  /* managedMemory */
-        *(int *)(raw + 648) = 65536;  /* cooperativeLaunch related */
+        /* sharedMemPerBlockOptin @ offset 696 */
+        if      (resp.major == 8 && resp.minor == 0) *(int *)(raw + 696) = 167936;
+        else if (resp.major >= 8)                    *(int *)(raw + 696) = 101376;
+        else if (resp.major == 7 && resp.minor >= 5) *(int *)(raw + 696) = 65536;
+        else if (resp.major == 7)                    *(int *)(raw + 696) = 98304;
+        else                                         *(int *)(raw + 696) = 49152;
+
+        /* Boolean capabilities ggml-cuda may check */
+        *(int *)(raw + 576) = 1;                            /* unifiedAddressing */
+        *(int *)(raw + 600) = 1;                            /* managedMemory */
+        *(int *)(raw + 648) = 65536;                        /* reservedSharedMemPerBlock */
+        *(int *)(raw + 720) = 1024;                         /* maxBlocksPerMultiProcessor */
     }
     return err;
 }
