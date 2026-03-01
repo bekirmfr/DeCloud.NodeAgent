@@ -1818,9 +1818,9 @@ static void *connection_handler(void *arg)
 
         /* cuBLAS GEMM proxy */
         case GPU_CMD_CUBLAS_GEMM_BATCHED:
-            return handle_cublas_gemm_batched(ctx, payload, payload_len);
+            return handle_cublas_gemm_batched(ctx, buf, hdr.payload_len);
         case GPU_CMD_CUBLAS_GEMM_STRIDED:
-            return handle_cublas_gemm_strided(ctx, payload, payload_len);
+            return handle_cublas_gemm_strided(ctx, buf, hdr.payload_len);
 
         case GPU_CMD_GOODBYE:
             LOG_INFO("CID %u: graceful disconnect (mem=%lu kernels=%u ktime=%lu µs)",
