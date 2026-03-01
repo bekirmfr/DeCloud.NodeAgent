@@ -37,15 +37,13 @@ static void shim_init(void)
 {
     /* Force ggml to use its own CUDA matmul kernels instead of cuBLAS.
      * cuBLAS requires cuGetExportTable (private driver internals) which
-     * cannot be proxied at function level. */
-    setenv("GGML_CUDA_FORCE_MMQ",      "1", 0);  /* 0 = don't override if already set */
-
-    /* Hint only — Ollama v0.17 ignores this (USE_GRAPHS=1 hardcoded).
-     * Graph stubs below handle this by returning cudaSuccess as no-ops. */
+     * cannot be proxied at function level.
+     * Flag=1: ALWAYS overwrite — Ollama may set these to empty/"0". */
+    setenv("GGML_CUDA_FORCE_MMQ",      "1", 1);
     setenv("GGML_CUDA_DISABLE_GRAPHS",  "1", 1);
+    setenv("GGML_CUDA_NO_PEER_COPY",    "1", 1);
 
-    /* Peer copies can't work across proxy boundaries */
-    setenv("GGML_CUDA_NO_PEER_COPY",    "1", 0);
+    fprintf(stderr, "[cudart-shim] constructor: env vars set (FORCE_MMQ=1, DISABLE_GRAPHS=1, NO_PEER_COPY=1)\n");
 }
 
 #define SHIM_LOG(fmt, ...) \
@@ -1398,7 +1396,6 @@ typedef void *cudaGraph_t;
 typedef void *cudaGraphExec_t;
 typedef int cudaGraphExecUpdateResult;
 
-/* Dummy handles — must be non-NULL so ggml doesn't treat as allocation failure */
 static int g_dummy_graph = 0xDEC10001;
 static int g_dummy_graph_exec = 0xDEC10002;
 
@@ -1418,7 +1415,7 @@ cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
                                  cudaGraphExecUpdateResult *updateResult_out)
 {
     (void)hGraphExec; (void)hGraph;
-    if (updateResult_out) *updateResult_out = 0;  /* success */
+    if (updateResult_out) *updateResult_out = 0;
     return cudaSuccess;
 }
 
@@ -1433,7 +1430,6 @@ cudaError_t cudaGraphInstantiate(cudaGraphExec_t *pGraphExec, cudaGraph_t graph,
 cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream)
 {
     (void)graphExec; (void)stream;
-    /* No-op: kernels already executed eagerly via RPC during "capture" */
     return cudaSuccess;
 }
 
@@ -1483,7 +1479,8 @@ cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
 
     RegisteredFunction *rf = find_registered_function((uint64_t)(uintptr_t)func);
     if (!rf) {
-        *numBlocks = 1; /* safe fallback for unknown functions */
+        SHIM_LOG("occupancy: unknown function %p, returning 2", func);
+        *numBlocks = 2; /* safe fallback for unknown functions */
         return cudaSuccess;
     }
 
@@ -1491,7 +1488,8 @@ cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
     if (!rf->registered) {
         ensure_module_uploaded(rf->module_index);
         if (!rf->registered) {
-            *numBlocks = 1;
+            SHIM_LOG("occupancy: eager upload failed for %s, returning 2", rf->device_name);
+            *numBlocks = 2;
             return cudaSuccess;
         }
     }
@@ -1509,7 +1507,16 @@ cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
     int err = rpc_call(GPU_CMD_OCCUPANCY_MAX_BLOCKS,
                        &req, sizeof(req), &resp, sizeof(resp), NULL);
     if (err != 0) {
-        *numBlocks = 1; /* safe fallback on RPC failure */
+        SHIM_LOG("occupancy: RPC failed for %s (err=%d), returning 2", rf->device_name, err);
+        *numBlocks = 2; /* safe fallback on RPC failure */
+        return cudaSuccess;
+    }
+
+    /* Sanity: daemon should never return 0 for a valid kernel */
+    if (resp.numBlocks <= 0) {
+        SHIM_LOG("occupancy: daemon returned %d for %s (blockSize=%d), clamping to 2",
+                 resp.numBlocks, rf->device_name, blockSize);
+        *numBlocks = 2;
         return cudaSuccess;
     }
 
@@ -1539,7 +1546,6 @@ typedef enum {
 cudaError_t cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode_t mode)
 {
     (void)stream; (void)mode;
-    /* No-op: kernels will execute eagerly via RPC regardless of capture state */
     return cudaSuccess;
 }
 
