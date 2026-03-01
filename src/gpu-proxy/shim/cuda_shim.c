@@ -655,13 +655,99 @@ cudaError_t cudaDeviceGetAttribute(int *value, int attr, int device)
     if (err != cudaSuccess) { *value = 0; return err; }
 
     switch (attr) {
-        case 75: *value = resp.major; break;  /* COMPUTE_CAPABILITY_MAJOR */
-        case 76: *value = resp.minor; break;  /* COMPUTE_CAPABILITY_MINOR */
-        case 16: *value = resp.multi_processor_count; break;
-        case 39: *value = resp.max_threads_per_multiprocessor; break;
-        case 13: *value = resp.clock_rate; break;
-        case 36: *value = resp.memory_clock_rate; break;
-        case 37: *value = resp.memory_bus_width; break;
+        /* --- Thread/block dimensions --- */
+        case  1: *value = resp.max_threads_dim[0]; break;       /* cudaDevAttrMaxBlockDimX */
+        case  2: *value = resp.max_threads_dim[1]; break;       /* cudaDevAttrMaxBlockDimY */
+        case  3: *value = resp.max_threads_dim[2]; break;       /* cudaDevAttrMaxBlockDimZ */
+        case  4: *value = resp.max_grid_size[0]; break;         /* cudaDevAttrMaxGridDimX */
+        case  5: *value = resp.max_grid_size[1]; break;         /* cudaDevAttrMaxGridDimY */
+        case  6: *value = resp.max_grid_size[2]; break;         /* cudaDevAttrMaxGridDimZ */
+
+        /* --- Shared memory (CRITICAL for MMQ kernel selection) --- */
+        case  8: *value = (int)resp.shared_mem_per_block; break; /* cudaDevAttrMaxSharedMemoryPerBlock */
+
+        /* --- Core device properties --- */
+        case 10: *value = resp.warp_size; break;                 /* cudaDevAttrWarpSize */
+        case 13: *value = resp.clock_rate; break;                /* cudaDevAttrClockRate */
+        case 16: *value = resp.multi_processor_count; break;     /* cudaDevAttrMultiProcessorCount */
+        case 21: *value = 65536; break;                          /* cudaDevAttrTotalConstantMemory (64KB typical) */
+        case 24: *value = resp.max_threads_per_block; break;     /* cudaDevAttrMaxThreadsPerBlock */
+        case 36: *value = resp.memory_clock_rate; break;         /* cudaDevAttrMemoryClockRate */
+        case 37: *value = resp.memory_bus_width; break;          /* cudaDevAttrMemoryBusWidth */
+        case 38: *value = resp.l2_cache_size; break;             /* cudaDevAttrL2CacheSize */
+        case 39: *value = resp.max_threads_per_multiprocessor; break; /* cudaDevAttrMaxThreadsPerMultiProcessor */
+
+        /* --- Registers --- */
+        case 12: *value = resp.regs_per_block; break;            /* cudaDevAttrMaxRegistersPerBlock */
+
+        /* --- Compute capability --- */
+        case 75: *value = resp.major; break;                     /* cudaDevAttrComputeCapabilityMajor */
+        case 76: *value = resp.minor; break;                     /* cudaDevAttrComputeCapabilityMinor */
+
+        /* --- Shared memory attributes NOT in proto (derived from compute cap) ---
+         *
+         * These are critical for MMQ kernel selection. Values are per-architecture
+         * constants from NVIDIA documentation. Without these, the MMQ kernel
+         * selector sees 0 shared memory → mmq_x_best=0 → SIGABRT.
+         *
+         * sm_89 (Ada Lovelace, RTX 4060/4070/4080/4090):
+         *   MaxSharedPerBlock         = 49152  (48 KB)
+         *   MaxSharedPerBlockOptin    = 101376 (99 KB, with dynamic shmem)
+         *   MaxSharedPerMultiprocessor = 102400 (100 KB)
+         *
+         * sm_86 (Ampere, RTX 3060/3070/3080/3090):
+         *   MaxSharedPerBlock         = 49152  (48 KB)
+         *   MaxSharedPerBlockOptin    = 101376 (99 KB)
+         *   MaxSharedPerMultiprocessor = 102400 (100 KB)
+         *
+         * sm_80 (A100):
+         *   MaxSharedPerBlock         = 49152  (48 KB)
+         *   MaxSharedPerBlockOptin    = 167936 (164 KB)
+         *   MaxSharedPerMultiprocessor = 167936 (164 KB)
+         *
+         * sm_75 (Turing, RTX 2060/2070/2080):
+         *   MaxSharedPerBlock         = 49152  (48 KB)
+         *   MaxSharedPerBlockOptin    = 65536  (64 KB)
+         *   MaxSharedPerMultiprocessor = 65536  (64 KB)
+         *
+         * sm_70 (Volta, V100):
+         *   MaxSharedPerBlock         = 49152  (48 KB)
+         *   MaxSharedPerBlockOptin    = 98304  (96 KB)
+         *   MaxSharedPerMultiprocessor = 98304  (96 KB)
+         */
+        case 81: /* cudaDevAttrMaxSharedMemoryPerMultiprocessor */
+            if      (resp.major == 8 && resp.minor == 0) *value = 167936;
+            else if (resp.major >= 8)                    *value = 102400;
+            else if (resp.major == 7 && resp.minor >= 5) *value = 65536;
+            else if (resp.major == 7)                    *value = 98304;
+            else                                         *value = 49152;
+            break;
+
+        case 97: /* cudaDevAttrMaxSharedMemoryPerBlockOptin */
+            if      (resp.major == 8 && resp.minor == 0) *value = 167936;
+            else if (resp.major >= 8)                    *value = 101376;
+            else if (resp.major == 7 && resp.minor >= 5) *value = 65536;
+            else if (resp.major == 7)                    *value = 98304;
+            else                                         *value = 49152;
+            break;
+
+        /* --- Memory management capabilities --- */
+        case 83: *value = 1; break;   /* cudaDevAttrComputePreemptionSupported */
+        case 84: *value = 1; break;   /* cudaDevAttrCanUseHostPointerForRegisteredMem */
+        case 86: *value = 1; break;   /* cudaDevAttrManagedMemory */
+        case 89: *value = 1; break;   /* cudaDevAttrConcurrentManagedAccess */
+
+        case 100: /* cudaDevAttrVirtualMemoryManagementSupported */
+            /*
+             * Return 0 to force ggml-cuda to use regular cudaMalloc instead of
+             * the VMM path. VMM operations cannot be proxied over the network.
+             */
+            *value = 0; break;
+
+        case 101: *value = 0; break;  /* cudaDevAttrHandleTypePosixFileDescriptorSupported */
+        case 102: *value = 0; break;  /* cudaDevAttrHandleTypeWin32HandleSupported */
+        case 103: *value = 0; break;  /* cudaDevAttrHandleTypeWin32KMTHandleSupported */
+
         default: *value = 0; break;
     }
     return cudaSuccess;
