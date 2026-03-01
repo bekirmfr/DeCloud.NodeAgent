@@ -1697,9 +1697,25 @@ static void *tcp_listener_thread(void *arg)
     inet_aton(g_tcp_bind, &addr.sin_addr);
 
     if (bind(listen_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        LOG_ERR("TCP bind(%s:%d) failed: %s", g_tcp_bind, port, strerror(errno));
+        LOG_ERR("bind(vsock port %d) failed: %s", port, strerror(errno));
         close(listen_fd);
-        return NULL;
+
+        /* vsock bind failed but TCP is available — fall through to TCP-only */
+        if (g_tcp_enabled) {
+            LOG_INFO("vsock bind failed — falling back to TCP-only mode");
+            pthread_t tcp_tid;
+            if (pthread_create(&tcp_tid, NULL, tcp_listener_thread, &port) != 0) {
+                LOG_ERR("Failed to start TCP listener: %s", strerror(errno));
+                return 1;
+            }
+            while (g_running) {
+                maybe_reload_tokens();
+                sleep(1);
+            }
+            LOG_INFO("Shutting down (TCP-only mode)");
+            return 0;
+        }
+        return 1;
     }
 
     if (listen(listen_fd, 16) < 0) {
