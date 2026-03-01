@@ -1330,8 +1330,56 @@ typedef struct {
 
 cudaError_t cudaFuncGetAttributes(cudaFuncAttributes_t *attr, const void *func)
 {
-    (void)func;
-    if (attr) memset(attr, 0, sizeof(*attr));
+    if (!attr) return cudaErrorInvalidValue;
+
+    /* Find registered function by host-side pointer */
+    RegisteredFunction *rf = find_registered_function((uint64_t)(uintptr_t)func);
+    if (!rf) {
+        SHIM_LOG("cudaFuncGetAttributes: unknown function %p", func);
+        return cudaErrorInvalidDeviceFunction;
+    }
+
+    /* EAGER upload: trigger module upload NOW, not on first launch.
+     * This is the key fix — ggml queries attributes BEFORE any launch. */
+    if (!rf->registered) {
+        ensure_module_uploaded(rf->module_index);
+        if (!rf->registered) {
+            SHIM_LOG("cudaFuncGetAttributes: eager upload failed for %s",
+                     rf->device_name);
+            return cudaErrorInvalidDeviceFunction;
+        }
+    }
+
+    /* RPC to daemon for REAL kernel attributes from the physical GPU */
+    GpuFuncGetAttributesRequest req = {
+        .host_func_ptr = (uint64_t)(uintptr_t)func,
+    };
+    GpuFuncGetAttributesResponse resp;
+    memset(&resp, 0, sizeof(resp));
+
+    int err = rpc_call(GPU_CMD_FUNC_GET_ATTRIBUTES,
+                       &req, sizeof(req), &resp, sizeof(resp), NULL);
+    if (err != 0) {
+        SHIM_LOG("cudaFuncGetAttributes: RPC failed for %s (err=%d)",
+                 rf->device_name, err);
+        return (cudaError_t)err;
+    }
+
+    /* Populate caller's struct with real values from daemon */
+    memset(attr, 0, sizeof(*attr));
+    attr->binaryVersion          = resp.binaryVersion;
+    attr->maxThreadsPerBlock     = resp.maxThreadsPerBlock;
+    attr->numRegs                = resp.numRegs;
+    attr->sharedSizeBytes        = resp.sharedSizeBytes;
+    attr->constSizeBytes         = resp.constSizeBytes;
+    attr->localSizeBytes         = resp.localSizeBytes;
+    attr->maxDynamicSharedSizeBytes = resp.maxDynamicSharedSizeBytes;
+    attr->preferredShmemCarveout = resp.preferredShmemCarveout;
+    attr->ptxVersion             = resp.ptxVersion;
+
+    SHIM_LOG("cudaFuncGetAttributes(%s): binary=%d maxThreads=%d regs=%d shared=%d",
+             rf->device_name, resp.binaryVersion,
+             resp.maxThreadsPerBlock, resp.numRegs, resp.sharedSizeBytes);
     return cudaSuccess;
 }
 
@@ -1416,9 +1464,51 @@ cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
     int *numBlocks, const void *func, int blockSize,
     size_t dynamicSMemSize, unsigned int flags)
 {
-    (void)func; (void)blockSize; (void)dynamicSMemSize; (void)flags;
-    if (numBlocks) *numBlocks = 1;
+    if (!numBlocks) return cudaErrorInvalidValue;
+
+    RegisteredFunction *rf = find_registered_function((uint64_t)(uintptr_t)func);
+    if (!rf) {
+        *numBlocks = 1; /* safe fallback for unknown functions */
+        return cudaSuccess;
+    }
+
+    /* EAGER upload if not yet registered on daemon */
+    if (!rf->registered) {
+        ensure_module_uploaded(rf->module_index);
+        if (!rf->registered) {
+            *numBlocks = 1;
+            return cudaSuccess;
+        }
+    }
+
+    /* RPC to daemon for REAL occupancy from the physical GPU */
+    GpuOccupancyMaxBlocksRequest req = {
+        .host_func_ptr   = (uint64_t)(uintptr_t)func,
+        .blockSize       = blockSize,
+        .dynamicSMemSize = (uint64_t)dynamicSMemSize,
+        .flags           = flags,
+    };
+    GpuOccupancyMaxBlocksResponse resp;
+    memset(&resp, 0, sizeof(resp));
+
+    int err = rpc_call(GPU_CMD_OCCUPANCY_MAX_BLOCKS,
+                       &req, sizeof(req), &resp, sizeof(resp), NULL);
+    if (err != 0) {
+        *numBlocks = 1; /* safe fallback on RPC failure */
+        return cudaSuccess;
+    }
+
+    *numBlocks = resp.numBlocks;
     return cudaSuccess;
+}
+
+/* Non-Flags variant that delegates to the Flags version */
+cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+    int *numBlocks, const void *func, int blockSize,
+    size_t dynamicSMemSize)
+{
+    return cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
+        numBlocks, func, blockSize, dynamicSMemSize, 0);
 }
 
 /* Stream capture */

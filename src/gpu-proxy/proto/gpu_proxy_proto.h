@@ -65,6 +65,10 @@ typedef enum {
     GPU_CMD_REGISTER_FUNCTION      = 0x52,
     GPU_CMD_REGISTER_VAR           = 0x53,
 
+    /* True GPU Presence — kernel attribute & occupancy queries */
+    GPU_CMD_FUNC_GET_ATTRIBUTES    = 0x54,
+    GPU_CMD_OCCUPANCY_MAX_BLOCKS   = 0x55,
+
     /* Resource management */
     GPU_CMD_SET_MEMORY_QUOTA       = 0x60,
     GPU_CMD_GET_USAGE_STATS        = 0x61,
@@ -289,6 +293,35 @@ typedef struct __attribute__((packed)) {
     uint64_t free;
     uint64_t total;
 } GpuMemInfoResponse;
+
+/* --- TRUE GPU PRESENCE: FUNC_GET_ATTRIBUTES (0x54) --- */
+typedef struct __attribute__((packed)) {
+    uint64_t host_func_ptr;   /* VM-side function pointer (lookup key) */
+} GpuFuncGetAttributesRequest;
+
+typedef struct __attribute__((packed)) {
+    int32_t  binaryVersion;          /* Compute capability (e.g., 89 for sm_89) */
+    int32_t  maxThreadsPerBlock;     /* Max threads per block for this kernel */
+    int32_t  numRegs;                /* Registers used per thread */
+    int32_t  sharedSizeBytes;        /* Static shared memory per block */
+    int32_t  constSizeBytes;         /* Constant memory used */
+    int32_t  localSizeBytes;         /* Local memory per thread */
+    int32_t  maxDynamicSharedSizeBytes; /* Max dynamic shared memory */
+    int32_t  preferredShmemCarveout; /* Preferred L1/shared split */
+    int32_t  ptxVersion;             /* PTX version */
+} GpuFuncGetAttributesResponse;
+
+/* --- TRUE GPU PRESENCE: OCCUPANCY_MAX_BLOCKS (0x55) --- */
+typedef struct __attribute__((packed)) {
+    uint64_t host_func_ptr;   /* VM-side function pointer (lookup key) */
+    int32_t  blockSize;       /* Block size to query */
+    uint64_t dynamicSMemSize; /* Dynamic shared memory per block */
+    uint32_t flags;           /* Flags (usually 0) */
+} GpuOccupancyMaxBlocksRequest;
+
+typedef struct __attribute__((packed)) {
+    int32_t numBlocks;        /* Max active blocks per SM */
+} GpuOccupancyMaxBlocksResponse;
 
 /* --- RESOURCE MANAGEMENT --- */
 typedef struct __attribute__((packed)) {

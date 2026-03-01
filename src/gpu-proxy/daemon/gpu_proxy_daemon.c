@@ -888,6 +888,126 @@ static int handle_register_function(ConnectionCtx *ctx, const void *payload, uin
                          &resp, sizeof(resp));
 }
 
+/* ----------------------------------------------------------------
+ * Queries real kernel attributes from the GPU using the CUDA Driver API.
+ * Called when the shim's cudaFuncGetAttributes triggers an RPC after
+ * eagerly uploading the fat binary module.
+ * ---------------------------------------------------------------- */
+
+static int handle_func_get_attributes(ConnectionCtx *ctx,
+                                       const void *payload,
+                                       uint32_t payload_len)
+{
+    if (payload_len < sizeof(GpuFuncGetAttributesRequest)) {
+        return send_response(ctx->fd, GPU_CMD_FUNC_GET_ATTRIBUTES, -1, NULL, 0);
+    }
+
+    GpuFuncGetAttributesRequest req;
+    memcpy(&req, payload, sizeof(req));
+
+    /* Find the function by host_func_ptr (same key used in register + launch) */
+    FunctionSlot *fs = find_function(ctx, req.host_func_ptr);
+    if (!fs) {
+        LOG_ERR("CID %u: func_get_attributes: unknown func_ptr 0x%lx",
+                ctx->peer_cid, (unsigned long)req.host_func_ptr);
+        return send_response(ctx->fd, GPU_CMD_FUNC_GET_ATTRIBUTES,
+                             (int32_t)cudaErrorInvalidDeviceFunction, NULL, 0);
+    }
+
+    /* Ensure CUDA context is current for Driver API calls */
+    if (ctx->cu_ctx) cuCtxSetCurrent(ctx->cu_ctx);
+
+    /* Query each attribute individually using Driver API.
+     * cuFuncGetAttribute returns a single int per attribute. */
+    GpuFuncGetAttributesResponse resp;
+    memset(&resp, 0, sizeof(resp));
+
+    int val = 0;
+
+    cuFuncGetAttribute(&val, CU_FUNC_ATTRIBUTE_BINARY_VERSION, fs->cu_func);
+    resp.binaryVersion = val;
+
+    cuFuncGetAttribute(&val, CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK, fs->cu_func);
+    resp.maxThreadsPerBlock = val;
+
+    cuFuncGetAttribute(&val, CU_FUNC_ATTRIBUTE_NUM_REGS, fs->cu_func);
+    resp.numRegs = val;
+
+    cuFuncGetAttribute(&val, CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, fs->cu_func);
+    resp.sharedSizeBytes = val;
+
+    cuFuncGetAttribute(&val, CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES, fs->cu_func);
+    resp.constSizeBytes = val;
+
+    cuFuncGetAttribute(&val, CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES, fs->cu_func);
+    resp.localSizeBytes = val;
+
+    cuFuncGetAttribute(&val, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, fs->cu_func);
+    resp.maxDynamicSharedSizeBytes = val;
+
+    cuFuncGetAttribute(&val, CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT, fs->cu_func);
+    resp.preferredShmemCarveout = val;
+
+    cuFuncGetAttribute(&val, CU_FUNC_ATTRIBUTE_PTX_VERSION, fs->cu_func);
+    resp.ptxVersion = val;
+
+    LOG_DBG("CID %u: func_get_attributes(0x%lx): binary=%d maxThreads=%d regs=%d shared=%d",
+            ctx->peer_cid, (unsigned long)req.host_func_ptr,
+            resp.binaryVersion, resp.maxThreadsPerBlock,
+            resp.numRegs, resp.sharedSizeBytes);
+
+    return send_response(ctx->fd, GPU_CMD_FUNC_GET_ATTRIBUTES, 0,
+                         &resp, sizeof(resp));
+}
+
+/* ----------------------------------------------------------------
+ * Queries real occupancy from the GPU using the CUDA Driver API.
+ * Returns the maximum number of active blocks per SM for a given
+ * kernel with the specified block size and shared memory usage.
+ * ---------------------------------------------------------------- */
+
+static int handle_occupancy_max_blocks(ConnectionCtx *ctx,
+                                        const void *payload,
+                                        uint32_t payload_len)
+{
+    if (payload_len < sizeof(GpuOccupancyMaxBlocksRequest)) {
+        return send_response(ctx->fd, GPU_CMD_OCCUPANCY_MAX_BLOCKS, -1, NULL, 0);
+    }
+
+    GpuOccupancyMaxBlocksRequest req;
+    memcpy(&req, payload, sizeof(req));
+
+    /* Find the function — fall back to safe value if not found */
+    FunctionSlot *fs = find_function(ctx, req.host_func_ptr);
+    if (!fs) {
+        GpuOccupancyMaxBlocksResponse resp = { .numBlocks = 1 };
+        return send_response(ctx->fd, GPU_CMD_OCCUPANCY_MAX_BLOCKS, 0,
+                             &resp, sizeof(resp));
+    }
+
+    /* Ensure CUDA context is current */
+    if (ctx->cu_ctx) cuCtxSetCurrent(ctx->cu_ctx);
+
+    int numBlocks = 0;
+    CUresult cr = cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
+        &numBlocks, fs->cu_func, req.blockSize,
+        (size_t)req.dynamicSMemSize, req.flags);
+
+    if (cr != CUDA_SUCCESS) {
+        LOG_ERR("CID %u: occupancy query failed (cr=%d), using fallback=1",
+                ctx->peer_cid, cr);
+        numBlocks = 1; /* safe fallback */
+    }
+
+    LOG_DBG("CID %u: occupancy_max_blocks(0x%lx, blockSize=%d): numBlocks=%d",
+            ctx->peer_cid, (unsigned long)req.host_func_ptr,
+            req.blockSize, numBlocks);
+
+    GpuOccupancyMaxBlocksResponse resp = { .numBlocks = numBlocks };
+    return send_response(ctx->fd, GPU_CMD_OCCUPANCY_MAX_BLOCKS, 0,
+                         &resp, sizeof(resp));
+}
+
 /* ================================================================
  * Command handler — kernel launch
  * ================================================================ */
@@ -1424,7 +1544,12 @@ static void *connection_handler(void *arg)
         case GPU_CMD_REGISTER_FUNCTION:
             rc = handle_register_function(ctx, buf, hdr.payload_len);
             break;
-
+        case GPU_CMD_FUNC_GET_ATTRIBUTES:
+            rc = handle_func_get_attributes(ctx, buf, hdr.payload_len);
+            break;
+        case GPU_CMD_OCCUPANCY_MAX_BLOCKS:
+            rc = handle_occupancy_max_blocks(ctx, buf, hdr.payload_len);
+            break;
         /* Kernel launch */
         case GPU_CMD_LAUNCH_KERNEL:
             rc = handle_launch_kernel(ctx, buf, hdr.payload_len);
