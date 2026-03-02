@@ -528,6 +528,8 @@ void __cudaRegisterFunction(
         rf->module_index  = g_current_module_index;
         strncpy(rf->device_name, name, sizeof(rf->device_name) - 1);
         rf->device_name[sizeof(rf->device_name) - 1] = '\0';
+        SHIM_LOG("__cudaRegisterFunction('%s', hostFun=%p) — #%d, mod=%d",
+            name, hostFun, g_function_count, g_current_module_index);
     }
 }
 
