@@ -11,6 +11,7 @@
  *       -Wl,--version-script=libcublas.version -ldl
  */
 
+#define _GNU_SOURCE
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -112,6 +113,15 @@ const char *cublasGetStatusString(cublasStatus_t status)
 /* ================================================================
  * GEMM compute functions — RPC to daemon via shim
  * ================================================================ */
+
+/* Forward declarations for delegation chain */\\
+cublasStatus_t cublasGemmEx(cublasHandle_t, int, int, int, int, int,
+    const void *, const void *, int, int, const void *, int, int,
+    const void *, void *, int, int, int, int);
+cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t, int, int,
+    int, int, int, const void *, const void *, int, int, long long,
+    const void *, int, int, long long, const void *, void *, int, int,
+    long long, int, int, int);
 
 cublasStatus_t cublasSgemm_v2(cublasHandle_t h, int ta, int tb,
     int m, int n, int k, const float *alpha,
