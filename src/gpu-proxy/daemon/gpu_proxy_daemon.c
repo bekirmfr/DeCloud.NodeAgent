@@ -750,10 +750,17 @@ static int handle_register_module(ConnectionCtx *ctx, const void *payload, uint3
             LOG_ERR("CID %u: cuDeviceGet failed (%d)", ctx->peer_cid, cr);
             return send_response(ctx->fd, GPU_CMD_REGISTER_MODULE, (int32_t)cr, NULL, 0);
         }
-        cr = cuCtxCreate(&ctx->cu_ctx, 0, dev);
+        /* Use the PRIMARY context (same one the runtime API uses for
+         * cudaMalloc/cudaMemcpy). cuCtxCreate would make a separate
+         * context, causing CUDA_ERROR_INVALID_HANDLE on launch. */
+        cr = cuDevicePrimaryCtxRetain(&ctx->cu_ctx, dev);
         if (cr != CUDA_SUCCESS) {
-            LOG_ERR("CID %u: cuCtxCreate failed (%d)", ctx->peer_cid, cr);
+            LOG_ERR("CID %u: cuDevicePrimaryCtxRetain failed (%d)", ctx->peer_cid, cr);
             return send_response(ctx->fd, GPU_CMD_REGISTER_MODULE, (int32_t)cr, NULL, 0);
+        }
+        cr = cuCtxSetCurrent(ctx->cu_ctx);
+        if (cr != CUDA_SUCCESS) {
+            LOG_ERR("CID %u: cuCtxSetCurrent failed (%d)", ctx->peer_cid, cr);
         }
     } else {
         cuCtxSetCurrent(ctx->cu_ctx);
