@@ -171,7 +171,7 @@ typedef struct {
  * ================================================================ */
 
 #define MAX_REGISTERED_FUNCTIONS 8192
-#define MAX_DEFERRED_MODULES 64
+#define MAX_DEFERRED_MODULES 256
 
 typedef struct {
     uint64_t host_func_ptr;
