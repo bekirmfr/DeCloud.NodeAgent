@@ -114,7 +114,7 @@ const char *cublasGetStatusString(cublasStatus_t status)
  * GEMM compute functions — RPC to daemon via shim
  * ================================================================ */
 
-/* Forward declarations for delegation chain */\\
+/* Forward declarations for delegation chain */
 cublasStatus_t cublasGemmEx(cublasHandle_t, int, int, int, int, int,
     const void *, const void *, int, int, const void *, int, int,
     const void *, void *, int, int, int, int);
