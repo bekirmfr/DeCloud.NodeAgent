@@ -104,7 +104,7 @@ $(NVML_SHIM): shim/nvml_shim.c $(TRANSPORT_DEPS) | $(BUILD_DIR)
 # ----------------------------------------------------------------
 cublas-stub: $(CUBLAS_STUB)
 
-$(CUBLAS_STUB): stubs/cublas_stub.c stubs/libcublas.version | $(BUILD_DIR)
+$(CUBLAS_STUB): stubs/cublas_stub.c -ldl stubs/libcublas.version | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -shared -fPIC \
 		-o $@ $< \
 		-Wl,-soname,libcublas.so.12 \

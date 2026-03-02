@@ -1321,6 +1321,18 @@ cudaError_t cudaHostUnregister(void *ptr)
 }
 
 /* ================================================================
+ * Exported RPC helper for cublas_stub.so
+ *
+ * The stub has correct @@libcublas.so.12 version tags but no
+ * transport. It finds us via dlsym(RTLD_DEFAULT) at runtime.
+ * ================================================================ */
+int decloud_rpc_call(uint8_t cmd, const void *req, uint32_t req_len,
+                     void *resp, uint32_t resp_size, uint32_t *resp_len)
+{
+    return rpc_call(cmd, req, req_len, resp, resp_size, resp_len);
+}
+
+/* ================================================================
  * cuBLAS stub functions
  *
  * ggml unconditionally creates cuBLAS handles during CUDA backend init,

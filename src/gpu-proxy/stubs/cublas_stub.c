@@ -1,39 +1,66 @@
 /*
  * DeCloud cuBLAS Stub Library (libcublas.so.12)
  *
- * Minimal stub that satisfies libggml-cuda.so's DT_NEEDED: libcublas.so.12
- * with correct ELF version tags (@@libcublas.so.12).
+ * Provides cublasGemmBatchedEx and cublasGemmStridedBatchedEx with
+ * correct @@libcublas.so.12 version tags. GEMM calls are forwarded
+ * via RPC to the daemon through the shim's exported decloud_rpc_call.
  *
- * Background:
- *   Ollama v0.17 bundles real NVIDIA cuBLAS (~300MB) in cuda_v12/. Real cuBLAS
- *   calls cuGetExportTable (private NVIDIA driver internals) which can't be
- *   proxied. This stub replaces the real library — init/handle functions return
- *   SUCCESS so ggml's cuBLAS init path doesn't crash, compute functions return
- *   NOT_SUPPORTED so ggml falls back to its native MMQ kernels.
- *
- * CRITICAL: Must be compiled with:
+ * Build:
  *   gcc -shared -fPIC -o libcublas_stub.so cublas_stub.c \
  *       -Wl,-soname,libcublas.so.12 \
- *       -Wl,--version-script=libcublas.version
- *
- *   The version script exports symbols under the libcublas.so.12 version
- *   namespace. Without it, symbols get tagged @@libcudart.so.12 (wrong)
- *   and dlopen(libggml-cuda.so) fails silently.
- *
- * See: GPU_PROXY_DEBUGGING_JOURNAL.md, Problem 17 (Day 4)
+ *       -Wl,--version-script=libcublas.version -ldl
  */
 
 #include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <dlfcn.h>
+
+/* Include proto for struct definitions */
+#include "../proto/gpu_proxy_proto.h"
 
 typedef void *cublasHandle_t;
 typedef int cublasStatus_t;
 typedef void *cudaStream_t;
 
-#define CUBLAS_STATUS_SUCCESS          0
-#define CUBLAS_STATUS_NOT_INITIALIZED  1
-#define CUBLAS_STATUS_NOT_SUPPORTED   15
+#define CUBLAS_STATUS_SUCCESS           0
+#define CUBLAS_STATUS_NOT_INITIALIZED   1
+#define CUBLAS_STATUS_ALLOC_FAILED      3
+#define CUBLAS_STATUS_EXECUTION_FAILED 13
+#define CUBLAS_STATUS_NOT_SUPPORTED    15
+
+#define STUB_LOG(fmt, ...) \
+    fprintf(stderr, "[cublas-stub] " fmt "\n", ##__VA_ARGS__)
 
 static int g_cublas_dummy_handle = 0xDEC10BD;
+
+/* ================================================================
+ * RPC bridge to the shim's daemon connection
+ *
+ * The shim (libcudart.so.12, loaded via LD_PRELOAD) exports
+ * decloud_rpc_call() which shares the daemon connection.
+ * We resolve it lazily via dlsym(RTLD_DEFAULT).
+ * ================================================================ */
+
+typedef int (*rpc_call_fn)(uint8_t cmd, const void *req, uint32_t req_len,
+                           void *resp, uint32_t resp_size, uint32_t *resp_len);
+
+static rpc_call_fn g_rpc_call = NULL;
+static int g_rpc_resolved = 0;
+
+static rpc_call_fn get_rpc(void)
+{
+    if (!g_rpc_resolved) {
+        g_rpc_call = (rpc_call_fn)dlsym(RTLD_DEFAULT, "decloud_rpc_call");
+        if (!g_rpc_call) {
+            STUB_LOG("WARNING: decloud_rpc_call not found — GEMM will fail");
+        }
+        g_rpc_resolved = 1;
+    }
+    return g_rpc_call;
+}
 
 /* ================================================================
  * Init / handle management — return SUCCESS
@@ -75,16 +102,15 @@ const char *cublasGetStatusString(cublasStatus_t status)
     switch (status) {
         case 0:  return "CUBLAS_STATUS_SUCCESS";
         case 1:  return "CUBLAS_STATUS_NOT_INITIALIZED";
+        case 3:  return "CUBLAS_STATUS_ALLOC_FAILED";
+        case 13: return "CUBLAS_STATUS_EXECUTION_FAILED";
         case 15: return "CUBLAS_STATUS_NOT_SUPPORTED";
         default: return "CUBLAS_STATUS_UNKNOWN";
     }
 }
 
 /* ================================================================
- * Compute stubs — return NOT_SUPPORTED
- *
- * These are called when ggml bypasses MMQ and attempts cuBLAS compute.
- * Returning NOT_SUPPORTED makes ggml fall back to its native MMQ kernels.
+ * GEMM compute functions — RPC to daemon via shim
  * ================================================================ */
 
 cublasStatus_t cublasSgemm_v2(cublasHandle_t h, int ta, int tb,
@@ -92,10 +118,12 @@ cublasStatus_t cublasSgemm_v2(cublasHandle_t h, int ta, int tb,
     const float *A, int lda, const float *B, int ldb,
     const float *beta, float *C, int ldc)
 {
-    (void)h;(void)ta;(void)tb;(void)m;(void)n;(void)k;
-    (void)alpha;(void)A;(void)lda;(void)B;(void)ldb;
-    (void)beta;(void)C;(void)ldc;
-    return CUBLAS_STATUS_NOT_SUPPORTED;
+    /* Delegate to GemmEx with float types */
+    return cublasGemmEx(h, ta, tb, m, n, k, alpha,
+        A, 0 /*CUDA_R_32F*/, lda,
+        B, 0 /*CUDA_R_32F*/, ldb,
+        beta, C, 0 /*CUDA_R_32F*/, ldc,
+        68 /*CUBLAS_COMPUTE_32F*/, -1 /*CUBLAS_GEMM_DEFAULT*/);
 }
 
 cublasStatus_t cublasGemmEx(cublasHandle_t h, int ta, int tb,
@@ -105,6 +133,7 @@ cublasStatus_t cublasGemmEx(cublasHandle_t h, int ta, int tb,
     const void *beta, void *C, int Ctype, int ldc,
     int computeType, int algo)
 {
+    /* Delegate to strided batched with batch=1, stride=0 */
     return cublasGemmStridedBatchedEx(h, ta, tb, m, n, k, alpha,
         A, Atype, lda, 0,
         B, Btype, ldb, 0,
@@ -120,9 +149,17 @@ cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t h, int ta, int tb,
     int batchCount, int computeType, int algo)
 {
     (void)h;
+    if (batchCount <= 0) return CUBLAS_STATUS_SUCCESS;
+
+    rpc_call_fn rpc = get_rpc();
+    if (!rpc) {
+        STUB_LOG("cublasGemmStridedBatchedEx: no RPC — NOT_SUPPORTED");
+        return CUBLAS_STATUS_NOT_SUPPORTED;
+    }
 
     int scalar_size = 4;
-    if (computeType == 1) scalar_size = 8;
+    if (computeType == 70) scalar_size = 8;  /* CUBLAS_COMPUTE_64F */
+    if (computeType == 64) scalar_size = 2;  /* CUBLAS_COMPUTE_16F */
 
     GpuCublasGemmStridedRequest req;
     memset(&req, 0, sizeof(req));
@@ -150,11 +187,10 @@ cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t h, int ta, int tb,
     if (alpha) memcpy(req.alpha, alpha, scalar_size);
     if (beta)  memcpy(req.beta, beta, scalar_size);
 
-    int err = rpc_call(GPU_CMD_CUBLAS_GEMM_STRIDED,
-                       &req, sizeof(req), NULL, 0, NULL);
-
+    int err = rpc(GPU_CMD_CUBLAS_GEMM_STRIDED,
+                  &req, sizeof(req), NULL, 0, NULL);
     if (err != 0) {
-        SHIM_LOG("cublasGemmStridedBatchedEx: RPC failed (err=%d)", err);
+        STUB_LOG("cublasGemmStridedBatchedEx: RPC failed (err=%d)", err);
         return CUBLAS_STATUS_EXECUTION_FAILED;
     }
     return CUBLAS_STATUS_SUCCESS;
@@ -170,17 +206,23 @@ cublasStatus_t cublasGemmBatchedEx(cublasHandle_t h, int ta, int tb,
     (void)h;
     if (batchCount <= 0) return CUBLAS_STATUS_SUCCESS;
 
-    /* Determine scalar size from computeType */
-    int scalar_size = 4; /* float by default */
-    if (computeType == 1) scalar_size = 8; /* CUDA_R_64F = double */
+    rpc_call_fn rpc = get_rpc();
+    if (!rpc) {
+        STUB_LOG("cublasGemmBatchedEx: no RPC — NOT_SUPPORTED");
+        return CUBLAS_STATUS_NOT_SUPPORTED;
+    }
 
-    /* Build RPC payload: fixed header + 3*batchCount device pointers */
-    uint32_t ptrs_size = 3 * batchCount * sizeof(uint64_t);
-    uint32_t req_len = sizeof(GpuCublasGemmBatchedRequest) + ptrs_size;
+    int scalar_size = 4;
+    if (computeType == 70) scalar_size = 8;
+    if (computeType == 64) scalar_size = 2;
+
+    uint32_t ptrs_size = 3 * batchCount * (uint32_t)sizeof(uint64_t);
+    uint32_t req_len = (uint32_t)sizeof(GpuCublasGemmBatchedRequest) + ptrs_size;
     void *req_buf = malloc(req_len);
     if (!req_buf) return CUBLAS_STATUS_ALLOC_FAILED;
 
     GpuCublasGemmBatchedRequest *req = (GpuCublasGemmBatchedRequest *)req_buf;
+    memset(req, 0, sizeof(*req));
     req->transa      = ta;
     req->transb      = tb;
     req->m           = m;
@@ -196,26 +238,23 @@ cublasStatus_t cublasGemmBatchedEx(cublasHandle_t h, int ta, int tb,
     req->computeType = computeType;
     req->algo        = algo;
 
-    /* Copy scalar values */
-    memset(req->alpha, 0, 16);
-    memset(req->beta, 0, 16);
     if (alpha) memcpy(req->alpha, alpha, scalar_size);
     if (beta)  memcpy(req->beta, beta, scalar_size);
 
-    /* Copy device pointer arrays */
-    uint64_t *ptrs = (uint64_t *)((uint8_t *)req_buf + sizeof(GpuCublasGemmBatchedRequest));
+    uint64_t *ptrs = (uint64_t *)((uint8_t *)req_buf
+                      + sizeof(GpuCublasGemmBatchedRequest));
     for (int i = 0; i < batchCount; i++) {
-        ptrs[i]                = (uint64_t)(uintptr_t)A[i];
-        ptrs[batchCount + i]   = (uint64_t)(uintptr_t)B[i];
-        ptrs[2*batchCount + i] = (uint64_t)(uintptr_t)C[i];
+        ptrs[i]                  = (uint64_t)(uintptr_t)A[i];
+        ptrs[batchCount + i]     = (uint64_t)(uintptr_t)B[i];
+        ptrs[2 * batchCount + i] = (uint64_t)(uintptr_t)C[i];
     }
 
-    int err = rpc_call(GPU_CMD_CUBLAS_GEMM_BATCHED,
-                       req_buf, req_len, NULL, 0, NULL);
+    int err = rpc(GPU_CMD_CUBLAS_GEMM_BATCHED,
+                  req_buf, req_len, NULL, 0, NULL);
     free(req_buf);
 
     if (err != 0) {
-        SHIM_LOG("cublasGemmBatchedEx: RPC failed (err=%d)", err);
+        STUB_LOG("cublasGemmBatchedEx: RPC failed (err=%d)", err);
         return CUBLAS_STATUS_EXECUTION_FAILED;
     }
     return CUBLAS_STATUS_SUCCESS;

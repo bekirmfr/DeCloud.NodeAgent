@@ -3,5 +3,6 @@ libcudart.so.12 {
         cuda*;
         __cuda*;
         cublas*;
+        decloud_*;
     local: *;
 };
