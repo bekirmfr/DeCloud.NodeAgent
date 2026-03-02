@@ -235,7 +235,7 @@ static int send_response(int fd, uint8_t cmd, int32_t status,
  * ================================================================ */
 
 #define MAX_MODULES   128
-#define MAX_FUNCTIONS 4096
+#define MAX_FUNCTIONS 8192
 #define MAX_STREAMS   64
 #define MAX_EVENTS    128
 
