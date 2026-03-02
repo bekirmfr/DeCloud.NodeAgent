@@ -170,7 +170,7 @@ typedef struct {
  * Registration tracking
  * ================================================================ */
 
-#define MAX_REGISTERED_FUNCTIONS 2048
+#define MAX_REGISTERED_FUNCTIONS 4096
 #define MAX_DEFERRED_MODULES 64
 
 typedef struct {
