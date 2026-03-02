@@ -1168,6 +1168,15 @@ build_gpu_proxy() {
         log_success "cuBLAS stub installed → $SHIM_DIR/libcublas_stub.so"
     fi
 
+    # cuBLAS Lt Stub → decloud-gpu-shim/ only
+    # Minimal placeholder satisfying libggml-cuda.so DT_NEEDED: libcublasLt.so.12.
+    # No versioned symbols needed — real compute is proxied via daemon on host.
+    local built_cublaslt_stub="$GPU_PROXY_SRC/build/libcublasLt_stub.so"
+    if [ -f "$built_cublaslt_stub" ]; then
+        install -m 644 "$built_cublaslt_stub" "$SHIM_DIR/libcublasLt_stub.so"
+        log_success "cuBLAS Lt stub installed → $SHIM_DIR/libcublasLt_stub.so"
+    fi
+
     # Daemon → /usr/local/bin (this is fine — daemon is a standalone binary)
     if [ "$daemon_built" = true ] && [ -f "$GPU_PROXY_SRC/build/gpu-proxy-daemon" ]; then
         install -d /usr/local/bin
@@ -1187,8 +1196,9 @@ build_gpu_proxy() {
     log_info "│ CUDA Home:      ${CUDA_HOME:-not found}"
     log_info "│ Runtime Shim:   $([ -f $SHIM_DIR/libdecloud_cuda_shim.so ] && echo 'installed' || echo 'not built')"
     log_info "│ Driver Shim:    $([ -f $SHIM_DIR/libcuda.so.1 ] && echo 'installed' || echo 'not built')"
-log_info "│ NVML Shim:      $([ -f $SHIM_DIR/libnvidia-ml.so.1 ] && echo 'installed' || echo 'not built')"
+    log_info "│ NVML Shim:      $([ -f $SHIM_DIR/libnvidia-ml.so.1 ] && echo 'installed' || echo 'not built')"
     log_info "│ cuBLAS Stub:    $([ -f $SHIM_DIR/libcublas_stub.so ] && echo 'installed' || echo 'not built')"
+    log_info "│ cuBLAS Lt Stub: $([ -f $SHIM_DIR/libcublasLt_stub.so ] && echo 'installed' || echo 'not built')"
     log_info "│ Daemon:         $([ -f /usr/local/bin/gpu-proxy-daemon ] && echo 'installed' || echo 'not built')"
     log_info "└──────────────────────────────────────────────────┘"
     echo ""

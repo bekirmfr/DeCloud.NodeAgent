@@ -88,7 +88,8 @@ public class GpuProxyService
         "libdecloud_cuda_shim.so",
         "libcuda.so.1",
         "libnvidia-ml.so.1",
-        "libcublas_stub.so"
+        "libcublas_stub.so",
+        "libcublasLt_stub.so"
     };
 
     /// <summary>
