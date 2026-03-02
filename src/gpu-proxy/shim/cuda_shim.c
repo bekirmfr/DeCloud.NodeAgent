@@ -481,10 +481,13 @@ void **__cudaRegisterFatBinary(void *fatCubin)
     }
     const void *fatbin_data = (const void *)wrapper->data;
     size_t fatbin_size = get_fatbin_size(fatbin_data);
-    if (fatbin_size == 0 || fatbin_size > GPU_PROXY_MAX_PAYLOAD) {
+    if (fatbin_size == 0) {
         static void *dummy_handle = NULL;
         return &dummy_handle;
     }
+    /* No upper size limit — fatbin_data is mmap'd, we store a pointer.
+     * Streaming upload in ensure_module_uploaded() writes directly. */
+     
     /* LOCAL ONLY - no RPC */
     if (g_module_count < MAX_DEFERRED_MODULES) {
         DeferredModule *dm = &g_modules[g_module_count];
@@ -987,15 +990,51 @@ static int ensure_module_uploaded(int mod_idx)
     if (m->uploaded) return 0;
     ensure_connected();
     if (g_conn_fd < 0) return -1;
-    uint32_t req_len = sizeof(GpuRegisterModuleRequest) + (uint32_t)m->fatbin_size;
-    void *req_buf = malloc(req_len);
-    if (!req_buf) return -1;
-    GpuRegisterModuleRequest *mreq = (GpuRegisterModuleRequest *)req_buf;
-    mreq->fatbin_size = (uint64_t)m->fatbin_size;
-    memcpy((uint8_t *)req_buf + sizeof(GpuRegisterModuleRequest), m->fatbin_data, m->fatbin_size);
+
+    /*
+     * STREAMING MODULE UPLOAD — writes fatbin directly from mmap'd
+     * memory instead of malloc+memcpy (which OOMs for 1.5GB+ fatbins).
+     * Wire format: [header][GpuRegisterModuleRequest][fatbin bytes]
+     */
+    pthread_mutex_lock(&g_conn_lock);
+
+    uint32_t payload_len = (uint32_t)(sizeof(GpuRegisterModuleRequest) + m->fatbin_size);
+    SHIM_LOG("streaming module %d: %.1f MB fatbin",
+            mod_idx, (double)m->fatbin_size / (1024.0 * 1024.0));
+
+    GpuProxyHeader hdr = {
+        .magic = GPU_PROXY_MAGIC, .version = GPU_PROXY_VERSION,
+        .cmd = GPU_CMD_REGISTER_MODULE, .flags = 0,
+        .payload_len = payload_len, .status = 0,
+    };
+    if (write_exact(g_conn_fd, &hdr, sizeof(hdr)) < 0) goto mod_err;
+
+    GpuRegisterModuleRequest mreq_s = { .fatbin_size = (uint64_t)m->fatbin_size };
+    if (write_exact(g_conn_fd, &mreq_s, sizeof(mreq_s)) < 0) goto mod_err;
+
+    /* Stream fatbin directly from mmap — zero copy, zero malloc */
+    if (write_exact(g_conn_fd, m->fatbin_data, m->fatbin_size) < 0) goto mod_err;
+
+    /* Read response */
+    GpuProxyHeader rhdr;
+    if (read_exact(g_conn_fd, &rhdr, sizeof(rhdr)) < 0) goto mod_err;
     GpuRegisterModuleResponse mresp;
-    int err = rpc_call(GPU_CMD_REGISTER_MODULE, req_buf, req_len, &mresp, sizeof(mresp), NULL);
-    free(req_buf);
+    memset(&mresp, 0, sizeof(mresp));
+    if (rhdr.payload_len > 0 && rhdr.payload_len <= sizeof(mresp)) {
+        if (read_exact(g_conn_fd, &mresp, rhdr.payload_len) < 0) goto mod_err;
+    } else if (rhdr.payload_len > sizeof(mresp)) {
+        char drain[256]; uint32_t rem = rhdr.payload_len;
+        while (rem > 0) { uint32_t c = rem < 256 ? rem : 256;
+            if (read_exact(g_conn_fd, drain, c) < 0) goto mod_err; rem -= c; }
+    }
+    int err = rhdr.status;
+    pthread_mutex_unlock(&g_conn_lock);
+    if (0) { mod_err:
+        close(g_conn_fd); g_conn_fd = -1; g_initialized = 0;
+        pthread_mutex_unlock(&g_conn_lock);
+        SHIM_LOG("streaming module %d: connection lost", mod_idx);
+        return -1;
+    }
     if (err != 0) { SHIM_LOG("lazy upload: module %d failed", mod_idx); return -1; }
     m->remote_handle = mresp.module_handle;
     m->uploaded = 1;

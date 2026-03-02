@@ -16,7 +16,8 @@
 #define GPU_PROXY_VERSION   2
 #define GPU_PROXY_PORT      9999
 #define GPU_PROXY_TCP_BIND  "192.168.122.1"
-#define GPU_PROXY_MAX_PAYLOAD (64 * 1024 * 1024)  /* 64 MB max transfer */
+#define GPU_PROXY_MAX_PAYLOAD (2048UL * 1024 * 1024)  /* 2 GB — large fatbins */
+#define GPU_PROXY_CHUNK_SIZE  (32UL * 1024 * 1024)    /* 32 MB memcpy chunks */
 #define GPU_PROXY_TOKEN_LEN 32
 #define GPU_MAX_KERNEL_PARAMS 64
 #define GPU_DEFAULT_KERNEL_TIMEOUT_US 30000000  /* 30 seconds */
