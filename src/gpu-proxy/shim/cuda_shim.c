@@ -19,6 +19,7 @@
 #include <sys/socket.h>
 #include <linux/vm_sockets.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 
 #include "proto/gpu_proxy_proto.h"
@@ -283,6 +284,10 @@ static int try_tcp_connect(int port)
         close(fd);
         return -1;
     }
+
+    /* Disable Nagle — critical for low-latency RPC */
+    int nodelay = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
     SHIM_LOG("Connected via TCP to %s:%d", host, port);
     return fd;

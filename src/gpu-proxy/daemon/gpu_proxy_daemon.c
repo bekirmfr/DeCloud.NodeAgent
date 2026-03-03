@@ -31,6 +31,7 @@
 #include <sys/socket.h>
 #include <linux/vm_sockets.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 
 #include <dlfcn.h>
@@ -1384,6 +1385,7 @@ static int handle_launch_kernel(ConnectionCtx *ctx, const void *payload, uint32_
         }
     } else if (cr == CUDA_SUCCESS && g_kernel_timeout_us == 0) {
         /* No timeout — skip sync to allow async kernel pipelining.
+         * cuStreamSynchronize(cu_stream ? cu_stream : 0);
          * Metering uses event-based timing if needed. */
     }
 
@@ -1999,6 +2001,10 @@ static void *tcp_listener_thread(void *arg)
             LOG_ERR("TCP accept() failed: %s", strerror(errno));
             break;
         }
+
+        /* Disable Nagle — critical for low-latency RPC */
+        int nodelay = 1;
+        setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
         ConnectionCtx *ctx = calloc(1, sizeof(ConnectionCtx));
         if (!ctx) {

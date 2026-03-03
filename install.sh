@@ -1179,6 +1179,23 @@ build_gpu_proxy() {
 
     # Daemon → /usr/local/bin (this is fine — daemon is a standalone binary)
     if [ "$daemon_built" = true ] && [ -f "$GPU_PROXY_SRC/build/gpu-proxy-daemon" ]; then
+        # Kill stale processes before replacing binary
+        local stale_pids
+        stale_pids=$(pgrep -f gpu-proxy-daemon 2>/dev/null || true)
+        if [ -n "$stale_pids" ]; then
+            log_info "Stopping stale gpu-proxy-daemon processes..."
+            kill -9 $stale_pids 2>/dev/null || true
+            sleep 2
+            local remaining
+            remaining=$(pgrep -f gpu-proxy-daemon 2>/dev/null || true)
+            if [ -n "$remaining" ]; then
+                log_warn "Some daemon processes still running: $remaining"
+                kill -9 $remaining 2>/dev/null || true
+                sleep 1
+            fi
+            log_success "Stale daemon processes cleaned up"
+        fi
+
         install -d /usr/local/bin
         install -m 755 "$GPU_PROXY_SRC/build/gpu-proxy-daemon" /usr/local/bin/
         log_success "Daemon installed → /usr/local/bin/gpu-proxy-daemon"
