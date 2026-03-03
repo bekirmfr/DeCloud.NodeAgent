@@ -1269,6 +1269,41 @@ static int handle_launch_kernel(ConnectionCtx *ctx, const void *payload, uint32_
     /* Resolve stream */
     CUstream cu_stream = (CUstream)resolve_stream(ctx, req.stream_handle);
 
+    /* === DIAGNOSTIC: validate context, function, and stream before launch === */
+    {
+        CUcontext cur_ctx = NULL;
+        CUresult diag_cr = cuCtxGetCurrent(&cur_ctx);
+        LOG_INFO("CID %u: DIAG launch pre-check: cuCtxGetCurrent=%d cur_ctx=%p ctx->cu_ctx=%p",
+                 ctx->peer_cid, diag_cr, (void *)cur_ctx, (void *)ctx->cu_ctx);
+
+        /* Verify CUfunction is valid by querying an attribute */
+        int diag_regs = -1;
+        CUresult func_cr = cuFuncGetAttribute(&diag_regs, CU_FUNC_ATTRIBUTE_NUM_REGS, fs->cu_func);
+        LOG_INFO("CID %u: DIAG func check: cu_func=%p GetAttribute(NUM_REGS)=%d regs=%d "
+                 "host_ptr=0x%lx stream_req=0x%lx cu_stream=%p",
+                 ctx->peer_cid, (void *)fs->cu_func, func_cr, diag_regs,
+                 (unsigned long)req.host_func_ptr,
+                 (unsigned long)req.stream_handle,
+                 (void *)cu_stream);
+
+        /* Also check if primary context is active */
+        CUcontext primary_ctx = NULL;
+        unsigned int pctx_flags = 0;
+        int pctx_active = 0;
+        CUdevice diag_dev;
+        cuDeviceGet(&diag_dev, 0);
+        CUresult pctx_cr = cuDevicePrimaryCtxGetState(diag_dev, &pctx_flags, &pctx_active);
+        cuDevicePrimaryCtxRetain(&primary_ctx, diag_dev);
+        LOG_INFO("CID %u: DIAG primary ctx: state_cr=%d flags=%u active=%d "
+                 "primary=%p matches_cur=%d matches_stored=%d",
+                 ctx->peer_cid, pctx_cr, pctx_flags, pctx_active,
+                 (void *)primary_ctx,
+                 (primary_ctx == cur_ctx),
+                 (primary_ctx == ctx->cu_ctx));
+        cuDevicePrimaryCtxRelease(diag_dev);  /* Balance the retain */
+    }
+    /* === END DIAGNOSTIC === */
+
     uint64_t t0 = now_us();
 
     CUresult cr = cuLaunchKernel(
