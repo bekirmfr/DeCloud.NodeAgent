@@ -861,6 +861,25 @@ static int handle_register_function(ConnectionCtx *ctx, const void *payload, uin
     fs->in_use = 1;
 
     /*
+     * Auto-set max dynamic shared memory to device optin limit.
+     * ggml-cuda calls cudaFuncSetAttribute(MaxDynamicSharedMemorySize)
+     * but the shim discards it (no-op stub). Without this, heavy MMQ
+     * kernels needing >48KB shared memory fail with INVALID_VALUE (1).
+     */
+    {
+        int shmem_optin = 0;
+        CUresult shmem_cr = cuDeviceGetAttribute(
+            &shmem_optin,
+            CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+            0);
+        if (shmem_cr == CUDA_SUCCESS && shmem_optin > 0) {
+            cuFuncSetAttribute(func,
+                CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                shmem_optin);
+        }
+    }
+
+    /*
      * Query parameter info using cuFuncGetParamInfo (CUDA 12.0+).
      * If not available (older driver), fall back to a heuristic:
      * we can't determine param sizes server-side, so we tell the shim
