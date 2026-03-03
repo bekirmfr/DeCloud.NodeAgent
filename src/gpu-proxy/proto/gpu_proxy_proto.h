@@ -359,10 +359,15 @@ typedef struct __attribute__((packed)) {
     int32_t  algo;           /* CUBLAS_GEMM_DEFAULT=(-1), _TENSOR_OP=99 */
     uint8_t  alpha[16];      /* Up to 128-bit scalar (covers double complex) */
     uint8_t  beta[16];
-    /* Followed by: uint64_t Aarray[batchCount]
-     *              uint64_t Barray[batchCount]
-     *              uint64_t Carray[batchCount]
+    /*
+     * Device pointers to the A[], B[], C[] pointer arrays in GPU memory.
+     * ggml-cuda's k_compute_batched_ptrs kernel writes these arrays to
+     * device memory. The VM CANNOT dereference them (SEGFAULT).
+     * The daemon reads them via cudaMemcpy D2H before calling cuBLAS.
      */
+    uint64_t A_array_dev;    /* Device ptr to array of batchCount A ptrs */
+    uint64_t B_array_dev;    /* Device ptr to array of batchCount B ptrs */
+    uint64_t C_array_dev;    /* Device ptr to array of batchCount C ptrs */
 } GpuCublasGemmBatchedRequest;
 
 /* --- CUBLAS GEMM STRIDED BATCHED (0x57) --- */

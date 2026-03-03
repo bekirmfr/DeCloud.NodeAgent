@@ -169,9 +169,17 @@ cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t h, int ta, int tb,
 
     int scalar_size = 4;
     if (computeType == 70) scalar_size = 8;  /* CUBLAS_COMPUTE_64F */
-    if (computeType == 64) scalar_size = 2;  /* CUBLAS_COMPUTE_16F */
+if (computeType == 64) scalar_size = 2;
 
-    GpuCublasGemmStridedRequest req;
+    /*
+     * A, B, C are DEVICE pointers to arrays of per-batch device pointers.
+     * We CANNOT dereference them — they live in GPU memory, not host RAM.
+     * Attempting A[i] would SEGFAULT (the original bug).
+     *
+     * Instead, send the device base addresses to the daemon, which reads
+     * the pointer arrays via cudaMemcpy D2H before calling real cuBLAS.
+     */
+    GpuCublasGemmBatchedRequest req;
     memset(&req, 0, sizeof(req));
     req.transa      = ta;
     req.transb      = tb;
@@ -180,24 +188,25 @@ cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t h, int ta, int tb,
     req.k           = k;
     req.Atype       = Atype;
     req.lda         = lda;
-    req.strideA     = strideA;
     req.Btype       = Btype;
     req.ldb         = ldb;
-    req.strideB     = strideB;
     req.Ctype       = Ctype;
     req.ldc         = ldc;
-    req.strideC     = strideC;
     req.batchCount  = batchCount;
     req.computeType = computeType;
     req.algo        = algo;
-    req.A_ptr       = (uint64_t)(uintptr_t)A;
-    req.B_ptr       = (uint64_t)(uintptr_t)B;
-    req.C_ptr       = (uint64_t)(uintptr_t)C;
+    req.A_array_dev = (uint64_t)(uintptr_t)A;
+    req.B_array_dev = (uint64_t)(uintptr_t)B;
+    req.C_array_dev = (uint64_t)(uintptr_t)C;
 
     if (alpha) memcpy(req.alpha, alpha, scalar_size);
     if (beta)  memcpy(req.beta, beta, scalar_size);
 
-    int err = rpc(GPU_CMD_CUBLAS_GEMM_STRIDED,
+    STUB_LOG("cublasGemmBatchedEx: m=%d n=%d k=%d bc=%d A_dev=%p B_dev=%p C_dev=%p",
+             m, n, k, batchCount,
+             (void *)(uintptr_t)A, (void *)(uintptr_t)B, (void *)(uintptr_t)C);
+
+    int err = rpc(GPU_CMD_CUBLAS_GEMM_BATCHED,
                   &req, sizeof(req), NULL, 0, NULL);
     if (err != 0) {
         STUB_LOG("cublasGemmStridedBatchedEx: RPC failed (err=%d)", err);
