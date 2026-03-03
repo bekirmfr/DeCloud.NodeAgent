@@ -1086,6 +1086,19 @@ static int handle_cublas_gemm_batched(ConnectionCtx *ctx,
         return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_BATCHED, -1, NULL, 0);
     }
 
+    /* Sync all streams BEFORE reading pointer arrays from device.
+     * k_compute_batched_ptrs runs on a non-blocking stream which does
+     * NOT synchronize with the default stream used by cudaMemcpy.
+     * Without this, D2H reads stale/uninitialized pointers → error 700. */
+    cudaError_t sync_err = cudaDeviceSynchronize();
+    if (sync_err != cudaSuccess) {
+        LOG_ERR("CID %u: gemm_batched: pre-D2H sync failed (err=%d)",
+                ctx->peer_cid, sync_err);
+        free((void *)Aarray); free((void *)Barray); free(Carray);
+        return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_BATCHED,
+                             (int32_t)sync_err, NULL, 0);
+    }
+
     cudaError_t merr;
     merr = cudaMemcpy(Aarray, (const void *)(uintptr_t)req.A_array_dev,
                       arr_bytes, cudaMemcpyDeviceToHost);
@@ -1139,7 +1152,14 @@ static int handle_cublas_gemm_batched(ConnectionCtx *ctx,
         (cublasGemmAlgo_t)req.algo);
 
     /* Sync to ensure GEMM completes before we respond */
-    cudaDeviceSynchronize();
+    cudaError_t post_sync = cudaDeviceSynchronize();
+    if (post_sync != cudaSuccess) {
+        LOG_ERR("CID %u: gemm_batched: post-GEMM sync failed (err=%d)",
+                ctx->peer_cid, post_sync);
+        free((void *)Aarray); free((void *)Barray); free(Carray);
+        return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_BATCHED,
+                             (int32_t)post_sync, NULL, 0);
+    }
 
     free((void *)Aarray);
     free((void *)Barray);
