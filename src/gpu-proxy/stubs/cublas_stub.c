@@ -235,43 +235,37 @@ cublasStatus_t cublasGemmBatchedEx(cublasHandle_t h, int ta, int tb,
     if (computeType == 70) scalar_size = 8;
     if (computeType == 64) scalar_size = 2;
 
-    uint32_t ptrs_size = 3 * batchCount * (uint32_t)sizeof(uint64_t);
-    uint32_t req_len = (uint32_t)sizeof(GpuCublasGemmBatchedRequest) + ptrs_size;
-    void *req_buf = malloc(req_len);
-    if (!req_buf) return CUBLAS_STATUS_ALLOC_FAILED;
+    /* A, B, C are DEVICE pointers — do NOT dereference.
+     * Send base addresses; daemon reads arrays via cudaMemcpy D2H. */
+    GpuCublasGemmBatchedRequest req;
+    memset(&req, 0, sizeof(req));
+    req.transa      = ta;
+    req.transb      = tb;
+    req.m           = m;
+    req.n           = n;
+    req.k           = k;
+    req.Atype       = Atype;
+    req.lda         = lda;
+    req.Btype       = Btype;
+    req.ldb         = ldb;
+    req.Ctype       = Ctype;
+    req.ldc         = ldc;
+    req.batchCount  = batchCount;
+    req.computeType = computeType;
+    req.algo        = algo;
+    req.A_array_dev = (uint64_t)(uintptr_t)A;
+    req.B_array_dev = (uint64_t)(uintptr_t)B;
+    req.C_array_dev = (uint64_t)(uintptr_t)C;
 
-    GpuCublasGemmBatchedRequest *req = (GpuCublasGemmBatchedRequest *)req_buf;
-    memset(req, 0, sizeof(*req));
-    req->transa      = ta;
-    req->transb      = tb;
-    req->m           = m;
-    req->n           = n;
-    req->k           = k;
-    req->Atype       = Atype;
-    req->lda         = lda;
-    req->Btype       = Btype;
-    req->ldb         = ldb;
-    req->Ctype       = Ctype;
-    req->ldc         = ldc;
-    req->batchCount  = batchCount;
-    req->computeType = computeType;
-    req->algo        = algo;
+    if (alpha) memcpy(req.alpha, alpha, scalar_size);
+    if (beta)  memcpy(req.beta, beta, scalar_size);
 
-    if (alpha) memcpy(req->alpha, alpha, scalar_size);
-    if (beta)  memcpy(req->beta, beta, scalar_size);
-
-    uint64_t *ptrs = (uint64_t *)((uint8_t *)req_buf
-                      + sizeof(GpuCublasGemmBatchedRequest));
-    for (int i = 0; i < batchCount; i++) {
-        ptrs[i]                  = (uint64_t)(uintptr_t)A[i];
-        ptrs[batchCount + i]     = (uint64_t)(uintptr_t)B[i];
-        ptrs[2 * batchCount + i] = (uint64_t)(uintptr_t)C[i];
-    }
+    STUB_LOG("cublasGemmBatchedEx: m=%d n=%d k=%d bc=%d A_dev=%p B_dev=%p C_dev=%p",
+             m, n, k, batchCount,
+             (void *)(uintptr_t)A, (void *)(uintptr_t)B, (void *)(uintptr_t)C);
 
     int err = rpc(GPU_CMD_CUBLAS_GEMM_BATCHED,
-                  req_buf, req_len, NULL, 0, NULL);
-    free(req_buf);
-
+                  &req, sizeof(req), NULL, 0, NULL);
     if (err != 0) {
         STUB_LOG("cublasGemmBatchedEx: RPC failed (err=%d)", err);
         return CUBLAS_STATUS_EXECUTION_FAILED;
