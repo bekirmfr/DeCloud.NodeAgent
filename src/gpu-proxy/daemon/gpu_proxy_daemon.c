@@ -1045,7 +1045,7 @@ static int cublas_scalar_size(int computeType)
  *
  * Payload: GpuCublasGemmBatchedRequest (fixed size, includes device
  *          addresses of A[], B[], C[] pointer arrays).
- *          Daemon reads arrays from GPU via cudaMemcpy D2H.
+  *          Device pointer arrays passed directly to cuBLAS.
  * ---------------------------------------------------------------- */
 static int handle_cublas_gemm_batched(ConnectionCtx *ctx,
                                        const void *payload, uint32_t payload_len)
@@ -1065,77 +1065,33 @@ static int handle_cublas_gemm_batched(ConnectionCtx *ctx,
         return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_BATCHED, -1, NULL, 0);
     }
 
-/* Lazy-init cuBLAS */
     if (ensure_cublas(ctx) < 0) {
         return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_BATCHED,
                              CUBLAS_STATUS_NOT_INITIALIZED, NULL, 0);
     }
 
-    /*
-     * The stub sends device addresses of the A[], B[], C[] pointer arrays.
-     * ggml-cuda's k_compute_batched_ptrs kernel wrote these arrays to GPU
-     * memory — the VM cannot dereference them. We read them here via
-     * cudaMemcpy D2H, then pass host-side copies to real cuBLAS.
-     */
-    size_t arr_bytes = bc * sizeof(void *);
-    const void **Aarray = (const void **)malloc(arr_bytes);
-    const void **Barray = (const void **)malloc(arr_bytes);
-    void       **Carray = (void **)malloc(arr_bytes);
-    if (!Aarray || !Barray || !Carray) {
-        free((void *)Aarray); free((void *)Barray); free(Carray);
-        return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_BATCHED, -1, NULL, 0);
-    }
+    /* The pointer arrays (A[], B[], C[]) are already in DEVICE memory —
+     * cublasGemmBatchedEx expects device arrays of device pointers.
+     * Pass the device addresses directly, no D2H copy needed. */
 
-    /* Sync all streams BEFORE reading pointer arrays from device.
-     * k_compute_batched_ptrs runs on a non-blocking stream which does
-     * NOT synchronize with the default stream used by cudaMemcpy.
-     * Without this, D2H reads stale/uninitialized pointers → error 700. */
+    if (ctx->cu_ctx) cuCtxSetCurrent(ctx->cu_ctx);
+
+    /* Sync to ensure k_compute_batched_ptrs has finished writing
+     * the pointer arrays before cuBLAS reads them. */
     cudaError_t sync_err = cudaDeviceSynchronize();
     if (sync_err != cudaSuccess) {
-        LOG_ERR("CID %u: gemm_batched: pre-D2H sync failed (err=%d)",
+        LOG_ERR("CID %u: gemm_batched: pre-GEMM sync failed (err=%d)",
                 ctx->peer_cid, sync_err);
-        free((void *)Aarray); free((void *)Barray); free(Carray);
         return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_BATCHED,
                              (int32_t)sync_err, NULL, 0);
     }
 
-    cudaError_t merr;
-    merr = cudaMemcpy(Aarray, (const void *)(uintptr_t)req.A_array_dev,
-                      arr_bytes, cudaMemcpyDeviceToHost);
-    if (merr != cudaSuccess) {
-        LOG_ERR("CID %u: gemm_batched: D2H Aarray failed (dev=%p err=%d)",
-                ctx->peer_cid, (void *)(uintptr_t)req.A_array_dev, merr);
-        free((void *)Aarray); free((void *)Barray); free(Carray);
-        return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_BATCHED,
-                             (int32_t)merr, NULL, 0);
-    }
-    merr = cudaMemcpy(Barray, (const void *)(uintptr_t)req.B_array_dev,
-                      arr_bytes, cudaMemcpyDeviceToHost);
-    if (merr != cudaSuccess) {
-        LOG_ERR("CID %u: gemm_batched: D2H Barray failed (dev=%p err=%d)",
-                ctx->peer_cid, (void *)(uintptr_t)req.B_array_dev, merr);
-        free((void *)Aarray); free((void *)Barray); free(Carray);
-        return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_BATCHED,
-                             (int32_t)merr, NULL, 0);
-    }
-    merr = cudaMemcpy(Carray, (const void *)(uintptr_t)req.C_array_dev,
-                      arr_bytes, cudaMemcpyDeviceToHost);
-    if (merr != cudaSuccess) {
-        LOG_ERR("CID %u: gemm_batched: D2H Carray failed (dev=%p err=%d)",
-                ctx->peer_cid, (void *)(uintptr_t)req.C_array_dev, merr);
-        free((void *)Aarray); free((void *)Barray); free(Carray);
-        return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_BATCHED,
-                             (int32_t)merr, NULL, 0);
-    }
-
-    LOG_DBG("CID %u: gemm_batched: read %d ptr triplets from device "
-            "(A_dev=%p B_dev=%p C_dev=%p)",
-            ctx->peer_cid, bc,
+    LOG_DBG("CID %u: gemm_batched: m=%d n=%d k=%d bc=%d "
+            "A_dev=%p B_dev=%p C_dev=%p",
+            ctx->peer_cid, req.m, req.n, req.k, bc,
             (void *)(uintptr_t)req.A_array_dev,
             (void *)(uintptr_t)req.B_array_dev,
             (void *)(uintptr_t)req.C_array_dev);
-
-    if (ctx->cu_ctx) cuCtxSetCurrent(ctx->cu_ctx);
 
     cublasStatus_t cs = cublasGemmBatchedEx(
         ctx->cublas_handle,
@@ -1143,10 +1099,13 @@ static int handle_cublas_gemm_batched(ConnectionCtx *ctx,
         (cublasOperation_t)req.transb,
         req.m, req.n, req.k,
         req.alpha,
-        Aarray, (cudaDataType_t)req.Atype, req.lda,
-        Barray, (cudaDataType_t)req.Btype, req.ldb,
+        (const void *const *)(uintptr_t)req.A_array_dev,
+        (cudaDataType_t)req.Atype, req.lda,
+        (const void *const *)(uintptr_t)req.B_array_dev,
+        (cudaDataType_t)req.Btype, req.ldb,
         req.beta,
-        Carray, (cudaDataType_t)req.Ctype, req.ldc,
+        (void *const *)(uintptr_t)req.C_array_dev,
+        (cudaDataType_t)req.Ctype, req.ldc,
         bc,
         (cublasComputeType_t)req.computeType,
         (cublasGemmAlgo_t)req.algo);
@@ -1156,14 +1115,9 @@ static int handle_cublas_gemm_batched(ConnectionCtx *ctx,
     if (post_sync != cudaSuccess) {
         LOG_ERR("CID %u: gemm_batched: post-GEMM sync failed (err=%d)",
                 ctx->peer_cid, post_sync);
-        free((void *)Aarray); free((void *)Barray); free(Carray);
         return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_BATCHED,
                              (int32_t)post_sync, NULL, 0);
     }
-
-    free((void *)Aarray);
-    free((void *)Barray);
-    free(Carray);
 
     if (cs != CUBLAS_STATUS_SUCCESS) {
         LOG_ERR("CID %u: cublasGemmBatchedEx failed: %d (m=%d n=%d k=%d bc=%d "
