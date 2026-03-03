@@ -1287,6 +1287,7 @@ static int handle_launch_kernel(ConnectionCtx *ctx, const void *payload, uint32_
     /* Resolve stream */
     CUstream cu_stream = (CUstream)resolve_stream(ctx, req.stream_handle);
 
+    #if 0 /* DIAG: disabled for performance — re-enable for debugging only */
     /* === DIAGNOSTIC: validate context, function, and stream before launch === */
     {
         CUcontext cur_ctx = NULL;
@@ -1321,6 +1322,7 @@ static int handle_launch_kernel(ConnectionCtx *ctx, const void *payload, uint32_
         cuDevicePrimaryCtxRelease(diag_dev);  /* Balance the retain */
     }
     /* === END DIAGNOSTIC === */
+    #endif
 
     uint64_t t0 = now_us();
 
@@ -1381,8 +1383,8 @@ static int handle_launch_kernel(ConnectionCtx *ctx, const void *payload, uint32_
             cr = CUDA_ERROR_LAUNCH_TIMEOUT; /* 702 */
         }
     } else if (cr == CUDA_SUCCESS && g_kernel_timeout_us == 0) {
-        /* No timeout — just sync for metering */
-        cuStreamSynchronize(cu_stream ? cu_stream : 0);
+        /* No timeout — skip sync to allow async kernel pipelining.
+         * Metering uses event-based timing if needed. */
     }
 
     uint64_t elapsed = now_us() - t0;
