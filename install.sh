@@ -1139,7 +1139,10 @@ build_gpu_proxy() {
     # Runtime API Shim → decloud-gpu-shim/ only
     if [ -n "$built_shim" ] && [ -f "$built_shim" ]; then
         install -m 644 "$built_shim" "$SHIM_DIR/libdecloud_cuda_shim.so"
-        log_success "Runtime API shim installed → $SHIM_DIR/libdecloud_cuda_shim.so"
+        # Keep libcudart.so.12 in sync — VMs copy this name from the 9p share
+        # into /usr/local/lib/ollama/cuda_v12/ where Ollama expects it.
+        cp "$SHIM_DIR/libdecloud_cuda_shim.so" "$SHIM_DIR/libcudart.so.12"
+        log_success "Runtime API shim installed → $SHIM_DIR/libdecloud_cuda_shim.so (+libcudart.so.12)"
     else
         log_warn "Runtime API shim binary not found — skipping install"
     fi
@@ -1219,6 +1222,21 @@ build_gpu_proxy() {
     log_info "│ Daemon:         $([ -f /usr/local/bin/gpu-proxy-daemon ] && echo 'installed' || echo 'not built')"
     log_info "└──────────────────────────────────────────────────┘"
     echo ""
+
+    # --- Verify all 9p share files are in sync ---
+    # Cloud-init copies these files from the 9p share into the VM.
+    # If any are stale, the VM gets old binaries without recent fixes.
+    local shim_ref="$SHIM_DIR/libdecloud_cuda_shim.so"
+    if [ -f "$shim_ref" ]; then
+        for sync_target in libcudart.so.12; do
+            if [ -f "$SHIM_DIR/$sync_target" ]; then
+                if ! cmp -s "$shim_ref" "$SHIM_DIR/$sync_target"; then
+                    log_warn "$sync_target is stale — syncing from libdecloud_cuda_shim.so"
+                    cp "$shim_ref" "$SHIM_DIR/$sync_target"
+                fi
+            fi
+        done
+    fi
 
     return 0
 }
