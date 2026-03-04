@@ -2006,6 +2006,9 @@ static void *tcp_listener_thread(void *arg)
         int nodelay = 1;
         setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
+        int quickack = 1;
+        setsockopt(client_fd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
+
         ConnectionCtx *ctx = calloc(1, sizeof(ConnectionCtx));
         if (!ctx) {
             close(client_fd);
@@ -2019,6 +2022,12 @@ static void *tcp_listener_thread(void *arg)
                  inet_ntoa(peer.sin_addr), ntohs(peer.sin_port));
 
         pthread_t tid;
+
+        /* Re-arm TCP_QUICKACK each iteration (Linux resets per-operation) */
+        { int qa = 1; setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &qa, sizeof(qa)); }
+
+        if (read_exact(fd, &hdr, sizeof(hdr)) < 0) break;
+        
         if (pthread_create(&tid, NULL, connection_handler, ctx) != 0) {
             LOG_ERR("pthread_create failed for TCP client: %s", strerror(errno));
             close(client_fd);

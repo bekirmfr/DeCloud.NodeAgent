@@ -289,6 +289,10 @@ static int try_tcp_connect(int port)
     int nodelay = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
+    /* Disable delayed ACK — eliminates 40ms ato delay on small RPCs */
+    int quickack = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
+
     SHIM_LOG("Connected via TCP to %s:%d", host, port);
     return fd;
 }
@@ -430,6 +434,10 @@ static int rpc_call(uint8_t cmd,
     if (req_len > 0 && req_payload) {
         if (write_exact(g_conn_fd, req_payload, req_len) < 0) goto err;
     }
+
+    /* Re-arm TCP_QUICKACK before reading response (Linux resets it per-operation) */
+    int qa = 1;
+    setsockopt(g_conn_fd, IPPROTO_TCP, TCP_QUICKACK, &qa, sizeof(qa));
 
     GpuProxyHeader resp_hdr;
     if (read_exact(g_conn_fd, &resp_hdr, sizeof(resp_hdr)) < 0) goto err;

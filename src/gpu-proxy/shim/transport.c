@@ -205,6 +205,10 @@ static int transport_try_tcp(int port)
     int nodelay = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
+    /* Disable delayed ACK — eliminates 40ms ato delay on small RPCs */
+    int quickack = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
+
     TRANSPORT_LOG("Connected via TCP to %s:%d", host, port);
     return fd;
 }
@@ -362,10 +366,13 @@ int transport_rpc_call(uint8_t cmd,
         if (transport_write_exact(g_transport_fd, req_payload, req_len) < 0) goto err;
     }
 
+    /* Re-arm TCP_QUICKACK before reading response (Linux resets it per-operation) */
+    int qa = 1;
+    setsockopt(g_transport_fd, IPPROTO_TCP, TCP_QUICKACK, &qa, sizeof(qa));
+
     /* Read response header */
     GpuProxyHeader resp_hdr;
     if (transport_read_exact(g_transport_fd, &resp_hdr, sizeof(resp_hdr)) < 0) goto err;
-
     if (resp_hdr.magic != GPU_PROXY_MAGIC) {
         TRANSPORT_LOG("bad response magic 0x%08x", resp_hdr.magic);
         goto err;
