@@ -198,16 +198,12 @@ static int transport_try_tcp(int port)
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         TRANSPORT_LOG("TCP connect(%s:%d) failed: %s", host, port, strerror(errno));
         close(fd);
-
-        /* Disable Nagle — critical for low-latency RPC */
-        int nodelay = 1;
-        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
-
-        TRANSPORT_LOG("Connected via TCP to %s:%d", host, port);
-        return fd;
-
         return -1;
     }
+
+    /* Disable Nagle — critical for low-latency RPC */
+    int nodelay = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
     TRANSPORT_LOG("Connected via TCP to %s:%d", host, port);
     return fd;

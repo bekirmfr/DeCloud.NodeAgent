@@ -328,7 +328,16 @@ static int ensure_connected(void)
     int port = get_env_int("DECLOUD_GPU_PROXY_PORT", GPU_PROXY_PORT);
     int is_tcp = 0;
 
-    int fd = try_vsock_connect(port);
+    /* Respect DECLOUD_GPU_PROXY_TRANSPORT — "tcp" skips vsock entirely */
+    const char *transport_mode = getenv("DECLOUD_GPU_PROXY_TRANSPORT");
+    int try_vsock = 1;
+    if (transport_mode && strcmp(transport_mode, "tcp") == 0)
+        try_vsock = 0;
+
+    int fd = -1;
+    if (try_vsock) {
+        fd = try_vsock_connect(port);
+    }
     if (fd < 0) {
         fd = try_tcp_connect(port);
         if (fd < 0) {
