@@ -1740,6 +1740,12 @@ static void *connection_handler(void *arg)
     }
 
     while (g_running) {
+        /* Re-arm TCP_QUICKACK each iteration (Linux resets per-operation) */
+        if (ctx->is_tcp) {
+            int qa = 1;
+            setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &qa, sizeof(qa));
+        }
+
         /* Read request header */
         GpuProxyHeader hdr;
         if (read_exact(fd, &hdr, sizeof(hdr)) < 0) {
@@ -2022,12 +2028,6 @@ static void *tcp_listener_thread(void *arg)
                  inet_ntoa(peer.sin_addr), ntohs(peer.sin_port));
 
         pthread_t tid;
-
-        /* Re-arm TCP_QUICKACK each iteration (Linux resets per-operation) */
-        { int qa = 1; setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &qa, sizeof(qa)); }
-
-        if (read_exact(fd, &hdr, sizeof(hdr)) < 0) break;
-        
         if (pthread_create(&tid, NULL, connection_handler, ctx) != 0) {
             LOG_ERR("pthread_create failed for TCP client: %s", strerror(errno));
             close(client_fd);
