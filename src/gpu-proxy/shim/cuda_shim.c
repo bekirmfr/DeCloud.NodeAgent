@@ -33,19 +33,7 @@
  * the critical ggml flags here so they're present when ggml reads them.
  * ================================================================ */
 
-__attribute__((constructor))
-static void shim_init(void)
-{
-    /* Force ggml to use its own CUDA matmul kernels instead of cuBLAS.
-     * cuBLAS requires cuGetExportTable (private driver internals) which
-     * cannot be proxied at function level.
-     * Flag=1: ALWAYS overwrite — Ollama may set these to empty/"0". */
-    setenv("GGML_CUDA_FORCE_MMQ",      "1", 1);
-    setenv("GGML_CUDA_DISABLE_GRAPHS",  "1", 1);
-    setenv("GGML_CUDA_NO_PEER_COPY",    "1", 1);
-
     fprintf(stderr, "[cudart-shim] constructor: env vars set (FORCE_MMQ=1, DISABLE_GRAPHS=1, NO_PEER_COPY=1)\n");
-}
 
 #define SHIM_LOG(fmt, ...) \
     fprintf(stderr, "[cudart-shim] " fmt "\n", ##__VA_ARGS__)
@@ -1625,7 +1613,35 @@ static int g_dummy_graph_exec = 0xDEC10002;
 cudaError_t cudaGraphDestroy(cudaGraph_t graph)
 {
     (void)graph;
-    return cudaSuccess;
+    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
+}
+
+cudaError_t cudaGraphExecDestroy(cudaGraphExec_t graphExec)
+{
+    (void)graphExec;
+    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
+}
+
+cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
+                                 cudaGraphExecUpdateResult *updateResult_out)
+{
+    (void)hGraphExec; (void)hGraph;
+    if (updateResult_out) *updateResult_out = 0;
+    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
+}
+
+cudaError_t cudaGraphInstantiate(cudaGraphExec_t *pGraphExec, cudaGraph_t graph,
+                                  void *pErrorNode, char *pLogBuffer, size_t bufferSize)
+{
+    (void)graph; (void)pErrorNode; (void)pLogBuffer; (void)bufferSize;
+    if (pGraphExec && g_graph_noop) *pGraphExec = (cudaGraphExec_t)&g_dummy_graph_exec;
+    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
+}
+
+cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream)
+{
+    (void)graphExec; (void)stream;
+    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
 }
 
 cudaError_t cudaGraphExecDestroy(cudaGraphExec_t graphExec)

@@ -1709,7 +1709,28 @@ public class LibvirtVmManager : IVmManager
             // =====================================================
             if (spec.GpuMode == GpuMode.Proxied)
             {
-                cloudInitYaml = EnsureGpuProxyShim(cloudInitYaml, spec.VsockCid, spec.GpuProxyToken);
+                // Extract GPU-specific env vars from the template's environment.
+                // Convention: keys starting with GGML_, CUDA_, or DECLOUD_GPU_ are GPU app vars.
+                Dictionary<string, string>? gpuEnvVars = null;
+                if (spec.Labels != null &&
+                    spec.Labels.TryGetValue("template:cloud-init-vars", out var varsJson))
+                {
+                    try
+                    {
+                        var allVars = JsonSerializer.Deserialize<Dictionary<string, string>>(varsJson);
+                        if (allVars != null)
+                        {
+                            gpuEnvVars = allVars
+                                .Where(kv => kv.Key.StartsWith("GGML_") ||
+                                             kv.Key.StartsWith("CUDA_") ||
+                                             kv.Key.StartsWith("DECLOUD_GPU_"))
+                                .ToDictionary(kv => kv.Key, kv => kv.Value);
+                        }
+                    }
+                    catch { /* ignore parse errors */ }
+                }
+
+                cloudInitYaml = EnsureGpuProxyShim(cloudInitYaml, spec.VsockCid, spec.GpuProxyToken, gpuEnvVars);
                 _logger.LogInformation(
                     "VM {VmId}: Injected CUDA shim into cloud-init (vsock CID={Cid})",
                     spec.Id, spec.VsockCid?.ToString() ?? "none (TCP)");
@@ -1851,7 +1872,7 @@ public class LibvirtVmManager : IVmManager
     /// GLIBC compatibility is verified before installation to prevent bricking
     /// the VM if host and guest libc versions diverge.
     /// </summary>
-    private static string EnsureGpuProxyShim(string cloudInitYaml, uint? vsockCid, string? gpuProxyToken)
+    private static string EnsureGpuProxyShim(string cloudInitYaml, uint? vsockCid, string? gpuProxyToken, Dictionary<string, string>? gpuEnvVars = null)
     {
         // Guard: don't inject twice
         if (cloudInitYaml.Contains("gpu-proxy.sh"))
@@ -1902,6 +1923,17 @@ public class LibvirtVmManager : IVmManager
             envFileVars.AppendLine($"      DECLOUD_GPU_PROXY_TOKEN={gpuProxyToken}");
         }
         envFileVars.AppendLine("      LD_PRELOAD=/usr/local/lib/libdecloud_cuda_shim.so");
+
+        // Application-specific env vars — read by shim constructor via config file.
+        // Each template provides its own set (e.g., GGML_* for Ollama, CUDA_* for PyTorch).
+        if (gpuEnvVars != null && gpuEnvVars.Count > 0)
+        {
+            envFileVars.AppendLine("      # --- Application GPU env vars (template-specific) ---");
+            foreach (var kvp in gpuEnvVars)
+            {
+                envFileVars.AppendLine($"      {kvp.Key}={kvp.Value}");
+            }
+        }
 
         // =====================================================
         // 1. Inject write_files
