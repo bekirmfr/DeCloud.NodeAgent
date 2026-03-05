@@ -7,6 +7,7 @@ using DeCloud.NodeAgent.Infrastructure.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 
@@ -879,7 +880,7 @@ public class LibvirtVmManager : IVmManager
 
         var metadataPath = Path.Combine(vmDir, "metadata.json");
         await File.WriteAllTextAsync(metadataPath,
-            System.Text.Json.JsonSerializer.Serialize(metadata, new System.Text.Json.JsonSerializerOptions
+            JsonSerializer.Serialize(metadata, new System.Text.Json.JsonSerializerOptions
             {
                 WriteIndented = true
             }), ct);
