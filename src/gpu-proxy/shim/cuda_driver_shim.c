@@ -296,11 +296,6 @@ CUresult cuDeviceGetAttribute(int *value, int attrib, CUdevice device)
     case 89: /* CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS */
         *value = 1; break;
     case 100: *value = g_vmem_proxy ? 1 : 0; break; /* VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED */
-        /*
-         * Return 0 to force ggml-cuda to use regular cudaMalloc instead of
-         * the VMM path. VMM operations cannot be proxied over the network.
-         */
-        *value = 0; break;
     default:
         *value = 0;
         break;

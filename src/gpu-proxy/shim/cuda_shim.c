@@ -1674,7 +1674,6 @@ cudaError_t cudaGraphInstantiate(cudaGraphExec_t *pGraphExec, cudaGraph_t graph,
                                   void *pErrorNode, char *pLogBuffer, size_t bufferSize)
 {
     (void)graph; (void)pErrorNode; (void)pLogBuffer; (void)bufferSize;
-    if (pGraphExec) *pGraphExec = (cudaGraphExec_t)&g_dummy_graph_exec;
     if (pGraphExec && g_graph_noop) *pGraphExec = (cudaGraphExec_t)&g_dummy_graph_exec;
     return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
 }
@@ -1804,7 +1803,6 @@ cudaError_t cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode_t 
 cudaError_t cudaStreamEndCapture(cudaStream_t stream, cudaGraph_t *pGraph)
 {
     (void)stream;
-    if (pGraph) *pGraph = (cudaGraph_t)&g_dummy_graph;
     if (pGraph && g_graph_noop) *pGraph = (cudaGraph_t)&g_dummy_graph;
     return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
 }
