@@ -819,15 +819,11 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle,
                      const CUmemAllocationProp *prop,
                      unsigned long long flags)
 {
-    if (!g_vmem_proxy) {
-        return CUDA_ERROR_NOT_SUPPORTED;
-    }
+    if (!g_vmem_proxy) return CUDA_ERROR_NOT_SUPPORTED;
 
+    /* Send size + flags; daemon uses real CUDA headers to interpret prop */
     GpuMemCreateRequest req = {
         .size = (uint64_t)size,
-        .type = prop ? prop->type : 0,
-        .location_type = prop ? prop->location.type : 0,
-        .location_id = prop ? prop->location.id : 0,
         .flags = (uint64_t)flags,
     };
     GpuMemCreateResponse resp;
@@ -841,56 +837,42 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle,
 CUresult cuMemRelease(CUmemGenericAllocationHandle handle)
 {
     if (!g_vmem_proxy) return CUDA_ERROR_NOT_SUPPORTED;
-
     GpuMemReleaseRequest req = { .handle = (uint64_t)handle };
     return (CUresult)transport_rpc_call(GPU_CMD_MEM_RELEASE,
                                         &req, sizeof(req), NULL, 0, NULL);
 }
 
-CUresult cuMemAddressReserve(CUdeviceptr *ptr,
-                              size_t size,
-                              size_t alignment,
-                              CUdeviceptr addr,
+CUresult cuMemAddressReserve(CUdeviceptr *ptr, size_t size,
+                              size_t alignment, CUdeviceptr addr,
                               unsigned long long flags)
 {
     if (!g_vmem_proxy) return CUDA_ERROR_NOT_SUPPORTED;
-
     GpuMemAddressReserveRequest req = {
-        .size = (uint64_t)size,
-        .alignment = (uint64_t)alignment,
-        .addr = (uint64_t)addr,
-        .flags = (uint64_t)flags,
+        .size = (uint64_t)size, .alignment = (uint64_t)alignment,
+        .addr = (uint64_t)addr, .flags = (uint64_t)flags,
     };
     GpuMemAddressReserveResponse resp;
     int err = transport_rpc_call(GPU_CMD_MEM_ADDRESS_RESERVE,
                                  &req, sizeof(req), &resp, sizeof(resp), NULL);
-    if (err == 0 && ptr)
-        *ptr = (CUdeviceptr)resp.ptr;
+    if (err == 0 && ptr) *ptr = (CUdeviceptr)resp.ptr;
     return (CUresult)err;
 }
 
 CUresult cuMemAddressFree(CUdeviceptr ptr, size_t size)
 {
     if (!g_vmem_proxy) return CUDA_ERROR_NOT_SUPPORTED;
-
     GpuMemAddressFreeRequest req = { .ptr = (uint64_t)ptr, .size = (uint64_t)size };
     return (CUresult)transport_rpc_call(GPU_CMD_MEM_ADDRESS_FREE,
                                         &req, sizeof(req), NULL, 0, NULL);
 }
 
-CUresult cuMemMap(CUdeviceptr ptr,
-                  size_t size,
-                  size_t offset,
-                  CUmemGenericAllocationHandle handle,
-                  unsigned long long flags)
+CUresult cuMemMap(CUdeviceptr ptr, size_t size, size_t offset,
+                  CUmemGenericAllocationHandle handle, unsigned long long flags)
 {
     if (!g_vmem_proxy) return CUDA_ERROR_NOT_SUPPORTED;
-
     GpuMemMapRequest req = {
-        .ptr = (uint64_t)ptr,
-        .size = (uint64_t)size,
-        .offset = (uint64_t)offset,
-        .handle = (uint64_t)handle,
+        .ptr = (uint64_t)ptr, .size = (uint64_t)size,
+        .offset = (uint64_t)offset, .handle = (uint64_t)handle,
         .flags = (uint64_t)flags,
     };
     return (CUresult)transport_rpc_call(GPU_CMD_MEM_MAP,
@@ -900,25 +882,17 @@ CUresult cuMemMap(CUdeviceptr ptr,
 CUresult cuMemUnmap(CUdeviceptr ptr, size_t size)
 {
     if (!g_vmem_proxy) return CUDA_ERROR_NOT_SUPPORTED;
-
     GpuMemUnmapRequest req = { .ptr = (uint64_t)ptr, .size = (uint64_t)size };
     return (CUresult)transport_rpc_call(GPU_CMD_MEM_UNMAP,
                                         &req, sizeof(req), NULL, 0, NULL);
 }
 
-CUresult cuMemSetAccess(CUdeviceptr ptr,
-                        size_t size,
-                        const CUmemAccessDesc *desc,
-                        size_t count)
+CUresult cuMemSetAccess(CUdeviceptr ptr, size_t size,
+                        const CUmemAccessDesc *desc, size_t count)
 {
     if (!g_vmem_proxy) return CUDA_ERROR_NOT_SUPPORTED;
-
     GpuMemSetAccessRequest req = {
-        .ptr = (uint64_t)ptr,
-        .size = (uint64_t)size,
-        .access_type = desc ? desc->flags : 0,
-        .location_type = desc ? desc->location.type : 0,
-        .location_id = desc ? desc->location.id : 0,
+        .ptr = (uint64_t)ptr, .size = (uint64_t)size,
         .count = (uint32_t)count,
     };
     return (CUresult)transport_rpc_call(GPU_CMD_MEM_SET_ACCESS,
@@ -933,75 +907,12 @@ CUresult cuMemGetAllocationGranularity(size_t *granularity,
         if (granularity) *granularity = 0;
         return CUDA_ERROR_NOT_SUPPORTED;
     }
-
-    GpuMemGetGranularityRequest req = {
-        .type = prop ? prop->type : 0,
-        .location_type = prop ? prop->location.type : 0,
-        .location_id = prop ? prop->location.id : 0,
-        .option = (uint32_t)option,
-    };
+    GpuMemGetGranularityRequest req = { .option = (uint32_t)option };
     GpuMemGetGranularityResponse resp;
     int err = transport_rpc_call(GPU_CMD_MEM_GET_GRANULARITY,
                                  &req, sizeof(req), &resp, sizeof(resp), NULL);
-    if (err == 0 && granularity)
-        *granularity = (size_t)resp.granularity;
+    if (err == 0 && granularity) *granularity = (size_t)resp.granularity;
     return (CUresult)err;
-}
-
-CUresult cuMemRelease(CUmemGenericAllocationHandle handle)
-{
-    (void)handle;
-    return CUDA_ERROR_NOT_SUPPORTED;
-}
-
-CUresult cuMemAddressReserve(CUdeviceptr *ptr,
-                              size_t size,
-                              size_t alignment,
-                              CUdeviceptr addr,
-                              unsigned long long flags)
-{
-    (void)ptr; (void)size; (void)alignment; (void)addr; (void)flags;
-    return CUDA_ERROR_NOT_SUPPORTED;
-}
-
-CUresult cuMemAddressFree(CUdeviceptr ptr, size_t size)
-{
-    (void)ptr; (void)size;
-    return CUDA_ERROR_NOT_SUPPORTED;
-}
-
-CUresult cuMemMap(CUdeviceptr ptr,
-                  size_t size,
-                  size_t offset,
-                  CUmemGenericAllocationHandle handle,
-                  unsigned long long flags)
-{
-    (void)ptr; (void)size; (void)offset; (void)handle; (void)flags;
-    return CUDA_ERROR_NOT_SUPPORTED;
-}
-
-CUresult cuMemUnmap(CUdeviceptr ptr, size_t size)
-{
-    (void)ptr; (void)size;
-    return CUDA_ERROR_NOT_SUPPORTED;
-}
-
-CUresult cuMemSetAccess(CUdeviceptr ptr,
-                        size_t size,
-                        const CUmemAccessDesc *desc,
-                        size_t count)
-{
-    (void)ptr; (void)size; (void)desc; (void)count;
-    return CUDA_ERROR_NOT_SUPPORTED;
-}
-
-CUresult cuMemGetAllocationGranularity(size_t *granularity,
-                                        const CUmemAllocationProp *prop,
-                                        CUmemAllocationGranularity_flags option)
-{
-    (void)prop; (void)option;
-    if (granularity) *granularity = 0;
-    return CUDA_ERROR_NOT_SUPPORTED;
 }
 
 /* ================================================================

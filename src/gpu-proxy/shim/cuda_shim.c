@@ -1659,7 +1659,7 @@ cudaError_t cudaGraphDestroy(cudaGraph_t graph)
 cudaError_t cudaGraphExecDestroy(cudaGraphExec_t graphExec)
 {
     (void)graphExec;
-    return cudaSuccess;
+    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
 }
 
 cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
@@ -1667,7 +1667,7 @@ cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
 {
     (void)hGraphExec; (void)hGraph;
     if (updateResult_out) *updateResult_out = 0;
-    return cudaSuccess;
+    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
 }
 
 cudaError_t cudaGraphInstantiate(cudaGraphExec_t *pGraphExec, cudaGraph_t graph,
@@ -1675,13 +1675,14 @@ cudaError_t cudaGraphInstantiate(cudaGraphExec_t *pGraphExec, cudaGraph_t graph,
 {
     (void)graph; (void)pErrorNode; (void)pLogBuffer; (void)bufferSize;
     if (pGraphExec) *pGraphExec = (cudaGraphExec_t)&g_dummy_graph_exec;
-    return cudaSuccess;
+    if (pGraphExec && g_graph_noop) *pGraphExec = (cudaGraphExec_t)&g_dummy_graph_exec;
+    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
 }
 
 cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream)
 {
     (void)graphExec; (void)stream;
-    return cudaSuccess;
+    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
 }
 
 /* Managed memory */
@@ -1797,14 +1798,15 @@ typedef enum {
 cudaError_t cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode_t mode)
 {
     (void)stream; (void)mode;
-    return cudaSuccess;
+    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
 }
 
 cudaError_t cudaStreamEndCapture(cudaStream_t stream, cudaGraph_t *pGraph)
 {
     (void)stream;
     if (pGraph) *pGraph = (cudaGraph_t)&g_dummy_graph;
-    return cudaSuccess;
+    if (pGraph && g_graph_noop) *pGraph = (cudaGraph_t)&g_dummy_graph;
+    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
 }
 
 cudaError_t cudaStreamIsCapturing(cudaStream_t stream, cudaStreamCaptureStatus_t *pCaptureStatus)

@@ -71,14 +71,14 @@ typedef enum {
     GPU_CMD_OCCUPANCY_MAX_BLOCKS    = 0x55,
 
     /* Virtual memory management (CUDA 10.2+) */
-    GPU_CMD_MEM_CREATE              = 0x60,
-    GPU_CMD_MEM_RELEASE             = 0x61,
-    GPU_CMD_MEM_ADDRESS_RESERVE     = 0x62,
-    GPU_CMD_MEM_ADDRESS_FREE        = 0x63,
-    GPU_CMD_MEM_MAP                 = 0x64,
-    GPU_CMD_MEM_UNMAP               = 0x65,
-    GPU_CMD_MEM_SET_ACCESS          = 0x66,
-    GPU_CMD_MEM_GET_GRANULARITY     = 0x67,
+    GPU_CMD_MEM_CREATE              = 0x70,
+    GPU_CMD_MEM_RELEASE             = 0x71,
+    GPU_CMD_MEM_ADDRESS_RESERVE     = 0x72,
+    GPU_CMD_MEM_ADDRESS_FREE        = 0x73,
+    GPU_CMD_MEM_MAP                 = 0x74,
+    GPU_CMD_MEM_UNMAP               = 0x75,
+    GPU_CMD_MEM_SET_ACCESS          = 0x76,
+    GPU_CMD_MEM_GET_GRANULARITY     = 0x77,
 
     /* cuBLAS GEMM proxy (GQA attention requires real cuBLAS on host) */
     GPU_CMD_CUBLAS_GEMM_BATCHED    = 0x56,
