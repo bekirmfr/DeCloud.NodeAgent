@@ -40,6 +40,8 @@
  * Set by DECLOUD_GPU_VMEM_PROXY=1 in config. Default: off. */
 static int g_vmem_proxy = 0;
 
+static CUresult graph_success_stub(void) { return CUDA_SUCCESS; }
+
 /* ================================================================
  * CUDA Driver API type definitions
  * ================================================================ */
@@ -185,6 +187,12 @@ CUresult cuInit(unsigned int flags)
     /* Check if virtual memory proxying is enabled */
     const char *vmem = transport_getenv("DECLOUD_GPU_VMEM_PROXY");
     if (vmem && vmem[0] == '1') g_vmem_proxy = 1;
+
+    const char *vmem = transport_getenv("DECLOUD_GPU_VMEM_PROXY");
+    if (vmem && vmem[0] == '1') g_vmem_proxy = 1;
+
+    const char *gnoop = transport_getenv("DECLOUD_GPU_GRAPH_NOOP");
+    if (gnoop && gnoop[0] == '1') g_driver_graph_noop = 1;
 
     g_driver_initialized = 1;
     return CUDA_SUCCESS;
@@ -1836,9 +1844,12 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn,
     if (strncmp(symbol, "cuGraph", 7) == 0 ||
         strncmp(symbol, "cuStreamBeginCapture", 20) == 0 ||
         strncmp(symbol, "cuStreamEndCapture", 18) == 0) {
-        *pfn = (void *)graph_not_supported_stub;
-        TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-blocked]",
-                      symbol, cudaVersion, *pfn);
+        *pfn = g_driver_graph_noop
+             ? (void *)graph_success_stub
+             : (void *)graph_not_supported_stub;
+        TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-%s]",
+                      symbol, cudaVersion, *pfn,
+                      g_driver_graph_noop ? "noop" : "blocked");
         return CUDA_SUCCESS;
     }
 
