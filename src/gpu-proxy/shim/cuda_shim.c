@@ -33,7 +33,47 @@
  * the critical ggml flags here so they're present when ggml reads them.
  * ================================================================ */
 
-    fprintf(stderr, "[cudart-shim] constructor: env vars set (FORCE_MMQ=1, DISABLE_GRAPHS=1, NO_PEER_COPY=1)\n");
+/* Global flag: when true, CUDA graph stubs return cudaSuccess (no-op).
+ * When false, they return cudaErrorNotSupported (honest).
+ * Set by DECLOUD_GPU_GRAPH_NOOP=1 in /etc/decloud/gpu-proxy.env */
+static int g_graph_noop = 0;
+
+__attribute__((constructor))
+static void shim_init(void)
+{
+    FILE *f = fopen("/etc/decloud/gpu-proxy.env", "r");
+    int count = 0;
+    if (f) {
+        char line[512];
+        while (fgets(line, sizeof(line), f)) {
+            char *p = line;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '\0' || *p == '\n' || *p == '#') continue;
+            char *nl = strchr(p, '\n');
+            if (nl) *nl = '\0';
+            char *eq = strchr(p, '=');
+            if (!eq) continue;
+            *eq = '\0';
+            char *key = p;
+            char *val = eq + 1;
+
+            if (strcmp(key, "DECLOUD_GPU_GRAPH_NOOP") == 0) {
+                g_graph_noop = (val[0] == '1');
+                continue;
+            }
+
+            if (strncmp(key, "DECLOUD_", 8) == 0) continue;
+            if (strcmp(key, "LD_PRELOAD") == 0) continue;
+
+            setenv(key, val, 1);
+            count++;
+        }
+        fclose(f);
+    }
+
+    fprintf(stderr, "[cudart-shim] constructor: %d app env vars loaded, graph_noop=%d\n",
+            count, g_graph_noop);
+}
 
 #define SHIM_LOG(fmt, ...) \
     fprintf(stderr, "[cudart-shim] " fmt "\n", ##__VA_ARGS__)
@@ -1613,34 +1653,6 @@ static int g_dummy_graph_exec = 0xDEC10002;
 cudaError_t cudaGraphDestroy(cudaGraph_t graph)
 {
     (void)graph;
-    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
-}
-
-cudaError_t cudaGraphExecDestroy(cudaGraphExec_t graphExec)
-{
-    (void)graphExec;
-    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
-}
-
-cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
-                                 cudaGraphExecUpdateResult *updateResult_out)
-{
-    (void)hGraphExec; (void)hGraph;
-    if (updateResult_out) *updateResult_out = 0;
-    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
-}
-
-cudaError_t cudaGraphInstantiate(cudaGraphExec_t *pGraphExec, cudaGraph_t graph,
-                                  void *pErrorNode, char *pLogBuffer, size_t bufferSize)
-{
-    (void)graph; (void)pErrorNode; (void)pLogBuffer; (void)bufferSize;
-    if (pGraphExec && g_graph_noop) *pGraphExec = (cudaGraphExec_t)&g_dummy_graph_exec;
-    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
-}
-
-cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream)
-{
-    (void)graphExec; (void)stream;
     return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
 }
 
