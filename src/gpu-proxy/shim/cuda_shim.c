@@ -1797,6 +1797,8 @@ typedef enum {
 cudaError_t cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode_t mode)
 {
     (void)stream; (void)mode;
+    SHIM_LOG("cudaStreamBeginCapture: g_graph_noop=%d, returning %d",
+             g_graph_noop, g_graph_noop ? 0 : 71);
     return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
 }
 
