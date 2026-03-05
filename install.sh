@@ -1181,22 +1181,52 @@ build_gpu_proxy() {
     fi
 
     # Daemon → /usr/local/bin (this is fine — daemon is a standalone binary)
-    if [ "$daemon_built" = true ] && [ -f "$GPU_PROXY_SRC/build/gpu-proxy-daemon" ]; then
-        # Kill stale processes before replacing binary
+if [ "$daemon_built" = true ] && [ -f "$GPU_PROXY_SRC/build/gpu-proxy-daemon" ]; then
+        # Capture running daemon's command-line args before killing
+        local daemon_was_running=false
+        local daemon_args=""
+        local daemon_pid
+        daemon_pid=$(pgrep -x gpu-proxy-daemon 2>/dev/null | head -1 || true)
+        if [ -n "$daemon_pid" ]; then
+            daemon_was_running=true
+            # Read args from /proc (null-delimited → space-delimited, skip argv[0])
+            daemon_args=$(tr '\0' ' ' < /proc/$daemon_pid/cmdline 2>/dev/null | cut -d' ' -f2- || true)
+            log_info "Running daemon detected (PID $daemon_pid, args: $daemon_args)"
+        fi
+
+        # Kill all daemon processes before replacing binary
         local stale_pids
         stale_pids=$(pgrep -f gpu-proxy-daemon 2>/dev/null || true)
         if [ -n "$stale_pids" ]; then
-            log_info "Stopping stale gpu-proxy-daemon processes..."
+            log_info "Stopping gpu-proxy-daemon processes..."
             kill -9 $stale_pids 2>/dev/null || true
             sleep 2
             local remaining
             remaining=$(pgrep -f gpu-proxy-daemon 2>/dev/null || true)
             if [ -n "$remaining" ]; then
-                log_warn "Some daemon processes still running: $remaining"
                 kill -9 $remaining 2>/dev/null || true
                 sleep 1
             fi
-            log_success "Stale daemon processes cleaned up"
+            log_success "Daemon processes stopped"
+        fi
+
+        install -d /usr/local/bin
+        install -m 755 "$GPU_PROXY_SRC/build/gpu-proxy-daemon" /usr/local/bin/
+        log_success "Daemon installed → /usr/local/bin/gpu-proxy-daemon"
+
+        # Restart daemon if it was previously running
+        if [ "$daemon_was_running" = true ] && [ -n "$daemon_args" ]; then
+            log_info "Restarting daemon with previous args: $daemon_args"
+            /usr/local/bin/gpu-proxy-daemon $daemon_args > /dev/null 2>&1 &
+            sleep 1
+            if pgrep -x gpu-proxy-daemon > /dev/null 2>&1; then
+                log_success "Daemon restarted (PID $(pgrep -x gpu-proxy-daemon | head -1))"
+            else
+                log_warn "Daemon failed to restart — start manually"
+            fi
+        elif [ "$daemon_was_running" = true ]; then
+            log_warn "Could not read previous daemon args — restart manually"
+        fi
         fi
 
         install -d /usr/local/bin
