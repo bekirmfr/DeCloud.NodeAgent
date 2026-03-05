@@ -1181,13 +1181,13 @@ build_gpu_proxy() {
     fi
 
     # Daemon → /usr/local/bin (this is fine — daemon is a standalone binary)
-if [ "$daemon_built" = true ] && [ -f "$GPU_PROXY_SRC/build/gpu-proxy-daemon" ]; then
+    if [ "$daemon_built" = true ] && [ -f "$GPU_PROXY_SRC/build/gpu-proxy-daemon" ]; then
         # Capture running daemon's command-line args before killing
         local daemon_was_running=false
         local daemon_args=""
         local daemon_pid
         daemon_pid=$(pgrep -x gpu-proxy-daemon 2>/dev/null | head -1 || true)
-        if [ -n "$daemon_pid" ]; then
+        if [ -n "$daemon_pisd" ]; then
             daemon_was_running=true
             # Read args from /proc (null-delimited → space-delimited, skip argv[0])
             daemon_args=$(tr '\0' ' ' < /proc/$daemon_pid/cmdline 2>/dev/null | cut -d' ' -f2- || true)
@@ -1226,7 +1226,6 @@ if [ "$daemon_built" = true ] && [ -f "$GPU_PROXY_SRC/build/gpu-proxy-daemon" ];
             fi
         elif [ "$daemon_was_running" = true ]; then
             log_warn "Could not read previous daemon args — restart manually"
-        fi
         fi
 
         install -d /usr/local/bin
