@@ -35,6 +35,20 @@
 #include "transport.h"
 #include "transport.c"
 
+/* When true (default), graph capture stubs return CUDA_SUCCESS (no-op).
+ * Set DECLOUD_GPU_GRAPH_NOOP=0 to return NOT_SUPPORTED instead. */
+static int g_driver_graph_noop = 1;
+
+static CUresult graph_success_stub(void) { return CUDA_SUCCESS; }
+
+__attribute__((constructor))
+static void driver_shim_init(void)
+{
+    /* Load config early — cuGetProcAddress is called before cuInit */
+    const char *gnoop = transport_getenv("DECLOUD_GPU_GRAPH_NOOP");
+    if (gnoop && gnoop[0] == '0') g_driver_graph_noop = 0;
+}
+
 /* ================================================================
  * CUDA Driver API type definitions
  * ================================================================ */
@@ -1795,9 +1809,12 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn,
     if (strncmp(symbol, "cuGraph", 7) == 0 ||
         strncmp(symbol, "cuStreamBeginCapture", 20) == 0 ||
         strncmp(symbol, "cuStreamEndCapture", 18) == 0) {
-        *pfn = (void *)graph_not_supported_stub;
-        TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-blocked]",
-                      symbol, cudaVersion, *pfn);
+        *pfn = g_driver_graph_noop
+             ? (void *)graph_success_stub
+             : (void *)graph_not_supported_stub;
+        TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-%s]",
+                      symbol, cudaVersion, *pfn,
+                      g_driver_graph_noop ? "noop" : "blocked");
         return CUDA_SUCCESS;
     }
 

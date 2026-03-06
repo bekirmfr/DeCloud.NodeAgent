@@ -33,6 +33,11 @@
  * the critical ggml flags here so they're present when ggml reads them.
  * ================================================================ */
 
+/* Global flag: when true (default), CUDA graph stubs return cudaSuccess (no-op).
+ * When false, they return cudaErrorNotSupported (honest).
+ * Defaults to 1 for safety — set DECLOUD_GPU_GRAPH_NOOP=0 to disable. */
+static int g_graph_noop = 1;
+
 __attribute__((constructor))
 static void shim_init(void)
 {
@@ -58,6 +63,11 @@ static void shim_init(void)
             char *val = eq + 1;
 
             /* Skip transport config (handled by transport layer) and LD_PRELOAD */
+            /* Consume proxy-level flags we handle internally */
+            if (strcmp(key, "DECLOUD_GPU_GRAPH_NOOP") == 0) {
+                g_graph_noop = (val[0] == '1');
+                continue;
+            }
             if (strncmp(key, "DECLOUD_", 8) == 0) continue;
             if (strcmp(key, "LD_PRELOAD") == 0) continue;
 
@@ -1649,13 +1659,13 @@ static int g_dummy_graph_exec = 0xDEC10002;
 cudaError_t cudaGraphDestroy(cudaGraph_t graph)
 {
     (void)graph;
-    return cudaSuccess;
+    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
 }
 
 cudaError_t cudaGraphExecDestroy(cudaGraphExec_t graphExec)
 {
     (void)graphExec;
-    return cudaSuccess;
+    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
 }
 
 cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
@@ -1663,21 +1673,21 @@ cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
 {
     (void)hGraphExec; (void)hGraph;
     if (updateResult_out) *updateResult_out = 0;
-    return cudaSuccess;
+    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
 }
 
 cudaError_t cudaGraphInstantiate(cudaGraphExec_t *pGraphExec, cudaGraph_t graph,
                                   void *pErrorNode, char *pLogBuffer, size_t bufferSize)
 {
     (void)graph; (void)pErrorNode; (void)pLogBuffer; (void)bufferSize;
-    if (pGraphExec) *pGraphExec = (cudaGraphExec_t)&g_dummy_graph_exec;
-    return cudaSuccess;
+    if (pGraphExec && g_graph_noop) *pGraphExec = (cudaGraphExec_t)&g_dummy_graph_exec;
+    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
 }
 
 cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream)
 {
     (void)graphExec; (void)stream;
-    return cudaSuccess;
+    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
 }
 
 /* Managed memory */
@@ -1793,14 +1803,14 @@ typedef enum {
 cudaError_t cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode_t mode)
 {
     (void)stream; (void)mode;
-    return cudaSuccess;
+    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
 }
 
 cudaError_t cudaStreamEndCapture(cudaStream_t stream, cudaGraph_t *pGraph)
 {
     (void)stream;
-    if (pGraph) *pGraph = (cudaGraph_t)&g_dummy_graph;
-    return cudaSuccess;
+    if (pGraph && g_graph_noop) *pGraph = (cudaGraph_t)&g_dummy_graph;
+    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
 }
 
 cudaError_t cudaStreamIsCapturing(cudaStream_t stream, cudaStreamCaptureStatus_t *pCaptureStatus)
