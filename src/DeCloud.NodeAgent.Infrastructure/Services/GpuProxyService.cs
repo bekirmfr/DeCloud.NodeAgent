@@ -232,7 +232,7 @@ public class GpuProxyService
             var psi = new ProcessStartInfo
             {
                 FileName = DaemonPath,
-                Arguments = $"-p {DaemonPort} -t {KernelTimeoutSeconds} -T 192.168.122.1 -v",
+                Arguments = $"-p {DaemonPort} -t 0 -T 192.168.122.1",
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
