@@ -133,12 +133,14 @@ typedef struct {
 } DriverModuleSlot;
 
 typedef struct {
-    uint64_t opaque_handle;  /* Our generated handle (returned as CUfunction) */
-    uint64_t module_slot;    /* Index into g_driver_modules[] */
-    char     name[256];      /* Kernel name (for debug logging) */
+    uint64_t opaque_handle;
+    uint64_t module_slot;
+    char     name[256];
     uint32_t num_params;
     uint32_t param_sizes[GPU_MAX_KERNEL_PARAMS];
     int      in_use;
+    int      attrs_cached;
+    GpuFuncGetAttributesResponse cached_attrs;
 } DriverFunctionSlot;
 
 static DriverModuleSlot    g_driver_modules[MAX_DRIVER_MODULES];
@@ -1535,21 +1537,53 @@ static CUresult cu_launch_kernel_ex(const void *config,
 static CUresult cu_func_get_attribute(int *value, int attrib, CUfunction func)
 {
     if (!value) return CUDA_ERROR_INVALID_VALUE;
-    (void)func;
 
-    /* Return reasonable defaults for RTX 4060 (sm_89)
-     * TODO: Query daemon for actual values if multi-GPU support is added */
+    /* Try to return real attributes from daemon (cached per-function) */
+    uint64_t handle = (uint64_t)(uintptr_t)func;
+    DriverFunctionSlot *fs = find_driver_function(handle);
+
+    if (fs && !fs->attrs_cached) {
+        GpuFuncGetAttributesRequest req = { .host_func_ptr = handle };
+        GpuFuncGetAttributesResponse resp;
+        memset(&resp, 0, sizeof(resp));
+        int err = transport_rpc_call(GPU_CMD_FUNC_GET_ATTRIBUTES,
+                                     &req, sizeof(req), &resp, sizeof(resp), NULL);
+        if (err == 0) {
+            fs->cached_attrs = resp;
+            fs->attrs_cached = 1;
+        }
+    }
+
+    if (fs && fs->attrs_cached) {
+        GpuFuncGetAttributesResponse *a = &fs->cached_attrs;
+        switch (attrib) {
+        case 0:  *value = a->maxThreadsPerBlock; break;
+        case 1:  *value = a->sharedSizeBytes; break;
+        case 2:  *value = a->constSizeBytes; break;
+        case 3:  *value = a->localSizeBytes; break;
+        case 4:  *value = a->numRegs; break;
+        case 5:  *value = a->ptxVersion; break;
+        case 6:  *value = a->binaryVersion; break;
+        case 7:  *value = 0; break;
+        case 8:  *value = a->maxDynamicSharedSizeBytes; break;
+        case 9:  *value = a->preferredShmemCarveout; break;
+        default: *value = 0; break;
+        }
+        return CUDA_SUCCESS;
+    }
+
+    /* Fallback: safe defaults if RPC failed or function unknown */
     switch (attrib) {
-    case 0:  *value = 1024; break;      /* CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK */
-    case 1:  *value = 48 * 1024; break;  /* CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES */
-    case 2:  *value = 0; break;          /* CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES */
-    case 3:  *value = 0; break;          /* CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES */
-    case 4:  *value = 32; break;         /* CU_FUNC_ATTRIBUTE_NUM_REGS */
-    case 5:  *value = 80; break;         /* CU_FUNC_ATTRIBUTE_PTX_VERSION */
-    case 6:  *value = 89; break;         /* CU_FUNC_ATTRIBUTE_BINARY_VERSION (sm_89) */
-    case 7:  *value = 0; break;          /* CU_FUNC_ATTRIBUTE_CACHE_MODE_CA */
-    case 8:  *value = 100 * 1024; break; /* CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES */
-    case 9:  *value = 0; break;          /* CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT */
+    case 0:  *value = 1024; break;
+    case 1:  *value = 48 * 1024; break;
+    case 2:  *value = 0; break;
+    case 3:  *value = 0; break;
+    case 4:  *value = 32; break;
+    case 5:  *value = 80; break;
+    case 6:  *value = 89; break;
+    case 7:  *value = 0; break;
+    case 8:  *value = 100 * 1024; break;
+    case 9:  *value = 0; break;
     default: *value = 0; break;
     }
     return CUDA_SUCCESS;
