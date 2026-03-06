@@ -36,15 +36,39 @@
 __attribute__((constructor))
 static void shim_init(void)
 {
-    /* Force ggml to use its own CUDA matmul kernels instead of cuBLAS.
-     * cuBLAS requires cuGetExportTable (private driver internals) which
-     * cannot be proxied at function level.
-     * Flag=1: ALWAYS overwrite — Ollama may set these to empty/"0". */
-    setenv("GGML_CUDA_FORCE_MMQ",      "1", 1);
-    setenv("GGML_CUDA_DISABLE_GRAPHS",  "1", 1);
-    setenv("GGML_CUDA_NO_PEER_COPY",    "1", 1);
+    /* Read config file and propagate app-specific env vars.
+     * Cloud-init templates write application env vars here (e.g.,
+     * GGML_CUDA_FORCE_MMQ=1 for Ollama, CUDA_VISIBLE_DEVICES for PyTorch).
+     * We setenv() any non-transport vars so they reach the application
+     * even when the parent process filters the environment. */
+    FILE *f = fopen("/etc/decloud/gpu-proxy.env", "r");
+    int count = 0;
+    if (f) {
+        char line[512];
+        while (fgets(line, sizeof(line), f)) {
+            char *p = line;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '\0' || *p == '\n' || *p == '#') continue;
+            char *nl = strchr(p, '\n');
+            if (nl) *nl = '\0';
+            char *eq = strchr(p, '=');
+            if (!eq) continue;
+            *eq = '\0';
+            char *key = p;
+            char *val = eq + 1;
 
-    fprintf(stderr, "[cudart-shim] constructor: env vars set (FORCE_MMQ=1, DISABLE_GRAPHS=1, NO_PEER_COPY=1)\n");
+            /* Skip transport config (handled by transport layer) and LD_PRELOAD */
+            if (strncmp(key, "DECLOUD_", 8) == 0) continue;
+            if (strcmp(key, "LD_PRELOAD") == 0) continue;
+
+            setenv(key, val, 1);
+            count++;
+        }
+        fclose(f);
+    }
+
+    if (getenv("DECLOUD_GPU_DEBUG"))
+        fprintf(stderr, "[cudart-shim] constructor: %d app env vars loaded\n", count);
 }
 
 #define SHIM_LOG(fmt, ...) \
