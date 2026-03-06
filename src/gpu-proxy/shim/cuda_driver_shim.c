@@ -35,13 +35,6 @@
 #include "transport.h"
 #include "transport.c"
 
-/* When true, virtual memory APIs proxy to daemon.
- * When false, return NOT_SUPPORTED (forces cudaMalloc path).
- * Set by DECLOUD_GPU_VMEM_PROXY=1 in config. Default: off. */
-static int g_vmem_proxy = 0;
-
-static CUresult graph_success_stub(void) { return CUDA_SUCCESS; }
-
 /* ================================================================
  * CUDA Driver API type definitions
  * ================================================================ */
@@ -140,14 +133,12 @@ typedef struct {
 } DriverModuleSlot;
 
 typedef struct {
-    uint64_t opaque_handle;
-    uint64_t module_slot;
-    char     name[256];
+    uint64_t opaque_handle;  /* Our generated handle (returned as CUfunction) */
+    uint64_t module_slot;    /* Index into g_driver_modules[] */
+    char     name[256];      /* Kernel name (for debug logging) */
     uint32_t num_params;
     uint32_t param_sizes[GPU_MAX_KERNEL_PARAMS];
     int      in_use;
-    int      attrs_cached;
-    GpuFuncGetAttributesResponse cached_attrs;
 } DriverFunctionSlot;
 
 static DriverModuleSlot    g_driver_modules[MAX_DRIVER_MODULES];
@@ -183,16 +174,6 @@ CUresult cuInit(unsigned int flags)
 
     if (transport_ensure_connected() < 0)
         return CUDA_ERROR_NO_DEVICE;
-
-    /* Check if virtual memory proxying is enabled */
-    const char *vmem = transport_getenv("DECLOUD_GPU_VMEM_PROXY");
-    if (vmem && vmem[0] == '1') g_vmem_proxy = 1;
-
-    const char *vmem = transport_getenv("DECLOUD_GPU_VMEM_PROXY");
-    if (vmem && vmem[0] == '1') g_vmem_proxy = 1;
-
-    const char *gnoop = transport_getenv("DECLOUD_GPU_GRAPH_NOOP");
-    if (gnoop && gnoop[0] == '1') g_driver_graph_noop = 1;
 
     g_driver_initialized = 1;
     return CUDA_SUCCESS;
@@ -303,7 +284,12 @@ CUresult cuDeviceGetAttribute(int *value, int attrib, CUdevice device)
         *value = 1; break;
     case 89: /* CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS */
         *value = 1; break;
-    case 100: *value = g_vmem_proxy ? 1 : 0; break; /* VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED */
+    case 100: /* CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED */
+        /*
+         * Return 0 to force ggml-cuda to use regular cudaMalloc instead of
+         * the VMM path. VMM operations cannot be proxied over the network.
+         */
+        *value = 0; break;
     default:
         *value = 0;
         break;
@@ -822,100 +808,65 @@ CUresult cuMemCreate(CUmemGenericAllocationHandle *handle,
                      const CUmemAllocationProp *prop,
                      unsigned long long flags)
 {
-    if (!g_vmem_proxy) return CUDA_ERROR_NOT_SUPPORTED;
-
-    /* Send size + flags; daemon uses real CUDA headers to interpret prop */
-    GpuMemCreateRequest req = {
-        .size = (uint64_t)size,
-        .flags = (uint64_t)flags,
-    };
-    GpuMemCreateResponse resp;
-    int err = transport_rpc_call(GPU_CMD_MEM_CREATE,
-                                 &req, sizeof(req), &resp, sizeof(resp), NULL);
-    if (err == 0 && handle)
-        *handle = (CUmemGenericAllocationHandle)resp.handle;
-    return (CUresult)err;
+    (void)handle; (void)size; (void)prop; (void)flags;
+    TRANSPORT_LOG("cuMemCreate() → NOT_SUPPORTED (using cudaMalloc path)");
+    return CUDA_ERROR_NOT_SUPPORTED;
 }
 
 CUresult cuMemRelease(CUmemGenericAllocationHandle handle)
 {
-    if (!g_vmem_proxy) return CUDA_ERROR_NOT_SUPPORTED;
-    GpuMemReleaseRequest req = { .handle = (uint64_t)handle };
-    return (CUresult)transport_rpc_call(GPU_CMD_MEM_RELEASE,
-                                        &req, sizeof(req), NULL, 0, NULL);
+    (void)handle;
+    return CUDA_ERROR_NOT_SUPPORTED;
 }
 
-CUresult cuMemAddressReserve(CUdeviceptr *ptr, size_t size,
-                              size_t alignment, CUdeviceptr addr,
+CUresult cuMemAddressReserve(CUdeviceptr *ptr,
+                              size_t size,
+                              size_t alignment,
+                              CUdeviceptr addr,
                               unsigned long long flags)
 {
-    if (!g_vmem_proxy) return CUDA_ERROR_NOT_SUPPORTED;
-    GpuMemAddressReserveRequest req = {
-        .size = (uint64_t)size, .alignment = (uint64_t)alignment,
-        .addr = (uint64_t)addr, .flags = (uint64_t)flags,
-    };
-    GpuMemAddressReserveResponse resp;
-    int err = transport_rpc_call(GPU_CMD_MEM_ADDRESS_RESERVE,
-                                 &req, sizeof(req), &resp, sizeof(resp), NULL);
-    if (err == 0 && ptr) *ptr = (CUdeviceptr)resp.ptr;
-    return (CUresult)err;
+    (void)ptr; (void)size; (void)alignment; (void)addr; (void)flags;
+    return CUDA_ERROR_NOT_SUPPORTED;
 }
 
 CUresult cuMemAddressFree(CUdeviceptr ptr, size_t size)
 {
-    if (!g_vmem_proxy) return CUDA_ERROR_NOT_SUPPORTED;
-    GpuMemAddressFreeRequest req = { .ptr = (uint64_t)ptr, .size = (uint64_t)size };
-    return (CUresult)transport_rpc_call(GPU_CMD_MEM_ADDRESS_FREE,
-                                        &req, sizeof(req), NULL, 0, NULL);
+    (void)ptr; (void)size;
+    return CUDA_ERROR_NOT_SUPPORTED;
 }
 
-CUresult cuMemMap(CUdeviceptr ptr, size_t size, size_t offset,
-                  CUmemGenericAllocationHandle handle, unsigned long long flags)
+CUresult cuMemMap(CUdeviceptr ptr,
+                  size_t size,
+                  size_t offset,
+                  CUmemGenericAllocationHandle handle,
+                  unsigned long long flags)
 {
-    if (!g_vmem_proxy) return CUDA_ERROR_NOT_SUPPORTED;
-    GpuMemMapRequest req = {
-        .ptr = (uint64_t)ptr, .size = (uint64_t)size,
-        .offset = (uint64_t)offset, .handle = (uint64_t)handle,
-        .flags = (uint64_t)flags,
-    };
-    return (CUresult)transport_rpc_call(GPU_CMD_MEM_MAP,
-                                        &req, sizeof(req), NULL, 0, NULL);
+    (void)ptr; (void)size; (void)offset; (void)handle; (void)flags;
+    return CUDA_ERROR_NOT_SUPPORTED;
 }
 
 CUresult cuMemUnmap(CUdeviceptr ptr, size_t size)
 {
-    if (!g_vmem_proxy) return CUDA_ERROR_NOT_SUPPORTED;
-    GpuMemUnmapRequest req = { .ptr = (uint64_t)ptr, .size = (uint64_t)size };
-    return (CUresult)transport_rpc_call(GPU_CMD_MEM_UNMAP,
-                                        &req, sizeof(req), NULL, 0, NULL);
+    (void)ptr; (void)size;
+    return CUDA_ERROR_NOT_SUPPORTED;
 }
 
-CUresult cuMemSetAccess(CUdeviceptr ptr, size_t size,
-                        const CUmemAccessDesc *desc, size_t count)
+CUresult cuMemSetAccess(CUdeviceptr ptr,
+                        size_t size,
+                        const CUmemAccessDesc *desc,
+                        size_t count)
 {
-    if (!g_vmem_proxy) return CUDA_ERROR_NOT_SUPPORTED;
-    GpuMemSetAccessRequest req = {
-        .ptr = (uint64_t)ptr, .size = (uint64_t)size,
-        .count = (uint32_t)count,
-    };
-    return (CUresult)transport_rpc_call(GPU_CMD_MEM_SET_ACCESS,
-                                        &req, sizeof(req), NULL, 0, NULL);
+    (void)ptr; (void)size; (void)desc; (void)count;
+    return CUDA_ERROR_NOT_SUPPORTED;
 }
 
 CUresult cuMemGetAllocationGranularity(size_t *granularity,
                                         const CUmemAllocationProp *prop,
                                         CUmemAllocationGranularity_flags option)
 {
-    if (!g_vmem_proxy) {
-        if (granularity) *granularity = 0;
-        return CUDA_ERROR_NOT_SUPPORTED;
-    }
-    GpuMemGetGranularityRequest req = { .option = (uint32_t)option };
-    GpuMemGetGranularityResponse resp;
-    int err = transport_rpc_call(GPU_CMD_MEM_GET_GRANULARITY,
-                                 &req, sizeof(req), &resp, sizeof(resp), NULL);
-    if (err == 0 && granularity) *granularity = (size_t)resp.granularity;
-    return (CUresult)err;
+    (void)prop; (void)option;
+    if (granularity) *granularity = 0;
+    return CUDA_ERROR_NOT_SUPPORTED;
 }
 
 /* ================================================================
@@ -1584,55 +1535,21 @@ static CUresult cu_launch_kernel_ex(const void *config,
 static CUresult cu_func_get_attribute(int *value, int attrib, CUfunction func)
 {
     if (!value) return CUDA_ERROR_INVALID_VALUE;
+    (void)func;
 
-    /* Try to return real attributes from daemon (cached per-function) */
-    uint64_t handle = (uint64_t)(uintptr_t)func;
-    DriverFunctionSlot *fs = find_driver_function(handle);
-
-    if (fs && !fs->attrs_cached) {
-        /* RPC to daemon for real kernel attributes */
-        GpuFuncGetAttributesRequest req = { .host_func_ptr = handle };
-        GpuFuncGetAttributesResponse resp;
-        memset(&resp, 0, sizeof(resp));
-        int err = transport_rpc_call(GPU_CMD_FUNC_GET_ATTRIBUTES,
-                                     &req, sizeof(req), &resp, sizeof(resp), NULL);
-        if (err == 0) {
-            fs->cached_attrs = resp;
-            fs->attrs_cached = 1;
-        }
-    }
-
-    if (fs && fs->attrs_cached) {
-        /* Return real values from physical GPU */
-        GpuFuncGetAttributesResponse *a = &fs->cached_attrs;
-        switch (attrib) {
-        case 0:  *value = a->maxThreadsPerBlock; break;
-        case 1:  *value = a->sharedSizeBytes; break;
-        case 2:  *value = a->constSizeBytes; break;
-        case 3:  *value = a->localSizeBytes; break;
-        case 4:  *value = a->numRegs; break;
-        case 5:  *value = a->ptxVersion; break;
-        case 6:  *value = a->binaryVersion; break;
-        case 7:  *value = 0; break;  /* CACHE_MODE_CA — not in our response */
-        case 8:  *value = a->maxDynamicSharedSizeBytes; break;
-        case 9:  *value = a->preferredShmemCarveout; break;
-        default: *value = 0; break;
-        }
-        return CUDA_SUCCESS;
-    }
-
-    /* Fallback: safe defaults if RPC failed or function unknown */
+    /* Return reasonable defaults for RTX 4060 (sm_89)
+     * TODO: Query daemon for actual values if multi-GPU support is added */
     switch (attrib) {
-    case 0:  *value = 1024; break;
-    case 1:  *value = 48 * 1024; break;
-    case 2:  *value = 0; break;
-    case 3:  *value = 0; break;
-    case 4:  *value = 32; break;
-    case 5:  *value = 80; break;
-    case 6:  *value = 89; break;
-    case 7:  *value = 0; break;
-    case 8:  *value = 100 * 1024; break;
-    case 9:  *value = 0; break;
+    case 0:  *value = 1024; break;      /* CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK */
+    case 1:  *value = 48 * 1024; break;  /* CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES */
+    case 2:  *value = 0; break;          /* CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES */
+    case 3:  *value = 0; break;          /* CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES */
+    case 4:  *value = 32; break;         /* CU_FUNC_ATTRIBUTE_NUM_REGS */
+    case 5:  *value = 80; break;         /* CU_FUNC_ATTRIBUTE_PTX_VERSION */
+    case 6:  *value = 89; break;         /* CU_FUNC_ATTRIBUTE_BINARY_VERSION (sm_89) */
+    case 7:  *value = 0; break;          /* CU_FUNC_ATTRIBUTE_CACHE_MODE_CA */
+    case 8:  *value = 100 * 1024; break; /* CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES */
+    case 9:  *value = 0; break;          /* CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT */
     default: *value = 0; break;
     }
     return CUDA_SUCCESS;
@@ -1844,12 +1761,9 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn,
     if (strncmp(symbol, "cuGraph", 7) == 0 ||
         strncmp(symbol, "cuStreamBeginCapture", 20) == 0 ||
         strncmp(symbol, "cuStreamEndCapture", 18) == 0) {
-        *pfn = g_driver_graph_noop
-             ? (void *)graph_success_stub
-             : (void *)graph_not_supported_stub;
-        TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-%s]",
-                      symbol, cudaVersion, *pfn,
-                      g_driver_graph_noop ? "noop" : "blocked");
+        *pfn = (void *)graph_not_supported_stub;
+        TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-blocked]",
+                      symbol, cudaVersion, *pfn);
         return CUDA_SUCCESS;
     }
 
