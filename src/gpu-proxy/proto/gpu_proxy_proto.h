@@ -68,7 +68,17 @@ typedef enum {
 
     /* True GPU Presence — kernel attribute & occupancy queries */
     GPU_CMD_FUNC_GET_ATTRIBUTES    = 0x54,
-    GPU_CMD_OCCUPANCY_MAX_BLOCKS   = 0x55,
+    GPU_CMD_OCCUPANCY_MAX_BLOCKS    = 0x55,
+
+    /* Virtual memory management (CUDA 10.2+) */
+    GPU_CMD_VMEM_CREATE             = 0x70,
+    GPU_CMD_VMEM_RELEASE            = 0x71,
+    GPU_CMD_VMEM_ADDRESS_RESERVE    = 0x72,
+    GPU_CMD_VMEM_ADDRESS_FREE       = 0x73,
+    GPU_CMD_VMEM_MAP                = 0x74,
+    GPU_CMD_VMEM_UNMAP              = 0x75,
+    GPU_CMD_VMEM_SET_ACCESS         = 0x76,
+    GPU_CMD_VMEM_GET_GRANULARITY    = 0x77,
 
     /* cuBLAS GEMM proxy (GQA attention requires real cuBLAS on host) */
     GPU_CMD_CUBLAS_GEMM_BATCHED    = 0x56,
@@ -411,5 +421,63 @@ typedef struct __attribute__((packed)) {
     uint64_t kernel_time_us;
     uint64_t connect_time_us;
 } GpuUsageStatsResponse;
+
+/* --- Virtual Memory Management (0x70-0x77) --- */
+
+typedef struct __attribute__((packed)) {
+    uint64_t size;
+    uint64_t flags;
+} GpuVmemCreateRequest;
+
+typedef struct __attribute__((packed)) {
+    uint64_t handle;
+} GpuVmemCreateResponse;
+
+typedef struct __attribute__((packed)) {
+    uint64_t handle;
+} GpuVmemReleaseRequest;
+
+typedef struct __attribute__((packed)) {
+    uint64_t size;
+    uint64_t alignment;
+    uint64_t addr;
+    uint64_t flags;
+} GpuVmemAddressReserveRequest;
+
+typedef struct __attribute__((packed)) {
+    uint64_t ptr;
+} GpuVmemAddressReserveResponse;
+
+typedef struct __attribute__((packed)) {
+    uint64_t ptr;
+    uint64_t size;
+} GpuVmemAddressFreeRequest;
+
+typedef struct __attribute__((packed)) {
+    uint64_t ptr;
+    uint64_t size;
+    uint64_t offset;
+    uint64_t handle;
+    uint64_t flags;
+} GpuVmemMapRequest;
+
+typedef struct __attribute__((packed)) {
+    uint64_t ptr;
+    uint64_t size;
+} GpuVmemUnmapRequest;
+
+typedef struct __attribute__((packed)) {
+    uint64_t ptr;
+    uint64_t size;
+    uint32_t count;
+} GpuVmemSetAccessRequest;
+
+typedef struct __attribute__((packed)) {
+    uint32_t option;
+} GpuVmemGetGranularityRequest;
+
+typedef struct __attribute__((packed)) {
+    uint64_t granularity;
+} GpuVmemGetGranularityResponse;
 
 #endif /* DECLOUD_GPU_PROXY_PROTO_H */
