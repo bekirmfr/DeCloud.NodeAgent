@@ -35,37 +35,22 @@
 #include "transport.h"
 #include "transport.c"
 
-/* When true (default), graph capture stubs return CUDA_SUCCESS (no-op).
- * Set DECLOUD_GPU_GRAPH_NOOP=0 to return NOT_SUPPORTED instead. */
-static int g_driver_graph_noop = 1;
-
-static CUresult graph_success_stub(void) { return CUDA_SUCCESS; }
-
-__attribute__((constructor))
-static void driver_shim_init(void)
-{
-    /* Load config early — cuGetProcAddress is called before cuInit */
-    const char *gnoop = transport_getenv("DECLOUD_GPU_GRAPH_NOOP");
-    if (gnoop && gnoop[0] == '0') g_driver_graph_noop = 0;
-
-    const char *vmem = transport_getenv("DECLOUD_GPU_VMEM_PROXY");
-    if (vmem && vmem[0] == '1') g_vmem_proxy = 1;
-}
-
 /* ================================================================
  * CUDA Driver API type definitions
+ * Must appear before graph_success_stub / driver_shim_init which
+ * reference CUresult, CUDA_SUCCESS, and g_vmem_proxy.
  * ================================================================ */
 
 typedef int CUresult;
-#define CUDA_SUCCESS 0
-#define CUDA_ERROR_INVALID_VALUE 1
-#define CUDA_ERROR_OUT_OF_MEMORY 2
-#define CUDA_ERROR_NOT_FOUND 500
-#define CUDA_ERROR_NO_DEVICE 100
+#define CUDA_SUCCESS               0
+#define CUDA_ERROR_INVALID_VALUE   1
+#define CUDA_ERROR_OUT_OF_MEMORY   2
+#define CUDA_ERROR_NOT_FOUND     500
+#define CUDA_ERROR_NO_DEVICE     100
 #define CUDA_ERROR_INVALID_CONTEXT 201
-#define CUDA_ERROR_INVALID_SOURCE 300
-#define CUDA_ERROR_FILE_NOT_FOUND 301
-#define CUDA_ERROR_NOT_SUPPORTED 801
+#define CUDA_ERROR_INVALID_SOURCE  300
+#define CUDA_ERROR_FILE_NOT_FOUND  301
+#define CUDA_ERROR_NOT_SUPPORTED   801
 
 typedef int CUdevice;
 typedef void *CUcontext;
@@ -92,6 +77,27 @@ typedef enum {
     CU_MEM_ALLOC_GRANULARITY_MINIMUM     = 0,
     CU_MEM_ALLOC_GRANULARITY_RECOMMENDED = 1,
 } CUmemAllocationGranularity_flags;
+
+/* When true (set via DECLOUD_GPU_VMEM_PROXY=1), VMM RPC path is active.
+ * Off by default — Ollama/ggml never calls VMM functions at runtime. */
+static int g_vmem_proxy = 0;
+
+/* When true (default), graph capture stubs return CUDA_SUCCESS (no-op).
+ * Set DECLOUD_GPU_GRAPH_NOOP=0 to return NOT_SUPPORTED instead. */
+static int g_driver_graph_noop = 1;
+
+static CUresult graph_success_stub(void) { return CUDA_SUCCESS; }
+
+__attribute__((constructor))
+static void driver_shim_init(void)
+{
+    /* Load config early — cuGetProcAddress is called before cuInit */
+    const char *gnoop = transport_getenv("DECLOUD_GPU_GRAPH_NOOP");
+    if (gnoop && gnoop[0] == '0') g_driver_graph_noop = 0;
+
+    const char *vmem = transport_getenv("DECLOUD_GPU_VMEM_PROXY");
+    if (vmem && vmem[0] == '1') g_vmem_proxy = 1;
+}
 
 /* ================================================================
  * Generic stub for unimplemented functions
@@ -914,62 +920,6 @@ CUresult cuMemGetAllocationGranularity(size_t *granularity,
                                  &req, sizeof(req), &resp, sizeof(resp), NULL);
     if (err == 0 && granularity) *granularity = (size_t)resp.granularity;
     return (CUresult)err;
-}
-
-CUresult cuMemRelease(CUmemGenericAllocationHandle handle)
-{
-    (void)handle;
-    return CUDA_ERROR_NOT_SUPPORTED;
-}
-
-CUresult cuMemAddressReserve(CUdeviceptr *ptr,
-                              size_t size,
-                              size_t alignment,
-                              CUdeviceptr addr,
-                              unsigned long long flags)
-{
-    (void)ptr; (void)size; (void)alignment; (void)addr; (void)flags;
-    return CUDA_ERROR_NOT_SUPPORTED;
-}
-
-CUresult cuMemAddressFree(CUdeviceptr ptr, size_t size)
-{
-    (void)ptr; (void)size;
-    return CUDA_ERROR_NOT_SUPPORTED;
-}
-
-CUresult cuMemMap(CUdeviceptr ptr,
-                  size_t size,
-                  size_t offset,
-                  CUmemGenericAllocationHandle handle,
-                  unsigned long long flags)
-{
-    (void)ptr; (void)size; (void)offset; (void)handle; (void)flags;
-    return CUDA_ERROR_NOT_SUPPORTED;
-}
-
-CUresult cuMemUnmap(CUdeviceptr ptr, size_t size)
-{
-    (void)ptr; (void)size;
-    return CUDA_ERROR_NOT_SUPPORTED;
-}
-
-CUresult cuMemSetAccess(CUdeviceptr ptr,
-                        size_t size,
-                        const CUmemAccessDesc *desc,
-                        size_t count)
-{
-    (void)ptr; (void)size; (void)desc; (void)count;
-    return CUDA_ERROR_NOT_SUPPORTED;
-}
-
-CUresult cuMemGetAllocationGranularity(size_t *granularity,
-                                        const CUmemAllocationProp *prop,
-                                        CUmemAllocationGranularity_flags option)
-{
-    (void)prop; (void)option;
-    if (granularity) *granularity = 0;
-    return CUDA_ERROR_NOT_SUPPORTED;
 }
 
 /* ================================================================
