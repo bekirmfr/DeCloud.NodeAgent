@@ -1904,8 +1904,10 @@ public class LibvirtVmManager : IVmManager
             profileVars.AppendLine("      export DECLOUD_GPU_PROXY_CID=2");
         if (hasTcp)
             profileVars.AppendLine("      export DECLOUD_GPU_PROXY_HOST=192.168.122.1");
+        // PyTorch stubs must precede main shim — override cudaMallocAsync etc.
+        // Safe for all workloads: stubs are no-ops for Ollama/ggml.
         profileVars.AppendLine("      if [ -f /usr/local/lib/libdecloud_cuda_shim.so ]; then");
-        profileVars.AppendLine("        export LD_PRELOAD=/usr/local/lib/libdecloud_cuda_shim.so");
+        profileVars.AppendLine("        export LD_PRELOAD=/usr/local/lib/libcuda_pytorch_stubs.so:/usr/local/lib/libdecloud_cuda_shim.so");
         profileVars.AppendLine("      fi");
         // Source the token from the protected env file (only for the current user's session)
         if (hasTcp)
@@ -1923,7 +1925,8 @@ public class LibvirtVmManager : IVmManager
             envFileVars.AppendLine("      DECLOUD_GPU_PROXY_HOST=192.168.122.1");
             envFileVars.AppendLine($"      DECLOUD_GPU_PROXY_TOKEN={gpuProxyToken}");
         }
-        envFileVars.AppendLine("      LD_PRELOAD=/usr/local/lib/libdecloud_cuda_shim.so");
+        // PyTorch stubs first — must win symbol resolution for cudaMallocAsync etc.
+        envFileVars.AppendLine("      LD_PRELOAD=/usr/local/lib/libcuda_pytorch_stubs.so:/usr/local/lib/libdecloud_cuda_shim.so");
 
         // Application-specific env vars — read by shim constructor via config file.
         // Each template provides its own set (e.g., GGML_* for Ollama, CUDA_* for PyTorch).
@@ -1995,6 +1998,11 @@ public class LibvirtVmManager : IVmManager
       else
         cp /run/decloud/libdecloud_cuda_shim.so /usr/local/lib/
         chmod 755 /usr/local/lib/libdecloud_cuda_shim.so
+        # PyTorch compat stubs (no-ops for Ollama, required for PyTorch/vLLM/Forge)
+        if [ -f /run/decloud/libcuda_pytorch_stubs.so ]; then
+          cp /run/decloud/libcuda_pytorch_stubs.so /usr/local/lib/
+          chmod 755 /usr/local/lib/libcuda_pytorch_stubs.so
+        fi
         echo 'GLIBC_COMPAT=true' > /etc/decloud/gpu-shim-status
         echo 'GPU shim installed — use LD_PRELOAD or source /etc/profile.d/gpu-proxy.sh'
       fi

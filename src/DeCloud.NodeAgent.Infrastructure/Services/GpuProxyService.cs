@@ -89,7 +89,8 @@ public class GpuProxyService
         "libcuda.so.1",
         "libnvidia-ml.so.1",
         "libcublas_stub.so",
-        "libcublasLt_stub.so"
+        "libcublasLt_stub.so",
+        "libcuda_pytorch_stubs.so"   // PyTorch 2.3.x + Stable Diffusion Forge compat stubs
     };
 
     /// <summary>
