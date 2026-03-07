@@ -7,7 +7,7 @@ hostname: __HOSTNAME__
 manage_etc_hosts: true
 
 # bootcmd runs in cloud_init_modules — FIRST stage, before packages, before
-# set-passwords, before runcmd. Three jobs here:
+# set-passwords, before runcmd. Two jobs here:
 #
 #  1. Regenerate machine-id to prevent DHCP IP collisions when cloning base image.
 #
@@ -21,18 +21,23 @@ manage_etc_hosts: true
 #       - Alpine 3.19 (tiny-cloud): neither chpasswd format is supported.
 #     The shell guard skips this if __ADMIN_PASSWORD__ is empty (key-only VMs).
 #
-#  3. Write sshd_config.d/99-decloud-password-auth.conf and restart sshd so
-#     password auth is available within seconds of boot — long before the
-#     packages stage (apt) blocks cloud_final_modules for 5-10 minutes on
-#     template VMs. write_files (cloud_config_modules) and runcmd
-#     (cloud_final_modules) both repeat this as belt-and-suspenders.
+#  3. Write sshd_config.d/99-decloud-password-auth.conf so it is present when
+#     the cloud-init `ssh` module starts sshd (host key generation + first start).
+#     The ssh module runs AFTER bootcmd in cloud_init_modules, so writing the
+#     config here means sshd picks it up on its very first start — no restart
+#     needed. write_files (below) repeats this write as belt-and-suspenders.
+#
+# IMPORTANT: Do NOT restart sshd here. bootcmd runs before the cloud-init ssh
+# module generates host keys. Restarting sshd without host keys causes repeated
+# failures which exhaust systemd's StartLimitBurst (default: 5 failures), after
+# which systemd permanently stops the service — leaving SSH permanently refused
+# for the entire boot. Let the ssh module start sshd correctly with host keys.
 bootcmd:
   - rm -f /etc/machine-id /var/lib/dbus/machine-id
   - systemd-machine-id-setup
   - sh -c 'P="__ADMIN_PASSWORD__"; [ -n "$P" ] && printf "%s\n" "root:$P" | chpasswd || true'
   - mkdir -p /etc/ssh/sshd_config.d
   - printf 'PasswordAuthentication yes\nPermitRootLogin yes\nChallengeResponseAuthentication no\nUsePAM yes\n' > /etc/ssh/sshd_config.d/99-decloud-password-auth.conf
-  - systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
 
 # Root user configuration
 # Single-tenant VMs get direct root access (similar to Hetzner, Vultr, Linode)
@@ -198,8 +203,8 @@ runcmd:
   - systemctl daemon-reload
   - systemctl enable --now welcome
 
-  # Restart SSH to apply all configurations (CA keys, principals, sshd_config.d)
-  - systemctl restart sshd || systemctl restart ssh
+  # Reload SSH to apply CA key and principals config (SIGHUP — no port downtime)
+  - systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
 
 
 final_message: "DeCloud VM __VM_NAME__ is ready!"

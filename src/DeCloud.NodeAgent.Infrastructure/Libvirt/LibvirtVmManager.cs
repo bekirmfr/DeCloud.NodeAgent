@@ -1545,7 +1545,7 @@ public class LibvirtVmManager : IVmManager
                     "sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config",
                     "sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config",
                     "sed -i 's/^#PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config",
-                    "systemctl restart sshd || systemctl restart ssh"
+                    "systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true"
                 };
 
                 // Join with && to make one compound command
@@ -2107,34 +2107,25 @@ public class LibvirtVmManager : IVmManager
             {
                 foundRuncmd = true;
                 
-                // ── bootcmd: SSH config (runs before packages/modules/runcmd) ──────────
-                // bootcmd executes on every boot in cloud_init_modules stage — before apt,
-                // before set-passwords, before anything else. This ensures SSH password
-                // auth is always available from first boot regardless of how long packages
-                // take or whether cloud-init stalls. Without this, on Ubuntu 24.04 the
-                // packages stage blocks runcmd for 5-10 minutes and SSH is inaccessible.
-                // NOTE: Only inject if no bootcmd section exists — we don't merge into
-                // existing bootcmd (templates needing bootcmd define it themselves).
+                // ── bootcmd: password + SSH config ───────────────────────────────────────
+                // Runs in cloud_init_modules (before packages, set-passwords, runcmd).
+                // Jobs: (1) set root password, (2) write sshd_config.d so it is present
+                // when the cloud-init ssh module generates host keys and starts sshd.
+                //
+                // IMPORTANT: Do NOT restart sshd here. bootcmd runs before the cloud-init
+                // ssh module generates host keys. Restarting sshd without host keys causes
+                // repeated failures that exhaust systemd's StartLimitBurst (default: 5),
+                // after which systemd permanently marks the service failed — SSH stays
+                // "Connection refused" for the entire boot.
+                //
+                // Only inject if no bootcmd section exists (templates define their own).
                 if (hasPassword && !customUserData.Contains("bootcmd:", StringComparison.OrdinalIgnoreCase))
                 {
-                    // bootcmd fires in cloud_init_modules — before packages, before set-passwords,
-                    // before runcmd. Two jobs here:
-                    //
-                    // 1. Set root password via `echo "root:PASS" | chpasswd`
-                    //    Universal fallback that works regardless of cloud-init version:
-                    //      - Ubuntu 24.04 / Fedora 40 (cloud-init 24.x): chpasswd.list REMOVED in 23.4
-                    //      - Debian 11 (cloud-init 20.4.1): chpasswd.users not added until 22.3
-                    //      - Alpine 3.19 (tiny-cloud): neither chpasswd format works at all
-                    //
-                    // 2. Write sshd_config.d/99-decloud-password-auth.conf + restart sshd
-                    //    SSH accepts passwords within seconds of boot, before packages stage
-                    //    blocks for 5-10 minutes on template VMs (PyTorch, Stable Diffusion etc.)
                     lines.Add("bootcmd:");
                     lines.Add($"  - echo 'root:{password}' | chpasswd");
                     lines.Add("  - mkdir -p /etc/ssh/sshd_config.d");
                     lines.Add("  - |");
                     lines.Add("    printf 'PasswordAuthentication yes\\nPermitRootLogin yes\\nChallengeResponseAuthentication no\\nUsePAM yes\\n' > /etc/ssh/sshd_config.d/99-decloud-password-auth.conf");
-                    lines.Add("  - systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true");
                     lines.Add("");
                 }
                 // Before runcmd, inject base configuration if not already present
@@ -2192,7 +2183,7 @@ public class LibvirtVmManager : IVmManager
                 lines.Add("  - mkdir -p /etc/ssh/sshd_config.d");
                 lines.Add("  - |");
                 lines.Add("    printf '%s\\n' 'PasswordAuthentication yes' 'PermitRootLogin yes' 'ChallengeResponseAuthentication no' 'UsePAM yes' > /etc/ssh/sshd_config.d/99-decloud-password-auth.conf");
-                lines.Add("  - systemctl restart sshd || systemctl restart ssh");
+                lines.Add("  - systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true");
                 lines.Add("");
 
                 // Now add the first actual runcmd item
