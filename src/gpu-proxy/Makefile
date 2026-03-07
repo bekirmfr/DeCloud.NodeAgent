@@ -13,9 +13,11 @@
 #   make nvml-shim    — build NVML shim (libnvidia-ml.so.1)
 #   make cublas-stub  — build cuBLAS stub with correct version tags
 #   make cublaslt-stub — build cuBLAS Lt stub (DT_NEEDED placeholder)
+#   make pytorch-stub — build PyTorch compat stubs (libcuda_pytorch_stubs.so)
 #   make all-shims    — build ALL shims + stubs (no Docker, host glibc)
 #   make shim-compat  — build runtime shim in Ubuntu 20.04 container
 #   make all-shims-compat — build ALL shims + stubs in container (preferred)
+#   make pytorch-stub-compat — build PyTorch stubs in container
 #   make test         — run protocol tests (no CUDA needed)
 #   make clean        — remove build artifacts
 #   make install      — install daemon + shim to /usr/local
@@ -37,21 +39,22 @@ CUDA_INC   = $(CUDA_HOME)/include
 CUDA_LIB   = $(CUDA_HOME)/lib64
 
 # Output
-BUILD_DIR     := build
-DAEMON        := $(BUILD_DIR)/gpu-proxy-daemon
-SHIM          := $(BUILD_DIR)/libdecloud_cuda_shim.so
-SHIM_STATIC   := $(BUILD_DIR)/libdecloud_cuda_shim-static.so
-SHIM_COMPAT   := $(BUILD_DIR)/libdecloud_cuda_shim-compat.so
-DRIVER_SHIM   := $(BUILD_DIR)/libcuda.so.1
-NVML_SHIM     := $(BUILD_DIR)/libnvidia-ml.so.1
-CUBLAS_STUB   := $(BUILD_DIR)/libcublas_stub.so
-CUBLASLT_STUB := $(BUILD_DIR)/libcublasLt_stub.so
+BUILD_DIR      := build
+DAEMON         := $(BUILD_DIR)/gpu-proxy-daemon
+SHIM           := $(BUILD_DIR)/libdecloud_cuda_shim.so
+SHIM_STATIC    := $(BUILD_DIR)/libdecloud_cuda_shim-static.so
+SHIM_COMPAT    := $(BUILD_DIR)/libdecloud_cuda_shim-compat.so
+DRIVER_SHIM    := $(BUILD_DIR)/libcuda.so.1
+NVML_SHIM      := $(BUILD_DIR)/libnvidia-ml.so.1
+CUBLAS_STUB    := $(BUILD_DIR)/libcublas_stub.so
+CUBLASLT_STUB  := $(BUILD_DIR)/libcublasLt_stub.so
+PYTORCH_STUB   := $(BUILD_DIR)/libcuda_pytorch_stubs.so
 
 # Transport header dependency (shared by all shims)
 TRANSPORT_DEPS := shim/transport.h shim/transport.c proto/gpu_proxy_proto.h
 
-.PHONY: all daemon shim driver-shim nvml-shim cublas-stub cublaslt-stub \
-        all-shims shim-compat all-shims-compat \
+.PHONY: all daemon shim driver-shim nvml-shim cublas-stub cublaslt-stub pytorch-stub \
+        all-shims shim-compat all-shims-compat pytorch-stub-compat \
         test clean \
         install install-shim-compat install-all-shims-compat
 
@@ -61,13 +64,14 @@ all: daemon shim
 # all-shims: build ALL shims + stubs on host (no Docker).
 # Used by install.sh when Docker is unavailable.
 # ----------------------------------------------------------------
-all-shims: shim driver-shim nvml-shim cublas-stub cublaslt-stub
+all-shims: shim driver-shim nvml-shim cublas-stub cublaslt-stub pytorch-stub
 	@echo "All shims built (host glibc — may have compat issues on older distros):"
 	@echo "  $(SHIM)            (Runtime API, LD_PRELOAD)"
 	@echo "  $(DRIVER_SHIM)     (Driver API, dlopen target)"
 	@echo "  $(NVML_SHIM)       (NVML, dlopen target)"
 	@echo "  $(CUBLAS_STUB)     (cuBLAS stub, @@libcublas.so.12 tags)"
 	@echo "  $(CUBLASLT_STUB)   (cuBLAS Lt stub, DT_NEEDED placeholder)"
+	@echo "  $(PYTORCH_STUB)    (PyTorch compat stubs, @@libcudart.so.12 tags)"
 
 # ----------------------------------------------------------------
 # Daemon: links against CUDA runtime
@@ -149,6 +153,44 @@ $(CUBLASLT_STUB): stubs/cublasLt_stub.c | $(BUILD_DIR)
 		-o $@ $<
 
 # ----------------------------------------------------------------
+# PyTorch Compatibility Stubs (libcuda_pytorch_stubs.so)
+#
+# Supplies CUDA Runtime symbols required by PyTorch 2.3.x, Stable
+# Diffusion Forge, and bitsandbytes that are absent from the main
+# libdecloud_cuda_shim.so:
+#
+#   libtorch_cuda.so         — cudaGraphInstantiateWithFlags,
+#                              cudaGraphGetNodes, cudaGraphGetEdges, ...
+#   libbitsandbytes_cuda121.so — cudaMemPrefetchAsync
+#   libc10_cuda.so           — cudaMallocAsync, cudaFreeAsync,
+#                              cudaStreamCreateWithPriority,
+#                              cudaDeviceGetStreamPriorityRange, +9 more
+#
+# Must appear BEFORE libdecloud_cuda_shim.so in LD_PRELOAD so these
+# specific @@libcudart.so.12 versioned symbols resolve here first.
+# Safe for all workloads — stubs are pure no-ops for Ollama/ggml
+# (those symbols are never called by the ggml CUDA backend).
+# ----------------------------------------------------------------
+pytorch-stub: $(PYTORCH_STUB)
+
+$(PYTORCH_STUB): stubs/cuda_pytorch_stubs.c stubs/libcudart.version | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -shared -fPIC \
+		-Wl,-soname,libcuda_pytorch_stubs.so \
+		-Wl,--version-script=stubs/libcudart.version \
+		-o $@ $<
+
+pytorch-stub-compat: | $(BUILD_DIR)
+	docker run --rm -v $(CURDIR):/src -w /src ubuntu:20.04 \
+	    sh -c "apt-get update -qq && \
+	           apt-get install -y -qq gcc libc6-dev >/dev/null 2>&1 && \
+	           gcc -Wall -Wextra -O2 -shared -fPIC \
+	               -Wl,-soname,libcuda_pytorch_stubs.so \
+	               -Wl,--version-script=stubs/libcudart.version \
+	               -o build/libcuda_pytorch_stubs.so \
+	               stubs/cuda_pytorch_stubs.c"
+	@echo "PyTorch compat stub built (glibc 2.31+): $(PYTORCH_STUB)"
+
+# ----------------------------------------------------------------
 # Compat shims: built inside Ubuntu 20.04 container for universal
 # glibc compatibility (glibc 2.31+). Requires: docker
 #
@@ -204,7 +246,13 @@ all-shims-compat: | $(BUILD_DIR)
 	           gcc -Wall -Wextra -O2 -shared -fPIC \
 	               -Wl,-soname,libcublasLt.so.12 \
 	               -o build/libcublasLt_stub.so \
-	               stubs/cublasLt_stub.c"
+	               stubs/cublasLt_stub.c && \
+	           echo '==> Building PyTorch compat stubs...' && \
+	           gcc -Wall -Wextra -O2 -shared -fPIC \
+	               -Wl,-soname,libcuda_pytorch_stubs.so \
+	               -Wl,--version-script=stubs/libcudart.version \
+	               -o build/libcuda_pytorch_stubs.so \
+	               stubs/cuda_pytorch_stubs.c"
 	@echo ""
 	@echo "All compat shims built (glibc 2.31+, universal):"
 	@echo "  $(BUILD_DIR)/libdecloud_cuda_shim-compat.so  (Runtime API, LD_PRELOAD)"
@@ -212,6 +260,7 @@ all-shims-compat: | $(BUILD_DIR)
 	@echo "  $(BUILD_DIR)/libnvidia-ml.so.1               (NVML, dlopen target)"
 	@echo "  $(BUILD_DIR)/libcublas_stub.so               (cuBLAS stub, @@libcublas.so.12 tags)"
 	@echo "  $(BUILD_DIR)/libcublasLt_stub.so             (cuBLAS Lt stub, DT_NEEDED placeholder)"
+	@echo "  $(BUILD_DIR)/libcuda_pytorch_stubs.so        (PyTorch compat stubs, @@libcudart.so.12 tags)"
 
 # ----------------------------------------------------------------
 # Tests: no CUDA dependency — runs on any machine
@@ -274,6 +323,8 @@ install-all-shims-compat: all-shims-compat
 	install -m 644 $(CUBLAS_STUB) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcublas_stub.so
 	# cuBLAS Lt stub (DT_NEEDED placeholder)
 	install -m 644 $(CUBLASLT_STUB) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcublasLt_stub.so
+	# PyTorch compat stubs (must precede libdecloud_cuda_shim.so in LD_PRELOAD)
+	install -m 644 $(PYTORCH_STUB) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcuda_pytorch_stubs.so
 	# Convenience copies for VM deployment (Ollama/llama.cpp expect these names)
 	cp $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libdecloud_cuda_shim.so \
 	   $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcudart.so.12
