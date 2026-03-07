@@ -1683,7 +1683,8 @@ public class LibvirtVmManager : IVmManager
                     spec.Name,
                     sshKeysBlock,
                     passwordBlock,
-                    hasPassword);
+                    hasPassword,
+                    password ?? "");
                 
                 _logger.LogInformation(
                     "VM {VmId}: Merged custom UserData with base configuration",
@@ -2082,7 +2083,8 @@ public class LibvirtVmManager : IVmManager
         string hostname,
         string sshKeysBlock,
         string passwordBlock,
-        bool hasPassword)
+        bool hasPassword,
+        string password = "")
     {
         var lines = new List<string>();
         
