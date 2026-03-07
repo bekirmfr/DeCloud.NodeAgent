@@ -1187,7 +1187,7 @@ build_gpu_proxy() {
         local daemon_args=""
         local daemon_pid
         daemon_pid=$(pgrep -x gpu-proxy-daemon 2>/dev/null | head -1 || true)
-        if [ -n "$daemon_pisd" ]; then
+        if [ -n "$daemon_pid" ]; then
             daemon_was_running=true
             # Read args from /proc (null-delimited → space-delimited, skip argv[0])
             daemon_args=$(tr '\0' ' ' < /proc/$daemon_pid/cmdline 2>/dev/null | cut -d' ' -f2- || true)
@@ -1233,6 +1233,18 @@ build_gpu_proxy() {
         log_success "Daemon installed → /usr/local/bin/gpu-proxy-daemon"
     elif [ "$daemon_built" = true ]; then
         log_warn "Daemon binary not found at $GPU_PROXY_SRC/build/gpu-proxy-daemon — skipping install"
+    fi
+
+    # PyTorch Compat Stubs → decloud-gpu-shim/ only
+    # Supplies cudaMallocAsync, cudaFreeAsync, cudaStreamCreateWithPriority,
+    # cudaGraphInstantiateWithFlags, cudaMemPrefetchAsync (+22 more) required by
+    # libtorch_cuda.so, libc10_cuda.so, and libbitsandbytes_cuda121.so.
+    # Must precede libdecloud_cuda_shim.so in LD_PRELOAD — see LibvirtVmManager.cs.
+    # Pure no-ops for Ollama/ggml (those symbols are never called by ggml backend).
+    local built_pytorch_stub="$GPU_PROXY_SRC/build/libcuda_pytorch_stubs.so"
+    if [ -f "$built_pytorch_stub" ]; then
+        install -m 644 "$built_pytorch_stub" "$SHIM_DIR/libcuda_pytorch_stubs.so"
+        log_success "PyTorch compat stubs installed → $SHIM_DIR/libcuda_pytorch_stubs.so"
     fi
 
     # --- Summary ---
