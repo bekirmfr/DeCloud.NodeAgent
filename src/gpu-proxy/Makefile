@@ -173,10 +173,10 @@ $(CUBLASLT_STUB): stubs/cublasLt_stub.c | $(BUILD_DIR)
 # ----------------------------------------------------------------
 pytorch-stub: $(PYTORCH_STUB)
 
-$(PYTORCH_STUB): stubs/cuda_pytorch_stubs.c stubs/libcudart.version | $(BUILD_DIR)
+$(PYTORCH_STUB): stubs/cuda_pytorch_stubs.c shim/libcudart.version | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -shared -fPIC \
 		-Wl,-soname,libcuda_pytorch_stubs.so \
-		-Wl,--version-script=stubs/libcudart.version \
+		-Wl,--version-script=shim/libcudart.version \
 		-o $@ $<
 
 pytorch-stub-compat: | $(BUILD_DIR)
@@ -185,7 +185,7 @@ pytorch-stub-compat: | $(BUILD_DIR)
 	           apt-get install -y -qq gcc libc6-dev >/dev/null 2>&1 && \
 	           gcc -Wall -Wextra -O2 -shared -fPIC \
 	               -Wl,-soname,libcuda_pytorch_stubs.so \
-	               -Wl,--version-script=stubs/libcudart.version \
+	               -Wl,--version-script=shim/libcudart.version \
 	               -o build/libcuda_pytorch_stubs.so \
 	               stubs/cuda_pytorch_stubs.c"
 	@echo "PyTorch compat stub built (glibc 2.31+): $(PYTORCH_STUB)"
@@ -250,7 +250,7 @@ all-shims-compat: | $(BUILD_DIR)
 	           echo '==> Building PyTorch compat stubs...' && \
 	           gcc -Wall -Wextra -O2 -shared -fPIC \
 	               -Wl,-soname,libcuda_pytorch_stubs.so \
-	               -Wl,--version-script=stubs/libcudart.version \
+	               -Wl,--version-script=shim/libcudart.version \
 	               -o build/libcuda_pytorch_stubs.so \
 	               stubs/cuda_pytorch_stubs.c"
 	@echo ""
