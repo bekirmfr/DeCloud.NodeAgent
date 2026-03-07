@@ -1499,9 +1499,15 @@ public class LibvirtVmManager : IVmManager
             if (hasPassword && spec.VmType != VmType.Relay)
             {
                 var sb = new StringBuilder();
+                // Use chpasswd.users format (cloud-init 22.3+, Ubuntu 22.04 and 24.04).
+                // The old chpasswd.list format was deprecated in cloud-init 23.x and
+                // silently fails on Ubuntu 24.04 (cloud-init 24.x), leaving root with
+                // no password and breaking console + SSH password login.
                 sb.AppendLine("chpasswd:");
-                sb.AppendLine("  list: |");
-                sb.AppendLine($"    root:{password}");
+                sb.AppendLine("  users:");
+                sb.AppendLine("    - name: root");
+                sb.AppendLine($"      password: \"{password}\"");
+                sb.AppendLine("      type: text");
                 sb.AppendLine("  expire: false");
 
                 passwordBlock = sb.ToString().TrimEnd();
@@ -1516,6 +1522,14 @@ public class LibvirtVmManager : IVmManager
             }
 
             variables["__PASSWORD_CONFIG_BLOCK__"] = passwordBlock;
+
+            // Set __ADMIN_PASSWORD__ explicitly so the general-vm-cloudinit.yaml bootcmd
+            // gets the same password as __PASSWORD_CONFIG_BLOCK__.
+            // CloudInitTemplateService.BuildTemplateVariablesAsync() calls GenerateSecurePassword()
+            // independently — without this override the template would have a DIFFERENT password
+            // in __ADMIN_PASSWORD__ than what chpasswd.users sets. The additionalVariables dict
+            // is merged AFTER variables.ToDictionary(), so this value wins.
+            variables["__ADMIN_PASSWORD__"] = hasPassword ? password! : "";
 
             // =====================================================
             // STEP 4: Build Password SSH Commands Block
@@ -2091,6 +2105,36 @@ public class LibvirtVmManager : IVmManager
             {
                 foundRuncmd = true;
                 
+                // ── bootcmd: SSH config (runs before packages/modules/runcmd) ──────────
+                // bootcmd executes on every boot in cloud_init_modules stage — before apt,
+                // before set-passwords, before anything else. This ensures SSH password
+                // auth is always available from first boot regardless of how long packages
+                // take or whether cloud-init stalls. Without this, on Ubuntu 24.04 the
+                // packages stage blocks runcmd for 5-10 minutes and SSH is inaccessible.
+                // NOTE: Only inject if no bootcmd section exists — we don't merge into
+                // existing bootcmd (templates needing bootcmd define it themselves).
+                if (hasPassword && !customUserData.Contains("bootcmd:", StringComparison.OrdinalIgnoreCase))
+                {
+                    // bootcmd fires in cloud_init_modules — before packages, before set-passwords,
+                    // before runcmd. Two jobs here:
+                    //
+                    // 1. Set root password via `echo "root:PASS" | chpasswd`
+                    //    Universal fallback that works regardless of cloud-init version:
+                    //      - Ubuntu 24.04 / Fedora 40 (cloud-init 24.x): chpasswd.list REMOVED in 23.4
+                    //      - Debian 11 (cloud-init 20.4.1): chpasswd.users not added until 22.3
+                    //      - Alpine 3.19 (tiny-cloud): neither chpasswd format works at all
+                    //
+                    // 2. Write sshd_config.d/99-decloud-password-auth.conf + restart sshd
+                    //    SSH accepts passwords within seconds of boot, before packages stage
+                    //    blocks for 5-10 minutes on template VMs (PyTorch, Stable Diffusion etc.)
+                    lines.Add("bootcmd:");
+                    lines.Add($"  - echo 'root:{password}' | chpasswd");
+                    lines.Add("  - mkdir -p /etc/ssh/sshd_config.d");
+                    lines.Add("  - |");
+                    lines.Add("    printf 'PasswordAuthentication yes\\nPermitRootLogin yes\\nChallengeResponseAuthentication no\\nUsePAM yes\\n' > /etc/ssh/sshd_config.d/99-decloud-password-auth.conf");
+                    lines.Add("  - systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true");
+                    lines.Add("");
+                }
                 // Before runcmd, inject base configuration if not already present
                 if (!customUserData.Contains("hostname:", StringComparison.OrdinalIgnoreCase))
                 {

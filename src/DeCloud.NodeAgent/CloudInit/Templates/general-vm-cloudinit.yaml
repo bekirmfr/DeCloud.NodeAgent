@@ -6,22 +6,54 @@
 hostname: __HOSTNAME__
 manage_etc_hosts: true
 
-# CRITICAL: Regenerate machine-id BEFORE networking starts
-# Prevents DHCP IP address collisions when cloning from base image
+# bootcmd runs in cloud_init_modules — FIRST stage, before packages, before
+# set-passwords, before runcmd. Three jobs here:
+#
+#  1. Regenerate machine-id to prevent DHCP IP collisions when cloning base image.
+#
+#  2. Set root password universally via `echo "root:PASS" | chpasswd`.
+#     The chpasswd.users cloud-init directive (below) handles Ubuntu 22.04+,
+#     Debian 12, and Fedora 40 correctly. But:
+#       - Ubuntu 24.04 / Fedora 40 (cloud-init 24.x): chpasswd.list was REMOVED
+#         in cloud-init 23.4. chpasswd.users works but bootcmd runs first.
+#       - Debian 11 (cloud-init 20.4.1): chpasswd.users wasn't added until 22.3
+#         — the cloud-init block silently does nothing on this distro.
+#       - Alpine 3.19 (tiny-cloud): neither chpasswd format is supported.
+#     The shell guard skips this if __ADMIN_PASSWORD__ is empty (key-only VMs).
+#
+#  3. Write sshd_config.d/99-decloud-password-auth.conf and restart sshd so
+#     password auth is available within seconds of boot — long before the
+#     packages stage (apt) blocks cloud_final_modules for 5-10 minutes on
+#     template VMs. write_files (cloud_config_modules) and runcmd
+#     (cloud_final_modules) both repeat this as belt-and-suspenders.
 bootcmd:
   - rm -f /etc/machine-id /var/lib/dbus/machine-id
   - systemd-machine-id-setup
+  - sh -c 'P="__ADMIN_PASSWORD__"; [ -n "$P" ] && printf "%s\n" "root:$P" | chpasswd || true'
+  - mkdir -p /etc/ssh/sshd_config.d
+  - printf 'PasswordAuthentication yes\nPermitRootLogin yes\nChallengeResponseAuthentication no\nUsePAM yes\n' > /etc/ssh/sshd_config.d/99-decloud-password-auth.conf
+  - systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
 
 # Root user configuration
 # Single-tenant VMs get direct root access (similar to Hetzner, Vultr, Linode)
 disable_root: false
 
 # SSH public key authentication (placeholder will be replaced with actual block)
-# Format: ssh_authorized_keys:\n  - ssh-rsa AAA...
+# Format: ssh_authorized_keys:\n  - ssh-ed25519 AAA...
 # __SSH_AUTHORIZED_KEYS_BLOCK__
 
 # Password authentication (placeholder will be replaced with actual block)
-# Format: chpasswd:\n  list: |\n    root:password
+# Format (cloud-init 22.3+, Ubuntu 22.04 / Ubuntu 24.04 / Debian 12 / Fedora 40):
+#   chpasswd:
+#     users:
+#       - name: root
+#         password: "PASSWORD"
+#         type: text
+#     expire: false
+# NOTE: The old chpasswd.list format was removed in cloud-init 23.4 and
+# silently fails on Ubuntu 24.04. __PASSWORD_CONFIG_BLOCK__ now uses
+# chpasswd.users. For Debian 11 and Alpine, bootcmd above is the authoritative
+# password setter.
 __PASSWORD_CONFIG_BLOCK__
 
 # SSH password authentication flag
@@ -40,6 +72,9 @@ write_files:
       __CA_PUBLIC_KEY__
 
   # Universal SSH Password Authentication
+  # Duplicates the bootcmd write above — write_files runs in cloud_config_modules
+  # (after bootcmd, before packages) and ensures the file is correct even if
+  # bootcmd's printf somehow failed or was skipped.
   - path: /etc/ssh/sshd_config.d/99-decloud-password-auth.conf
     permissions: '0644'
     owner: root:root
@@ -79,14 +114,14 @@ write_files:
       [Unit]
       Description=DeCloud Welcome Page with Caching
       After=network.target
-      
+
       [Service]
       ExecStart=/usr/local/bin/welcome-server.py
       Restart=always
       WorkingDirectory=/var/www
       StandardOutput=journal
       StandardError=journal
-      
+
       [Install]
       WantedBy=multi-user.target
 
@@ -107,28 +142,28 @@ write_files:
       Description=DeCloud Ephemeral Attestation Agent
       After=network.target
       Documentation=https://docs.decloud.network/attestation
-      
+
       [Service]
       Type=simple
       ExecStart=/usr/local/bin/decloud-agent
       Restart=always
       RestartSec=5
-      
+
       # Security hardening
       NoNewPrivileges=yes
       ProtectSystem=strict
       ProtectHome=yes
       PrivateTmp=yes
-      
+
       # Only needs to read /proc/* and /etc/machine-id
       ReadOnlyPaths=/proc /sys
       ReadWritePaths=/var/log
-      
+
       # Logging
       StandardOutput=journal
       StandardError=journal
       SyslogIdentifier=decloud-agent
-      
+
       [Install]
       WantedBy=multi-user.target
 
@@ -137,14 +172,14 @@ runcmd:
   # Start QEMU guest agent (static unit - systemctl enable fails silently)
   - ln -sf /lib/systemd/system/qemu-guest-agent.service /etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service
   - systemctl start qemu-guest-agent
-  
+
   # Configure SSH Certificate Authority
   - |
     echo '' >> /etc/ssh/sshd_config
     echo '# DeCloud: SSH Certificate Authority' >> /etc/ssh/sshd_config
     echo 'TrustedUserCAKeys /etc/ssh/decloud_ca.pub' >> /etc/ssh/sshd_config
     echo 'AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u' >> /etc/ssh/sshd_config
-  
+
   # Create SSH principals for certificate-based auth
   - mkdir -p /etc/ssh/auth_principals
   - echo vm-__VM_ID__ > /etc/ssh/auth_principals/root
@@ -157,14 +192,13 @@ runcmd:
   - systemctl daemon-reload
   - systemctl enable decloud-agent
   - systemctl start decloud-agent
-  # Log startup
   - echo "DeCloud Attestation Agent started" | systemd-cat -t decloud-agent
-  
+
   # Start welcome page service
   - systemctl daemon-reload
   - systemctl enable --now welcome
-  
-  # Restart SSH to apply all configurations
+
+  # Restart SSH to apply all configurations (CA keys, principals, sshd_config.d)
   - systemctl restart sshd || systemctl restart ssh
 
 
