@@ -271,9 +271,9 @@ cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t h, int ta, int tb,
     req.batchCount  = batchCount;
     req.computeType = computeType;
     req.algo        = algo;
-    req.A_dev       = (uint64_t)(uintptr_t)A;
-    req.B_dev       = (uint64_t)(uintptr_t)B;
-    req.C_dev       = (uint64_t)(uintptr_t)C;
+    req.A_ptr       = (uint64_t)(uintptr_t)A;
+    req.B_ptr       = (uint64_t)(uintptr_t)B;
+    req.C_ptr       = (uint64_t)(uintptr_t)C;
 
     if (alpha) memcpy(req.alpha, alpha, scalar_size);
     if (beta)  memcpy(req.beta,  beta,  scalar_size);
