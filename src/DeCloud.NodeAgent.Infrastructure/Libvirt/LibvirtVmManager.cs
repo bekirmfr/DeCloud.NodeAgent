@@ -2072,15 +2072,20 @@ public class LibvirtVmManager : IVmManager
         }
 
         // =====================================================
-        // 3. Append terminal runcmd step — bundled CUDA lib scan
+        // 3. Insert terminal runcmd step — bundled CUDA lib scan
         // =====================================================
         // Problem: Python ML frameworks (PyTorch, vLLM, SD Forge, bitsandbytes)
         // ship their own libcublas.so.12 inside site-packages and load it via
         // dlopen(RTLD_LOCAL), which bypasses LD_PRELOAD entirely. Physical file
         // replacement is the only reliable fix.
         //
-        // Solution: append this scan step LAST in runcmd so it runs after all
-        // pip/conda installs complete, then replaces any bundled copies found.
+        // Solution: insert this step as the LAST item inside the runcmd: block,
+        // so it runs after all pip/conda installs but before any post-runcmd
+        // top-level sections (e.g. final_message:, power_state:, etc.).
+        //
+        // Naive tail-append breaks when templates have sections after runcmd —
+        // appended text lands outside the runcmd list and cloud-init silently
+        // ignores it. We must find the insertion point explicitly.
         //
         // Template authors do not need to know about this — it is transparent
         // and handles any current or future framework that ships bundled CUDA libs.
@@ -2106,9 +2111,57 @@ public class LibvirtVmManager : IVmManager
             "      echo \"DeCloud GPU proxy: cuBLAS stub not found at /usr/local/lib/libcublas_stub.so — skipping scan\"\n" +
             "    fi\n";
 
-        // Append after the last runcmd item. All our templates end with runcmd,
-        // so appending to the document tail is safe and correct YAML.
-        result += terminalStep;
+        // Find the insertion point: the first top-level key (^[a-z_]+:) that
+        // appears AFTER the runcmd: section. Templates such as PYTORCH_CLOUD_INIT
+        // have a final_message: block after runcmd — appending to the document
+        // tail would place the step outside the runcmd list, causing cloud-init
+        // to silently ignore it.
+        var runcmdSectionIdx = result.IndexOf("\nruncmd:", StringComparison.Ordinal);
+        if (runcmdSectionIdx >= 0)
+        {
+            // Search for next top-level YAML key after runcmd: (^word: pattern)
+            var afterRuncmd = runcmdSectionIdx + "\nruncmd:".Length;
+            var nextTopLevelKey = System.Text.RegularExpressions.Regex.Match(
+                result,
+                @"(?<=\n)[a-z_]+:",
+                System.Text.RegularExpressions.RegexOptions.None,
+                TimeSpan.FromSeconds(1));
+
+            // Advance past the runcmd: key itself to find the NEXT top-level key
+            int insertPos = -1;
+            var searchStart = afterRuncmd;
+            while (true)
+            {
+                var m = System.Text.RegularExpressions.Regex.Match(
+                    result.Substring(searchStart),
+                    @"(?<=\n)[a-z_]+:",
+                    System.Text.RegularExpressions.RegexOptions.None,
+                    TimeSpan.FromSeconds(1));
+                if (!m.Success) break;
+
+                var absPos = searchStart + m.Index;
+                // Top-level keys start at column 0 — the char before must be \n
+                // (already guaranteed by the lookbehind), and the key must not
+                // be indented (no leading spaces on that line).
+                var lineStart = absPos; // points to the char after the \n
+                if (lineStart < result.Length && result[lineStart] != ' ' && result[lineStart] != '\t')
+                {
+                    insertPos = absPos; // insert the terminal step before this key
+                    break;
+                }
+                searchStart = absPos + 1;
+            }
+
+            if (insertPos >= 0)
+                result = result.Insert(insertPos, terminalStep);
+            else
+                result += terminalStep; // no subsequent top-level key — safe to append
+        }
+        else
+        {
+            // No runcmd section found at all — append and let cloud-init handle it
+            result += terminalStep;
+        }
 
         return result;
     }
