@@ -2071,6 +2071,45 @@ public class LibvirtVmManager : IVmManager
                 result = result.Insert(runcmdLineEnd + 1, runcmdSteps);
         }
 
+        // =====================================================
+        // 3. Append terminal runcmd step — bundled CUDA lib scan
+        // =====================================================
+        // Problem: Python ML frameworks (PyTorch, vLLM, SD Forge, bitsandbytes)
+        // ship their own libcublas.so.12 inside site-packages and load it via
+        // dlopen(RTLD_LOCAL), which bypasses LD_PRELOAD entirely. Physical file
+        // replacement is the only reliable fix.
+        //
+        // Solution: append this scan step LAST in runcmd so it runs after all
+        // pip/conda installs complete, then replaces any bundled copies found.
+        //
+        // Template authors do not need to know about this — it is transparent
+        // and handles any current or future framework that ships bundled CUDA libs.
+        const string terminalStep =
+            "\n  # GPU proxy: replace bundled cuBLAS copies with proxy stubs (terminal — runs after all installs)\n" +
+            "  # Frameworks using dlopen(RTLD_LOCAL) bypass LD_PRELOAD; physical replacement is the only fix.\n" +
+            "  # Covers PyTorch, vLLM, SD Forge, bitsandbytes — any pip package shipping libcublas.so.12.\n" +
+            "  - |\n" +
+            "    if [ -f /usr/local/lib/libcublas_stub.so ]; then\n" +
+            "      find /opt /home /root -name \"libcublas.so.12\" 2>/dev/null | while read lib; do\n" +
+            "        dir=$(dirname \"$lib\")\n" +
+            "        [ -f \"${lib}.orig\" ] && continue\n" +
+            "        cp \"$lib\" \"${lib}.orig\"\n" +
+            "        cp /usr/local/lib/libcublas_stub.so \"$lib\"\n" +
+            "        if [ -f \"$dir/libcublasLt.so.12\" ] && [ ! -f \"$dir/libcublasLt.so.12.orig\" ]; then\n" +
+            "          cp \"$dir/libcublasLt.so.12\" \"$dir/libcublasLt.so.12.orig\"\n" +
+            "          cp /usr/local/lib/libcublasLt_stub.so \"$dir/libcublasLt.so.12\" 2>/dev/null || \\\n" +
+            "            cp /usr/local/lib/libcublas_stub.so \"$dir/libcublasLt.so.12\"\n" +
+            "        fi\n" +
+            "        echo \"DeCloud GPU proxy: replaced bundled cuBLAS in $dir\"\n" +
+            "      done\n" +
+            "    else\n" +
+            "      echo \"DeCloud GPU proxy: cuBLAS stub not found at /usr/local/lib/libcublas_stub.so — skipping scan\"\n" +
+            "    fi\n";
+
+        // Append after the last runcmd item. All our templates end with runcmd,
+        // so appending to the document tail is safe and correct YAML.
+        result += terminalStep;
+
         return result;
     }
 
