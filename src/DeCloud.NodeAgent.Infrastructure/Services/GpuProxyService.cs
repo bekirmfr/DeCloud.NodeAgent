@@ -140,7 +140,7 @@ public class GpuProxyService
                 "docker", "info", CancellationToken.None);
             var makeTarget = dockerCheck.Success
                 ? "install-all-shims-compat"
-                : "install";
+                : "install-all-shims";
 
             // 'make install-all-shims-compat' builds ALL shims in Docker (glibc 2.31)
             // and installs directly to /usr/local/lib/decloud-gpu-shim/ (= ShimShareDir).

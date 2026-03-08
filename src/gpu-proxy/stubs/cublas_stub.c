@@ -5,6 +5,12 @@
  * correct @@libcublas.so.12 version tags. GEMM calls are forwarded
  * via RPC to the daemon through the shim's exported decloud_rpc_call.
  *
+ * Extended with additional symbols required by PyTorch 2.3.x:
+ *   cublasDgemm_v2, cublasHgemm, cublasSgemmStridedBatched,
+ *   cublasDgemmStridedBatched, cublasGetVersion_v2,
+ *   cublasSetWorkspace_v2, cublasLoggerConfigure,
+ *   cublasSetLoggerCallback
+ *
  * Build:
  *   gcc -shared -fPIC -o libcublas_stub.so cublas_stub.c \
  *       -Wl,-soname,libcublas.so.12 \
@@ -98,6 +104,35 @@ cublasStatus_t cublasGetMathMode(cublasHandle_t handle, int *mode)
     return CUBLAS_STATUS_SUCCESS;
 }
 
+cublasStatus_t cublasGetVersion_v2(cublasHandle_t handle, int *version)
+{
+    (void)handle;
+    if (version) *version = 120800; /* CUDA 12.8 */
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasSetWorkspace_v2(cublasHandle_t handle,
+                                      void *workspace,
+                                      size_t workspaceSizeInBytes)
+{
+    (void)handle; (void)workspace; (void)workspaceSizeInBytes;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+/* Logging (CUDA 12+) — no-ops */
+cublasStatus_t cublasLoggerConfigure(int logIsOn, int logToStdout,
+                                      int logToStderr, const char *logFileName)
+{
+    (void)logIsOn; (void)logToStdout; (void)logToStderr; (void)logFileName;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasSetLoggerCallback(void *callback)
+{
+    (void)callback;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
 const char *cublasGetStatusString(cublasStatus_t status)
 {
     switch (status) {
@@ -123,17 +158,63 @@ cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t, int, int,
     const void *, int, int, long long, const void *, void *, int, int,
     long long, int, int, int);
 
+/* FP32 GEMM — delegate to GemmEx (CUDA_R_32F=0, CUBLAS_COMPUTE_32F=68) */
 cublasStatus_t cublasSgemm_v2(cublasHandle_t h, int ta, int tb,
     int m, int n, int k, const float *alpha,
     const float *A, int lda, const float *B, int ldb,
     const float *beta, float *C, int ldc)
 {
-    /* Delegate to GemmEx with float types */
     return cublasGemmEx(h, ta, tb, m, n, k, alpha,
-        A, 0 /*CUDA_R_32F*/, lda,
-        B, 0 /*CUDA_R_32F*/, ldb,
-        beta, C, 0 /*CUDA_R_32F*/, ldc,
-        68 /*CUBLAS_COMPUTE_32F*/, -1 /*CUBLAS_GEMM_DEFAULT*/);
+        A, 0, lda, B, 0, ldb, beta, C, 0, ldc, 68, -1);
+}
+
+/* FP32 strided batched — delegate to StridedBatchedEx */
+cublasStatus_t cublasSgemmStridedBatched(cublasHandle_t h, int ta, int tb,
+    int m, int n, int k, const float *alpha,
+    const float *A, int lda, long long strideA,
+    const float *B, int ldb, long long strideB,
+    const float *beta, float *C, int ldc, long long strideC,
+    int batchCount)
+{
+    return cublasGemmStridedBatchedEx(h, ta, tb, m, n, k, alpha,
+        A, 0, lda, strideA, B, 0, ldb, strideB,
+        beta, C, 0, ldc, strideC, batchCount, 68, -1);
+}
+
+/* FP64 GEMM — delegate to StridedBatchedEx (CUDA_R_64F=1, CUBLAS_COMPUTE_64F=70) */
+cublasStatus_t cublasDgemm_v2(cublasHandle_t h, int ta, int tb,
+    int m, int n, int k, const double *alpha,
+    const double *A, int lda,
+    const double *B, int ldb,
+    const double *beta, double *C, int ldc)
+{
+    return cublasGemmStridedBatchedEx(h, ta, tb, m, n, k, alpha,
+        A, 1, lda, 0, B, 1, ldb, 0,
+        beta, C, 1, ldc, 0, 1, 70, -1);
+}
+
+/* FP64 strided batched */
+cublasStatus_t cublasDgemmStridedBatched(cublasHandle_t h, int ta, int tb,
+    int m, int n, int k, const double *alpha,
+    const double *A, int lda, long long strideA,
+    const double *B, int ldb, long long strideB,
+    const double *beta, double *C, int ldc, long long strideC,
+    int batchCount)
+{
+    return cublasGemmStridedBatchedEx(h, ta, tb, m, n, k, alpha,
+        A, 1, lda, strideA, B, 1, ldb, strideB,
+        beta, C, 1, ldc, strideC, batchCount, 70, -1);
+}
+
+/* FP16 GEMM — delegate to GemmEx (CUDA_R_16F=2, CUBLAS_COMPUTE_16F=64) */
+cublasStatus_t cublasHgemm(cublasHandle_t h, int ta, int tb,
+    int m, int n, int k, const void *alpha,
+    const void *A, int lda,
+    const void *B, int ldb,
+    const void *beta, void *C, int ldc)
+{
+    return cublasGemmEx(h, ta, tb, m, n, k, alpha,
+        A, 2, lda, B, 2, ldb, beta, C, 2, ldc, 64, -1);
 }
 
 cublasStatus_t cublasGemmEx(cublasHandle_t h, int ta, int tb,
@@ -169,17 +250,9 @@ cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t h, int ta, int tb,
 
     int scalar_size = 4;
     if (computeType == 70) scalar_size = 8;  /* CUBLAS_COMPUTE_64F */
-if (computeType == 64) scalar_size = 2;
+    if (computeType == 64) scalar_size = 2;  /* CUBLAS_COMPUTE_16F */
 
-    /*
-     * A, B, C are DEVICE pointers to arrays of per-batch device pointers.
-     * We CANNOT dereference them — they live in GPU memory, not host RAM.
-     * Attempting A[i] would SEGFAULT (the original bug).
-     *
-     * Instead, send the device base addresses to the daemon, which reads
-     * the pointer arrays via cudaMemcpy D2H before calling real cuBLAS.
-     */
-    GpuCublasGemmBatchedRequest req;
+    GpuCublasGemmStridedRequest req;
     memset(&req, 0, sizeof(req));
     req.transa      = ta;
     req.transb      = tb;
@@ -188,25 +261,27 @@ if (computeType == 64) scalar_size = 2;
     req.k           = k;
     req.Atype       = Atype;
     req.lda         = lda;
+    req.strideA     = strideA;
     req.Btype       = Btype;
     req.ldb         = ldb;
+    req.strideB     = strideB;
     req.Ctype       = Ctype;
     req.ldc         = ldc;
+    req.strideC     = strideC;
     req.batchCount  = batchCount;
     req.computeType = computeType;
     req.algo        = algo;
-    req.A_array_dev = (uint64_t)(uintptr_t)A;
-    req.B_array_dev = (uint64_t)(uintptr_t)B;
-    req.C_array_dev = (uint64_t)(uintptr_t)C;
+    req.A_dev       = (uint64_t)(uintptr_t)A;
+    req.B_dev       = (uint64_t)(uintptr_t)B;
+    req.C_dev       = (uint64_t)(uintptr_t)C;
 
     if (alpha) memcpy(req.alpha, alpha, scalar_size);
-    if (beta)  memcpy(req.beta, beta, scalar_size);
+    if (beta)  memcpy(req.beta,  beta,  scalar_size);
 
-    STUB_LOG("cublasGemmBatchedEx: m=%d n=%d k=%d bc=%d A_dev=%p B_dev=%p C_dev=%p",
-             m, n, k, batchCount,
-             (void *)(uintptr_t)A, (void *)(uintptr_t)B, (void *)(uintptr_t)C);
+    STUB_LOG("cublasGemmStridedBatchedEx: m=%d n=%d k=%d bc=%d Atype=%d compute=%d",
+             m, n, k, batchCount, Atype, computeType);
 
-    int err = rpc(GPU_CMD_CUBLAS_GEMM_BATCHED,
+    int err = rpc(GPU_CMD_CUBLAS_GEMM_STRIDED,
                   &req, sizeof(req), NULL, 0, NULL);
     if (err != 0) {
         STUB_LOG("cublasGemmStridedBatchedEx: RPC failed (err=%d)", err);
@@ -235,8 +310,10 @@ cublasStatus_t cublasGemmBatchedEx(cublasHandle_t h, int ta, int tb,
     if (computeType == 70) scalar_size = 8;
     if (computeType == 64) scalar_size = 2;
 
-    /* A, B, C are DEVICE pointers — do NOT dereference.
-     * Send base addresses; daemon reads arrays via cudaMemcpy D2H. */
+    /*
+     * A, B, C are arrays of DEVICE pointers — do NOT dereference.
+     * Send base addresses; daemon reads arrays via cudaMemcpy D2H.
+     */
     GpuCublasGemmBatchedRequest req;
     memset(&req, 0, sizeof(req));
     req.transa      = ta;
@@ -258,7 +335,7 @@ cublasStatus_t cublasGemmBatchedEx(cublasHandle_t h, int ta, int tb,
     req.C_array_dev = (uint64_t)(uintptr_t)C;
 
     if (alpha) memcpy(req.alpha, alpha, scalar_size);
-    if (beta)  memcpy(req.beta, beta, scalar_size);
+    if (beta)  memcpy(req.beta,  beta,  scalar_size);
 
     STUB_LOG("cublasGemmBatchedEx: m=%d n=%d k=%d bc=%d A_dev=%p B_dev=%p C_dev=%p",
              m, n, k, batchCount,

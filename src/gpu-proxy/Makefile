@@ -56,7 +56,7 @@ TRANSPORT_DEPS := shim/transport.h shim/transport.c proto/gpu_proxy_proto.h
 .PHONY: all daemon shim driver-shim nvml-shim cublas-stub cublaslt-stub pytorch-stub \
         all-shims shim-compat all-shims-compat pytorch-stub-compat \
         test clean \
-        install install-shim-compat install-all-shims-compat
+        install install-shim-compat install-all-shims install-all-shims-compat
 
 all: daemon shim
 
@@ -331,3 +331,17 @@ install-all-shims-compat: all-shims-compat
 	cp $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libdecloud_cuda_shim.so \
 	   $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcudart.so.12
 	@echo "All compat shims installed to $(PREFIX)/lib/decloud-gpu-shim (VM delivery only)"
+
+install-all-shims: all-shims
+	install -d $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim
+	install -m 644 $(SHIM_COMPAT) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libdecloud_cuda_shim.so
+	install -m 644 $(DRIVER_SHIM) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcuda.so.1
+	ln -sf libcuda.so.1 $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcuda.so
+	install -m 644 $(NVML_SHIM) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libnvidia-ml.so.1
+	ln -sf libnvidia-ml.so.1 $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libnvidia-ml.so
+	install -m 644 $(CUBLAS_STUB) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcublas_stub.so
+	install -m 644 $(CUBLASLT_STUB) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcublasLt_stub.so
+	install -m 644 $(PYTORCH_STUB) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcuda_pytorch_stubs.so
+	cp $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libdecloud_cuda_shim.so \
+	   $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcudart.so.12
+	@echo "All shims installed to $(PREFIX)/lib/decloud-gpu-shim (host glibc)"
