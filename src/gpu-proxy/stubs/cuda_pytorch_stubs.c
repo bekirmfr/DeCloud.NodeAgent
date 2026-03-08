@@ -439,3 +439,16 @@ cudaError_t cudaThreadExchangeStreamCaptureMode(int *mode)
     if (mode) *mode = 0; /* cudaStreamCaptureModeGlobal */
     return cudaSuccess;
 }
+
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 28. cudaEventQuery
+ *     All proxy ops are synchronous — every event is already complete.
+ *     Required by: libc10_cuda.so (PyTorch 2.x)
+ *     Discovered: 2026-03-08, libc10_cuda.so + libtorch_cuda.so scan
+ * ══════════════════════════════════════════════════════════════════════ */
+cudaError_t cudaEventQuery(cudaEvent_t event)
+{
+    (void)event;
+    return cudaSuccess; /* cudaSuccess == event complete */
+}
