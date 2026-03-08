@@ -1,20 +1,24 @@
 /*
  * DeCloud cuBLAS Stub Library (libcublas.so.12)
  *
- * Provides cublasGemmBatchedEx and cublasGemmStridedBatchedEx with
- * correct @@libcublas.so.12 version tags. GEMM calls are forwarded
- * via RPC to the daemon through the shim's exported decloud_rpc_call.
+ * Provides ALL cuBLAS symbols required by PyTorch 2.3.x libtorch_cuda.so
+ * with correct @@libcublas.so.12 version tags.
  *
- * Extended with additional symbols required by PyTorch 2.3.x:
- *   cublasDgemm_v2, cublasHgemm, cublasSgemmStridedBatched,
- *   cublasDgemmStridedBatched, cublasGetVersion_v2,
- *   cublasSetWorkspace_v2, cublasLoggerConfigure,
- *   cublasSetLoggerCallback
+ * Architecture:
+ *   - Handle/mode/workspace management: return SUCCESS (dummy handles)
+ *   - GEMM (S/D/H): delegate to cublasGemmStridedBatchedEx → RPC to daemon
+ *   - GEMM (C/Z complex): return NOT_SUPPORTED (PyTorch falls back)
+ *   - GEMV, dot, TRSM, GELS, GETRF, GETRS, GEQRF: return NOT_SUPPORTED
+ *     (PyTorch handles these gracefully or uses cuSOLVER instead)
+ *
+ * Symbol list sourced from:
+ *   objdump -T libtorch_cuda.so | awk '/libcublas\.so\.12/{print $NF}' | sort -u
  *
  * Build:
- *   gcc -shared -fPIC -o libcublas_stub.so cublas_stub.c \
+ *   gcc -shared -fPIC -I. \
  *       -Wl,-soname,libcublas.so.12 \
- *       -Wl,--version-script=libcublas.version -ldl
+ *       -Wl,--version-script=stubs/libcublas.version \
+ *       -o build/libcublas_stub.so stubs/cublas_stub.c -ldl
  */
 
 #define _GNU_SOURCE
@@ -25,12 +29,16 @@
 #include <stdio.h>
 #include <dlfcn.h>
 
-/* Include proto for struct definitions */
 #include "../proto/gpu_proxy_proto.h"
 
-typedef void *cublasHandle_t;
-typedef int cublasStatus_t;
-typedef void *cudaStream_t;
+/* ----------------------------------------------------------------
+ * Type aliases
+ * ---------------------------------------------------------------- */
+typedef void   *cublasHandle_t;
+typedef int     cublasStatus_t;
+typedef void   *cudaStream_t;
+typedef struct { float  x, y; } cuComplex;
+typedef struct { double x, y; } cuDoubleComplex;
 
 #define CUBLAS_STATUS_SUCCESS           0
 #define CUBLAS_STATUS_NOT_INITIALIZED   1
@@ -38,19 +46,27 @@ typedef void *cudaStream_t;
 #define CUBLAS_STATUS_EXECUTION_FAILED 13
 #define CUBLAS_STATUS_NOT_SUPPORTED    15
 
+/* CUDA data type constants */
+#define CUDA_R_32F   0
+#define CUDA_R_64F   1
+#define CUDA_R_16F   2
+#define CUDA_C_32F   4
+#define CUDA_C_64F   5
+
+/* cuBLAS compute type constants */
+#define CUBLAS_COMPUTE_16F  64
+#define CUBLAS_COMPUTE_32F  68
+#define CUBLAS_COMPUTE_64F  70
+
 #define STUB_LOG(fmt, ...) \
     fprintf(stderr, "[cublas-stub] " fmt "\n", ##__VA_ARGS__)
 
 static int g_cublas_dummy_handle = 0xDEC10BD;
+static int g_pointer_mode = 0; /* CUBLAS_POINTER_MODE_HOST */
 
 /* ================================================================
- * RPC bridge to the shim's daemon connection
- *
- * The shim (libcudart.so.12, loaded via LD_PRELOAD) exports
- * decloud_rpc_call() which shares the daemon connection.
- * We resolve it lazily via dlsym(RTLD_DEFAULT).
+ * RPC bridge — resolves decloud_rpc_call from the shim at runtime
  * ================================================================ */
-
 typedef int (*rpc_call_fn)(uint8_t cmd, const void *req, uint32_t req_len,
                            void *resp, uint32_t resp_size, uint32_t *resp_len);
 
@@ -61,16 +77,15 @@ static rpc_call_fn get_rpc(void)
 {
     if (!g_rpc_resolved) {
         g_rpc_call = (rpc_call_fn)dlsym(RTLD_DEFAULT, "decloud_rpc_call");
-        if (!g_rpc_call) {
-            STUB_LOG("WARNING: decloud_rpc_call not found — GEMM will fail");
-        }
+        if (!g_rpc_call)
+            STUB_LOG("WARNING: decloud_rpc_call not found — GEMM RPC unavailable");
         g_rpc_resolved = 1;
     }
     return g_rpc_call;
 }
 
 /* ================================================================
- * Init / handle management — return SUCCESS
+ * Handle / stream / mode management
  * ================================================================ */
 
 cublasStatus_t cublasCreate_v2(cublasHandle_t *handle)
@@ -100,26 +115,50 @@ cublasStatus_t cublasSetMathMode(cublasHandle_t handle, int mode)
 cublasStatus_t cublasGetMathMode(cublasHandle_t handle, int *mode)
 {
     (void)handle;
-    if (mode) *mode = 0;
+    if (mode) *mode = 0; /* CUBLAS_DEFAULT_MATH */
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasSetPointerMode_v2(cublasHandle_t handle, int mode)
+{
+    (void)handle;
+    g_pointer_mode = mode;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasGetPointerMode_v2(cublasHandle_t handle, int *mode)
+{
+    (void)handle;
+    if (mode) *mode = g_pointer_mode;
+    return CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasSetWorkspace_v2(cublasHandle_t handle,
+                                      void *workspace, size_t sizeInBytes)
+{
+    (void)handle; (void)workspace; (void)sizeInBytes;
     return CUBLAS_STATUS_SUCCESS;
 }
 
 cublasStatus_t cublasGetVersion_v2(cublasHandle_t handle, int *version)
 {
     (void)handle;
-    if (version) *version = 120800; /* CUDA 12.8 */
+    if (version) *version = 120800;
     return CUBLAS_STATUS_SUCCESS;
 }
 
-cublasStatus_t cublasSetWorkspace_v2(cublasHandle_t handle,
-                                      void *workspace,
-                                      size_t workspaceSizeInBytes)
+const char *cublasGetStatusString(cublasStatus_t status)
 {
-    (void)handle; (void)workspace; (void)workspaceSizeInBytes;
-    return CUBLAS_STATUS_SUCCESS;
+    switch (status) {
+    case 0:  return "CUBLAS_STATUS_SUCCESS";
+    case 1:  return "CUBLAS_STATUS_NOT_INITIALIZED";
+    case 3:  return "CUBLAS_STATUS_ALLOC_FAILED";
+    case 13: return "CUBLAS_STATUS_EXECUTION_FAILED";
+    case 15: return "CUBLAS_STATUS_NOT_SUPPORTED";
+    default: return "CUBLAS_STATUS_UNKNOWN";
+    }
 }
 
-/* Logging (CUDA 12+) — no-ops */
 cublasStatus_t cublasLoggerConfigure(int logIsOn, int logToStdout,
                                       int logToStderr, const char *logFileName)
 {
@@ -133,104 +172,22 @@ cublasStatus_t cublasSetLoggerCallback(void *callback)
     return CUBLAS_STATUS_SUCCESS;
 }
 
-const char *cublasGetStatusString(cublasStatus_t status)
-{
-    switch (status) {
-        case 0:  return "CUBLAS_STATUS_SUCCESS";
-        case 1:  return "CUBLAS_STATUS_NOT_INITIALIZED";
-        case 3:  return "CUBLAS_STATUS_ALLOC_FAILED";
-        case 13: return "CUBLAS_STATUS_EXECUTION_FAILED";
-        case 15: return "CUBLAS_STATUS_NOT_SUPPORTED";
-        default: return "CUBLAS_STATUS_UNKNOWN";
-    }
-}
-
 /* ================================================================
- * GEMM compute functions — RPC to daemon via shim
+ * Core RPC GEMM path
+ *
+ * All real/half GEMM variants funnel here. Complex GEMM variants
+ * return NOT_SUPPORTED — PyTorch falls back to cuSOLVER or CPU.
  * ================================================================ */
 
-/* Forward declarations for delegation chain */
+/* Forward declarations needed by delegation chain */
 cublasStatus_t cublasGemmEx(cublasHandle_t, int, int, int, int, int,
     const void *, const void *, int, int, const void *, int, int,
     const void *, void *, int, int, int, int);
+
 cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t, int, int,
     int, int, int, const void *, const void *, int, int, long long,
     const void *, int, int, long long, const void *, void *, int, int,
     long long, int, int, int);
-
-/* FP32 GEMM — delegate to GemmEx (CUDA_R_32F=0, CUBLAS_COMPUTE_32F=68) */
-cublasStatus_t cublasSgemm_v2(cublasHandle_t h, int ta, int tb,
-    int m, int n, int k, const float *alpha,
-    const float *A, int lda, const float *B, int ldb,
-    const float *beta, float *C, int ldc)
-{
-    return cublasGemmEx(h, ta, tb, m, n, k, alpha,
-        A, 0, lda, B, 0, ldb, beta, C, 0, ldc, 68, -1);
-}
-
-/* FP32 strided batched — delegate to StridedBatchedEx */
-cublasStatus_t cublasSgemmStridedBatched(cublasHandle_t h, int ta, int tb,
-    int m, int n, int k, const float *alpha,
-    const float *A, int lda, long long strideA,
-    const float *B, int ldb, long long strideB,
-    const float *beta, float *C, int ldc, long long strideC,
-    int batchCount)
-{
-    return cublasGemmStridedBatchedEx(h, ta, tb, m, n, k, alpha,
-        A, 0, lda, strideA, B, 0, ldb, strideB,
-        beta, C, 0, ldc, strideC, batchCount, 68, -1);
-}
-
-/* FP64 GEMM — delegate to StridedBatchedEx (CUDA_R_64F=1, CUBLAS_COMPUTE_64F=70) */
-cublasStatus_t cublasDgemm_v2(cublasHandle_t h, int ta, int tb,
-    int m, int n, int k, const double *alpha,
-    const double *A, int lda,
-    const double *B, int ldb,
-    const double *beta, double *C, int ldc)
-{
-    return cublasGemmStridedBatchedEx(h, ta, tb, m, n, k, alpha,
-        A, 1, lda, 0, B, 1, ldb, 0,
-        beta, C, 1, ldc, 0, 1, 70, -1);
-}
-
-/* FP64 strided batched */
-cublasStatus_t cublasDgemmStridedBatched(cublasHandle_t h, int ta, int tb,
-    int m, int n, int k, const double *alpha,
-    const double *A, int lda, long long strideA,
-    const double *B, int ldb, long long strideB,
-    const double *beta, double *C, int ldc, long long strideC,
-    int batchCount)
-{
-    return cublasGemmStridedBatchedEx(h, ta, tb, m, n, k, alpha,
-        A, 1, lda, strideA, B, 1, ldb, strideB,
-        beta, C, 1, ldc, strideC, batchCount, 70, -1);
-}
-
-/* FP16 GEMM — delegate to GemmEx (CUDA_R_16F=2, CUBLAS_COMPUTE_16F=64) */
-cublasStatus_t cublasHgemm(cublasHandle_t h, int ta, int tb,
-    int m, int n, int k, const void *alpha,
-    const void *A, int lda,
-    const void *B, int ldb,
-    const void *beta, void *C, int ldc)
-{
-    return cublasGemmEx(h, ta, tb, m, n, k, alpha,
-        A, 2, lda, B, 2, ldb, beta, C, 2, ldc, 64, -1);
-}
-
-cublasStatus_t cublasGemmEx(cublasHandle_t h, int ta, int tb,
-    int m, int n, int k, const void *alpha,
-    const void *A, int Atype, int lda,
-    const void *B, int Btype, int ldb,
-    const void *beta, void *C, int Ctype, int ldc,
-    int computeType, int algo)
-{
-    /* Delegate to strided batched with batch=1, stride=0 */
-    return cublasGemmStridedBatchedEx(h, ta, tb, m, n, k, alpha,
-        A, Atype, lda, 0,
-        B, Btype, ldb, 0,
-        beta, C, Ctype, ldc, 0,
-        1, computeType, algo);
-}
 
 cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t h, int ta, int tb,
     int m, int n, int k, const void *alpha,
@@ -243,14 +200,11 @@ cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t h, int ta, int tb,
     if (batchCount <= 0) return CUBLAS_STATUS_SUCCESS;
 
     rpc_call_fn rpc = get_rpc();
-    if (!rpc) {
-        STUB_LOG("cublasGemmStridedBatchedEx: no RPC — NOT_SUPPORTED");
-        return CUBLAS_STATUS_NOT_SUPPORTED;
-    }
+    if (!rpc) return CUBLAS_STATUS_NOT_SUPPORTED;
 
     int scalar_size = 4;
-    if (computeType == 70) scalar_size = 8;  /* CUBLAS_COMPUTE_64F */
-    if (computeType == 64) scalar_size = 2;  /* CUBLAS_COMPUTE_16F */
+    if (computeType == CUBLAS_COMPUTE_64F) scalar_size = 8;
+    if (computeType == CUBLAS_COMPUTE_16F) scalar_size = 2;
 
     GpuCublasGemmStridedRequest req;
     memset(&req, 0, sizeof(req));
@@ -278,16 +232,21 @@ cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t h, int ta, int tb,
     if (alpha) memcpy(req.alpha, alpha, scalar_size);
     if (beta)  memcpy(req.beta,  beta,  scalar_size);
 
-    STUB_LOG("cublasGemmStridedBatchedEx: m=%d n=%d k=%d bc=%d Atype=%d compute=%d",
-             m, n, k, batchCount, Atype, computeType);
-
     int err = rpc(GPU_CMD_CUBLAS_GEMM_STRIDED,
                   &req, sizeof(req), NULL, 0, NULL);
-    if (err != 0) {
-        STUB_LOG("cublasGemmStridedBatchedEx: RPC failed (err=%d)", err);
-        return CUBLAS_STATUS_EXECUTION_FAILED;
-    }
-    return CUBLAS_STATUS_SUCCESS;
+    return err ? CUBLAS_STATUS_EXECUTION_FAILED : CUBLAS_STATUS_SUCCESS;
+}
+
+cublasStatus_t cublasGemmEx(cublasHandle_t h, int ta, int tb,
+    int m, int n, int k, const void *alpha,
+    const void *A, int Atype, int lda,
+    const void *B, int Btype, int ldb,
+    const void *beta, void *C, int Ctype, int ldc,
+    int computeType, int algo)
+{
+    return cublasGemmStridedBatchedEx(h, ta, tb, m, n, k, alpha,
+        A, Atype, lda, 0, B, Btype, ldb, 0,
+        beta, C, Ctype, ldc, 0, 1, computeType, algo);
 }
 
 cublasStatus_t cublasGemmBatchedEx(cublasHandle_t h, int ta, int tb,
@@ -301,19 +260,12 @@ cublasStatus_t cublasGemmBatchedEx(cublasHandle_t h, int ta, int tb,
     if (batchCount <= 0) return CUBLAS_STATUS_SUCCESS;
 
     rpc_call_fn rpc = get_rpc();
-    if (!rpc) {
-        STUB_LOG("cublasGemmBatchedEx: no RPC — NOT_SUPPORTED");
-        return CUBLAS_STATUS_NOT_SUPPORTED;
-    }
+    if (!rpc) return CUBLAS_STATUS_NOT_SUPPORTED;
 
     int scalar_size = 4;
-    if (computeType == 70) scalar_size = 8;
-    if (computeType == 64) scalar_size = 2;
+    if (computeType == CUBLAS_COMPUTE_64F) scalar_size = 8;
+    if (computeType == CUBLAS_COMPUTE_16F) scalar_size = 2;
 
-    /*
-     * A, B, C are arrays of DEVICE pointers — do NOT dereference.
-     * Send base addresses; daemon reads arrays via cudaMemcpy D2H.
-     */
     GpuCublasGemmBatchedRequest req;
     memset(&req, 0, sizeof(req));
     req.transa      = ta;
@@ -337,17 +289,261 @@ cublasStatus_t cublasGemmBatchedEx(cublasHandle_t h, int ta, int tb,
     if (alpha) memcpy(req.alpha, alpha, scalar_size);
     if (beta)  memcpy(req.beta,  beta,  scalar_size);
 
-    STUB_LOG("cublasGemmBatchedEx: m=%d n=%d k=%d bc=%d A_dev=%p B_dev=%p C_dev=%p",
-             m, n, k, batchCount,
-             (void *)(uintptr_t)A, (void *)(uintptr_t)B, (void *)(uintptr_t)C);
-
     int err = rpc(GPU_CMD_CUBLAS_GEMM_BATCHED,
                   &req, sizeof(req), NULL, 0, NULL);
-    if (err != 0) {
-        STUB_LOG("cublasGemmBatchedEx: RPC failed (err=%d)", err);
-        return CUBLAS_STATUS_EXECUTION_FAILED;
-    }
-    return CUBLAS_STATUS_SUCCESS;
+    return err ? CUBLAS_STATUS_EXECUTION_FAILED : CUBLAS_STATUS_SUCCESS;
+}
+
+/* ================================================================
+ * Real GEMM wrappers — delegate to GemmStridedBatchedEx
+ * ================================================================ */
+
+/* FP32 */
+cublasStatus_t cublasSgemm_v2(cublasHandle_t h, int ta, int tb,
+    int m, int n, int k, const float *alpha,
+    const float *A, int lda, const float *B, int ldb,
+    const float *beta, float *C, int ldc)
+{
+    return cublasGemmStridedBatchedEx(h, ta, tb, m, n, k, alpha,
+        A, CUDA_R_32F, lda, 0, B, CUDA_R_32F, ldb, 0,
+        beta, C, CUDA_R_32F, ldc, 0, 1, CUBLAS_COMPUTE_32F, -1);
+}
+
+cublasStatus_t cublasSgemmEx(cublasHandle_t h, int ta, int tb,
+    int m, int n, int k, const float *alpha,
+    const void *A, int Atype, int lda,
+    const void *B, int Btype, int ldb,
+    const float *beta, void *C, int Ctype, int ldc)
+{
+    return cublasGemmEx(h, ta, tb, m, n, k, alpha,
+        A, Atype, lda, B, Btype, ldb,
+        beta, C, Ctype, ldc, CUBLAS_COMPUTE_32F, -1);
+}
+
+cublasStatus_t cublasSgemmStridedBatched(cublasHandle_t h, int ta, int tb,
+    int m, int n, int k, const float *alpha,
+    const float *A, int lda, long long strideA,
+    const float *B, int ldb, long long strideB,
+    const float *beta, float *C, int ldc, long long strideC,
+    int batchCount)
+{
+    return cublasGemmStridedBatchedEx(h, ta, tb, m, n, k, alpha,
+        A, CUDA_R_32F, lda, strideA, B, CUDA_R_32F, ldb, strideB,
+        beta, C, CUDA_R_32F, ldc, strideC, batchCount, CUBLAS_COMPUTE_32F, -1);
+}
+
+/* FP64 */
+cublasStatus_t cublasDgemm_v2(cublasHandle_t h, int ta, int tb,
+    int m, int n, int k, const double *alpha,
+    const double *A, int lda, const double *B, int ldb,
+    const double *beta, double *C, int ldc)
+{
+    return cublasGemmStridedBatchedEx(h, ta, tb, m, n, k, alpha,
+        A, CUDA_R_64F, lda, 0, B, CUDA_R_64F, ldb, 0,
+        beta, C, CUDA_R_64F, ldc, 0, 1, CUBLAS_COMPUTE_64F, -1);
+}
+
+cublasStatus_t cublasDgemmStridedBatched(cublasHandle_t h, int ta, int tb,
+    int m, int n, int k, const double *alpha,
+    const double *A, int lda, long long strideA,
+    const double *B, int ldb, long long strideB,
+    const double *beta, double *C, int ldc, long long strideC,
+    int batchCount)
+{
+    return cublasGemmStridedBatchedEx(h, ta, tb, m, n, k, alpha,
+        A, CUDA_R_64F, lda, strideA, B, CUDA_R_64F, ldb, strideB,
+        beta, C, CUDA_R_64F, ldc, strideC, batchCount, CUBLAS_COMPUTE_64F, -1);
+}
+
+/* FP16 */
+cublasStatus_t cublasHgemm(cublasHandle_t h, int ta, int tb,
+    int m, int n, int k, const void *alpha,
+    const void *A, int lda, const void *B, int ldb,
+    const void *beta, void *C, int ldc)
+{
+    return cublasGemmStridedBatchedEx(h, ta, tb, m, n, k, alpha,
+        A, CUDA_R_16F, lda, 0, B, CUDA_R_16F, ldb, 0,
+        beta, C, CUDA_R_16F, ldc, 0, 1, CUBLAS_COMPUTE_16F, -1);
+}
+
+/* ================================================================
+ * Complex GEMM — NOT_SUPPORTED
+ * PyTorch detects this and falls back to cuSOLVER or CPU paths.
+ * ================================================================ */
+
+cublasStatus_t cublasCgemm_v2(cublasHandle_t h, int ta, int tb,
+    int m, int n, int k, const cuComplex *alpha,
+    const cuComplex *A, int lda, const cuComplex *B, int ldb,
+    const cuComplex *beta, cuComplex *C, int ldc)
+{
+    (void)h;(void)ta;(void)tb;(void)m;(void)n;(void)k;
+    (void)alpha;(void)A;(void)lda;(void)B;(void)ldb;
+    (void)beta;(void)C;(void)ldc;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasCgemmStridedBatched(cublasHandle_t h, int ta, int tb,
+    int m, int n, int k, const cuComplex *alpha,
+    const cuComplex *A, int lda, long long strideA,
+    const cuComplex *B, int ldb, long long strideB,
+    const cuComplex *beta, cuComplex *C, int ldc, long long strideC,
+    int batchCount)
+{
+    (void)h;(void)ta;(void)tb;(void)m;(void)n;(void)k;
+    (void)alpha;(void)A;(void)lda;(void)strideA;
+    (void)B;(void)ldb;(void)strideB;
+    (void)beta;(void)C;(void)ldc;(void)strideC;(void)batchCount;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasZgemm_v2(cublasHandle_t h, int ta, int tb,
+    int m, int n, int k, const cuDoubleComplex *alpha,
+    const cuDoubleComplex *A, int lda, const cuDoubleComplex *B, int ldb,
+    const cuDoubleComplex *beta, cuDoubleComplex *C, int ldc)
+{
+    (void)h;(void)ta;(void)tb;(void)m;(void)n;(void)k;
+    (void)alpha;(void)A;(void)lda;(void)B;(void)ldb;
+    (void)beta;(void)C;(void)ldc;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasZgemmStridedBatched(cublasHandle_t h, int ta, int tb,
+    int m, int n, int k, const cuDoubleComplex *alpha,
+    const cuDoubleComplex *A, int lda, long long strideA,
+    const cuDoubleComplex *B, int ldb, long long strideB,
+    const cuDoubleComplex *beta, cuDoubleComplex *C, int ldc, long long strideC,
+    int batchCount)
+{
+    (void)h;(void)ta;(void)tb;(void)m;(void)n;(void)k;
+    (void)alpha;(void)A;(void)lda;(void)strideA;
+    (void)B;(void)ldb;(void)strideB;
+    (void)beta;(void)C;(void)ldc;(void)strideC;(void)batchCount;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+/* ================================================================
+ * GEMV (matrix-vector multiply) — NOT_SUPPORTED
+ * ================================================================ */
+
+cublasStatus_t cublasSgemv_v2(cublasHandle_t h, int trans,
+    int m, int n, const float *alpha,
+    const float *A, int lda, const float *x, int incx,
+    const float *beta, float *y, int incy)
+{
+    (void)h;(void)trans;(void)m;(void)n;(void)alpha;
+    (void)A;(void)lda;(void)x;(void)incx;(void)beta;(void)y;(void)incy;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasDgemv_v2(cublasHandle_t h, int trans,
+    int m, int n, const double *alpha,
+    const double *A, int lda, const double *x, int incx,
+    const double *beta, double *y, int incy)
+{
+    (void)h;(void)trans;(void)m;(void)n;(void)alpha;
+    (void)A;(void)lda;(void)x;(void)incx;(void)beta;(void)y;(void)incy;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasCgemv_v2(cublasHandle_t h, int trans,
+    int m, int n, const cuComplex *alpha,
+    const cuComplex *A, int lda, const cuComplex *x, int incx,
+    const cuComplex *beta, cuComplex *y, int incy)
+{
+    (void)h;(void)trans;(void)m;(void)n;(void)alpha;
+    (void)A;(void)lda;(void)x;(void)incx;(void)beta;(void)y;(void)incy;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasZgemv_v2(cublasHandle_t h, int trans,
+    int m, int n, const cuDoubleComplex *alpha,
+    const cuDoubleComplex *A, int lda, const cuDoubleComplex *x, int incx,
+    const cuDoubleComplex *beta, cuDoubleComplex *y, int incy)
+{
+    (void)h;(void)trans;(void)m;(void)n;(void)alpha;
+    (void)A;(void)lda;(void)x;(void)incx;(void)beta;(void)y;(void)incy;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+/* ================================================================
+ * Dot products — NOT_SUPPORTED
+ * ================================================================ */
+
+cublasStatus_t cublasSdot_v2(cublasHandle_t h, int n,
+    const float *x, int incx, const float *y, int incy, float *result)
+{
+    (void)h;(void)n;(void)x;(void)incx;(void)y;(void)incy;
+    if (result) *result = 0.0f;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasDdot_v2(cublasHandle_t h, int n,
+    const double *x, int incx, const double *y, int incy, double *result)
+{
+    (void)h;(void)n;(void)x;(void)incx;(void)y;(void)incy;
+    if (result) *result = 0.0;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasCdotc_v2(cublasHandle_t h, int n,
+    const cuComplex *x, int incx, const cuComplex *y, int incy,
+    cuComplex *result)
+{
+    (void)h;(void)n;(void)x;(void)incx;(void)y;(void)incy;
+    if (result) { result->x = 0.0f; result->y = 0.0f; }
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasCdotu_v2(cublasHandle_t h, int n,
+    const cuComplex *x, int incx, const cuComplex *y, int incy,
+    cuComplex *result)
+{
+    (void)h;(void)n;(void)x;(void)incx;(void)y;(void)incy;
+    if (result) { result->x = 0.0f; result->y = 0.0f; }
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasZdotc_v2(cublasHandle_t h, int n,
+    const cuDoubleComplex *x, int incx, const cuDoubleComplex *y, int incy,
+    cuDoubleComplex *result)
+{
+    (void)h;(void)n;(void)x;(void)incx;(void)y;(void)incy;
+    if (result) { result->x = 0.0; result->y = 0.0; }
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasZdotu_v2(cublasHandle_t h, int n,
+    const cuDoubleComplex *x, int incx, const cuDoubleComplex *y, int incy,
+    cuDoubleComplex *result)
+{
+    (void)h;(void)n;(void)x;(void)incx;(void)y;(void)incy;
+    if (result) { result->x = 0.0; result->y = 0.0; }
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasDotEx(cublasHandle_t h, int n,
+    const void *x, int xType, int incx,
+    const void *y, int yType, int incy,
+    void *result, int resultType, int executionType)
+{
+    (void)h;(void)n;(void)x;(void)xType;(void)incx;
+    (void)y;(void)yType;(void)incy;
+    (void)result;(void)resultType;(void)executionType;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+/* ================================================================
+ * TRSM (triangular solve) — NOT_SUPPORTED
+ * ================================================================ */
+
+cublasStatus_t cublasStrsm_v2(cublasHandle_t h,
+    int side, int uplo, int trans, int diag,
+    int m, int n, const float *alpha,
+    const float *A, int lda, float *B, int ldb)
+{
+    (void)h;(void)side;(void)uplo;(void)trans;(void)diag;
+    (void)m;(void)n;(void)alpha;(void)A;(void)lda;(void)B;(void)ldb;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
 }
 
 cublasStatus_t cublasStrsmBatched(cublasHandle_t h,
@@ -359,5 +555,214 @@ cublasStatus_t cublasStrsmBatched(cublasHandle_t h,
     (void)h;(void)side;(void)uplo;(void)trans;(void)diag;
     (void)m;(void)n;(void)alpha;(void)A;(void)lda;
     (void)B;(void)ldb;(void)batchCount;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasDtrsm_v2(cublasHandle_t h,
+    int side, int uplo, int trans, int diag,
+    int m, int n, const double *alpha,
+    const double *A, int lda, double *B, int ldb)
+{
+    (void)h;(void)side;(void)uplo;(void)trans;(void)diag;
+    (void)m;(void)n;(void)alpha;(void)A;(void)lda;(void)B;(void)ldb;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasDtrsmBatched(cublasHandle_t h,
+    int side, int uplo, int trans, int diag,
+    int m, int n, const double *alpha,
+    const double *const A[], int lda,
+    double *const B[], int ldb, int batchCount)
+{
+    (void)h;(void)side;(void)uplo;(void)trans;(void)diag;
+    (void)m;(void)n;(void)alpha;(void)A;(void)lda;
+    (void)B;(void)ldb;(void)batchCount;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasCtrsm_v2(cublasHandle_t h,
+    int side, int uplo, int trans, int diag,
+    int m, int n, const cuComplex *alpha,
+    const cuComplex *A, int lda, cuComplex *B, int ldb)
+{
+    (void)h;(void)side;(void)uplo;(void)trans;(void)diag;
+    (void)m;(void)n;(void)alpha;(void)A;(void)lda;(void)B;(void)ldb;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasCtrsmBatched(cublasHandle_t h,
+    int side, int uplo, int trans, int diag,
+    int m, int n, const cuComplex *alpha,
+    const cuComplex *const A[], int lda,
+    cuComplex *const B[], int ldb, int batchCount)
+{
+    (void)h;(void)side;(void)uplo;(void)trans;(void)diag;
+    (void)m;(void)n;(void)alpha;(void)A;(void)lda;
+    (void)B;(void)ldb;(void)batchCount;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasZtrsm_v2(cublasHandle_t h,
+    int side, int uplo, int trans, int diag,
+    int m, int n, const cuDoubleComplex *alpha,
+    const cuDoubleComplex *A, int lda, cuDoubleComplex *B, int ldb)
+{
+    (void)h;(void)side;(void)uplo;(void)trans;(void)diag;
+    (void)m;(void)n;(void)alpha;(void)A;(void)lda;(void)B;(void)ldb;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasZtrsmBatched(cublasHandle_t h,
+    int side, int uplo, int trans, int diag,
+    int m, int n, const cuDoubleComplex *alpha,
+    const cuDoubleComplex *const A[], int lda,
+    cuDoubleComplex *const B[], int ldb, int batchCount)
+{
+    (void)h;(void)side;(void)uplo;(void)trans;(void)diag;
+    (void)m;(void)n;(void)alpha;(void)A;(void)lda;
+    (void)B;(void)ldb;(void)batchCount;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+/* ================================================================
+ * Batched solvers (GELS, GETRF, GETRS, GEQRF) — NOT_SUPPORTED
+ * ================================================================ */
+
+cublasStatus_t cublasSgelsBatched(cublasHandle_t h, int trans,
+    int m, int n, int nrhs, float *const A[], int lda,
+    float *const C[], int ldc, int *info, int *devInfoArray, int batchSize)
+{
+    (void)h;(void)trans;(void)m;(void)n;(void)nrhs;
+    (void)A;(void)lda;(void)C;(void)ldc;(void)info;
+    (void)devInfoArray;(void)batchSize;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasDgelsBatched(cublasHandle_t h, int trans,
+    int m, int n, int nrhs, double *const A[], int lda,
+    double *const C[], int ldc, int *info, int *devInfoArray, int batchSize)
+{
+    (void)h;(void)trans;(void)m;(void)n;(void)nrhs;
+    (void)A;(void)lda;(void)C;(void)ldc;(void)info;
+    (void)devInfoArray;(void)batchSize;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasCgelsBatched(cublasHandle_t h, int trans,
+    int m, int n, int nrhs, cuComplex *const A[], int lda,
+    cuComplex *const C[], int ldc, int *info, int *devInfoArray, int batchSize)
+{
+    (void)h;(void)trans;(void)m;(void)n;(void)nrhs;
+    (void)A;(void)lda;(void)C;(void)ldc;(void)info;
+    (void)devInfoArray;(void)batchSize;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasZgelsBatched(cublasHandle_t h, int trans,
+    int m, int n, int nrhs, cuDoubleComplex *const A[], int lda,
+    cuDoubleComplex *const C[], int ldc, int *info,
+    int *devInfoArray, int batchSize)
+{
+    (void)h;(void)trans;(void)m;(void)n;(void)nrhs;
+    (void)A;(void)lda;(void)C;(void)ldc;(void)info;
+    (void)devInfoArray;(void)batchSize;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasSgetrfBatched(cublasHandle_t h, int n,
+    float *const A[], int lda, int *P, int *info, int batchSize)
+{
+    (void)h;(void)n;(void)A;(void)lda;(void)P;(void)info;(void)batchSize;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasDgetrfBatched(cublasHandle_t h, int n,
+    double *const A[], int lda, int *P, int *info, int batchSize)
+{
+    (void)h;(void)n;(void)A;(void)lda;(void)P;(void)info;(void)batchSize;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasCgetrfBatched(cublasHandle_t h, int n,
+    cuComplex *const A[], int lda, int *P, int *info, int batchSize)
+{
+    (void)h;(void)n;(void)A;(void)lda;(void)P;(void)info;(void)batchSize;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasZgetrfBatched(cublasHandle_t h, int n,
+    cuDoubleComplex *const A[], int lda, int *P, int *info, int batchSize)
+{
+    (void)h;(void)n;(void)A;(void)lda;(void)P;(void)info;(void)batchSize;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasSgetrsBatched(cublasHandle_t h, int trans, int n,
+    int nrhs, const float *const A[], int lda, const int *devIpiv,
+    float *const B[], int ldb, int *info, int batchSize)
+{
+    (void)h;(void)trans;(void)n;(void)nrhs;(void)A;(void)lda;
+    (void)devIpiv;(void)B;(void)ldb;(void)info;(void)batchSize;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasDgetrsBatched(cublasHandle_t h, int trans, int n,
+    int nrhs, const double *const A[], int lda, const int *devIpiv,
+    double *const B[], int ldb, int *info, int batchSize)
+{
+    (void)h;(void)trans;(void)n;(void)nrhs;(void)A;(void)lda;
+    (void)devIpiv;(void)B;(void)ldb;(void)info;(void)batchSize;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasCgetrsBatched(cublasHandle_t h, int trans, int n,
+    int nrhs, const cuComplex *const A[], int lda, const int *devIpiv,
+    cuComplex *const B[], int ldb, int *info, int batchSize)
+{
+    (void)h;(void)trans;(void)n;(void)nrhs;(void)A;(void)lda;
+    (void)devIpiv;(void)B;(void)ldb;(void)info;(void)batchSize;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasZgetrsBatched(cublasHandle_t h, int trans, int n,
+    int nrhs, const cuDoubleComplex *const A[], int lda, const int *devIpiv,
+    cuDoubleComplex *const B[], int ldb, int *info, int batchSize)
+{
+    (void)h;(void)trans;(void)n;(void)nrhs;(void)A;(void)lda;
+    (void)devIpiv;(void)B;(void)ldb;(void)info;(void)batchSize;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasSgeqrfBatched(cublasHandle_t h, int m, int n,
+    float *const A[], int lda, float *const TAU[], int *info, int batchSize)
+{
+    (void)h;(void)m;(void)n;(void)A;(void)lda;
+    (void)TAU;(void)info;(void)batchSize;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasDgeqrfBatched(cublasHandle_t h, int m, int n,
+    double *const A[], int lda, double *const TAU[], int *info, int batchSize)
+{
+    (void)h;(void)m;(void)n;(void)A;(void)lda;
+    (void)TAU;(void)info;(void)batchSize;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasCgeqrfBatched(cublasHandle_t h, int m, int n,
+    cuComplex *const A[], int lda, cuComplex *const TAU[],
+    int *info, int batchSize)
+{
+    (void)h;(void)m;(void)n;(void)A;(void)lda;
+    (void)TAU;(void)info;(void)batchSize;
+    return CUBLAS_STATUS_NOT_SUPPORTED;
+}
+
+cublasStatus_t cublasZgeqrfBatched(cublasHandle_t h, int m, int n,
+    cuDoubleComplex *const A[], int lda, cuDoubleComplex *const TAU[],
+    int *info, int batchSize)
+{
+    (void)h;(void)m;(void)n;(void)A;(void)lda;
+    (void)TAU;(void)info;(void)batchSize;
     return CUBLAS_STATUS_NOT_SUPPORTED;
 }

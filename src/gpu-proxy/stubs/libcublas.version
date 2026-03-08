@@ -1,45 +1,100 @@
 /* Version script for DeCloud cuBLAS stub library.
  *
- * Exports cuBLAS symbols under the libcublas.so.12 version namespace.
- * Required by both ggml (cublasCreate_v2@libcublas.so.12) and PyTorch
- * (cublasDgemm_v2, cublasHgemm, cublasGetVersion_v2, etc.).
+ * Exports ALL cuBLAS symbols under the libcublas.so.12 version namespace
+ * required by PyTorch 2.3.x libtorch_cuda.so at dlopen time.
  *
- * See: GPU_PROXY_DEBUGGING_JOURNAL.md, Problem 17 (Day 4)
+ * Symbol list derived from:
+ *   objdump -T libtorch_cuda.so | awk '/libcublas\.so\.12/{print $NF}' | sort -u
+ *
+ * Additional utility symbols retained (not strictly required by PyTorch
+ * but needed for ggml/Ollama or general correctness):
+ *   cublasGetStatusString, cublasGetVersion_v2, cublasHgemm,
+ *   cublasGemmBatchedEx, cublasLoggerConfigure, cublasSetLoggerCallback
  */
 libcublas.so.12 {
     global:
-        /* Handle management */
+        /* Handle / stream / mode management */
         cublasCreate_v2;
         cublasDestroy_v2;
         cublasSetStream_v2;
         cublasSetMathMode;
         cublasGetMathMode;
+        cublasSetPointerMode_v2;
+        cublasGetPointerMode_v2;
+        cublasSetWorkspace_v2;
         cublasGetStatusString;
         cublasGetVersion_v2;
-        cublasSetWorkspace_v2;
-
-        /* Logging (CUDA 12+) */
         cublasLoggerConfigure;
         cublasSetLoggerCallback;
 
-        /* FP32 GEMM */
-        cublasSgemm_v2;
-        cublasSgemmStridedBatched;
+        /* Dot products */
+        cublasSdot_v2;
+        cublasDdot_v2;
+        cublasCdotc_v2;
+        cublasCdotu_v2;
+        cublasZdotc_v2;
+        cublasZdotu_v2;
+        cublasDotEx;
 
-        /* FP64 GEMM */
+        /* GEMV (matrix-vector multiply) */
+        cublasSgemv_v2;
+        cublasDgemv_v2;
+        cublasCgemv_v2;
+        cublasZgemv_v2;
+
+        /* GEMM — real types */
+        cublasSgemm_v2;
+        cublasSgemmEx;
+        cublasSgemmStridedBatched;
         cublasDgemm_v2;
         cublasDgemmStridedBatched;
-
-        /* FP16 GEMM */
         cublasHgemm;
+
+        /* GEMM — complex types */
+        cublasCgemm_v2;
+        cublasCgemmStridedBatched;
+        cublasZgemm_v2;
+        cublasZgemmStridedBatched;
 
         /* Typed GEMM (Ex variants — RPC proxied) */
         cublasGemmEx;
         cublasGemmStridedBatchedEx;
         cublasGemmBatchedEx;
 
-        /* TRSM */
+        /* TRSM (triangular solve with multiple RHS) */
+        cublasStrsm_v2;
         cublasStrsmBatched;
+        cublasDtrsm_v2;
+        cublasDtrsmBatched;
+        cublasCtrsm_v2;
+        cublasCtrsmBatched;
+        cublasZtrsm_v2;
+        cublasZtrsmBatched;
+
+        /* Batched least-squares (GELS) */
+        cublasSgelsBatched;
+        cublasDgelsBatched;
+        cublasCgelsBatched;
+        cublasZgelsBatched;
+
+        /* Batched LU factorisation (GETRF) */
+        cublasSgetrfBatched;
+        cublasDgetrfBatched;
+        cublasCgetrfBatched;
+        cublasZgetrfBatched;
+
+        /* Batched LU solve (GETRS) */
+        cublasSgetrsBatched;
+        cublasDgetrsBatched;
+        cublasCgetrsBatched;
+        cublasZgetrsBatched;
+
+        /* Batched QR factorisation (GEQRF) */
+        cublasSgeqrfBatched;
+        cublasDgeqrfBatched;
+        cublasCgeqrfBatched;
+        cublasZgeqrfBatched;
+
     local:
         *;
 };

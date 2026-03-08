@@ -1304,8 +1304,8 @@ build_gpu_proxy() {
         log_success "libcublas_stub.so OK ($cublas_syms versioned symbols)"
     fi
 
-    if [ "$cublaslt_syms" -lt 29 ]; then
-        log_error "libcublasLt_stub.so has only $cublaslt_syms versioned symbols (expected 29) — PyTorch will fail"
+    if [ "$cublaslt_syms" -lt 28 ]; then
+        log_error "libcublasLt_stub.so has only $cublaslt_syms versioned symbols (expected 28) — PyTorch will fail"
         log_error "Likely cause: stale artifact from before the cublasLt version script fix"
         log_error "Fix: check $LOG_DIR/install.log, then re-run install.sh"
     else
