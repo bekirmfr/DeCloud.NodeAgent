@@ -208,8 +208,8 @@ typedef struct {
  * Registration tracking
  * ================================================================ */
 
-#define MAX_REGISTERED_FUNCTIONS 8192
-#define MAX_DEFERRED_MODULES 256
+#define MAX_REGISTERED_FUNCTIONS 65536
+#define MAX_DEFERRED_MODULES 512
 
 typedef struct {
     uint64_t host_func_ptr;
