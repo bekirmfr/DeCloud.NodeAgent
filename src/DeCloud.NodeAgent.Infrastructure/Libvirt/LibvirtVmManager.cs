@@ -2054,6 +2054,13 @@ public class LibvirtVmManager : IVmManager
       cp /run/decloud/libcublas_stub.so /usr/local/lib/
       echo 'cuBLAS stub installed (libcublas_stub.so)'
     fi
+    # Install cuBLAS Lt stub (separate build with correct @@libcublasLt.so.12 version tags)
+    # Required by PyTorch: libtorch_cuda.so performs versioned symbol lookup at dlopen time.
+    # The terminal bundled-lib scan copies this to replace PyTorch's bundled libcublasLt.so.12.
+    if [ -f /run/decloud/libcublasLt_stub.so ]; then
+      cp /run/decloud/libcublasLt_stub.so /usr/local/lib/
+      echo 'cuBLAS Lt stub installed (libcublasLt_stub.so)'
+    fi
     ldconfig 2>/dev/null || true
   - |
     # Create dummy NVIDIA device nodes (needed by frameworks that stat these).
@@ -2072,20 +2079,15 @@ public class LibvirtVmManager : IVmManager
         }
 
         // =====================================================
-        // 3. Insert terminal runcmd step — bundled CUDA lib scan
+        // 3. Append terminal runcmd step — bundled CUDA lib scan
         // =====================================================
         // Problem: Python ML frameworks (PyTorch, vLLM, SD Forge, bitsandbytes)
         // ship their own libcublas.so.12 inside site-packages and load it via
         // dlopen(RTLD_LOCAL), which bypasses LD_PRELOAD entirely. Physical file
         // replacement is the only reliable fix.
         //
-        // Solution: insert this step as the LAST item inside the runcmd: block,
-        // so it runs after all pip/conda installs but before any post-runcmd
-        // top-level sections (e.g. final_message:, power_state:, etc.).
-        //
-        // Naive tail-append breaks when templates have sections after runcmd —
-        // appended text lands outside the runcmd list and cloud-init silently
-        // ignores it. We must find the insertion point explicitly.
+        // Solution: append this scan step LAST in runcmd so it runs after all
+        // pip/conda installs complete, then replaces any bundled copies found.
         //
         // Template authors do not need to know about this — it is transparent
         // and handles any current or future framework that ships bundled CUDA libs.
@@ -2111,25 +2113,17 @@ public class LibvirtVmManager : IVmManager
             "      echo \"DeCloud GPU proxy: cuBLAS stub not found at /usr/local/lib/libcublas_stub.so — skipping scan\"\n" +
             "    fi\n";
 
-        // Find the insertion point: the first top-level key (^[a-z_]+:) that
-        // appears AFTER the runcmd: section. Templates such as PYTORCH_CLOUD_INIT
-        // have a final_message: block after runcmd — appending to the document
-        // tail would place the step outside the runcmd list, causing cloud-init
-        // to silently ignore it.
+        // Insert the terminal step as the LAST item inside the runcmd: block,
+        // before any post-runcmd top-level sections (e.g. final_message:, power_state:).
+        // Naive tail-append breaks when templates have sections after runcmd —
+        // appended text lands outside the runcmd list and cloud-init silently ignores it.
+        // (PYTORCH_CLOUD_INIT ends with final_message: — this was the original bug.)
         var runcmdSectionIdx = result.IndexOf("\nruncmd:", StringComparison.Ordinal);
         if (runcmdSectionIdx >= 0)
         {
-            // Search for next top-level YAML key after runcmd: (^word: pattern)
-            var afterRuncmd = runcmdSectionIdx + "\nruncmd:".Length;
-            var nextTopLevelKey = System.Text.RegularExpressions.Regex.Match(
-                result,
-                @"(?<=\n)[a-z_]+:",
-                System.Text.RegularExpressions.RegexOptions.None,
-                TimeSpan.FromSeconds(1));
-
-            // Advance past the runcmd: key itself to find the NEXT top-level key
+            var afterRuncmdKey = runcmdSectionIdx + "\nruncmd:".Length;
             int insertPos = -1;
-            var searchStart = afterRuncmd;
+            var searchStart = afterRuncmdKey;
             while (true)
             {
                 var m = System.Text.RegularExpressions.Regex.Match(
@@ -2140,13 +2134,11 @@ public class LibvirtVmManager : IVmManager
                 if (!m.Success) break;
 
                 var absPos = searchStart + m.Index;
-                // Top-level keys start at column 0 — the char before must be \n
-                // (already guaranteed by the lookbehind), and the key must not
-                // be indented (no leading spaces on that line).
-                var lineStart = absPos; // points to the char after the \n
+                // Top-level keys are unindented — char after the \n must not be whitespace
+                var lineStart = absPos;
                 if (lineStart < result.Length && result[lineStart] != ' ' && result[lineStart] != '\t')
                 {
-                    insertPos = absPos; // insert the terminal step before this key
+                    insertPos = absPos;
                     break;
                 }
                 searchStart = absPos + 1;
@@ -2155,11 +2147,10 @@ public class LibvirtVmManager : IVmManager
             if (insertPos >= 0)
                 result = result.Insert(insertPos, terminalStep);
             else
-                result += terminalStep; // no subsequent top-level key — safe to append
+                result += terminalStep;
         }
         else
         {
-            // No runcmd section found at all — append and let cloud-init handle it
             result += terminalStep;
         }
 
