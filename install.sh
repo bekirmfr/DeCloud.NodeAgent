@@ -1067,6 +1067,12 @@ build_gpu_proxy() {
         log_info "For universal compatibility: install Docker and re-run"
     fi
     make -C "$GPU_PROXY_SRC" "$shim_target" 2>&1 | tee -a "$LOG_DIR/install.log"
+    local make_exit=${PIPESTATUS[0]}
+    if [ "$make_exit" -ne 0 ]; then
+        log_error "Shim build failed (exit=$make_exit) — stale artifacts in build/ will NOT be deployed"
+        log_info "Check logs: $LOG_DIR/install.log"
+        return 1
+    fi
 
     # Detect whichever runtime API shim was built
     local built_shim=""
@@ -1277,6 +1283,33 @@ build_gpu_proxy() {
                 fi
             fi
         done
+    fi
+
+    # Verify cuBLAS stubs have the expected versioned symbol counts.
+    # A stale stub (built before the PyTorch fix) has 11 symbols; correct is 20+.
+    # A stale cublasLt stub has 0 symbols; correct is 29.
+    local cublas_syms=0 cublaslt_syms=0
+    if [ -f "$SHIM_DIR/libcublas_stub.so" ]; then
+        cublas_syms=$(objdump -T "$SHIM_DIR/libcublas_stub.so" 2>/dev/null | grep -c "libcublas.so.12" || true)
+    fi
+    if [ -f "$SHIM_DIR/libcublasLt_stub.so" ]; then
+        cublaslt_syms=$(objdump -T "$SHIM_DIR/libcublasLt_stub.so" 2>/dev/null | grep -c "libcublasLt.so.12" || true)
+    fi
+
+    if [ "$cublas_syms" -lt 20 ]; then
+        log_error "libcublas_stub.so has only $cublas_syms versioned symbols (expected 20+) — PyTorch will fail"
+        log_error "Likely cause: make build failed silently and stale artifact was installed"
+        log_error "Fix: check $LOG_DIR/install.log, then re-run install.sh"
+    else
+        log_success "libcublas_stub.so OK ($cublas_syms versioned symbols)"
+    fi
+
+    if [ "$cublaslt_syms" -lt 29 ]; then
+        log_error "libcublasLt_stub.so has only $cublaslt_syms versioned symbols (expected 29) — PyTorch will fail"
+        log_error "Likely cause: stale artifact from before the cublasLt version script fix"
+        log_error "Fix: check $LOG_DIR/install.log, then re-run install.sh"
+    else
+        log_success "libcublasLt_stub.so OK ($cublaslt_syms versioned symbols)"
     fi
 
     return 0
