@@ -20,7 +20,6 @@
 #define TRANSPORT_LOG_PREFIX "gpu-shim"
 #endif
 
-extern int g_debug_log;
 #define TRANSPORT_LOG(fmt, ...) \
     do { if (g_debug_log) fprintf(stderr, "[" TRANSPORT_LOG_PREFIX "] " fmt "\n", ##__VA_ARGS__); } while(0)
 

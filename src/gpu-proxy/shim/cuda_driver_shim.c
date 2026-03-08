@@ -81,7 +81,7 @@ typedef enum {
 /* When true (set via DECLOUD_GPU_VMEM_PROXY=1), VMM RPC path is active.
  * Off by default — Ollama/ggml never calls VMM functions at runtime. */
 static int g_vmem_proxy = 0;
-
+static int g_debug_log = 0;
 /* When true (default), graph capture stubs return CUDA_SUCCESS (no-op).
  * Set DECLOUD_GPU_GRAPH_NOOP=0 to return NOT_SUPPORTED instead. */
 static int g_driver_graph_noop = 1;
@@ -92,6 +92,7 @@ __attribute__((constructor))
 static void driver_shim_init(void)
 {
     /* Load config early — cuGetProcAddress is called before cuInit */
+    g_debug_log = (transport_getenv("DECLOUD_GPU_DEBUG") != NULL);
     const char *gnoop = transport_getenv("DECLOUD_GPU_GRAPH_NOOP");
     if (gnoop && gnoop[0] == '0') g_driver_graph_noop = 0;
 

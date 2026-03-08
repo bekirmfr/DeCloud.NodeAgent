@@ -56,6 +56,7 @@ typedef struct {
 
 static int g_nvml_initialized = 0;
 static int g_nvml_device_count = -1;
+static int g_debug_log = 0;
 
 /* Cached device properties */
 static GpuDeviceProperties g_nvml_cached_props;
@@ -79,6 +80,12 @@ static int nvml_ensure_props(void)
 /* ================================================================
  * Exported NVML functions
  * ================================================================ */
+__attribute__((constructor))
+static void nvml_shim_init(void)
+{
+    if (getenv("DECLOUD_GPU_DEBUG"))
+        g_debug_log = 1;
+}
 
 nvmlReturn_t nvmlInit_v2(void)
 {
