@@ -37,6 +37,7 @@
  * When false, they return cudaErrorNotSupported (honest).
  * Defaults to 1 for safety — set DECLOUD_GPU_GRAPH_NOOP=0 to disable. */
 static int g_graph_noop = 1;
+static int g_debug_log = 0;
 
 __attribute__((constructor))
 static void shim_init(void)
@@ -83,7 +84,6 @@ static void shim_init(void)
     }
 }
 
-static int g_debug_log = 0;
 #define SHIM_LOG(fmt, ...) \
     do { if (g_debug_log) fprintf(stderr, "[cudart-shim] " fmt "\n", ##__VA_ARGS__); } while(0)
 
