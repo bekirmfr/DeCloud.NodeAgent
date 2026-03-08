@@ -1440,8 +1440,11 @@ int decloud_rpc_call(uint8_t cmd, const void *req, uint32_t req_len,
  * calls into the real cuBLAS which needs cuGetExportTable → crash.
  *
  * With MMQ mode active, cuBLAS compute functions (gemm, etc.) are never
- * called, so dummy handles are safe. If any compute function IS called,
- * we return an error rather than silently producing wrong results.
+ * called by ggml, so dummy handles are safe. For PyTorch workloads,
+ * compute functions are intentionally absent here — they resolve to
+ * libcublas_stub.so which proxies them via RPC to the host daemon.
+ * Defining them here would shadow libcublas_stub.so due to LD_PRELOAD
+ * symbol priority and break PyTorch inference.
  * ================================================================ */
 
 typedef void *cublasHandle_t;
@@ -1482,52 +1485,6 @@ cublasStatus_t cublasGetMathMode(cublasHandle_t handle, int *mode)
     (void)handle;
     if (mode) *mode = 0;  /* CUBLAS_DEFAULT_MATH */
     return CUBLAS_STATUS_SUCCESS;
-}
-
-/* Safety net: if any actual cuBLAS compute function is called despite MMQ mode,
- * return NOT_SUPPORTED rather than silently producing wrong results. */
-cublasStatus_t cublasSgemm_v2(cublasHandle_t h, int ta, int tb,
-    int m, int n, int k, const float *alpha,
-    const float *A, int lda, const float *B, int ldb,
-    const float *beta, float *C, int ldc)
-{
-    (void)h;(void)ta;(void)tb;(void)m;(void)n;(void)k;
-    (void)alpha;(void)A;(void)lda;(void)B;(void)ldb;
-    (void)beta;(void)C;(void)ldc;
-    SHIM_LOG("cublasSgemm_v2 called — MMQ bypass should prevent this!");
-    return CUBLAS_STATUS_NOT_SUPPORTED;
-}
-
-cublasStatus_t cublasGemmEx(cublasHandle_t h, int ta, int tb,
-    int m, int n, int k, const void *alpha,
-    const void *A, int Atype, int lda,
-    const void *B, int Btype, int ldb,
-    const void *beta, void *C, int Ctype, int ldc,
-    int computeType, int algo)
-{
-    (void)h;(void)ta;(void)tb;(void)m;(void)n;(void)k;
-    (void)alpha;(void)A;(void)Atype;(void)lda;
-    (void)B;(void)Btype;(void)ldb;
-    (void)beta;(void)C;(void)Ctype;(void)ldc;
-    (void)computeType;(void)algo;
-    SHIM_LOG("cublasGemmEx called — MMQ bypass should prevent this!");
-    return CUBLAS_STATUS_NOT_SUPPORTED;
-}
-
-cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t h, int ta, int tb,
-    int m, int n, int k, const void *alpha,
-    const void *A, int Atype, int lda, long long strideA,
-    const void *B, int Btype, int ldb, long long strideB,
-    const void *beta, void *C, int Ctype, int ldc, long long strideC,
-    int batchCount, int computeType, int algo)
-{
-    (void)h;(void)ta;(void)tb;(void)m;(void)n;(void)k;
-    (void)alpha;(void)A;(void)Atype;(void)lda;(void)strideA;
-    (void)B;(void)Btype;(void)ldb;(void)strideB;
-    (void)beta;(void)C;(void)Ctype;(void)ldc;(void)strideC;
-    (void)batchCount;(void)computeType;(void)algo;
-    SHIM_LOG("cublasGemmStridedBatchedEx called — MMQ bypass should prevent this!");
-    return CUBLAS_STATUS_NOT_SUPPORTED;
 }
 
 /* ================================================================
