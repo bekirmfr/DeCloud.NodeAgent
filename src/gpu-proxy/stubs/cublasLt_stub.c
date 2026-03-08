@@ -10,13 +10,17 @@
  *   for ggml (which only needs DT_NEEDED satisfied) but failed for PyTorch
  *   with: version `libcublasLt.so.12' not found
  *
- *   In DeCloud proxy mode, PyTorch's matmuls route through
- *   cublasGemmStridedBatchedEx (proxied via GPU_CMD_CUBLAS_GEMM_STRIDED),
- *   not through the cublasLt path. These stubs exist purely to satisfy
- *   dlopen — they return CUBLAS_STATUS_NOT_SUPPORTED (3) for all calls.
- *   If a caller checks the return code and falls back, that is correct
- *   behaviour. If a caller does not check, the subsequent GPU operation
- *   will fail with a clear CUDA error rather than a silent crash.
+ *   PyTorch's addmm/mm calls cublasLtCreate → cublasLtMatmulDescCreate →
+ *   cublasLtMatmulAlgoGetHeuristic. Any non-SUCCESS on the first two is a
+ *   hard throw (not a fallback). Returning SUCCESS + 0 algorithms from
+ *   cublasLtMatmulAlgoGetHeuristic triggers PyTorch's cublas fallback path,
+ *   which routes through cublasGemmStridedBatchedEx — our RPC-proxied path.
+ *
+ * Strategy:
+ *   - Handle/layout/descriptor/preference creation  → SUCCESS + dummy handle
+ *   - Attribute setters/getters, destroy functions  → SUCCESS (ignore)
+ *   - cublasLtMatmulAlgoGetHeuristic                → SUCCESS, count=0
+ *   - cublasLtMatmul (if somehow reached)           → NOT_SUPPORTED (15)
  *
  * Build:
  *   gcc -shared -fPIC \
@@ -28,9 +32,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* cublasStatus_t values */
+/* cublasStatus_t values — must match real cuBLAS ABI exactly.
+ * PyTorch inspects these codes; wrong values cause misleading errors.
+ * (Previous stub had NOT_SUPPORTED=3, which is actually ALLOC_FAILED.) */
 #define CUBLAS_STATUS_SUCCESS          0
-#define CUBLAS_STATUS_NOT_SUPPORTED    3
+#define CUBLAS_STATUS_ALLOC_FAILED     3
+#define CUBLAS_STATUS_NOT_SUPPORTED   15
 
 typedef int cublasStatus_t;
 typedef void* cublasLtHandle_t;
@@ -53,16 +60,18 @@ void __decloud_cublasLt_stub_v1(void) {}
 /* ----------------------------------------------------------------
  * Handle management
  * ---------------------------------------------------------------- */
+static int g_lt_dummy_handle = 0xDEC10B17;
+
 cublasStatus_t cublasLtCreate(cublasLtHandle_t *lightHandle)
 {
-    if (lightHandle) *lightHandle = NULL;
-    return CUBLAS_STATUS_NOT_SUPPORTED;
+    if (lightHandle) *lightHandle = &g_lt_dummy_handle;
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 cublasStatus_t cublasLtDestroy(cublasLtHandle_t lightHandle)
 {
     (void)lightHandle;
-    return CUBLAS_STATUS_NOT_SUPPORTED;
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 const char* cublasLtGetStatusString(cublasStatus_t status)
@@ -85,14 +94,14 @@ cublasStatus_t cublasLtMatrixLayoutCreate(
     uint64_t rows, uint64_t cols, int64_t ld)
 {
     (void)type; (void)rows; (void)cols; (void)ld;
-    if (matLayout) *matLayout = NULL;
-    return CUBLAS_STATUS_NOT_SUPPORTED;
+    if (matLayout) *matLayout = &g_lt_dummy_handle;
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 cublasStatus_t cublasLtMatrixLayoutDestroy(cublasLtMatrixLayout_t matLayout)
 {
     (void)matLayout;
-    return CUBLAS_STATUS_NOT_SUPPORTED;
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 cublasStatus_t cublasLtMatrixLayoutSetAttribute(
@@ -100,7 +109,7 @@ cublasStatus_t cublasLtMatrixLayoutSetAttribute(
     const void *buf, size_t sizeInBytes)
 {
     (void)matLayout; (void)attr; (void)buf; (void)sizeInBytes;
-    return CUBLAS_STATUS_NOT_SUPPORTED;
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 cublasStatus_t cublasLtMatrixLayoutGetAttribute(
@@ -109,7 +118,7 @@ cublasStatus_t cublasLtMatrixLayoutGetAttribute(
 {
     (void)matLayout; (void)attr; (void)buf; (void)sizeInBytes;
     if (sizeWritten) *sizeWritten = 0;
-    return CUBLAS_STATUS_NOT_SUPPORTED;
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 /* ----------------------------------------------------------------
@@ -121,14 +130,14 @@ cublasStatus_t cublasLtMatmulDescCreate(
     cudaDataType_t scaleType)
 {
     (void)computeType; (void)scaleType;
-    if (matmulDesc) *matmulDesc = NULL;
-    return CUBLAS_STATUS_NOT_SUPPORTED;
+    if (matmulDesc) *matmulDesc = &g_lt_dummy_handle;
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 cublasStatus_t cublasLtMatmulDescDestroy(cublasLtMatmulDesc_t matmulDesc)
 {
     (void)matmulDesc;
-    return CUBLAS_STATUS_NOT_SUPPORTED;
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 cublasStatus_t cublasLtMatmulDescSetAttribute(
@@ -136,7 +145,7 @@ cublasStatus_t cublasLtMatmulDescSetAttribute(
     const void *buf, size_t sizeInBytes)
 {
     (void)matmulDesc; (void)attr; (void)buf; (void)sizeInBytes;
-    return CUBLAS_STATUS_NOT_SUPPORTED;
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 cublasStatus_t cublasLtMatmulDescGetAttribute(
@@ -145,7 +154,7 @@ cublasStatus_t cublasLtMatmulDescGetAttribute(
 {
     (void)matmulDesc; (void)attr; (void)buf; (void)sizeInBytes;
     if (sizeWritten) *sizeWritten = 0;
-    return CUBLAS_STATUS_NOT_SUPPORTED;
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 /* ----------------------------------------------------------------
@@ -154,15 +163,15 @@ cublasStatus_t cublasLtMatmulDescGetAttribute(
 cublasStatus_t cublasLtMatmulPreferenceCreate(
     cublasLtMatmulPreference_t *pref)
 {
-    if (pref) *pref = NULL;
-    return CUBLAS_STATUS_NOT_SUPPORTED;
+    if (pref) *pref = &g_lt_dummy_handle;
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 cublasStatus_t cublasLtMatmulPreferenceDestroy(
     cublasLtMatmulPreference_t pref)
 {
     (void)pref;
-    return CUBLAS_STATUS_NOT_SUPPORTED;
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 cublasStatus_t cublasLtMatmulPreferenceSetAttribute(
@@ -170,12 +179,16 @@ cublasStatus_t cublasLtMatmulPreferenceSetAttribute(
     const void *buf, size_t sizeInBytes)
 {
     (void)pref; (void)attr; (void)buf; (void)sizeInBytes;
-    return CUBLAS_STATUS_NOT_SUPPORTED;
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 /* ----------------------------------------------------------------
  * Algorithm selection
  * ---------------------------------------------------------------- */
+/* Return SUCCESS with 0 algorithms — this is the key fallback trigger.
+ * PyTorch's CublasHandlePool checks the count: if 0, it falls back to
+ * the standard cublasSgemm/cublasDgemm path (our RPC-proxied path).
+ * Returning NOT_SUPPORTED here would cause a hard throw instead. */
 cublasStatus_t cublasLtMatmulAlgoGetHeuristic(
     cublasLtHandle_t lightHandle,
     cublasLtMatmulDesc_t operationDesc,
@@ -193,7 +206,7 @@ cublasStatus_t cublasLtMatmulAlgoGetHeuristic(
     (void)preference; (void)requestedAlgoCount;
     (void)heuristicResultsArray;
     if (returnAlgoCount) *returnAlgoCount = 0;
-    return CUBLAS_STATUS_NOT_SUPPORTED;
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 cublasStatus_t cublasLtMatmulAlgoInit(
@@ -285,15 +298,15 @@ cublasStatus_t cublasLtMatrixTransformDescCreate(
     cudaDataType_t scaleType)
 {
     (void)scaleType;
-    if (transformDesc) *transformDesc = NULL;
-    return CUBLAS_STATUS_NOT_SUPPORTED;
+    if (transformDesc) *transformDesc = &g_lt_dummy_handle;
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 cublasStatus_t cublasLtMatrixTransformDescDestroy(
     cublasLtMatrixTransformDesc_t transformDesc)
 {
     (void)transformDesc;
-    return CUBLAS_STATUS_NOT_SUPPORTED;
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 cublasStatus_t cublasLtMatrixTransformDescSetAttribute(
@@ -301,7 +314,7 @@ cublasStatus_t cublasLtMatrixTransformDescSetAttribute(
     const void *buf, size_t sizeInBytes)
 {
     (void)transformDesc; (void)attr; (void)buf; (void)sizeInBytes;
-    return CUBLAS_STATUS_NOT_SUPPORTED;
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 cublasStatus_t cublasLtMatrixTransform(
