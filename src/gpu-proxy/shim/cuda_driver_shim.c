@@ -159,7 +159,7 @@ typedef struct {
 typedef struct {
     uint64_t opaque_handle;
     uint64_t module_slot;
-    char     name[256];
+    char     name[1024];
     uint32_t num_params;
     uint32_t param_sizes[GPU_MAX_KERNEL_PARAMS];
     int      in_use;

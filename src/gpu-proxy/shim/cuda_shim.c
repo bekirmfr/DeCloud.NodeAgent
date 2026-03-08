@@ -216,7 +216,7 @@ typedef struct {
     uint32_t num_params;
     uint32_t param_sizes[GPU_MAX_KERNEL_PARAMS];
     int      registered;
-    char     device_name[256];
+    char     device_name[1024];
     int      module_index;
 } RegisteredFunction;
 
