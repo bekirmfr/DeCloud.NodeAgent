@@ -77,12 +77,15 @@ static void shim_init(void)
         fclose(f);
     }
 
-    if (getenv("DECLOUD_GPU_DEBUG"))
+    if (getenv("DECLOUD_GPU_DEBUG")) {
+        g_debug_log = 1;
         fprintf(stderr, "[cudart-shim] constructor: %d app env vars loaded\n", count);
+    }
 }
 
+static int g_debug_log = 0;
 #define SHIM_LOG(fmt, ...) \
-    fprintf(stderr, "[cudart-shim] " fmt "\n", ##__VA_ARGS__)
+    do { if (g_debug_log) fprintf(stderr, "[cudart-shim] " fmt "\n", ##__VA_ARGS__); } while(0)
 
 /*
  * CRITICAL: ggml-cuda allocates cudaDeviceProp on the stack with as little

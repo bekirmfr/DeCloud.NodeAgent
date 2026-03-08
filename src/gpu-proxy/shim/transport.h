@@ -20,8 +20,9 @@
 #define TRANSPORT_LOG_PREFIX "gpu-shim"
 #endif
 
+extern int g_debug_log;
 #define TRANSPORT_LOG(fmt, ...) \
-    fprintf(stderr, "[" TRANSPORT_LOG_PREFIX "] " fmt "\n", ##__VA_ARGS__)
+    do { if (g_debug_log) fprintf(stderr, "[" TRANSPORT_LOG_PREFIX "] " fmt "\n", ##__VA_ARGS__); } while(0)
 
 /*
  * Ensure the shared connection to the daemon is established.

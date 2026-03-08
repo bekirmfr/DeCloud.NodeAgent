@@ -440,7 +440,6 @@ cudaError_t cudaThreadExchangeStreamCaptureMode(int *mode)
     return cudaSuccess;
 }
 
-
 /* ══════════════════════════════════════════════════════════════════════
  * 28. cudaEventQuery
  *     All proxy ops are synchronous — every event is already complete.
