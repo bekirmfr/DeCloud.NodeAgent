@@ -147,10 +147,11 @@ $(CUBLAS_STUB): stubs/cublas_stub.c stubs/libcublas.version proto/gpu_proxy_prot
 # ----------------------------------------------------------------
 cublaslt-stub: $(CUBLASLT_STUB)
 
-$(CUBLASLT_STUB): stubs/cublasLt_stub.c | $(BUILD_DIR)
+$(CUBLASLT_STUB): stubs/cublasLt_stub.c stubs/libcublasLt.version | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -shared -fPIC \
 		-Wl,-soname,libcublasLt.so.12 \
-		-o $@ $<
+		-Wl,--version-script=stubs/libcublasLt.version \
+		-o $@ $
 
 # ----------------------------------------------------------------
 # PyTorch Compatibility Stubs (libcuda_pytorch_stubs.so)
@@ -244,9 +245,10 @@ all-shims-compat: | $(BUILD_DIR)
 	               stubs/cublas_stub.c -ldl && \
 	           echo '==> Building cuBLAS Lt stub...' && \
 	           gcc -Wall -Wextra -O2 -shared -fPIC \
-	               -Wl,-soname,libcublasLt.so.12 \
-	               -o build/libcublasLt_stub.so \
-	               stubs/cublasLt_stub.c && \
+					-Wl,-soname,libcublasLt.so.12 \
+					-Wl,--version-script=stubs/libcublasLt.version \
+					-o build/libcublasLt_stub.so \
+					stubs/cublasLt_stub.c && \
 	           echo '==> Building PyTorch compat stubs...' && \
 	           gcc -Wall -Wextra -O2 -shared -fPIC \
 	               -Wl,-soname,libcuda_pytorch_stubs.so \

@@ -1,0 +1,63 @@
+/* Version script for DeCloud cuBLAS Lt stub library.
+ *
+ * Exports cublasLt symbols under the libcublasLt.so.12 version namespace.
+ * Required by PyTorch 2.3.x: libtorch_cuda.so performs versioned symbol
+ * lookup (cublasLtCreate@libcublasLt.so.12). Without this script the
+ * dynamic linker fails at dlopen time with:
+ *   version `libcublasLt.so.12' not found
+ *
+ * The original stub had no version script — it satisfied ggml's DT_NEEDED
+ * link but not PyTorch's versioned symbol resolution.
+ *
+ * All functions are no-op stubs returning CUBLAS_STATUS_NOT_SUPPORTED (3).
+ * Real cublasLt compute is handled by the host daemon via RPC; in proxy
+ * mode PyTorch routes matmuls through cublasGemmStridedBatchedEx (proxied
+ * via GPU_CMD_CUBLAS_GEMM_STRIDED), not through the cublasLt path.
+ */
+libcublasLt.so.12 {
+    global:
+        /* Handle management */
+        cublasLtCreate;
+        cublasLtDestroy;
+        cublasLtGetStatusString;
+        cublasLtGetVersion;
+
+        /* Matrix layout */
+        cublasLtMatrixLayoutCreate;
+        cublasLtMatrixLayoutDestroy;
+        cublasLtMatrixLayoutSetAttribute;
+        cublasLtMatrixLayoutGetAttribute;
+
+        /* Matmul descriptor */
+        cublasLtMatmulDescCreate;
+        cublasLtMatmulDescDestroy;
+        cublasLtMatmulDescSetAttribute;
+        cublasLtMatmulDescGetAttribute;
+
+        /* Preference */
+        cublasLtMatmulPreferenceCreate;
+        cublasLtMatmulPreferenceDestroy;
+        cublasLtMatmulPreferenceSetAttribute;
+
+        /* Algorithm selection */
+        cublasLtMatmulAlgoGetHeuristic;
+        cublasLtMatmulAlgoInit;
+        cublasLtMatmulAlgoCheck;
+        cublasLtMatmulAlgoCapGetAttribute;
+        cublasLtMatmulAlgoConfigGetAttribute;
+        cublasLtMatmulAlgoConfigSetAttribute;
+
+        /* Compute */
+        cublasLtMatmul;
+
+        /* Matrix transform */
+        cublasLtMatrixTransform;
+        cublasLtMatrixTransformDescCreate;
+        cublasLtMatrixTransformDescDestroy;
+        cublasLtMatrixTransformDescSetAttribute;
+
+        /* Internal placeholder */
+        __decloud_cublasLt_stub_v1;
+    local:
+        *;
+};
