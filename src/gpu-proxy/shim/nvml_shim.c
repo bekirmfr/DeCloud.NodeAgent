@@ -56,7 +56,6 @@ typedef struct {
 
 static int g_nvml_initialized = 0;
 static int g_nvml_device_count = -1;
-static int g_debug_log = 0;
 
 /* Cached device properties */
 static GpuDeviceProperties g_nvml_cached_props;
