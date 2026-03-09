@@ -21,6 +21,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <fenv.h>
 
 #include "proto/gpu_proxy_proto.h"
 
@@ -82,6 +83,12 @@ static void shim_init(void)
         g_debug_log = 1;
         fprintf(stderr, "[cudart-shim] constructor: %d app env vars loaded\n", count);
     }
+
+    /* Restore default FPU exception mask.
+     * PyTorch/libtorch_cuda.so enables FPE exceptions during CUDA context
+     * init, causing SIGFPE in CPU Python (e.g. TemperatureLogitsWarper).
+     * fedisableexcept restores the safe default: all exceptions masked. */
+    fedisableexcept(FE_ALL_EXCEPT);
 }
 
 #define SHIM_LOG(fmt, ...) \

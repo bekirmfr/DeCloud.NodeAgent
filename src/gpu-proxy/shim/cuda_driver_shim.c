@@ -98,6 +98,9 @@ static void driver_shim_init(void)
 
     const char *vmem = transport_getenv("DECLOUD_GPU_VMEM_PROXY");
     if (vmem && vmem[0] == '1') g_vmem_proxy = 1;
+
+    /* Restore default FPU exception mask — same reason as cuda_shim.c */
+    fedisableexcept(FE_ALL_EXCEPT);
 }
 
 /* ================================================================
