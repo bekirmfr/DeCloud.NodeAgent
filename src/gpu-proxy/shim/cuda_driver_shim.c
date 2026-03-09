@@ -99,9 +99,6 @@ static void driver_shim_init(void)
 
     const char *vmem = transport_getenv("DECLOUD_GPU_VMEM_PROXY");
     if (vmem && vmem[0] == '1') g_vmem_proxy = 1;
-
-    /* Restore default FPU exception mask — same reason as cuda_shim.c */
-    fedisableexcept(FE_ALL_EXCEPT);
 }
 
 /* ================================================================
@@ -378,6 +375,14 @@ CUresult cuCtxCreate_v3(CUcontext *ctx, void *params, int nparams,
     } else {
         *ctx = NULL;
     }
+
+    /* Mask FPE exceptions after context creation.
+     * libtorch_cuda.so enables FPE exceptions in its own constructor
+     * (which runs during 'import torch', after our shim constructor).
+     * Calling fedisableexcept here — after PyTorch's CUDA init — ensures
+     * the mask is restored before any Python sampling code runs. */
+    fedisableexcept(FE_ALL_EXCEPT);
+
     return (CUresult)err;
 }
 
