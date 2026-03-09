@@ -41,21 +41,6 @@
 
 #include "../proto/gpu_proxy_proto.h"
 
-/* Mask all FP exceptions in SSE MXCSR and x87 FCW.
- * Replaces fedisableexcept(FE_ALL_EXCEPT) — no -lm dependency. */
-static inline void mask_fpe_exceptions(void)
-{
-    unsigned int mxcsr;
-    __asm__ volatile("stmxcsr %0" : "=m"(mxcsr));
-    mxcsr |= 0x1F80U;  /* bits 7-12: mask all SSE FP exceptions */
-    __asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
-
-    unsigned short fcw;
-    __asm__ volatile("fstcw %0" : "=m"(fcw));
-    fcw |= 0x3FU;       /* bits 0-5: mask all x87 FP exceptions */
-    __asm__ volatile("fldcw %0" : : "m"(fcw));
-}
-
 /* ----------------------------------------------------------------
  * Status codes — must match real cuBLAS ABI exactly
  * ---------------------------------------------------------------- */
@@ -543,12 +528,6 @@ cublasStatus_t cublasLtMatmul(
     void *workspace, size_t workspaceSizeInBytes,
     cudaStream_t stream)
 {
-    /* Re-mask FPE on every matmul call.
-     * PyTorch's CublasHandlePool re-enables FPE during lazy cuBLAS
-     * context init (after cuCtxCreate). This is the last proxy call
-     * before Python sampling runs, so masking here is the safe hook. */
-    mask_fpe_exceptions();
-
     (void)lightHandle;
     (void)algo; (void)workspace; (void)workspaceSizeInBytes; (void)stream;
 

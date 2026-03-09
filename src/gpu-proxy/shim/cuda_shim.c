@@ -21,6 +21,8 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <signal.h>
+#include <ucontext.h>
 
 #include "proto/gpu_proxy_proto.h"
 
@@ -51,6 +53,27 @@ static inline void mask_fpe_exceptions(void)
     unsigned short fcw;
     __asm__ volatile("fstcw %0" : "=m"(fcw));
     fcw |= 0x3FU;       /* bits 0-5: mask all x87 FP exceptions */
+    __asm__ volatile("fldcw %0" : : "m"(fcw));
+}
+
+/* SIGFPE handler — libtorch_cuda.so enables FP exceptions in its
+ * constructor. Any code path that re-enables them after our per-call
+ * masking will eventually reach this handler. We re-mask all FP
+ * exceptions and clear the sticky status bits, then return to let
+ * execution continue normally. On x86 Linux, returning from a SIGFPE
+ * handler for SSE/x87 FP exceptions (not integer div-by-zero) is
+ * well-defined — the kernel resumes at the faulting instruction. */
+static void sigfpe_handler(int sig, siginfo_t *info, void *uctx)
+{
+    (void)sig; (void)info; (void)uctx;
+    unsigned int mxcsr;
+    __asm__ volatile("stmxcsr %0" : "=m"(mxcsr));
+    mxcsr |= 0x1F80U;  /* set all SSE exception mask bits */
+    mxcsr &= ~0x003FU; /* clear sticky status bits */
+    __asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
+    unsigned short fcw;
+    __asm__ volatile("fstcw %0" : "=m"(fcw));
+    fcw |= 0x3FU;      /* mask all x87 FP exceptions */
     __asm__ volatile("fldcw %0" : : "m"(fcw));
 }
 
@@ -99,6 +122,16 @@ static void shim_init(void)
     }
 
     mask_fpe_exceptions();
+
+    /* Install SIGFPE handler as belt-and-suspenders.
+     * Per-call masking alone is insufficient — PyTorch re-enables
+     * FPE during cuBLAS handle pool init between our calls. */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = sigfpe_handler;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGFPE, &sa, NULL);
 }
 
 #define SHIM_LOG(fmt, ...) \
