@@ -29,6 +29,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <dlfcn.h>
+#include <fenv.h>
 
 /* Set transport log prefix before including shared transport */
 #define TRANSPORT_LOG_PREFIX "cuda-driver-shim"
