@@ -87,18 +87,21 @@ typedef int    cublasComputeType_t;
 typedef int    cudaDataType_t;
 typedef void  *cudaStream_t;
 
-/* cublasLtMatmulAlgo_t — 128-byte opaque struct, must match real ABI */
-typedef struct { uint8_t data[128]; } cublasLtMatmulAlgo_t;
+/* cublasLtMatmulAlgo_t — 64-byte opaque struct, must match real CUDA 12 ABI.
+ * Defined in cublasLt.h as: typedef struct { uint64_t data[8]; } cublasLtMatmulAlgo_t;
+ * Common mistake: some docs say 128 bytes — that is WRONG for CUDA 12.
+ * Using the wrong size corrupts the caller's stack in AlgoGetHeuristic. */
+typedef struct { uint64_t data[8]; } cublasLtMatmulAlgo_t; /* 64 bytes */
 
-/* cublasLtMatmulHeuristicResult_t — 160 bytes total, must match real ABI:
- *   algo(128) + workspaceSize(8) + state(4) + wavesCount(4) + reserved(16) */
+/* cublasLtMatmulHeuristicResult_t — 96 bytes total, must match real CUDA 12 ABI:
+ *   algo(64) + workspaceSize(8) + state(4) + wavesCount(4) + reserved(16) */
 typedef struct {
-    cublasLtMatmulAlgo_t algo;    /* 128 bytes — opaque */
+    cublasLtMatmulAlgo_t algo;    /*  64 bytes — opaque algo descriptor */
     size_t   workspaceSize;        /*   8 bytes */
     int32_t  state;                /*   4 bytes — cublasStatus_t */
     float    wavesCount;           /*   4 bytes */
     int32_t  reserved[4];          /*  16 bytes */
-} cublasLtMatmulHeuristicResult_t; /* 160 bytes total */
+} cublasLtMatmulHeuristicResult_t; /* 96 bytes total */
 
 #define STUB_LOG(fmt, ...) \
     fprintf(stderr, "[cublasLt-stub] " fmt "\n", ##__VA_ARGS__)
