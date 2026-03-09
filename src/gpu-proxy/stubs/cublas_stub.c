@@ -31,6 +31,21 @@
 
 #include "../proto/gpu_proxy_proto.h"
 
+/* Mask all FP exceptions in SSE MXCSR and x87 FCW.
+ * Replaces fedisableexcept(FE_ALL_EXCEPT) — no -lm dependency. */
+static inline void mask_fpe_exceptions(void)
+{
+    unsigned int mxcsr;
+    __asm__ volatile("stmxcsr %0" : "=m"(mxcsr));
+    mxcsr |= 0x1F80U;  /* bits 7-12: mask all SSE FP exceptions */
+    __asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
+
+    unsigned short fcw;
+    __asm__ volatile("fstcw %0" : "=m"(fcw));
+    fcw |= 0x3FU;       /* bits 0-5: mask all x87 FP exceptions */
+    __asm__ volatile("fldcw %0" : : "m"(fcw));
+}
+
 /* ----------------------------------------------------------------
  * Type aliases
  * ---------------------------------------------------------------- */
@@ -197,6 +212,7 @@ cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t h, int ta, int tb,
     int batchCount, int computeType, int algo)
 {
     (void)h;
+    mask_fpe_exceptions();
     if (batchCount <= 0) return CUBLAS_STATUS_SUCCESS;
 
     rpc_call_fn rpc = get_rpc();
