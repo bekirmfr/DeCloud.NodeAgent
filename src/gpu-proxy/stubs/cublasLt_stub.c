@@ -11,16 +11,19 @@
  *   CUBLAS_STATUS_NOT_SUPPORTED from the heuristic always throws.
  *
  * Fix:
- *   - Track descriptor state (transa/transb/computeType, matrix dims/types)
- *   - cublasLtMatmulAlgoGetHeuristic returns count=1 + valid heuristic
- *   - cublasLtMatmul extracts GEMM params from stored state, sends
- *     GPU_CMD_CUBLAS_GEMM_STRIDED RPC to daemon via decloud_rpc_call
+ *   - Track descriptor state (transa/transb/computeType/scaleType, per-matrix
+ *     rows/cols/ld/type/stride/batchCount) — accumulated across API calls
+ *   - cublasLtMatmulAlgoGetHeuristic returns count=1 so PyTorch proceeds
+ *   - cublasLtMatmul is a pure serializer: packs raw stored descriptor state
+ *     into GpuCublasLtMatmulRequest and sends GPU_CMD_CUBLAS_LT_MATMUL RPC.
+ *     No arithmetic. No GPU memory ops. No C/D logic.
+ *   - Daemon calls the real cublasLtMatmul on the host GPU, which natively
+ *     supports separate C (bias/accumulator) and D (output) pointers.
  *
- * Note on C vs D pointers in cublasLtMatmul:
- *   PyTorch always passes C==D for the standard gemm<T> path (same
- *   pointer, same descriptor). The D pointer is used as the output;
- *   beta scaling reads from C. Since C==D, passing D as C_ptr in the
- *   RPC is correct: daemon computes D = alpha*A*B + beta*D.
+ * Design principle:
+ *   The stub is a serializer. It accumulates API state and encodes it into
+ *   wire format. All computation — GEMM execution, dimension interpretation,
+ *   C≠D fused add — happens on the host via the real cuBLAS library.
  *
  * Build:
  *   gcc -shared -fPIC -I. -ldl \
@@ -503,19 +506,14 @@ cublasStatus_t cublasLtMatmulAlgoConfigSetAttribute(
 }
 
 /* ================================================================
- * cublasLtMatmul — GEMM proxy via RPC
+ * cublasLtMatmul — pure serializer
  *
- * Extracts GEMM parameters from stored descriptor/layout state and
- * calls GPU_CMD_CUBLAS_GEMM_STRIDED on the host daemon.
+ * Packs raw stored descriptor state into GpuCublasLtMatmulRequest
+ * and sends GPU_CMD_CUBLAS_LT_MATMUL to the daemon.
  *
- * Dimension extraction from cublasLt layout convention:
- *   D is always m×n (rows=m, cols=n, ld=ldc)
- *   A stores m×k if transa=N, or k×m if transa=T → k = A.cols (N) or A.rows (T)
- *
- * C vs D pointers:
- *   PyTorch gemm<T> passes C==D (same pointer, same descriptor) for the
- *   standard addmm path. Using D as C_ptr in the RPC computes:
- *   D = alpha*A*B + beta*D, which is correct when C==D.
+ * No arithmetic. No GPU memory operations. No C/D logic.
+ * The daemon calls the real cublasLtMatmul on the host GPU, which
+ * natively supports C≠D (fused bias-add / addmm).
  * ================================================================ */
 cublasStatus_t cublasLtMatmul(
     cublasLtHandle_t lightHandle,
@@ -530,7 +528,7 @@ cublasStatus_t cublasLtMatmul(
     void *workspace, size_t workspaceSizeInBytes,
     cudaStream_t stream)
 {
-    (void)lightHandle; (void)C; (void)Cdesc;
+    (void)lightHandle;
     (void)algo; (void)workspace; (void)workspaceSizeInBytes; (void)stream;
 
     rpc_call_fn rpc = get_rpc();
@@ -539,6 +537,7 @@ cublasStatus_t cublasLtMatmul(
     LtMatmulDescEntry   *desc = (LtMatmulDescEntry *)computeDesc;
     LtMatrixLayoutEntry *Al   = (LtMatrixLayoutEntry *)Adesc;
     LtMatrixLayoutEntry *Bl   = (LtMatrixLayoutEntry *)Bdesc;
+    LtMatrixLayoutEntry *Cl   = (LtMatrixLayoutEntry *)Cdesc;
     LtMatrixLayoutEntry *Dl   = (LtMatrixLayoutEntry *)Ddesc;
 
     if (!desc || !Al || !Bl || !Dl ||
@@ -547,52 +546,73 @@ cublasStatus_t cublasLtMatmul(
         return CUBLAS_STATUS_NOT_SUPPORTED;
     }
 
-    /* Extract GEMM dimensions.
-     * D layout: rows=m, cols=n (output is always m×n, no transpose)
-     * A layout: rows×cols as stored. k = cols if transa=N, rows if transa=T */
-    int m = (int)Dl->rows;
-    int n = (int)Dl->cols;
-    int k = (desc->transa == CUBLAS_OP_N) ? (int)Al->cols : (int)Al->rows;
-
-    int batchCount = (Dl->batchCount > 1) ? Dl->batchCount : 1;
-
-    /* Scalar size from computeType (alpha/beta are always host scalars) */
-    int scalar_size = 4; /* float for COMPUTE_32F and COMPUTE_16F */
-    if (desc->computeType == CUBLAS_COMPUTE_64F) scalar_size = 8;
-
-    STUB_LOG("cublasLtMatmul: m=%d n=%d k=%d transa=%d transb=%d "
-             "Atype=%d Btype=%d Ctype=%d computeType=%d bc=%d",
-             m, n, k, desc->transa, desc->transb,
-             Al->dataType, Bl->dataType, Dl->dataType,
-             desc->computeType, batchCount);
-
-    GpuCublasGemmStridedRequest req;
+    /* Serialize raw stored state — no interpretation, no arithmetic */
+    GpuCublasLtMatmulRequest req;
     memset(&req, 0, sizeof(req));
+
+    /* Operation descriptor — raw stored values */
     req.transa      = desc->transa;
     req.transb      = desc->transb;
-    req.m           = m;
-    req.n           = n;
-    req.k           = k;
-    req.Atype       = Al->dataType;
-    req.lda         = (int)Al->ld;
-    req.strideA     = Al->batchStride;
-    req.Btype       = Bl->dataType;
-    req.ldb         = (int)Bl->ld;
-    req.strideB     = Bl->batchStride;
-    req.Ctype       = Dl->dataType;
-    req.ldc         = (int)Dl->ld;
-    req.strideC     = Dl->batchStride;
-    req.batchCount  = batchCount;
     req.computeType = desc->computeType;
-    req.algo        = -1; /* CUBLAS_GEMM_DEFAULT */
-    req.A_ptr       = (uint64_t)(uintptr_t)A;
-    req.B_ptr       = (uint64_t)(uintptr_t)B;
-    req.C_ptr       = (uint64_t)(uintptr_t)D; /* D==C in PyTorch's gemm<T> path */
+    req.scaleType   = desc->scaleType;
 
-    if (alpha) memcpy(req.alpha, alpha, (size_t)scalar_size);
-    if (beta)  memcpy(req.beta,  beta,  (size_t)scalar_size);
+    /* Matrix layouts — raw rows/cols/ld/type/stride as stored */
+    req.Atype   = Al->dataType;
+    req.A_rows  = Al->rows;
+    req.A_cols  = Al->cols;
+    req.lda     = Al->ld;
+    req.strideA = Al->batchStride;
 
-    int err = rpc(GPU_CMD_CUBLAS_GEMM_STRIDED,
+    req.Btype   = Bl->dataType;
+    req.B_rows  = Bl->rows;
+    req.B_cols  = Bl->cols;
+    req.ldb     = Bl->ld;
+    req.strideB = Bl->batchStride;
+
+    /* C may be NULL when beta=0 and caller omits it */
+    if (Cl && Cl->in_use) {
+        req.Ctype   = Cl->dataType;
+        req.C_rows  = Cl->rows;
+        req.C_cols  = Cl->cols;
+        req.ldc     = Cl->ld;
+        req.strideC = Cl->batchStride;
+    } else {
+        req.Ctype   = Dl->dataType; /* fallback: same type as D */
+        req.C_rows  = Dl->rows;
+        req.C_cols  = Dl->cols;
+        req.ldc     = Dl->ld;
+        req.strideC = Dl->batchStride;
+    }
+
+    req.Dtype   = Dl->dataType;
+    req.D_rows  = Dl->rows;
+    req.D_cols  = Dl->cols;
+    req.ldd     = Dl->ld;
+    req.strideD = Dl->batchStride;
+
+    req.batchCount = Dl->batchCount;
+
+    /* Scalars: always send full 16 bytes — daemon reads what it needs
+     * based on scaleType. No size arithmetic in the stub. */
+    if (alpha) memcpy(req.alpha, alpha, sizeof(req.alpha));
+    if (beta)  memcpy(req.beta,  beta,  sizeof(req.beta));
+
+    /* Device pointers — passed through verbatim */
+    req.A_ptr = (uint64_t)(uintptr_t)A;
+    req.B_ptr = (uint64_t)(uintptr_t)B;
+    req.C_ptr = (uint64_t)(uintptr_t)C;
+    req.D_ptr = (uint64_t)(uintptr_t)D;
+
+    STUB_LOG("cublasLtMatmul: Arows=%llu Acols=%llu Brows=%llu Bcols=%llu "
+             "Drows=%llu Dcols=%llu transa=%d transb=%d computeType=%d "
+             "bc=%d C%sD",
+             (unsigned long long)req.A_rows, (unsigned long long)req.A_cols,
+             (unsigned long long)req.B_rows, (unsigned long long)req.B_cols,
+             (unsigned long long)req.D_rows, (unsigned long long)req.D_cols,
+             req.transa, req.transb, req.computeType,
+             req.batchCount, (C == D) ? "==" : "!=");
+
+    int err = rpc(GPU_CMD_CUBLAS_LT_MATMUL,
                   &req, sizeof(req), NULL, 0, NULL);
     if (err) {
         STUB_LOG("cublasLtMatmul: RPC failed (err=%d)", err);

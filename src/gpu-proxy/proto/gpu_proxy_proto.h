@@ -83,6 +83,7 @@ typedef enum {
     /* cuBLAS GEMM proxy (GQA attention requires real cuBLAS on host) */
     GPU_CMD_CUBLAS_GEMM_BATCHED    = 0x56,
     GPU_CMD_CUBLAS_GEMM_STRIDED    = 0x57,
+    GPU_CMD_CUBLAS_LT_MATMUL       = 0x58,
 
     /* Resource management */
     GPU_CMD_SET_MEMORY_QUOTA       = 0x60,
@@ -405,6 +406,68 @@ typedef struct __attribute__((packed)) {
     uint64_t B_ptr;
     uint64_t C_ptr;
 } GpuCublasGemmStridedRequest;
+
+/* --- CUBLASLT MATMUL (0x58) ---
+ *
+ * Proxies cublasLtMatmul for PyTorch's fused GEMM+bias (addmm) path.
+ * Carries raw descriptor state — rows/cols/ld/type per matrix, transa/transb,
+ * computeType, alpha/beta, and separate C (bias) + D (output) pointers.
+ *
+ * The daemon calls the real cublasLtMatmul on the host GPU, which natively
+ * supports C ≠ D. No arithmetic or GPU memory ops happen in the stub.
+ *
+ * rows/cols are the stored layout values (as passed to cublasLtMatrixLayoutCreate).
+ * The daemon passes them verbatim to cublasLtMatrixLayoutCreate on the host —
+ * it does not interpret or derive m/n/k itself.
+ */
+typedef struct __attribute__((packed)) {
+    /* Operation descriptor */
+    int32_t  transa;        /* CUBLAS_OP_N=0, T=1, C=2 */
+    int32_t  transb;
+    int32_t  computeType;   /* cublasComputeType_t */
+    int32_t  scaleType;     /* cudaDataType_t for alpha/beta scalars */
+
+    /* Matrix A — raw layout as stored in stub's descriptor table */
+    int32_t  Atype;
+    uint64_t A_rows;
+    uint64_t A_cols;
+    int64_t  lda;
+    int64_t  strideA;
+
+    /* Matrix B — raw layout */
+    int32_t  Btype;
+    uint64_t B_rows;
+    uint64_t B_cols;
+    int64_t  ldb;
+    int64_t  strideB;
+
+    /* Matrix C — bias/accumulator (read-only on host) */
+    int32_t  Ctype;
+    uint64_t C_rows;
+    uint64_t C_cols;
+    int64_t  ldc;
+    int64_t  strideC;
+
+    /* Matrix D — output (written by host cublasLtMatmul) */
+    int32_t  Dtype;
+    uint64_t D_rows;
+    uint64_t D_cols;
+    int64_t  ldd;
+    int64_t  strideD;
+
+    /* Batch */
+    int32_t  batchCount;
+
+    /* Scalars: always 16 bytes each — daemon reads the right width from scaleType */
+    uint8_t  alpha[16];
+    uint8_t  beta[16];
+
+    /* Device pointers (from the same connection's cudaMalloc calls) */
+    uint64_t A_ptr;
+    uint64_t B_ptr;
+    uint64_t C_ptr;   /* bias / accumulator */
+    uint64_t D_ptr;   /* output */
+} GpuCublasLtMatmulRequest;
 
 /* --- RESOURCE MANAGEMENT --- */
 typedef struct __attribute__((packed)) {

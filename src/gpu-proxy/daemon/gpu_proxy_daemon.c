@@ -282,6 +282,7 @@ typedef struct {
     /* Per-connection CUDA Driver API context */
     CUcontext    cu_ctx;
     cublasHandle_t cublas_handle;   /* Lazy-init on first GEMM RPC */
+    cublasLtHandle_t cublaslt_handle;
 
     ModuleSlot   modules[MAX_MODULES];
     FunctionSlot functions[MAX_FUNCTIONS];
@@ -437,6 +438,12 @@ static void cleanup_connection(ConnectionCtx *ctx)
         cublasDestroy_v2(ctx->cublas_handle);
         ctx->cublas_handle = NULL;
     }
+
+    if (ctx->cublaslt_handle) {
+        cublasLtDestroy(ctx->cublaslt_handle);
+        ctx->cublaslt_handle = NULL;
+    }
+
     if (ctx->cu_ctx) {
         cuCtxDestroy(ctx->cu_ctx);
         ctx->cu_ctx = NULL;
@@ -1028,6 +1035,152 @@ static int ensure_cublas(ConnectionCtx *ctx)
              ctx->is_tcp ? "VM" : "CID",
              ctx->is_tcp ? ctx->vm_id : "vsock");
     return 0;
+}
+
+/* Lazy-initialize cuBLAS Lt handle for this connection.
+ * Mirrors ensure_cublas() — called on first LT_MATMUL RPC. */
+static int ensure_cublaslt(ConnectionCtx *ctx)
+{
+    if (ctx->cublaslt_handle) return 0;
+
+    if (ctx->cu_ctx)
+        cuCtxSetCurrent(ctx->cu_ctx);
+
+    cublasStatus_t cs = cublasLtCreate(&ctx->cublaslt_handle);
+    if (cs != CUBLAS_STATUS_SUCCESS) {
+        LOG_ERR("%s %s: cublasLtCreate failed (%d)",
+                ctx->is_tcp ? "VM" : "CID",
+                ctx->is_tcp ? ctx->vm_id : "vsock",
+                (int)cs);
+        ctx->cublaslt_handle = NULL;
+        return -1;
+    }
+
+    LOG_INFO("%s %s: cuBLAS Lt handle initialized",
+             ctx->is_tcp ? "VM" : "CID",
+             ctx->is_tcp ? ctx->vm_id : "vsock");
+    return 0;
+}
+
+/* ----------------------------------------------------------------
+ * handle_cublas_lt_matmul (GPU_CMD_CUBLAS_LT_MATMUL = 0x58)
+ *
+ * Payload: GpuCublasLtMatmulRequest (fixed size, all params inline)
+ *
+ * Calls the real cublasLtMatmul on the host GPU. All layout params
+ * are passed verbatim from the stub — no arithmetic, no interpretation.
+ * The real cublasLtMatmul natively supports C≠D (fused bias-add).
+ * ---------------------------------------------------------------- */
+static int handle_cublas_lt_matmul(ConnectionCtx *ctx,
+                                    const void *payload, uint32_t payload_len)
+{
+    if (payload_len < sizeof(GpuCublasLtMatmulRequest)) {
+        return send_response(ctx->fd, GPU_CMD_CUBLAS_LT_MATMUL, -1, NULL, 0);
+    }
+
+    GpuCublasLtMatmulRequest req;
+    memcpy(&req, payload, sizeof(req));
+
+    if (req.batchCount <= 0 || req.batchCount > 65536) {
+        LOG_ERR("CID %u: lt_matmul: invalid batchCount=%d",
+                ctx->peer_cid, req.batchCount);
+        return send_response(ctx->fd, GPU_CMD_CUBLAS_LT_MATMUL, -1, NULL, 0);
+    }
+
+    if (ensure_cublaslt(ctx) < 0) {
+        return send_response(ctx->fd, GPU_CMD_CUBLAS_LT_MATMUL,
+                             CUBLAS_STATUS_NOT_INITIALIZED, NULL, 0);
+    }
+
+    if (ctx->cu_ctx) cuCtxSetCurrent(ctx->cu_ctx);
+
+    /* Build operation descriptor from raw stored values */
+    cublasLtMatmulDesc_t op_desc = NULL;
+    cublasStatus_t cs = cublasLtMatmulDescCreate(
+        &op_desc,
+        (cublasComputeType_t)req.computeType,
+        (cudaDataType_t)req.scaleType);
+    if (cs != CUBLAS_STATUS_SUCCESS) {
+        LOG_ERR("CID %u: lt_matmul: cublasLtMatmulDescCreate failed (%d)",
+                ctx->peer_cid, (int)cs);
+        return send_response(ctx->fd, GPU_CMD_CUBLAS_LT_MATMUL, (int32_t)cs, NULL, 0);
+    }
+    cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSA,
+                                   &req.transa, sizeof(req.transa));
+    cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSB,
+                                   &req.transb, sizeof(req.transb));
+
+    /* Build matrix layouts verbatim from raw stored rows/cols/ld/type.
+     * No m/n/k derivation — cublasLtMatmul determines dimensions from
+     * the layouts and transa/transb in the operation descriptor. */
+    cublasLtMatrixLayout_t A_layout = NULL, B_layout = NULL,
+                           C_layout = NULL, D_layout = NULL;
+
+    cublasLtMatrixLayoutCreate(&A_layout, (cudaDataType_t)req.Atype,
+                               req.A_rows, req.A_cols, req.lda);
+    cublasLtMatrixLayoutCreate(&B_layout, (cudaDataType_t)req.Btype,
+                               req.B_rows, req.B_cols, req.ldb);
+    cublasLtMatrixLayoutCreate(&C_layout, (cudaDataType_t)req.Ctype,
+                               req.C_rows, req.C_cols, req.ldc);
+    cublasLtMatrixLayoutCreate(&D_layout, (cudaDataType_t)req.Dtype,
+                               req.D_rows, req.D_cols, req.ldd);
+
+    if (req.batchCount > 1) {
+        cublasLtMatrixLayoutSetAttribute(A_layout,
+            CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,          &req.batchCount, sizeof(int32_t));
+        cublasLtMatrixLayoutSetAttribute(A_layout,
+            CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &req.strideA,    sizeof(int64_t));
+        cublasLtMatrixLayoutSetAttribute(B_layout,
+            CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,          &req.batchCount, sizeof(int32_t));
+        cublasLtMatrixLayoutSetAttribute(B_layout,
+            CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &req.strideB,    sizeof(int64_t));
+        cublasLtMatrixLayoutSetAttribute(C_layout,
+            CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,          &req.batchCount, sizeof(int32_t));
+        cublasLtMatrixLayoutSetAttribute(C_layout,
+            CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &req.strideC,    sizeof(int64_t));
+        cublasLtMatrixLayoutSetAttribute(D_layout,
+            CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,          &req.batchCount, sizeof(int32_t));
+        cublasLtMatrixLayoutSetAttribute(D_layout,
+            CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &req.strideD,    sizeof(int64_t));
+    }
+
+    /* Call the real cublasLtMatmul — C and D may differ (fused bias-add) */
+    cs = cublasLtMatmul(
+        ctx->cublaslt_handle, op_desc,
+        req.alpha,
+        (const void *)(uintptr_t)req.A_ptr, A_layout,
+        (const void *)(uintptr_t)req.B_ptr, B_layout,
+        req.beta,
+        (const void *)(uintptr_t)req.C_ptr, C_layout,
+        (void *)(uintptr_t)req.D_ptr,       D_layout,
+        NULL, NULL, 0, 0);
+
+    cudaDeviceSynchronize();
+
+    if (A_layout) cublasLtMatrixLayoutDestroy(A_layout);
+    if (B_layout) cublasLtMatrixLayoutDestroy(B_layout);
+    if (C_layout) cublasLtMatrixLayoutDestroy(C_layout);
+    if (D_layout) cublasLtMatrixLayoutDestroy(D_layout);
+    if (op_desc)  cublasLtMatmulDescDestroy(op_desc);
+
+    if (cs != CUBLAS_STATUS_SUCCESS) {
+        LOG_ERR("CID %u: cublasLtMatmul failed: %d "
+                "(Arows=%llu Acols=%llu Drows=%llu Dcols=%llu bc=%d)",
+                ctx->peer_cid, (int)cs,
+                (unsigned long long)req.A_rows, (unsigned long long)req.A_cols,
+                (unsigned long long)req.D_rows, (unsigned long long)req.D_cols,
+                req.batchCount);
+    } else {
+        LOG_DBG("CID %u: cublasLtMatmul OK "
+                "(Arows=%llu Acols=%llu Drows=%llu Dcols=%llu bc=%d C%sD)",
+                ctx->peer_cid,
+                (unsigned long long)req.A_rows, (unsigned long long)req.A_cols,
+                (unsigned long long)req.D_rows, (unsigned long long)req.D_cols,
+                req.batchCount,
+                (req.C_ptr == req.D_ptr) ? "==" : "!=");
+    }
+
+    return send_response(ctx->fd, GPU_CMD_CUBLAS_LT_MATMUL, (int32_t)cs, NULL, 0);
 }
 
 /* Determine scalar size (alpha/beta) from CUDA compute type */
@@ -1892,6 +2045,9 @@ static void *connection_handler(void *arg)
             break;
         case GPU_CMD_CUBLAS_GEMM_STRIDED:
             rc = handle_cublas_gemm_strided(ctx, buf, hdr.payload_len);
+            break;
+        case GPU_CMD_CUBLAS_LT_MATMUL:
+            rc = handle_cublas_lt_matmul(ctx, buf, hdr.payload_len);
             break;
 
         case GPU_CMD_GOODBYE:
