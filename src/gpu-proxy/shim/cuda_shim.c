@@ -21,7 +21,6 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
-#include <fenv.h>
 
 #include "proto/gpu_proxy_proto.h"
 
@@ -39,6 +38,21 @@
  * Defaults to 1 for safety — set DECLOUD_GPU_GRAPH_NOOP=0 to disable. */
 static int g_graph_noop = 1;
 static int g_debug_log = 0;
+
+/* Mask all FP exceptions in SSE MXCSR and x87 FCW.
+ * Replaces fedisableexcept(FE_ALL_EXCEPT) — no -lm dependency. */
+static inline void mask_fpe_exceptions(void)
+{
+    unsigned int mxcsr;
+    __asm__ volatile("stmxcsr %0" : "=m"(mxcsr));
+    mxcsr |= 0x1F80U;  /* bits 7-12: mask all SSE FP exceptions */
+    __asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
+
+    unsigned short fcw;
+    __asm__ volatile("fstcw %0" : "=m"(fcw));
+    fcw |= 0x3FU;       /* bits 0-5: mask all x87 FP exceptions */
+    __asm__ volatile("fldcw %0" : : "m"(fcw));
+}
 
 __attribute__((constructor))
 static void shim_init(void)
@@ -84,11 +98,7 @@ static void shim_init(void)
         fprintf(stderr, "[cudart-shim] constructor: %d app env vars loaded\n", count);
     }
 
-    /* Restore default FPU exception mask.
-     * PyTorch/libtorch_cuda.so enables FPE exceptions during CUDA context
-     * init, causing SIGFPE in CPU Python (e.g. TemperatureLogitsWarper).
-     * fedisableexcept restores the safe default: all exceptions masked. */
-    fedisableexcept(FE_ALL_EXCEPT);
+    mask_fpe_exceptions();
 }
 
 #define SHIM_LOG(fmt, ...) \

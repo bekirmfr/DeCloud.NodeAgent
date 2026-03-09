@@ -29,7 +29,6 @@
 #include <string.h>
 #include <stdint.h>
 #include <dlfcn.h>
-#include <fenv.h>
 
 /* Set transport log prefix before including shared transport */
 #define TRANSPORT_LOG_PREFIX "cuda-driver-shim"
@@ -88,6 +87,21 @@ static int g_vmem_proxy = 0;
 static int g_driver_graph_noop = 1;
 
 static CUresult graph_success_stub(void) { return CUDA_SUCCESS; }
+
+/* Mask all FP exceptions in SSE MXCSR and x87 FCW.
+ * Replaces fedisableexcept(FE_ALL_EXCEPT) — no -lm dependency. */
+static inline void mask_fpe_exceptions(void)
+{
+    unsigned int mxcsr;
+    __asm__ volatile("stmxcsr %0" : "=m"(mxcsr));
+    mxcsr |= 0x1F80U;  /* bits 7-12: mask all SSE FP exceptions */
+    __asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
+
+    unsigned short fcw;
+    __asm__ volatile("fstcw %0" : "=m"(fcw));
+    fcw |= 0x3FU;       /* bits 0-5: mask all x87 FP exceptions */
+    __asm__ volatile("fldcw %0" : : "m"(fcw));
+}
 
 __attribute__((constructor))
 static void driver_shim_init(void)
@@ -376,12 +390,7 @@ CUresult cuCtxCreate_v3(CUcontext *ctx, void *params, int nparams,
         *ctx = NULL;
     }
 
-    /* Mask FPE exceptions after context creation.
-     * libtorch_cuda.so enables FPE exceptions in its own constructor
-     * (which runs during 'import torch', after our shim constructor).
-     * Calling fedisableexcept here — after PyTorch's CUDA init — ensures
-     * the mask is restored before any Python sampling code runs. */
-    fedisableexcept(FE_ALL_EXCEPT);
+    mask_fpe_exceptions();
 
     return (CUresult)err;
 }
