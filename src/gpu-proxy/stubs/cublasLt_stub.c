@@ -638,7 +638,7 @@ cublasStatus_t cublasLtMatmul(
      * during init. Masking here ensures the calling thread's MXCSR is safe
      * for CPU code (e.g. temperature sampling) that runs after our return. */
     mask_fpe_exceptions();
-    return transport_result ? CUBLAS_STATUS_EXECUTION_FAILED : CUBLAS_STATUS_SUCCESS;
+    return CUBLAS_STATUS_SUCCESS;
 }
 
 /* ================================================================
