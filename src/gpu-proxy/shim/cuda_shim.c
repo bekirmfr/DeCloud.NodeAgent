@@ -54,6 +54,16 @@ static inline void mask_fpe_exceptions(void)
     __asm__ volatile("fldcw %0" : : "m"(fcw));
 }
 
+static void *fpe_mask_thread(void *arg)
+{
+    (void)arg;
+    while (1) {
+        mask_fpe_exceptions();
+        usleep(1000); /* re-mask every 1ms */
+    }
+    return NULL;
+}
+
 /* Intercept feenableexcept — libtorch_cuda.so calls this to enable FPE
  * exceptions during CublasHandlePool init. By shadowing libm's version
  * via LD_PRELOAD, we prevent FPE from ever being enabled. This is the
@@ -111,6 +121,13 @@ static void shim_init(void)
     }
 
     mask_fpe_exceptions();
+
+    pthread_t fpe_tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_create(&fpe_tid, &attr, fpe_mask_thread, NULL);
+    pthread_attr_destroy(&attr);
 }
 
 #define SHIM_LOG(fmt, ...) \
