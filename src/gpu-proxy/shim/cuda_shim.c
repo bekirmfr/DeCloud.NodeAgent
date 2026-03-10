@@ -21,6 +21,8 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <signal.h>
+#include <ucontext.h>
 
 #include "proto/gpu_proxy_proto.h"
 
@@ -53,6 +55,16 @@ static inline void mask_fpe_exceptions(void)
     __asm__ __volatile__("fstcw %0" : "=m"(fcw));
     fcw |= 0x003FU;     /* mask all x87 exceptions */
     __asm__ __volatile__("fldcw %0" : : "m"(fcw));
+}
+
+static void sigfpe_handler(int sig, siginfo_t *si, void *ctx)
+{
+    (void)sig; (void)si; (void)ctx;
+    /* Mask all FPE exceptions and clear pending sticky flags.
+     * Both steps are required: masking prevents re-trigger,
+     * clearing sticky bits prevents the re-executed instruction
+     * from immediately firing another SIGFPE. */
+    mask_fpe_exceptions();
 }
 
 /* Intercept feenableexcept — libtorch_cuda.so calls this to enable FPE
@@ -112,6 +124,13 @@ static void shim_init(void)
     }
 
     mask_fpe_exceptions();
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = sigfpe_handler;
+    sa.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGFPE, &sa, NULL);
 }
 
 #define SHIM_LOG(fmt, ...) \
