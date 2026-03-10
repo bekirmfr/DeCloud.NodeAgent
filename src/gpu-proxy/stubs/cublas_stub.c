@@ -38,11 +38,13 @@ static inline void mask_fpe_exceptions(void)
 {
     unsigned int mxcsr;
     __asm__ __volatile__("stmxcsr %0" : "=m"(mxcsr));
-    mxcsr |= 0x1F80U; /* mask IM|DM|ZM|OM|UM|PM */
+    mxcsr |= 0x1F80U;   /* mask all SSE exceptions: IM|DM|ZM|OM|UM|PM */
+    mxcsr &= ~0x003FU;  /* clear pending sticky exception flags */
     __asm__ __volatile__("ldmxcsr %0" : : "m"(mxcsr));
+    __asm__ __volatile__("fnclex");  /* clear x87 exception flags */
     unsigned short fcw;
     __asm__ __volatile__("fstcw %0" : "=m"(fcw));
-    fcw |= 0x003FU; /* mask all x87 exceptions */
+    fcw |= 0x003FU;     /* mask all x87 exceptions */
     __asm__ __volatile__("fldcw %0" : : "m"(fcw));
 }
 
