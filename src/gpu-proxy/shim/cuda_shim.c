@@ -61,6 +61,7 @@ static inline void mask_fpe_exceptions(void)
  * Returning 0 means "no exceptions were previously enabled" (correct). */
 int feenableexcept(int excepts)
 {
+    fprintf(stderr, "[cudart-shim] feenableexcept(%d) intercepted — suppressed\n", excepts);
     (void)excepts;
     return 0;
 }
