@@ -31,6 +31,21 @@
 
 #include "../proto/gpu_proxy_proto.h"
 
+/* Mask x87 and SSE FPE exceptions in the calling thread's MXCSR/FCW.
+ * PyTorch sets MXCSR directly via inline asm; we re-mask after every
+ * proxied GEMM call to keep the calling thread safe for CPU sampling. */
+static inline void mask_fpe_exceptions(void)
+{
+    unsigned int mxcsr;
+    __asm__ __volatile__("stmxcsr %0" : "=m"(mxcsr));
+    mxcsr |= 0x1F80U; /* mask IM|DM|ZM|OM|UM|PM */
+    __asm__ __volatile__("ldmxcsr %0" : : "m"(mxcsr));
+    unsigned short fcw;
+    __asm__ __volatile__("fstcw %0" : "=m"(fcw));
+    fcw |= 0x003FU; /* mask all x87 exceptions */
+    __asm__ __volatile__("fldcw %0" : : "m"(fcw));
+}
+
 /* ----------------------------------------------------------------
  * Type aliases
  * ---------------------------------------------------------------- */
@@ -234,6 +249,8 @@ cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t h, int ta, int tb,
 
     int err = rpc(GPU_CMD_CUBLAS_GEMM_STRIDED,
                   &req, sizeof(req), NULL, 0, NULL);
+    
+    mask_fpe_exceptions();
     return err ? CUBLAS_STATUS_EXECUTION_FAILED : CUBLAS_STATUS_SUCCESS;
 }
 
