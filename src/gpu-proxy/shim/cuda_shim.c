@@ -995,6 +995,7 @@ cudaError_t cudaMemcpy(void *dst, const void *src, size_t count,
             if (err != cudaSuccess) return err;
             offset += chunk;
         }
+        mask_fpe_exceptions();
         return cudaSuccess;
     }
 
@@ -1064,7 +1065,9 @@ cudaError_t cudaMemGetInfo(size_t *free, size_t *total)
 
 cudaError_t cudaDeviceSynchronize(void)
 {
-    return rpc_call(GPU_CMD_DEVICE_SYNCHRONIZE, NULL, 0, NULL, 0, NULL);
+    cudaError_t err = rpc_call(GPU_CMD_DEVICE_SYNCHRONIZE, NULL, 0, NULL, 0, NULL);
+    mask_fpe_exceptions();
+    return err;
 }
 
 /* ================================================================
@@ -1271,7 +1274,9 @@ cudaError_t cudaStreamSynchronize(cudaStream_t stream)
     GpuStreamSynchronizeRequest req = {
         .stream_handle = (uint64_t)(uintptr_t)stream,
     };
-    return rpc_call(GPU_CMD_STREAM_SYNCHRONIZE, &req, sizeof(req), NULL, 0, NULL);
+    cudaError_t err = rpc_call(GPU_CMD_STREAM_SYNCHRONIZE, &req, sizeof(req), NULL, 0, NULL);
+    mask_fpe_exceptions();
+    return err;
 }
 
 /* ================================================================
