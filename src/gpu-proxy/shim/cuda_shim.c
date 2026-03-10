@@ -59,7 +59,45 @@ static inline void mask_fpe_exceptions(void)
 
 static void sigfpe_handler(int sig, siginfo_t *si, void *ctx)
 {
-    (void)sig; (void)si; (void)ctx;
+    (void)sig; (void)ctx;
+    /* async-signal-safe: write() only, no malloc/fprintf */
+    static volatile int count = 0;
+    int n = __atomic_add_fetch(&count, 1, __ATOMIC_SEQ_CST);
+
+    /* Log FPE code so we know what triggered it */
+    const char *reason = "unknown";
+    if (si) {
+        switch (si->si_code) {
+            case FPE_INTDIV: reason = "integer divide by zero"; break;
+            case FPE_INTOVF: reason = "integer overflow";       break;
+            case FPE_FLTDIV: reason = "FP divide by zero";      break;
+            case FPE_FLTOVF: reason = "FP overflow";            break;
+            case FPE_FLTUND: reason = "FP underflow";           break;
+            case FPE_FLTRES: reason = "FP inexact result";      break;
+            case FPE_FLTINV: reason = "FP invalid operation";   break;
+            case FPE_FLTSUB: reason = "subscript out of range"; break;
+        }
+    }
+
+    /* Build and write a fixed-size diagnostic message */
+    char buf[128];
+    int len = 0;
+    /* Simple async-safe int-to-dec */
+    char nbuf[12]; int ni = 11; nbuf[ni] = '\0';
+    int tmp = n; if (tmp == 0) { nbuf[--ni] = '0'; } else { while (tmp > 0) { nbuf[--ni] = '0' + (tmp%10); tmp /= 10; } }
+    const char *nstr = nbuf + ni;
+
+    /* Compose: "[cudart-shim] SIGFPE #N: <reason>\n" */
+    const char *prefix = "[cudart-shim] SIGFPE #";
+    const char *sep    = ": ";
+    const char *suffix = "\n";
+    for (const char *p = prefix; *p; p++) buf[len++] = *p;
+    for (const char *p = nstr;   *p; p++) buf[len++] = *p;
+    for (const char *p = sep;    *p; p++) buf[len++] = *p;
+    for (const char *p = reason; *p; p++) buf[len++] = *p;
+    for (const char *p = suffix; *p; p++) buf[len++] = *p;
+    (void)write(STDERR_FILENO, buf, len);
+
     /* Mask all FPE exceptions and clear pending sticky flags.
      * Both steps are required: masking prevents re-trigger,
      * clearing sticky bits prevents the re-executed instruction
