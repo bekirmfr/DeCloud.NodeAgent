@@ -1671,6 +1671,62 @@ static CUresult cu_func_set_cache_config(CUfunction func, int config)
     return CUDA_SUCCESS;
 }
 
+/* ================================================================
+ * Occupancy query — cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags
+ *
+ * MUST be in the driver dispatch table. libcudart.so.12 resolves
+ * occupancy via cuGetProcAddress (driver API), bypassing the runtime
+ * shim LD_PRELOAD entirely. Without this entry, cuGetProcAddress
+ * returns generic_not_supported_stub → numBlocks stays 0 →
+ * mbtopk::get_items_per_thread divides by zero → SIGFPE (Bug 17).
+ *
+ * If CUfunction is one we issued (in driver function table):
+ *   → RPC to daemon for real occupancy from physical GPU
+ * Otherwise (bundled libcudart with empty module table):
+ *   → safe fallback of 2 (prevents INTDIV, doesn't affect correctness)
+ * ================================================================ */
+static CUresult cu_occupancy_max_blocks_with_flags(
+    int *numBlocks, CUfunction func, int blockSize,
+    size_t dynamicShmem, unsigned int flags)
+{
+    if (!numBlocks) return CUDA_ERROR_INVALID_VALUE;
+
+    uint64_t handle = (uint64_t)(uintptr_t)func;
+    DriverFunctionSlot *fs = find_driver_function(handle);
+
+    if (fs) {
+        GpuOccupancyMaxBlocksRequest req = {
+            .host_func_ptr   = handle,
+            .blockSize       = blockSize,
+            .dynamicSMemSize = (uint64_t)dynamicShmem,
+            .flags           = flags,
+        };
+        GpuOccupancyMaxBlocksResponse resp;
+        memset(&resp, 0, sizeof(resp));
+        int err = transport_rpc_call(GPU_CMD_OCCUPANCY_MAX_BLOCKS,
+                                     &req, sizeof(req), &resp, sizeof(resp), NULL);
+        if (err == 0 && resp.numBlocks > 0) {
+            TRANSPORT_LOG("cuOccupancy(0x%lx, blockSize=%d) → %d",
+                          (unsigned long)handle, blockSize, resp.numBlocks);
+            *numBlocks = resp.numBlocks;
+            return CUDA_SUCCESS;
+        }
+    }
+
+    /* Safe fallback: unknown CUfunction or RPC failure.
+     * numBlocks=2 prevents INTDIV in mbtopk::get_items_per_thread. */
+    TRANSPORT_LOG("cuOccupancy(0x%lx, blockSize=%d) → fallback=2",
+                  (unsigned long)handle, blockSize);
+    *numBlocks = 2;
+    return CUDA_SUCCESS;
+}
+
+static CUresult cu_occupancy_max_blocks(
+    int *numBlocks, CUfunction func, int blockSize, size_t dynamicShmem)
+{
+    return cu_occupancy_max_blocks_with_flags(numBlocks, func, blockSize, dynamicShmem, 0);
+}
+
 static CUresult cu_module_get_global(CUdeviceptr *dptr, size_t *bytes,
                                       CUmodule module, const char *name)
 {
@@ -1801,6 +1857,14 @@ static const DriverDispatchEntry g_driver_dispatch[] = {
     { "cuFuncGetAttribute",               (void *)cu_func_get_attribute },
     { "cuFuncSetAttribute",               (void *)cu_func_set_attribute },
     { "cuFuncSetCacheConfig",             (void *)cu_func_set_cache_config },
+
+    /* ---- Occupancy queries ---- */
+    { "cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags",
+                                          (void *)cu_occupancy_max_blocks_with_flags },
+    { "cuOccupancyMaxActiveBlocksPerMultiprocessor",
+                                          (void *)cu_occupancy_max_blocks },
+    { "cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags_ptsz",
+                                          (void *)cu_occupancy_max_blocks_with_flags },
 
     /* ---- Library API stubs (CUDA 12.0+) ---- */
     { "cuLibraryGetModule",               (void *)cu_library_get_module },
