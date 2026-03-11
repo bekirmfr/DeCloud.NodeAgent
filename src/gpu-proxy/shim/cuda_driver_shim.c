@@ -1977,3 +1977,37 @@ static void driver_shim_cleanup(void)
 {
     transport_disconnect();
 }
+
+/* ================================================================
+ * Direct exported symbols for cuOccupancy* (Bug 17b fix)
+ *
+ * libtorch_cuda.so links libcudart.so.12 as NEEDED and resolves
+ * cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags via PLT
+ * (direct symbol lookup), NOT via cuGetProcAddress. The static
+ * cu_occupancy_max_blocks_with_flags functions above are invisible
+ * to the PLT — they only appear in our cuGetProcAddress dispatch
+ * table. Without these exported wrappers, the PLT falls to
+ * generic_not_supported_stub → numBlocks stays 0 →
+ * mbtopk::get_items_per_thread INTDIV → SIGFPE.
+ * ================================================================ */
+CUresult cuOccupancyMaxActiveBlocksPerMultiprocessor(
+    int *numBlocks, CUfunction func, int blockSize, size_t dynamicShmem)
+{
+    return cu_occupancy_max_blocks(numBlocks, func, blockSize, dynamicShmem);
+}
+
+CUresult cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags(
+    int *numBlocks, CUfunction func, int blockSize,
+    size_t dynamicShmem, unsigned int flags)
+{
+    return cu_occupancy_max_blocks_with_flags(
+        numBlocks, func, blockSize, dynamicShmem, flags);
+}
+
+CUresult cuOccupancyMaxActiveBlocksPerMultiprocessorWithFlags_ptsz(
+    int *numBlocks, CUfunction func, int blockSize,
+    size_t dynamicShmem, unsigned int flags)
+{
+    return cu_occupancy_max_blocks_with_flags(
+        numBlocks, func, blockSize, dynamicShmem, flags);
+}
