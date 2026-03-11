@@ -59,45 +59,7 @@ static inline void mask_fpe_exceptions(void)
 
 static void sigfpe_handler(int sig, siginfo_t *si, void *ctx)
 {
-    (void)sig; (void)ctx;
-    /* async-signal-safe: write() only, no malloc/fprintf */
-    static volatile int count = 0;
-    int n = __atomic_add_fetch(&count, 1, __ATOMIC_SEQ_CST);
-
-    /* Log FPE code so we know what triggered it */
-    const char *reason = "unknown";
-    if (si) {
-        switch (si->si_code) {
-            case FPE_INTDIV: reason = "integer divide by zero"; break;
-            case FPE_INTOVF: reason = "integer overflow";       break;
-            case FPE_FLTDIV: reason = "FP divide by zero";      break;
-            case FPE_FLTOVF: reason = "FP overflow";            break;
-            case FPE_FLTUND: reason = "FP underflow";           break;
-            case FPE_FLTRES: reason = "FP inexact result";      break;
-            case FPE_FLTINV: reason = "FP invalid operation";   break;
-            case FPE_FLTSUB: reason = "subscript out of range"; break;
-        }
-    }
-
-    /* Build and write a fixed-size diagnostic message */
-    char buf[128];
-    int len = 0;
-    /* Simple async-safe int-to-dec */
-    char nbuf[12]; int ni = 11; nbuf[ni] = '\0';
-    int tmp = n; if (tmp == 0) { nbuf[--ni] = '0'; } else { while (tmp > 0) { nbuf[--ni] = '0' + (tmp%10); tmp /= 10; } }
-    const char *nstr = nbuf + ni;
-
-    /* Compose: "[cudart-shim] SIGFPE #N: <reason>\n" */
-    const char *prefix = "[cudart-shim] SIGFPE #";
-    const char *sep    = ": ";
-    const char *suffix = "\n";
-    for (const char *p = prefix; *p; p++) buf[len++] = *p;
-    for (const char *p = nstr;   *p; p++) buf[len++] = *p;
-    for (const char *p = sep;    *p; p++) buf[len++] = *p;
-    for (const char *p = reason; *p; p++) buf[len++] = *p;
-    for (const char *p = suffix; *p; p++) buf[len++] = *p;
-    (void)write(STDERR_FILENO, buf, len);
-
+    (void)sig; (void)si; (void)ctx;
     /* Mask all FPE exceptions and clear pending sticky flags.
      * Both steps are required: masking prevents re-trigger,
      * clearing sticky bits prevents the re-executed instruction
@@ -162,13 +124,11 @@ static void shim_init(void)
     }
 
     mask_fpe_exceptions();
-
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_sigaction = sigfpe_handler;
-    sa.sa_flags = SA_SIGINFO | SA_RESTART;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGFPE, &sa, NULL);
+    /* NOTE: We intentionally do NOT install a SIGFPE handler here.
+     * FPE_INTDIV (integer divide by zero from idiv) cannot be masked via
+     * MXCSR — it always re-triggers after the handler returns, causing an
+     * infinite signal loop. FPE bugs must be fixed at source (see device
+     * property safety clamps in cudaGetDeviceProperties). */
 }
 
 #define SHIM_LOG(fmt, ...) \
@@ -837,6 +797,29 @@ cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop, int device)
         *(int *)(raw + 600) = 1;                            /* managedMemory */
         *(int *)(raw + 648) = 65536;                        /* reservedSharedMemPerBlock */
         *(int *)(raw + 720) = 1024;                         /* maxBlocksPerMultiProcessor */
+
+        /* Safety clamps: mbtopk::launch divides by (multiProcessorCount *
+         * maxThreadsPerMultiProcessor). If either is 0 → integer SIGFPE.
+         * Clamp to safe minimums so PyTorch can compute a valid thread count.
+         * Log any zero so we can fix the root cause. */
+        int *sms_ptr    = (int *)(raw + 388);
+        int *mptmp_ptr  = (int *)(raw + 624);
+        if (*sms_ptr == 0) {
+            fprintf(stderr, "[cudart-shim] WARNING: multiProcessorCount=0 from daemon — clamping to 1\n");
+            *sms_ptr = 1;
+        }
+        if (*mptmp_ptr == 0) {
+            /* Derive from maxThreadsPerBlock (offset 320) as a conservative fallback */
+            int max_tpb = *(int *)(raw + 320);
+            int fallback = (max_tpb > 0) ? max_tpb : 1024;
+            fprintf(stderr, "[cudart-shim] WARNING: maxThreadsPerMultiProcessor=0 from daemon — clamping to %d\n", fallback);
+            *mptmp_ptr = fallback;
+        }
+
+        SHIM_LOG("DevProps: warpSize=%d maxThreadsPerBlock=%d numSMs=%d maxThreadsPerMP=%d major=%d minor=%d",
+                 *(int *)(raw + 308), *(int *)(raw + 320),
+                 *(int *)(raw + 388), *(int *)(raw + 624),
+                 *(int *)(raw + 360), *(int *)(raw + 364));
     }
     return err;
 }
