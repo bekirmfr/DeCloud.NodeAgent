@@ -173,6 +173,16 @@ typedef struct { unsigned int x, y, z; } dim3;
  */
 struct cudaDeviceProp {
     char     name[256];
+    /* CUDA 12 ABI: real struct has uuid(16) + luid(8) + luidDeviceNodeMask(4) + pad(4) = 32 bytes
+     * between name[256] and totalGlobalMem. Without these, all raw offset writes
+     * are 32 bytes early, causing fields like maxThreadsPerMultiProcessor and
+     * maxBlocksPerMultiProcessor to land at wrong addresses and read as 0 → FPE_INTDIV.
+     * Verified by disassembling mbtopk::get_items_per_thread in libtorch_cuda.so:
+     *   0x288 = maxThreadsPerMultiProcessor, 0x2c8 = maxBlocksPerMultiProcessor */
+    unsigned char _uuid[16];
+    char          _luid[8];
+    unsigned int  _luidDeviceNodeMask;
+    unsigned int  _pad;
     size_t   totalGlobalMem;
     size_t   sharedMemPerBlock;
     int      regsPerBlock;
@@ -771,8 +781,8 @@ cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop, int device)
         *(int *)(raw + 612) = resp.memory_bus_width;
         *(int *)(raw + 616) = resp.l2_cache_size;
 
-        /* maxThreadsPerMultiprocessor — NOTE: real offset 624, NOT 368 */
-        *(int *)(raw + 624) = resp.max_threads_per_multiprocessor;
+        /* maxThreadsPerMultiprocessor — real CUDA 12 offset 0x288=648 (confirmed by libtorch_cuda.so disassembly) */
+        *(int *)(raw + 648) = resp.max_threads_per_multiprocessor;
 
         /* Shared memory limits (derived from compute capability).
          * These are per-architecture constants from NVIDIA documentation.
@@ -795,15 +805,15 @@ cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop, int device)
         /* Boolean capabilities ggml-cuda may check */
         *(int *)(raw + 576) = 1;                            /* unifiedAddressing */
         *(int *)(raw + 600) = 1;                            /* managedMemory */
-        *(int *)(raw + 648) = 65536;                        /* reservedSharedMemPerBlock */
-        *(int *)(raw + 720) = 1024;                         /* maxBlocksPerMultiProcessor */
+        *(size_t *)(raw + 720) = 65536;                     /* reservedSharedMemPerBlock — real CUDA 12 offset 720 */
+        *(int *)(raw + 712) = 1024;                         /* maxBlocksPerMultiProcessor — real CUDA 12 offset 0x2c8=712 */
 
         /* Safety clamps: mbtopk::launch divides by (multiProcessorCount *
          * maxThreadsPerMultiProcessor). If either is 0 → integer SIGFPE.
          * Clamp to safe minimums so PyTorch can compute a valid thread count.
          * Log any zero so we can fix the root cause. */
         int *sms_ptr    = (int *)(raw + 388);
-        int *mptmp_ptr  = (int *)(raw + 624);
+        int *mptmp_ptr  = (int *)(raw + 648);
         if (*sms_ptr == 0) {
             fprintf(stderr, "[cudart-shim] WARNING: multiProcessorCount=0 from daemon — clamping to 1\n");
             *sms_ptr = 1;
@@ -818,7 +828,7 @@ cudaError_t cudaGetDeviceProperties(struct cudaDeviceProp *prop, int device)
 
         SHIM_LOG("DevProps: warpSize=%d maxThreadsPerBlock=%d numSMs=%d maxThreadsPerMP=%d major=%d minor=%d",
                  *(int *)(raw + 308), *(int *)(raw + 320),
-                 *(int *)(raw + 388), *(int *)(raw + 624),
+                 *(int *)(raw + 388), *(int *)(raw + 648),
                  *(int *)(raw + 360), *(int *)(raw + 364));
     }
     return err;

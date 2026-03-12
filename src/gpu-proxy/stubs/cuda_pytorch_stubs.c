@@ -11,7 +11,7 @@
  *                               cudaDeviceGetStreamPriorityRange, + 9 more (see below)
  *
  * Symbols are exported with @@libcudart.so.12 version tags so the dynamic
- * linker resolves them correctly when this stub is first in LD_PRELOAD.
+ * linker resolves them correctly. Load AFTER libdecloud_cuda_shim.so in LD_PRELOAD.
  *
  * Discovery:
  *   Initial 16 symbols: 2026-03-06 — libtorch_cuda.so / libbitsandbytes scan
@@ -28,7 +28,11 @@
  *   /usr/local/lib/decloud-gpu-shim/libcuda_pytorch_stubs.so (9p share → VM)
  *
  * LD_PRELOAD order in /etc/decloud/gpu-proxy.env:
- *   LD_PRELOAD=libcuda_pytorch_stubs.so:libdecloud_cuda_shim.so
+ *   LD_PRELOAD=libdecloud_cuda_shim.so:libcuda_pytorch_stubs.so
+ *
+ * CRITICAL: Our shim must come FIRST so it wins symbol resolution for
+ * cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags and related calls.
+ * Stubs second — they supply only symbols our shim does NOT export.
  */
 
 #define _GNU_SOURCE

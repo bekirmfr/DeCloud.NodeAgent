@@ -1919,10 +1919,11 @@ public class LibvirtVmManager : IVmManager
             profileVars.AppendLine("      export DECLOUD_GPU_PROXY_CID=2");
         if (hasTcp)
             profileVars.AppendLine("      export DECLOUD_GPU_PROXY_HOST=192.168.122.1");
-        // PyTorch stubs must precede main shim — override cudaMallocAsync etc.
+        // Main shim must come FIRST — wins cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags.
+        // Stubs second — supply only symbols the main shim does not export.
         // Safe for all workloads: stubs are no-ops for Ollama/ggml.
         profileVars.AppendLine("      if [ -f /usr/local/lib/libdecloud_cuda_shim.so ]; then");
-        profileVars.AppendLine("        export LD_PRELOAD=/usr/local/lib/libcuda_pytorch_stubs.so:/usr/local/lib/libdecloud_cuda_shim.so");
+        profileVars.AppendLine("        export LD_PRELOAD=/usr/local/lib/libdecloud_cuda_shim.so:/usr/local/lib/libcuda_pytorch_stubs.so");
         profileVars.AppendLine("      fi");
         // Source the token from the protected env file (only for the current user's session)
         if (hasTcp)
@@ -1940,8 +1941,9 @@ public class LibvirtVmManager : IVmManager
             envFileVars.AppendLine("      DECLOUD_GPU_PROXY_HOST=192.168.122.1");
             envFileVars.AppendLine($"      DECLOUD_GPU_PROXY_TOKEN={gpuProxyToken}");
         }
-        // PyTorch stubs first — must win symbol resolution for cudaMallocAsync etc.
-        envFileVars.AppendLine("      LD_PRELOAD=/usr/local/lib/libcuda_pytorch_stubs.so:/usr/local/lib/libdecloud_cuda_shim.so");
+        // Main shim first — must win cudaOccupancy symbol resolution (Bug 17b).
+        // Stubs second — supply cudaMallocAsync etc. that our shim does not export.
+        envFileVars.AppendLine("      LD_PRELOAD=/usr/local/lib/libdecloud_cuda_shim.so:/usr/local/lib/libcuda_pytorch_stubs.so");
 
         // Application-specific env vars — read by shim constructor via config file.
         // Each template provides its own set (e.g., GGML_* for Ollama, CUDA_* for PyTorch).
