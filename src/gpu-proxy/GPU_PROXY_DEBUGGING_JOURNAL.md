@@ -1,8 +1,8 @@
 # DeCloud GPU Proxy — Debugging Journal
 
-**Date Range:** 2026-02-27 through 2026-03-06
+**Date Range:** 2026-02-27 through 2026-03-13
 **Authors:** BMA + Claude AI assistant
-**Status:** Complete — Production-ready
+**Status:** Active — PyTorch inference + training + LoRA confirmed production-ready
 
 ---
 
@@ -19,6 +19,8 @@
 | 8 | Mar 3-4 | GEMM batched D2H pointer fix, stream sync, **first successful GPU inference (22.99 tok/s)** |
 | 9 | Mar 4-5 | TCP_NODELAY in wrong branch, stale 9p binaries, install.sh sync fixes |
 | 10 | Mar 5-6 | **TCP_QUICKACK fix (0.07→436 tok/s)**, generic proxy refactor, production deployment |
+| 11 | Mar 6-13 | PyTorch CUDA 12 compatibility, Bug 17b/17c SIGFPE chain, **PyTorch inference confirmed** |
+| 12 | Mar 13 | **PyTorch full training + LoRA fine-tuning confirmed**; cublasLt debug gate |
 
 ---
 
@@ -156,3 +158,174 @@ Constructor reads `/etc/decloud/gpu-proxy.env` instead of hardcoding `GGML_*` se
 7. **Streaming upload is essential** for large fatbins. `malloc(1.5GB)` fails; `write_exact` from mmap succeeds.
 
 8. **Test incrementally.** The generic proxy refactor broke when applied all at once but succeeded when applied one step at a time with tests after each.
+---
+
+## Session 11: PyTorch CUDA 12 Compatibility (Mar 6-13) ⭐⭐
+
+### Bug 17b: `cuOccupancyMaxActiveBlocksPerMultiprocessor` Invisible to PLT
+
+**Symptom:** PyTorch / GPT-2 `torch.multinomial` → SIGFPE crash in `mbtopk::get_items_per_thread`. `objdump` and `nm -D` confirmed the function existed in the dispatch table but was `static`, giving it type `t` (local) rather than `T` (global exported).
+
+**Root cause:** `static` qualifier in `cuda_driver_shim.c` makes the function invisible to PLT symbol resolution — the dynamic linker can only bind to exported (`T`) symbols. PyTorch's `cuOccupancyMaxActiveBlocksPerMultiprocessor` call resolved to a zero-returning stub instead.
+
+**Fix in `src/gpu-proxy/shim/cuda_driver_shim.c`:**
+- Added non-static exported wrapper `cuOccupancyMaxActiveBlocksPerMultiprocessor` before the destructor block
+- Verified with `nm -D build/libcuda.so.1 | grep -i occupancy` → type `T`
+
+### Bug 17c: `maxThreadsPerMultiProcessor` at Wrong `cudaDeviceProp` Offset ⭐
+
+**Symptom:** After Bug 17b fix, SIGFPE persisted. `mbtopk::get_items_per_thread` at `0x288(%rax)` read value 0, then performed integer divide → `idiv %rcx` with rcx=0 → SIGFPE.
+
+**Root cause chain:**
+- `maxThreadsPerMultiProcessor` was being written to `raw+648` (0x288)
+- Real CUDA 12 offset for `maxThreadsPerMultiProcessor` is `raw+624` (0x270)
+- Offset 0x288 is `regsPerMultiprocessor` (should be 65536), not `maxThreadsPerMultiProcessor` (1536)
+- PyTorch's `mbtopk` kernel reads 0x288 expecting `regsPerMultiprocessor`, applies `/ 10240` trick → 6 (correct)
+- But it was reading 0 (miswritten `maxThreadsPerMultiProcessor`) → divide by zero
+
+**Fix in `src/gpu-proxy/shim/cuda_shim.c`:**
+```c
+*(int *)(raw + 624) = resp.max_threads_per_multiprocessor;  // 0x270 — correct CUDA 12 offset
+*(int *)(raw + 648) = 65536;                                // 0x288 — regsPerMultiprocessor (constant SM3.0+)
+```
+
+**Confirmed CUDA 12.1 / PyTorch 2.3.1 offset map for RTX 4060 (SM8.9):**
+
+| Offset | Field | Value |
+|--------|-------|-------|
+| 0x184 (388) | multiProcessorCount | 24 |
+| 0x270 (624) | maxThreadsPerMultiProcessor | 1536 |
+| 0x288 (648) | regsPerMultiprocessor | 65536 |
+| 0x2c8 (712) | maxBlocksPerMultiProcessor | 1024 |
+| 0x2d0 (720) | reservedSharedMemPerBlock | 65536 |
+
+**Result: PyTorch inference confirmed passing all 4 test steps** including `generate(do_sample=True, max_new_tokens=20)`.
+
+### JupyterLab Kernel GPU Access Confirmed
+
+LD_PRELOAD injected via `/etc/decloud/gpu-proxy.env` as `EnvironmentFile=` in the JupyterLab systemd unit. Kernels inherit the full proxy environment automatically — no per-notebook configuration needed.
+
+```
+CUDA available: True
+GPU: NVIDIA GeForce RTX 4060 Laptop GPU (7GB)
+GPT-2 generated text: confirmed ✅
+```
+
+---
+
+## Session 12: PyTorch Training + LoRA Confirmed (Mar 13) ⭐⭐⭐
+
+### PyTorch Full Fine-Tuning Confirmed
+
+**Test:** GPT-2 small (125M params), AdamW, batch=4, seq=128, 3 training steps.
+
+```
+step 0 OK, loss: 13.0006
+step 1 OK, loss: 11.8199
+step 2 OK, loss: 11.2646
+TRAINING OK
+```
+
+All gradient and optimizer CUDA kernels proxied correctly:
+- Autograd graph construction ✅
+- Backward pass through all 12 transformer layers ✅
+- Adam moment accumulation kernels ✅
+- Weight update kernels ✅
+- Loss decreasing monotonically ✅
+
+**No cuDNN required** — GPT-2 uses scaled dot-product attention via native CUDA kernels, not cuDNN. This means any transformer model using the same attention path works without cuDNN proxy.
+
+### PyTorch Training Benchmark (RTX 4060 Laptop GPU)
+
+```
+10 steps in 4.09s = 409ms/step
+Throughput: 1252 tokens/sec
+```
+
+**Analysis:** ~50% of bare metal (estimated 2,500-3,000 tok/s native). The gap vs inference comes from training having far more small kernel launches per step — each pays the RPC round-trip cost. In contrast, inference hot path is dominated by cublasLtMatmul RPC which is already well-optimized.
+
+### LoRA Fine-Tuning via PEFT Confirmed ⭐
+
+**Test:** GPT-2 + LoRA (r=8, `target_modules=["c_attn","c_proj"]`, 0.65% trainable params), AdamW, batch=4, seq=128, 20 steps.
+
+```
+Total params:     125,250,816
+Trainable params: 811,008  (0.65%)
+
+Steps:          20
+Batch x Seq:    4 x 128 = 512 tokens/step
+Total time:     9.86s
+ms / step:      493 ms
+Throughput:     1038 tokens/sec
+Peak VRAM:      1360 MB
+Loss (start):   12.1723
+Loss (end):     11.0411
+Loss delta:     1.1312  (OK decreasing)
+LORA BENCHMARK COMPLETE
+```
+
+**Key findings:**
+- LoRA is slightly *slower* per step than full fine-tune in proxy mode — RPC overhead dominates over fewer Adam ops
+- VRAM drops dramatically: 1,360MB vs ~3,500MB for full fine-tune — the real LoRA win
+- 1,360MB VRAM means Llama-3.2-1B LoRA (~2.5GB) and Llama-3.2-3B LoRA (~5GB) are feasible on 8GB nodes
+- Loss decreasing confirms all gradient + optimizer paths work correctly
+
+### Bug: cublasLt Unconditional `fprintf(stderr,...)` Logging
+
+**Symptom:** Every inference/training step produced hundreds of lines:
+```
+[cublasLt-stub] cublasLtMatmul: Arows=2304 Acols=768 ...
+```
+
+**Root cause:** `STUB_LOG` macro in `stubs/cublasLt_stub.c` was an unconditional `fprintf(stderr,...)`.
+
+**Fix (applied, rebuild pending for new VM deploy):**
+```c
+static int g_lt_debug = -1;
+static inline int lt_debug(void) {
+    if (g_lt_debug < 0) g_lt_debug = (getenv("DECLOUD_GPU_DEBUG") != NULL);
+    return g_lt_debug;
+}
+#define STUB_LOG(fmt, ...) \
+    do { if (lt_debug()) fprintf(stderr, "[cublasLt-stub] " fmt "\n", ##__VA_ARGS__); } while(0)
+```
+
+**Behavior after fix:** Silent in normal operation. `DECLOUD_GPU_DEBUG=1` re-enables all stub logging for debugging.
+
+---
+
+## Key Lessons Learned (Sessions 11-12)
+
+9. **CUDA 12 lazy loading bypasses `__cudaRegisterFunction` entirely.** `CUDA_MODULE_LOADING=EAGER` is mandatory for PyTorch. Without it, module registration is deferred to `__cudaInitModule` which the proxy doesn't intercept.
+
+10. **`static` functions in dispatch tables are PLT-invisible.** Any function that PyTorch resolves via the dynamic linker must be a non-static exported symbol (`T` in `nm -D`). This bit occupancy and will bite any future function added with `static`.
+
+11. **`cudaDeviceProp` offsets are CUDA-version-specific.** The struct layout changed between CUDA versions. The offset map must be verified against the actual PyTorch CUDA wheel (2.3.1+cu121 = CUDA 12.1 ABI). Wrong offsets cause silent wrong values, not crashes — making them hard to find.
+
+12. **LoRA VRAM savings are real; LoRA speed savings are not in proxy mode.** The RPC overhead dominates over fewer Adam states. Position LoRA as a VRAM efficiency tool, not a speed tool, when pitching on DeCloud.
+
+13. **Training support follows directly from good inference support.** Once autograd backward + optimizer steps worked, training "just worked" — no new protocol commands needed. The proxy is genuinely general-purpose.
+
+---
+
+## Production Status (2026-03-13)
+
+| Workload | Status | Performance |
+|----------|--------|-------------|
+| Ollama / ggml inference | ✅ Production | 436 tok/s prompt, 13-21 tok/s gen |
+| PyTorch inference | ✅ Confirmed | All ops including sampling |
+| PyTorch full fine-tuning | ✅ Confirmed | 1,252 tok/s, 409ms/step |
+| PyTorch LoRA (PEFT) | ✅ Confirmed | 1,038 tok/s, 493ms/step, 1,360MB VRAM |
+| JupyterLab kernel | ✅ Confirmed | Via systemd EnvironmentFile |
+| Stable Diffusion Forge | ⚠️ Partial | UI+model OK; cuBLAS backward pending |
+
+## Pending Items
+
+| Item | Priority | Notes |
+|------|----------|-------|
+| cublasLt `DECLOUD_GPU_DEBUG` gate rebuild + deploy | High | Fix written, needs `make all-shims-compat` + new VM |
+| Stable Diffusion WebUI Forge — cuBLAS backward | High | Next debug target after cublasLt fix deployed |
+| `cuGetExportTable` stub | Medium | Unblocks cuBLAS init path, estimated 1-2 days |
+| Llama-3.2-1B LoRA benchmark | Medium | Validates real-world fine-tuning target |
+| `.orig` guard content-check fix (Bug 9) | Low | Prevents re-replacement on redeploy |
+| GPU_PROXY_DEBUGGING_JOURNAL.md sync | ✅ Done | This update |

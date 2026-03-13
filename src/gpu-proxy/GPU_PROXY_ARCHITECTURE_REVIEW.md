@@ -1,8 +1,8 @@
 # DeCloud GPU Proxy — Architecture Review
 
-**Date Range:** 2026-02-27 through 2026-03-06
+**Date Range:** 2026-02-27 through 2026-03-13
 **Authors:** BMA + Claude AI assistant
-**Status:** Production-ready — Generic proxy with template-driven configuration
+**Status:** Production-ready — Generic proxy with template-driven configuration; PyTorch inference + training + LoRA confirmed
 
 ---
 
@@ -14,6 +14,11 @@ Over ten debugging sessions spanning three weeks, we built a complete CUDA virtu
 - Prompt eval: **436 tok/s** (warm), **188 tok/s** (cold)
 - Generation: **13-21 tok/s**
 - 100% GPU offload, zero manual configuration
+
+**PyTorch performance (GPT-2, RTX 4060 Laptop GPU, confirmed 2026-03-13):**
+- Full fine-tuning (AdamW, 125M params): **1,252 tok/s**, 409ms/step
+- LoRA fine-tuning (PEFT r=8, 811K params): **1,038 tok/s**, 493ms/step, **1,360MB peak VRAM**
+- Inference, backward pass, optimizer step, and LoRA all confirmed working end-to-end
 
 The proxy is now **fully generic** — no hardcoded application (Ollama/ggml) or vendor (NVIDIA RTX 4060) dependencies in the C code. Application-specific configuration is driven by template environment variables written to `/etc/decloud/gpu-proxy.env`.
 
@@ -143,12 +148,20 @@ install.sh handles: Docker compat build (glibc 2.31), native daemon build, stale
 | Prompt evaluation | ✅ | 188-436 tok/s |
 | 1.56GB streaming module upload | ✅ | Zero-copy from mmap |
 | cuBLAS GEMM proxy | ✅ | GQA attention via RPC |
+| cublasLtMatmul proxy | ✅ | PyTorch linear/attention GEMMs |
 | Real kernel attributes + occupancy | ✅ | Cached, with fallback |
 | Configurable graph stubs | ✅ | `DECLOUD_GPU_GRAPH_NOOP` |
 | TCP_NODELAY + TCP_QUICKACK | ✅ | Sub-ms RPC latency |
 | Template-driven env vars | ✅ | Generic proxy |
 | Zero-touch VM deployment | ✅ | Cloud-init automated |
-| Virtual memory (cuMem*) | Scaffolded | Off by default, for PyTorch/vLLM |
+| PyTorch inference (forward pass) | ✅ | Confirmed 2026-03-13 |
+| PyTorch training (backward + optimizer) | ✅ | Confirmed 2026-03-13 |
+| LoRA fine-tuning via PEFT | ✅ | Confirmed 2026-03-13; 1,360MB VRAM |
+| JupyterLab kernel GPU access | ✅ | Via systemd EnvironmentFile |
+| CUDA 12.1 ABI offsets (SM8.9) | ✅ | Verified offset map committed |
+| Virtual memory (cuMem*) | ✅ Enabled | `DECLOUD_GPU_VMEM_PROXY=1` for PyTorch |
+| cublasLt debug gate | ✅ Fixed | `DECLOUD_GPU_DEBUG` gate (rebuild pending deploy) |
+| Stable Diffusion WebUI Forge | ⚠️ Partial | UI+model load OK; cuBLAS backward pending |
 | cuDNN/cuFFT/cuSPARSE proxy | Deferred | For scientific computing |
 
 ---
