@@ -87,29 +87,124 @@ static int g_vmem_proxy = 0;
 static int g_driver_graph_noop = 1;
 
 /* ================================================================
- * cuGetExportTable stub table
+ * cuGetExportTable — per-GUID instrumented tables (Bug 19)
  *
- * cuBLAS and cuDNN call cuGetExportTable during init to obtain
- * internal driver function tables identified by 16-byte GUIDs.
- * The returned pointer is an array of function pointers.
+ * cuBLAS and cuDNN call cuGetExportTable to obtain internal driver
+ * function tables by 16-byte GUID.  Each table entry is a function
+ * pointer called as:  fn(CUcontext, void **out, void *arg2, void *arg3)
  *
- * Previous behaviour (CUDA_ERROR_NOT_FOUND):
- *   cuBLAS init aborts → torch.nn.functional.linear crashes.
+ * Phase 1 (current): per-index logging stubs for the two known cuDNN
+ * GUIDs so we can observe exactly which indices are called and with
+ * what args, then implement targeted responses.
  *
- * Fixed behaviour:
- *   Return a static table of 128 no-op entries (all return
- *   CUDA_SUCCESS).  128 × 8 bytes = 1 KB covers the largest known
- *   NVIDIA internal table; no NULL dereference at any offset.
+ * Known GUIDs (CUDA 12 / cuDNN 8.x):
+ *   6bd5fb6c-... NV_CUDA_DEVICE_INTERNAL  context/device query table
+ *   a094798c-... NV_CUDA_MEM_INTERNAL     workspace/memory table
  *
- * GCC range initialiser ([0 ... N-1] = fn) fills the table at
- * link time — no runtime init, no re-entrancy risk.
+ * All other GUIDs → g_export_table_generic (128 × CUDA_SUCCESS noops)
  * ================================================================ */
-typedef CUresult (*export_fn_t)(void);
-static CUresult export_table_noop(void) { return CUDA_SUCCESS; }
+ 
+/* Export fn signature: (context, output_ptr, arg2, arg3).
+ * Four void* covers the widest calling convention without UB. */
+typedef CUresult (*export_fn_t)(void *, void *, void *, void *);
+ 
+/* Generic noop — returns SUCCESS, writes nothing */
+static CUresult export_table_noop(void *a0, void *a1, void *a2, void *a3)
+{
+    (void)a0; (void)a1; (void)a2; (void)a3;
+    return CUDA_SUCCESS;
+}
+ 
+/* Macro: one logging stub per GUID-tag × index */
+#define MAKE_EXPORT_STUB(gtag, idx)                                     \
+static CUresult export_##gtag##_##idx(                                  \
+        void *a0, void *a1, void *a2, void *a3)                         \
+{                                                                        \
+    TRANSPORT_LOG("export_call: guid=" #gtag " index=" #idx             \
+                  " a0=%p a1=%p a2=%p a3=%p", a0, a1, a2, a3);         \
+    (void)a0; (void)a1; (void)a2; (void)a3;                            \
+    return CUDA_SUCCESS;                                                 \
+}
+ 
+/* 32 instrumented stubs for GUID 6bd5 (NV_CUDA_DEVICE_INTERNAL) */
+MAKE_EXPORT_STUB(6bd5, 0)  MAKE_EXPORT_STUB(6bd5, 1)
+MAKE_EXPORT_STUB(6bd5, 2)  MAKE_EXPORT_STUB(6bd5, 3)
+MAKE_EXPORT_STUB(6bd5, 4)  MAKE_EXPORT_STUB(6bd5, 5)
+MAKE_EXPORT_STUB(6bd5, 6)  MAKE_EXPORT_STUB(6bd5, 7)
+MAKE_EXPORT_STUB(6bd5, 8)  MAKE_EXPORT_STUB(6bd5, 9)
+MAKE_EXPORT_STUB(6bd5,10)  MAKE_EXPORT_STUB(6bd5,11)
+MAKE_EXPORT_STUB(6bd5,12)  MAKE_EXPORT_STUB(6bd5,13)
+MAKE_EXPORT_STUB(6bd5,14)  MAKE_EXPORT_STUB(6bd5,15)
+MAKE_EXPORT_STUB(6bd5,16)  MAKE_EXPORT_STUB(6bd5,17)
+MAKE_EXPORT_STUB(6bd5,18)  MAKE_EXPORT_STUB(6bd5,19)
+MAKE_EXPORT_STUB(6bd5,20)  MAKE_EXPORT_STUB(6bd5,21)
+MAKE_EXPORT_STUB(6bd5,22)  MAKE_EXPORT_STUB(6bd5,23)
+MAKE_EXPORT_STUB(6bd5,24)  MAKE_EXPORT_STUB(6bd5,25)
+MAKE_EXPORT_STUB(6bd5,26)  MAKE_EXPORT_STUB(6bd5,27)
+MAKE_EXPORT_STUB(6bd5,28)  MAKE_EXPORT_STUB(6bd5,29)
+MAKE_EXPORT_STUB(6bd5,30)  MAKE_EXPORT_STUB(6bd5,31)
+ 
+/* 32 instrumented stubs for GUID a094 (NV_CUDA_MEM_INTERNAL) */
+MAKE_EXPORT_STUB(a094, 0)  MAKE_EXPORT_STUB(a094, 1)
+MAKE_EXPORT_STUB(a094, 2)  MAKE_EXPORT_STUB(a094, 3)
+MAKE_EXPORT_STUB(a094, 4)  MAKE_EXPORT_STUB(a094, 5)
+MAKE_EXPORT_STUB(a094, 6)  MAKE_EXPORT_STUB(a094, 7)
+MAKE_EXPORT_STUB(a094, 8)  MAKE_EXPORT_STUB(a094, 9)
+MAKE_EXPORT_STUB(a094,10)  MAKE_EXPORT_STUB(a094,11)
+MAKE_EXPORT_STUB(a094,12)  MAKE_EXPORT_STUB(a094,13)
+MAKE_EXPORT_STUB(a094,14)  MAKE_EXPORT_STUB(a094,15)
+MAKE_EXPORT_STUB(a094,16)  MAKE_EXPORT_STUB(a094,17)
+MAKE_EXPORT_STUB(a094,18)  MAKE_EXPORT_STUB(a094,19)
+MAKE_EXPORT_STUB(a094,20)  MAKE_EXPORT_STUB(a094,21)
+MAKE_EXPORT_STUB(a094,22)  MAKE_EXPORT_STUB(a094,23)
+MAKE_EXPORT_STUB(a094,24)  MAKE_EXPORT_STUB(a094,25)
+MAKE_EXPORT_STUB(a094,26)  MAKE_EXPORT_STUB(a094,27)
+MAKE_EXPORT_STUB(a094,28)  MAKE_EXPORT_STUB(a094,29)
+MAKE_EXPORT_STUB(a094,30)  MAKE_EXPORT_STUB(a094,31)
+ 
+/* 96 generic noops for indices 32-127 (shared suffix for both tables) */
+#define _N export_table_noop
+#define NOOP96 \
+    _N,_N,_N,_N, _N,_N,_N,_N, _N,_N,_N,_N, _N,_N,_N,_N, \
+    _N,_N,_N,_N, _N,_N,_N,_N, _N,_N,_N,_N, _N,_N,_N,_N, \
+    _N,_N,_N,_N, _N,_N,_N,_N, _N,_N,_N,_N, _N,_N,_N,_N, \
+    _N,_N,_N,_N, _N,_N,_N,_N, _N,_N,_N,_N, _N,_N,_N,_N, \
+    _N,_N,_N,_N, _N,_N,_N,_N, _N,_N,_N,_N, _N,_N,_N,_N, \
+    _N,_N,_N,_N, _N,_N,_N,_N, _N,_N,_N,_N, _N,_N,_N,_N
+/* 96 = 6 rows × 16 entries */
+ 
 #define EXPORT_TABLE_ENTRIES 128
-static export_fn_t g_export_table[EXPORT_TABLE_ENTRIES] = {
-    [0 ... (EXPORT_TABLE_ENTRIES - 1)] = export_table_noop
+ 
+static export_fn_t g_export_table_6bd5[EXPORT_TABLE_ENTRIES] = {
+    export_6bd5_0,  export_6bd5_1,  export_6bd5_2,  export_6bd5_3,
+    export_6bd5_4,  export_6bd5_5,  export_6bd5_6,  export_6bd5_7,
+    export_6bd5_8,  export_6bd5_9,  export_6bd5_10, export_6bd5_11,
+    export_6bd5_12, export_6bd5_13, export_6bd5_14, export_6bd5_15,
+    export_6bd5_16, export_6bd5_17, export_6bd5_18, export_6bd5_19,
+    export_6bd5_20, export_6bd5_21, export_6bd5_22, export_6bd5_23,
+    export_6bd5_24, export_6bd5_25, export_6bd5_26, export_6bd5_27,
+    export_6bd5_28, export_6bd5_29, export_6bd5_30, export_6bd5_31,
+    NOOP96
 };
+ 
+static export_fn_t g_export_table_a094[EXPORT_TABLE_ENTRIES] = {
+    export_a094_0,  export_a094_1,  export_a094_2,  export_a094_3,
+    export_a094_4,  export_a094_5,  export_a094_6,  export_a094_7,
+    export_a094_8,  export_a094_9,  export_a094_10, export_a094_11,
+    export_a094_12, export_a094_13, export_a094_14, export_a094_15,
+    export_a094_16, export_a094_17, export_a094_18, export_a094_19,
+    export_a094_20, export_a094_21, export_a094_22, export_a094_23,
+    export_a094_24, export_a094_25, export_a094_26, export_a094_27,
+    export_a094_28, export_a094_29, export_a094_30, export_a094_31,
+    NOOP96
+};
+ 
+/* Fallback for all other GUIDs */
+#define NOOP128 NOOP96, _N,_N,_N,_N, _N,_N,_N,_N, _N,_N,_N,_N, \
+                        _N,_N,_N,_N, _N,_N,_N,_N, _N,_N,_N,_N, \
+                        _N,_N,_N,_N, _N,_N,_N,_N
+static export_fn_t g_export_table_generic[EXPORT_TABLE_ENTRIES] = { NOOP128 };
+#undef _N
 
 static CUresult graph_success_stub(void) { return CUDA_SUCCESS; }
 
@@ -710,33 +805,50 @@ CUresult cuEventElapsedTime(float *pMilliseconds, CUevent hStart,
     return CUDA_SUCCESS;
 }
 
-/* cuGetExportTable — cuBLAS/cuDNN use this for internal function tables.
+/* cuGetExportTable — dispatch by GUID to per-index instrumented table.
  *
- * Returns a static 128-entry stub table (all entries → export_table_noop
- * returning CUDA_SUCCESS).  This allows cuBLAS and cuDNN to complete their
- * init sequence without crashing.  Workspace / memory requests that come
- * through these tables fall back to standard cudaMalloc (which is proxied).
+ * With DECLOUD_GPU_DEBUG=1, each actual call into a table entry logs:
+ *   export_call: guid=6bd5 index=N a0=<ctx> a1=<out_ptr> a2=... a3=...
  *
- * Enable DECLOUD_GPU_DEBUG=1 to log every GUID requested — useful for
- * identifying which specific tables are in use and adding targeted
- * implementations in future iterations.
+ * Use the index + arg values to implement targeted responses for
+ * whichever entries cuDNN actually needs (Bug 19 phase 2).
  */
 CUresult cuGetExportTable(const void **ppExportTable, const void *pExportTableId)
 {
     if (!ppExportTable) return CUDA_ERROR_INVALID_VALUE;
-
-    if (g_debug_log && pExportTableId) {
+ 
+    /* Inline GUID bytes for memcmp dispatch — avoids a struct dependency */
+    static const uint8_t guid_6bd5[16] = {
+        0x6b,0xd5,0xfb,0x6c, 0x5b,0xf4, 0xe7,0x4a,
+        0x89,0x87, 0xd9,0x39,0x12,0xfd,0x9d,0xf9
+    };
+    static const uint8_t guid_a094[16] = {
+        0x8c,0x79,0x94,0xa0, 0x74,0x2e, 0x74,0x2e,
+        0x93,0xf2, 0x08,0x00,0x20,0x0c,0x0a,0x66
+    };
+ 
+    export_fn_t *table = g_export_table_generic;
+ 
+    if (pExportTableId) {
         const uint8_t *b = (const uint8_t *)pExportTableId;
-        TRANSPORT_LOG("cuGetExportTable {"
-                      "%02x%02x%02x%02x-%02x%02x-%02x%02x"
-                      "-%02x%02x-%02x%02x%02x%02x%02x%02x}",
-                      b[0], b[1], b[2],  b[3],
-                      b[4], b[5], b[6],  b[7],
-                      b[8], b[9], b[10], b[11],
-                      b[12],b[13],b[14], b[15]);
+ 
+        if (g_debug_log) {
+            TRANSPORT_LOG("cuGetExportTable {"
+                          "%02x%02x%02x%02x-%02x%02x-%02x%02x"
+                          "-%02x%02x-%02x%02x%02x%02x%02x%02x}",
+                          b[0], b[1], b[2],  b[3],
+                          b[4], b[5], b[6],  b[7],
+                          b[8], b[9], b[10], b[11],
+                          b[12],b[13],b[14], b[15]);
+        }
+ 
+        if (memcmp(b, guid_6bd5, 16) == 0)
+            table = g_export_table_6bd5;
+        else if (memcmp(b, guid_a094, 16) == 0)
+            table = g_export_table_a094;
     }
-
-    *ppExportTable = (const void *)g_export_table;
+ 
+    *ppExportTable = (const void *)table;
     return CUDA_SUCCESS;
 }
 
