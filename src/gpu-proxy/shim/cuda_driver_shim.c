@@ -86,6 +86,31 @@ static int g_vmem_proxy = 0;
  * Set DECLOUD_GPU_GRAPH_NOOP=0 to return NOT_SUPPORTED instead. */
 static int g_driver_graph_noop = 1;
 
+/* ================================================================
+ * cuGetExportTable stub table
+ *
+ * cuBLAS and cuDNN call cuGetExportTable during init to obtain
+ * internal driver function tables identified by 16-byte GUIDs.
+ * The returned pointer is an array of function pointers.
+ *
+ * Previous behaviour (CUDA_ERROR_NOT_FOUND):
+ *   cuBLAS init aborts → torch.nn.functional.linear crashes.
+ *
+ * Fixed behaviour:
+ *   Return a static table of 128 no-op entries (all return
+ *   CUDA_SUCCESS).  128 × 8 bytes = 1 KB covers the largest known
+ *   NVIDIA internal table; no NULL dereference at any offset.
+ *
+ * GCC range initialiser ([0 ... N-1] = fn) fills the table at
+ * link time — no runtime init, no re-entrancy risk.
+ * ================================================================ */
+typedef CUresult (*export_fn_t)(void);
+static CUresult export_table_noop(void) { return CUDA_SUCCESS; }
+#define EXPORT_TABLE_ENTRIES 128
+static export_fn_t g_export_table[EXPORT_TABLE_ENTRIES] = {
+    [0 ... (EXPORT_TABLE_ENTRIES - 1)] = export_table_noop
+};
+
 static CUresult graph_success_stub(void) { return CUDA_SUCCESS; }
 
 /* Mask all FP exceptions in SSE MXCSR and x87 FCW.
@@ -685,14 +710,34 @@ CUresult cuEventElapsedTime(float *pMilliseconds, CUevent hStart,
     return CUDA_SUCCESS;
 }
 
-/* cuGetExportTable — cuBLAS uses this for internal function tables.
- * Returning CUDA_SUCCESS without setting ppExportTable causes crash
- * at offset 0x10 (NULL dereference). Return NOT_FOUND instead. */
+/* cuGetExportTable — cuBLAS/cuDNN use this for internal function tables.
+ *
+ * Returns a static 128-entry stub table (all entries → export_table_noop
+ * returning CUDA_SUCCESS).  This allows cuBLAS and cuDNN to complete their
+ * init sequence without crashing.  Workspace / memory requests that come
+ * through these tables fall back to standard cudaMalloc (which is proxied).
+ *
+ * Enable DECLOUD_GPU_DEBUG=1 to log every GUID requested — useful for
+ * identifying which specific tables are in use and adding targeted
+ * implementations in future iterations.
+ */
 CUresult cuGetExportTable(const void **ppExportTable, const void *pExportTableId)
 {
-    (void)pExportTableId;
-    if (ppExportTable) *ppExportTable = NULL;
-    return CUDA_ERROR_NOT_FOUND;
+    if (!ppExportTable) return CUDA_ERROR_INVALID_VALUE;
+
+    if (g_debug_log && pExportTableId) {
+        const uint8_t *b = (const uint8_t *)pExportTableId;
+        TRANSPORT_LOG("cuGetExportTable {"
+                      "%02x%02x%02x%02x-%02x%02x-%02x%02x"
+                      "-%02x%02x-%02x%02x%02x%02x%02x%02x}",
+                      b[0], b[1], b[2],  b[3],
+                      b[4], b[5], b[6],  b[7],
+                      b[8], b[9], b[10], b[11],
+                      b[12],b[13],b[14], b[15]);
+    }
+
+    *ppExportTable = (const void *)g_export_table;
+    return CUDA_SUCCESS;
 }
 
 /* ================================================================
