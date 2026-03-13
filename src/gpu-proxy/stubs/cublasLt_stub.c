@@ -122,8 +122,13 @@ typedef struct {
     int32_t  reserved[4];          /*  16 bytes */
 } cublasLtMatmulHeuristicResult_t; /* 96 bytes total */
 
+static int g_lt_debug = -1;
+static inline int lt_debug(void) {
+    if (g_lt_debug < 0) g_lt_debug = (getenv("DECLOUD_GPU_DEBUG") != NULL);
+    return g_lt_debug;
+}
 #define STUB_LOG(fmt, ...) \
-    fprintf(stderr, "[cublasLt-stub] " fmt "\n", ##__VA_ARGS__)
+    do { if (lt_debug()) fprintf(stderr, "[cublasLt-stub] " fmt "\n", ##__VA_ARGS__); } while(0)
 
 /* ================================================================
  * RPC bridge — resolves decloud_rpc_call from cuda_shim.so at runtime
