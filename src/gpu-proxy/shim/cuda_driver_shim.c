@@ -144,10 +144,10 @@ static CUcontext g_current_ctx;
 /* 32 instrumented stubs for GUID 6bd5 (NV_CUDA_DEVICE_INTERNAL) */
 MAKE_EXPORT_STUB(6bd5, 0)  MAKE_EXPORT_STUB(6bd5, 1)
 
-/* guid=6bd5 index=2: cuDNN queries current CUDA context.
- * a0 = cuDNN internal handle (input, ignored)
- * a1 = CUcontext* output — must receive g_current_ctx or cuDNN
- *      treats itself as uninitialized → CUDNN_STATUS_NOT_INITIALIZED */
+/* guid=6bd5 index=2: cuDNN context query.
+ * a0 = output slot — receives g_fake_ctx (valid VM address).
+ * cuDNN init status depends on receiving a non-NULL dereferenceable
+ * pointer here. Full cuDNN init remains blocked (Bug 19 — parked). */
 static CUresult export_6bd5_2(void *a0, void *a1, void *a2, void *a3)
 {
     TRANSPORT_LOG("export_call: guid=6bd5 index=2 (ctx query) "
@@ -263,16 +263,10 @@ static void driver_shim_init(void)
     const char *vmem = transport_getenv("DECLOUD_GPU_VMEM_PROXY");
     if (vmem && vmem[0] == '1') g_vmem_proxy = 1;
 
-    /* Initialize fake context buffer.
-     * Offset 0: CUDA context magic (0x43555441 = "ATUC" reversed, seen in
-     *           CUDA 12 context structs via reverse engineering)
-     * Offset 8: device ordinal (0 = first GPU)
-     * Offset 16: context version / API flags */
+    /* Initialize fake context pointer — zeroed 512-byte buffer gives
+     * cuDNN a safe dereferenceable address. Full cuDNN init (Bug 19)
+     * requires context struct layout — parked pending nvproxy reference. */
     memset(g_fake_ctx_buf, 0, sizeof(g_fake_ctx_buf));
-    *(uint32_t *)(g_fake_ctx_buf +  0) = 0x43555441u;  /* magic */
-    *(uint32_t *)(g_fake_ctx_buf +  4) = 0x00000001u;  /* flags */
-    *(uint64_t *)(g_fake_ctx_buf +  8) = 0x0000000000000000ULL; /* device 0 */
-    *(uint64_t *)(g_fake_ctx_buf + 16) = 12010ULL;     /* CUDA 12.1 version */
     g_fake_ctx = (CUcontext)g_fake_ctx_buf;
 }
 
@@ -970,8 +964,6 @@ CUresult cuCtxGetCurrent(CUcontext *ctx)
 {
     if (!ctx) return CUDA_ERROR_INVALID_VALUE;
     *ctx = g_current_ctx ? g_fake_ctx : NULL;
-    TRANSPORT_LOG("cuCtxGetCurrent → %p (g_current_ctx=%p)",
-                  *ctx, g_current_ctx);
     return CUDA_SUCCESS;
 }
 
