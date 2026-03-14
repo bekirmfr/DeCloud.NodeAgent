@@ -1148,14 +1148,15 @@ static int handle_cublas_lt_matmul(ConnectionCtx *ctx,
             CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &req.strideD,    sizeof(int64_t));
     }
 
-    /* Plain GEMM — no epilogue. C==D so beta applies to output accumulator. */
+    /* Plain GEMM — no epilogue. Use C_ptr for accumulator (standard addmm:
+     * C=bias, beta=1). When epilogue=BIAS, C==D so this is also correct. */
     cs = cublasLtMatmul(
         ctx->cublaslt_handle, op_desc,
         req.alpha,
         (const void *)(uintptr_t)req.A_ptr, A_layout,
         (const void *)(uintptr_t)req.B_ptr, B_layout,
         req.beta,
-        (const void *)(uintptr_t)req.D_ptr, D_layout,
+        (const void *)(uintptr_t)req.C_ptr, C_layout,
         (void *)(uintptr_t)req.D_ptr,       D_layout,
         NULL, NULL, 0, 0);
 
