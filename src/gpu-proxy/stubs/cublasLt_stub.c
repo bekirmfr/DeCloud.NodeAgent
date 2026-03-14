@@ -638,12 +638,13 @@ cublasStatus_t cublasLtMatmul(
 
     STUB_LOG("cublasLtMatmul: Arows=%llu Acols=%llu Brows=%llu Bcols=%llu "
              "Drows=%llu Dcols=%llu transa=%d transb=%d computeType=%d "
-             "bc=%d C%sD",
+             "bc=%d C%sD epilogue=%d bias_ptr=%llu",
              (unsigned long long)req.A_rows, (unsigned long long)req.A_cols,
              (unsigned long long)req.B_rows, (unsigned long long)req.B_cols,
              (unsigned long long)req.D_rows, (unsigned long long)req.D_cols,
              req.transa, req.transb, req.computeType,
-             req.batchCount, (C == D) ? "==" : "!=");
+             req.batchCount, (C == D) ? "==" : "!=",
+             req.epilogue, (unsigned long long)req.bias_ptr);
 
     int err = rpc(GPU_CMD_CUBLAS_LT_MATMUL,
                   &req, sizeof(req), NULL, 0, NULL);
