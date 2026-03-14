@@ -1156,14 +1156,21 @@ static int handle_cublas_lt_matmul(ConnectionCtx *ctx,
     }
 
     /* Call the real cublasLtMatmul — C and D may differ (fused bias-add) */
+    /* When epilogue=BIAS, cublasLt requires C==D (bias added to GEMM output
+     * via the bias_ptr, not via C accumulation). Pass D for both. */
+    const void *C_ptr = (req.epilogue == 2 /* CUBLASLT_EPILOGUE_BIAS */)
+        ? (const void *)(uintptr_t)req.D_ptr
+        : (const void *)(uintptr_t)req.C_ptr;
+    cublasLtMatrixLayout_t C_layout_used = (req.epilogue == 2) ? D_layout : C_layout;
+
     cs = cublasLtMatmul(
         ctx->cublaslt_handle, op_desc,
         req.alpha,
         (const void *)(uintptr_t)req.A_ptr, A_layout,
         (const void *)(uintptr_t)req.B_ptr, B_layout,
         req.beta,
-        (const void *)(uintptr_t)req.C_ptr, C_layout,
-        (void *)(uintptr_t)req.D_ptr,       D_layout,
+        C_ptr,                               C_layout_used,
+        (void *)(uintptr_t)req.D_ptr,        D_layout,
         NULL, NULL, 0, 0);
 
     cudaDeviceSynchronize();
