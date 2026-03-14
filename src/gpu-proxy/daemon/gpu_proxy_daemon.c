@@ -1111,15 +1111,8 @@ static int handle_cublas_lt_matmul(ConnectionCtx *ctx,
                                    &req.transa, sizeof(req.transa));
     cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSB,
                                    &req.transb, sizeof(req.transb));
-    if (req.epilogue) {
-        cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_EPILOGUE,
-                                       &req.epilogue, sizeof(req.epilogue));
-    }
-    if (req.bias_ptr) {
-        void *bias_ptr = (void *)(uintptr_t)req.bias_ptr;
-        cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_BIAS_POINTER,
-                                       &bias_ptr, sizeof(bias_ptr));
-    }
+    /* Epilogue-based bias skipped — cublasLt EPILOGUE_BIAS fails for small
+     * n dimensions (e.g. n=2). Bias is added manually via cublasSaxpy below. */
 
     /* Build matrix layouts verbatim from raw stored rows/cols/ld/type.
      * No m/n/k derivation — cublasLtMatmul determines dimensions from
@@ -1155,25 +1148,36 @@ static int handle_cublas_lt_matmul(ConnectionCtx *ctx,
             CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &req.strideD,    sizeof(int64_t));
     }
 
-    /* Call the real cublasLtMatmul — C and D may differ (fused bias-add) */
-    /* When epilogue=BIAS, cublasLt requires C==D (bias added to GEMM output
-     * via the bias_ptr, not via C accumulation). Pass D for both. */
-    const void *C_ptr = (req.epilogue == 2 /* CUBLASLT_EPILOGUE_BIAS */)
-        ? (const void *)(uintptr_t)req.D_ptr
-        : (const void *)(uintptr_t)req.C_ptr;
-    cublasLtMatrixLayout_t C_layout_used = (req.epilogue == 2) ? D_layout : C_layout;
-
+    /* Plain GEMM — no epilogue. C==D so beta applies to output accumulator. */
     cs = cublasLtMatmul(
         ctx->cublaslt_handle, op_desc,
         req.alpha,
         (const void *)(uintptr_t)req.A_ptr, A_layout,
         (const void *)(uintptr_t)req.B_ptr, B_layout,
         req.beta,
-        C_ptr,                               C_layout_used,
-        (void *)(uintptr_t)req.D_ptr,        D_layout,
+        (const void *)(uintptr_t)req.D_ptr, D_layout,
+        (void *)(uintptr_t)req.D_ptr,       D_layout,
         NULL, NULL, 0, 0);
 
     cudaDeviceSynchronize();
+
+    /* Manual bias addition: D[:,j] += bias[:] for each column j.
+     * cublasSaxpy adds bias (length=m) to each column of D (stride=m).
+     * epilogue==2 is CUBLASLT_EPILOGUE_BIAS. */
+    if (cs == CUBLAS_STATUS_SUCCESS && req.epilogue == 2 && req.bias_ptr) {
+        int m = (int)req.D_rows;
+        int n = (int)req.D_cols;
+        float one = 1.0f;
+        float *D    = (float *)(uintptr_t)req.D_ptr;
+        float *bias = (float *)(uintptr_t)req.bias_ptr;
+        if (ensure_cublas(ctx) == 0) {
+            for (int j = 0; j < n; j++) {
+                cublasSaxpy(ctx->cublas_handle, m, &one,
+                            bias, 1, D + (size_t)j * m, 1);
+            }
+        }
+        cudaDeviceSynchronize();
+    }
 
     if (A_layout) cublasLtMatrixLayoutDestroy(A_layout);
     if (B_layout) cublasLtMatrixLayoutDestroy(B_layout);
