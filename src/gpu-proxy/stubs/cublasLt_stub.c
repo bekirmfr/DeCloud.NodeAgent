@@ -169,7 +169,7 @@ typedef struct {
     int      transb;
     int      computeType;  /* cublasComputeType_t */
     int      scaleType;    /* cudaDataType_t for alpha/beta */
-    int      epilogue;     /* CUBLASLT_EPILOGUE_DEFAULT=1, BIAS=2, etc. */
+    int      epilogue;     /* CUBLASLT_EPILOGUE_DEFAULT=1, BIAS=4, etc. */
     uint64_t bias_ptr;     /* device pointer to bias vector */
 } LtMatmulDescEntry;
 
