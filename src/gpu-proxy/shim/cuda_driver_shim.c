@@ -133,8 +133,10 @@ static CUresult export_##gtag##_##idx(                                  \
  * Returned consistently from export_6bd5_2 AND cuCtxGetCurrent so
  * cuDNN's internal consistency check (received_ctx == cuCtxGetCurrent())
  * also passes. */
+/* Fill with recognizable pattern — if cuDNN gets further than NOT_INITIALIZED,
+ * it was doing a zero-check. If same failure, it wants a specific value. */
 static uint8_t g_fake_ctx_buf[512];
-static CUcontext g_fake_ctx = (CUcontext)g_fake_ctx_buf;
+static CUcontext g_fake_ctx = NULL;  /* initialized in driver_shim_init() */
 
 /* Forward declaration — canonical definition with = NULL below */
 static CUcontext g_current_ctx;
@@ -260,6 +262,18 @@ static void driver_shim_init(void)
 
     const char *vmem = transport_getenv("DECLOUD_GPU_VMEM_PROXY");
     if (vmem && vmem[0] == '1') g_vmem_proxy = 1;
+
+    /* Initialize fake context buffer.
+     * Offset 0: CUDA context magic (0x43555441 = "ATUC" reversed, seen in
+     *           CUDA 12 context structs via reverse engineering)
+     * Offset 8: device ordinal (0 = first GPU)
+     * Offset 16: context version / API flags */
+    memset(g_fake_ctx_buf, 0, sizeof(g_fake_ctx_buf));
+    *(uint32_t *)(g_fake_ctx_buf +  0) = 0x43555441u;  /* magic */
+    *(uint32_t *)(g_fake_ctx_buf +  4) = 0x00000001u;  /* flags */
+    *(uint64_t *)(g_fake_ctx_buf +  8) = 0x0000000000000000ULL; /* device 0 */
+    *(uint64_t *)(g_fake_ctx_buf + 16) = 12010ULL;     /* CUDA 12.1 version */
+    g_fake_ctx = (CUcontext)g_fake_ctx_buf;
 }
 
 /* ================================================================
