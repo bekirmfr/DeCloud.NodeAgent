@@ -125,10 +125,26 @@ static CUresult export_##gtag##_##idx(                                  \
     (void)a0; (void)a1; (void)a2; (void)a3;                            \
     return CUDA_SUCCESS;                                                 \
 }
+
+/* Forward declaration — defined in primary context management section below */
+static CUcontext g_current_ctx;
  
 /* 32 instrumented stubs for GUID 6bd5 (NV_CUDA_DEVICE_INTERNAL) */
 MAKE_EXPORT_STUB(6bd5, 0)  MAKE_EXPORT_STUB(6bd5, 1)
-MAKE_EXPORT_STUB(6bd5, 2)  MAKE_EXPORT_STUB(6bd5, 3)
+/* guid=6bd5 index=2: cuDNN queries current CUDA context.
+ * a0 = cuDNN internal handle (input, ignored)
+ * a1 = CUcontext* output — must receive g_current_ctx or cuDNN
+ *      treats itself as uninitialized → CUDNN_STATUS_NOT_INITIALIZED */
+static CUresult export_6bd5_2(void *a0, void *a1, void *a2, void *a3)
+{
+    TRANSPORT_LOG("export_call: guid=6bd5 index=2 (ctx query) "
+                  "a0=%p a1=%p → writing ctx %p",
+                  a0, a1, g_current_ctx);
+    if (a1) *(CUcontext *)a1 = g_current_ctx;
+    (void)a0; (void)a2; (void)a3;
+    return CUDA_SUCCESS;
+}
+MAKE_EXPORT_STUB(6bd5, 3)
 MAKE_EXPORT_STUB(6bd5, 4)  MAKE_EXPORT_STUB(6bd5, 5)
 MAKE_EXPORT_STUB(6bd5, 6)  MAKE_EXPORT_STUB(6bd5, 7)
 MAKE_EXPORT_STUB(6bd5, 8)  MAKE_EXPORT_STUB(6bd5, 9)
