@@ -1164,8 +1164,8 @@ static int handle_cublas_lt_matmul(ConnectionCtx *ctx,
 
     /* Manual bias addition: D[:,j] += bias[:] for each column j.
      * cublasSaxpy adds bias (length=m) to each column of D (stride=m).
-     * epilogue==2 is CUBLASLT_EPILOGUE_BIAS. */
-    if (cs == CUBLAS_STATUS_SUCCESS && req.epilogue == 2 && req.bias_ptr) {
+     * epilogue==4 is CUBLASLT_EPILOGUE_BIAS. */
+    if (cs == CUBLAS_STATUS_SUCCESS && req.epilogue == 4 && req.bias_ptr) {
         int m = (int)req.D_rows;
         int n = (int)req.D_cols;
         float one = 1.0f;
