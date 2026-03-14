@@ -969,9 +969,9 @@ CUresult cuCtxSetCurrent(CUcontext ctx)
 CUresult cuCtxGetCurrent(CUcontext *ctx)
 {
     if (!ctx) return CUDA_ERROR_INVALID_VALUE;
-    /* Return g_fake_ctx so it matches what export_6bd5_2 wrote.
-     * cuDNN checks received_ctx == cuCtxGetCurrent() after init. */
     *ctx = g_current_ctx ? g_fake_ctx : NULL;
+    TRANSPORT_LOG("cuCtxGetCurrent → %p (g_current_ctx=%p)",
+                  *ctx, g_current_ctx);
     return CUDA_SUCCESS;
 }
 
