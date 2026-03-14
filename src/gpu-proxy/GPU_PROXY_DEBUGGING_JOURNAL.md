@@ -319,6 +319,121 @@ static inline int lt_debug(void) {
 | JupyterLab kernel | ✅ Confirmed | Via systemd EnvironmentFile |
 | Stable Diffusion Forge | ⚠️ Partial | UI+model OK; cuBLAS backward pending |
 
+---
+
+## Session 13: cuGetExportTable + cuDNN Investigation (2026-03-14)
+
+### Bug 18: cuGetExportTable returns NOT_FOUND — FIXED ✅
+
+**Symptom:** `torch.nn.functional.linear` and `nn.Linear` crashed. cuBLAS
+and cuDNN call `cuGetExportTable` during init to obtain internal driver
+function tables by 16-byte GUID. Previous implementation returned
+`CUDA_ERROR_NOT_FOUND` → both libraries aborted init.
+
+**Fix (`cuda_driver_shim.c`):**
+- Added static 128-entry stub table (`g_export_table`) filled at link time
+  via GCC range initialiser — zero runtime cost, no re-entrancy risk
+- `cuGetExportTable` now returns the table and `CUDA_SUCCESS` for all GUIDs
+- GUID hex logging under `DECLOUD_GPU_DEBUG=1`
+
+**Result:** `F.linear OK`, `nn.Linear OK` — cuBLAS fully unblocked.
+
+---
+
+### Bug 19: cuDNN CUDNN_STATUS_NOT_INITIALIZED — PARKED 🚧
+
+**Symptom:** `Conv2d` fails with `CUDNN_STATUS_NOT_INITIALIZED` after
+Bug 18 fix. `F.linear` and `nn.Linear` pass.
+
+**Investigation:**
+
+Two GUIDs observed at runtime:
+```
+6bd5fb6c-5bf4-e74a-8987-d93912fd9df9  NV_CUDA_DEVICE_INTERNAL
+a094798c-2e74-2e74-93f2-0800200c0a66  NV_CUDA_MEM_INTERNAL
+```
+
+Per-index instrumented tables added (32 stubs × 2 GUIDs). Confirmed:
+- `guid=6bd5 index=2` is the only entry called — cuDNN context query
+- `a0` is the output slot (not `a1` — confirmed from log `a1=(nil)`)
+- Writing `g_current_ctx` (opaque RPC handle `0x1`) → cuDNN crashes on
+  return (dereferences as VM pointer)
+- Writing `g_fake_ctx` (zeroed 512-byte static buffer) → same crash
+- Writing magic values at suspected struct offsets → same crash
+- No driver calls made after `index=2` returns — crash is internal to cuDNN
+
+**Root cause:** cuDNN validates the context struct at a specific field
+offset immediately after receiving the pointer. The field layout of
+CUDA 12's internal `CUcontext` struct is not public. Without knowing
+the exact offset and expected value, no static buffer can satisfy the
+check.
+
+**What's needed to fix:**
+- Reverse engineer `libcudnn.so` to find the context struct field cuDNN
+  reads at init, OR
+- Reference gvisor `nvproxy` source — Google's CUDA proxy implements
+  `cuGetExportTable` and may have the struct layout documented
+
+**Workaround:** `TORCH_CUDNN_ENABLED=0` added to pytorch-jupyter and
+SD Forge GPU templates. PyTorch native CUDA kernels handle all
+transformer ops and Conv2d without cuDNN — confirmed working. No
+performance regression for LLM inference, training, or LoRA workloads.
+
+**Current state of `cuda_driver_shim.c`:**
+- Per-GUID dispatch in `cuGetExportTable` (6bd5, a094, generic)
+- 32 instrumented stubs per GUID with `DECLOUD_GPU_DEBUG=1` logging
+- `export_6bd5_2` writes `g_fake_ctx` to `a0`
+- `g_fake_ctx` = zeroed 512-byte static buffer (safe dereferenceable addr)
+- `cuCtxGetCurrent` returns `g_fake_ctx` when context is active
+
+**Tracking:** Bug 19 — parked. Revisit when cuDNN acceleration becomes
+a customer-reported bottleneck or when nvproxy source is reviewed.
+
+---
+
+### Key Lessons Learned (Session 13)
+
+14. **`cuGetExportTable` GUID bytes are little-endian stored.** The human-
+    readable GUID string `{6bd5fb6c-...}` does NOT map byte-for-byte to
+    the in-memory representation — the first three groups are stored in
+    little-endian order. Always derive memcmp bytes from the runtime log,
+    not from the GUID string.
+
+15. **stderr to file is essential for high-volume debug sessions.**
+    `DECLOUD_GPU_DEBUG=1` produces thousands of lines per second. PTY
+    flushing blocks the process — redirect to file and grep after.
+    `> /tmp/out.txt 2> /tmp/debug.txt` is the standard pattern.
+
+16. **cuDNN crashes before making any driver calls after export table
+    init.** The failure is purely from reading the context struct in
+    memory — no RPC, no driver API, no logging possible without knowing
+    the struct layout. Instrumentation has hit its limit here.
+
+---
+
+## Production Status (2026-03-14)
+
+| Workload | Status | Notes |
+|----------|--------|-------|
+| Ollama / ggml inference | ✅ Production | 436 tok/s prompt, 13-21 tok/s gen |
+| PyTorch inference (eager) | ✅ Confirmed | All transformer ops |
+| PyTorch full fine-tuning | ✅ Confirmed | 1,252 tok/s, 409ms/step |
+| PyTorch LoRA (PEFT) | ✅ Confirmed | 1,038 tok/s, 493ms/step, 1,360MB VRAM |
+| JupyterLab kernel | ✅ Confirmed | Via systemd EnvironmentFile |
+| Conv2d / pooling (no cuDNN) | ✅ Confirmed | TORCH_CUDNN_ENABLED=0 |
+| Stable Diffusion Forge | ⚠️ Untested | TORCH_CUDNN_ENABLED=0 added, ready to test |
+| cuDNN-accelerated conv | ❌ Blocked | Bug 19 — parked |
+
+## Pending Items
+
+| Item | Priority | Notes |
+|------|----------|-------|
+| SD Forge end-to-end image generation test | High | Next — VMEM+cuDNN workaround in place |
+| vLLM template validation | High | VMEM_PROXY=1 already set |
+| `cuLaunchKernelEx` grid dims (TODO in source) | Medium | Parses 1×1×1 defaults |
+| Bug 19 — cuDNN context struct layout | Low | Parked — nvproxy reference needed |
+| Llama-3.2-1B LoRA benchmark | Medium | Validates real-world fine-tuning |
+
 ## Pending Items
 
 | Item | Priority | Notes |
