@@ -126,7 +126,17 @@ static CUresult export_##gtag##_##idx(                                  \
     return CUDA_SUCCESS;                                                 \
 }
 
-/* Forward declaration — defined in primary context management section below */
+/* Fake context object — cuDNN dereferences the context pointer immediately
+ * after receiving it from export_6bd5_2. Our opaque RPC handle (0x1) is
+ * not a valid VM address. This static buffer gives cuDNN a safe pointer
+ * to dereference. Sized at 512 bytes to cover any field offset cuDNN reads.
+ * Returned consistently from export_6bd5_2 AND cuCtxGetCurrent so
+ * cuDNN's internal consistency check (received_ctx == cuCtxGetCurrent())
+ * also passes. */
+static uint8_t g_fake_ctx_buf[512];
+static CUcontext g_fake_ctx = (CUcontext)g_fake_ctx_buf;
+
+/* Forward declaration — canonical definition with = NULL below */
 static CUcontext g_current_ctx;
  
 /* 32 instrumented stubs for GUID 6bd5 (NV_CUDA_DEVICE_INTERNAL) */
@@ -138,12 +148,9 @@ MAKE_EXPORT_STUB(6bd5, 0)  MAKE_EXPORT_STUB(6bd5, 1)
  *      treats itself as uninitialized → CUDNN_STATUS_NOT_INITIALIZED */
 static CUresult export_6bd5_2(void *a0, void *a1, void *a2, void *a3)
 {
-    /* a0 is the output pointer (a1 is always nil — confirmed from log).
-     * cuDNN calls this to obtain the current CUcontext before init. */
     TRANSPORT_LOG("export_call: guid=6bd5 index=2 (ctx query) "
-                  "a0=%p a1=%p → writing ctx %p to a0",
-                  a0, a1, g_current_ctx);
-    if (a0) *(CUcontext *)a0 = g_current_ctx;
+                  "a0=%p → writing fake_ctx %p", a0, g_fake_ctx);
+    if (a0) *(CUcontext *)a0 = g_fake_ctx;
     (void)a1; (void)a2; (void)a3;
     return CUDA_SUCCESS;
 }
@@ -948,7 +955,9 @@ CUresult cuCtxSetCurrent(CUcontext ctx)
 CUresult cuCtxGetCurrent(CUcontext *ctx)
 {
     if (!ctx) return CUDA_ERROR_INVALID_VALUE;
-    *ctx = g_current_ctx;
+    /* Return g_fake_ctx so it matches what export_6bd5_2 wrote.
+     * cuDNN checks received_ctx == cuCtxGetCurrent() after init. */
+    *ctx = g_current_ctx ? g_fake_ctx : NULL;
     return CUDA_SUCCESS;
 }
 
