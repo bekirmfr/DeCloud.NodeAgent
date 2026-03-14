@@ -1101,6 +1101,7 @@ static int handle_cublas_lt_matmul(ConnectionCtx *ctx,
         &op_desc,
         (cublasComputeType_t)req.computeType,
         (cudaDataType_t)req.scaleType);
+
     if (cs != CUBLAS_STATUS_SUCCESS) {
         LOG_ERR("CID %u: lt_matmul: cublasLtMatmulDescCreate failed (%d)",
                 ctx->peer_cid, (int)cs);
@@ -1110,6 +1111,15 @@ static int handle_cublas_lt_matmul(ConnectionCtx *ctx,
                                    &req.transa, sizeof(req.transa));
     cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSB,
                                    &req.transb, sizeof(req.transb));
+    if (req.epilogue) {
+        cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_EPILOGUE,
+                                       &req.epilogue, sizeof(req.epilogue));
+    }
+    if (req.bias_ptr) {
+        void *bias_ptr = (void *)(uintptr_t)req.bias_ptr;
+        cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_BIAS_POINTER,
+                                       &bias_ptr, sizeof(bias_ptr));
+    }
 
     /* Build matrix layouts verbatim from raw stored rows/cols/ld/type.
      * No m/n/k derivation — cublasLtMatmul determines dimensions from

@@ -167,6 +167,8 @@ typedef struct {
     int      transb;
     int      computeType;  /* cublasComputeType_t */
     int      scaleType;    /* cudaDataType_t for alpha/beta */
+    int      epilogue;     /* CUBLASLT_EPILOGUE_DEFAULT=1, BIAS=2, etc. */
+    uint64_t bias_ptr;     /* device pointer to bias vector */
 } LtMatmulDescEntry;
 
 typedef struct {
@@ -288,6 +290,12 @@ cublasStatus_t cublasLtMatmulDescSetAttribute(
         break;
     case CUBLASLT_MATMUL_DESC_TRANSB:
         if (sizeInBytes >= sizeof(int)) e->transb = *(const int *)buf;
+        break;
+    case CUBLASLT_MATMUL_DESC_EPILOGUE:
+        if (sizeInBytes >= sizeof(int)) e->epilogue = *(const int *)buf;
+        break;
+    case CUBLASLT_MATMUL_DESC_BIAS_POINTER:
+        if (sizeInBytes >= sizeof(uint64_t)) e->bias_ptr = *(const uint64_t *)buf;
         break;
     default:
         break;
@@ -623,6 +631,8 @@ cublasStatus_t cublasLtMatmul(
     req.B_ptr = (uint64_t)(uintptr_t)B;
     req.C_ptr = (uint64_t)(uintptr_t)C;
     req.D_ptr = (uint64_t)(uintptr_t)D;
+    req.epilogue  = desc->epilogue;
+    req.bias_ptr  = desc->bias_ptr;
 
     STUB_LOG("cublasLtMatmul: Arows=%llu Acols=%llu Brows=%llu Bcols=%llu "
              "Drows=%llu Dcols=%llu transa=%d transb=%d computeType=%d "

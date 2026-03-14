@@ -465,8 +465,10 @@ typedef struct __attribute__((packed)) {
     /* Device pointers (from the same connection's cudaMalloc calls) */
     uint64_t A_ptr;
     uint64_t B_ptr;
-    uint64_t C_ptr;   /* bias / accumulator */
-    uint64_t D_ptr;   /* output */
+    uint64_t C_ptr;     /* bias / accumulator */
+    uint64_t D_ptr;     /* output */
+    int32_t  epilogue;  /* CUBLASLT_EPILOGUE_DEFAULT=1, BIAS=2 */
+    uint64_t bias_ptr;  /* device ptr to bias vector (epilogue=BIAS only) */
 } GpuCublasLtMatmulRequest;
 
 /* --- RESOURCE MANAGEMENT --- */
