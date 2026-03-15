@@ -1139,52 +1139,18 @@ build_gpu_proxy() {
     # (circular dependency: daemon → shim → tries to connect to daemon → timeout).
     log_info "Installing GPU proxy artifacts..."
 
+    # Delegate all stub installation to the Makefile — single source of truth.
+    # install-all-shims-compat installs all shims + stubs to /usr/local/lib/decloud-gpu-shim/
+    local install_target="install-all-shims-compat"
+    if ! command -v docker &>/dev/null || ! docker info &>/dev/null 2>&1; then
+        install_target="install-all-shims"
+    fi
+    make -C "$GPU_PROXY_SRC" "$install_target" 2>&1 | tee -a "$LOG_DIR/install.log"
+    if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+        log_error "Shim install failed — check $LOG_DIR/install.log"
+        return 1
+    fi
     local SHIM_DIR="/usr/local/lib/decloud-gpu-shim"
-    install -d "$SHIM_DIR"
-
-    # Runtime API Shim → decloud-gpu-shim/ only
-    if [ -n "$built_shim" ] && [ -f "$built_shim" ]; then
-        install -m 644 "$built_shim" "$SHIM_DIR/libdecloud_cuda_shim.so"
-        # Keep libcudart.so.12 in sync — VMs copy this name from the 9p share
-        # into /usr/local/lib/ollama/cuda_v12/ where Ollama expects it.
-        cp "$SHIM_DIR/libdecloud_cuda_shim.so" "$SHIM_DIR/libcudart.so.12"
-        log_success "Runtime API shim installed → $SHIM_DIR/libdecloud_cuda_shim.so (+libcudart.so.12)"
-    else
-        log_warn "Runtime API shim binary not found — skipping install"
-    fi
-
-    # Driver API Shim → decloud-gpu-shim/ only (NOT /usr/local/lib/)
-    if [ -f "$built_driver_shim" ]; then
-        install -m 644 "$built_driver_shim" "$SHIM_DIR/libcuda.so.1"
-        ln -sf libcuda.so.1 "$SHIM_DIR/libcuda.so"
-        log_success "Driver API shim installed → $SHIM_DIR/libcuda.so.1"
-    fi
-
-    # NVML Shim → decloud-gpu-shim/ only (NOT /usr/local/lib/)
-    if [ -f "$built_nvml_shim" ]; then
-        install -m 644 "$built_nvml_shim" "$SHIM_DIR/libnvidia-ml.so.1"
-        ln -sf libnvidia-ml.so.1 "$SHIM_DIR/libnvidia-ml.so"
-        log_success "NVML shim installed → $SHIM_DIR/libnvidia-ml.so.1"
-    fi
-
-    # cuBLAS Stub → decloud-gpu-shim/ only
-    # Separate build with correct @@libcublas.so.12 ELF version tags.
-    # Copying the cuda shim as libcublas.so.12 gives wrong @@libcudart.so.12 tags
-    # causing silent dlopen failure of libggml-cuda.so (Problem 17, Day 4).
-    local built_cublas_stub="$GPU_PROXY_SRC/build/libcublas_stub.so"
-    if [ -f "$built_cublas_stub" ]; then
-        install -m 644 "$built_cublas_stub" "$SHIM_DIR/libcublas_stub.so"
-        log_success "cuBLAS stub installed → $SHIM_DIR/libcublas_stub.so"
-    fi
-
-    # cuBLAS Lt Stub → decloud-gpu-shim/ only
-    # Minimal placeholder satisfying libggml-cuda.so DT_NEEDED: libcublasLt.so.12.
-    # No versioned symbols needed — real compute is proxied via daemon on host.
-    local built_cublaslt_stub="$GPU_PROXY_SRC/build/libcublasLt_stub.so"
-    if [ -f "$built_cublaslt_stub" ]; then
-        install -m 644 "$built_cublaslt_stub" "$SHIM_DIR/libcublasLt_stub.so"
-        log_success "cuBLAS Lt stub installed → $SHIM_DIR/libcublasLt_stub.so"
-    fi
 
     # Daemon → /usr/local/bin (this is fine — daemon is a standalone binary)
     if [ "$daemon_built" = true ] && [ -f "$GPU_PROXY_SRC/build/gpu-proxy-daemon" ]; then
@@ -1265,7 +1231,8 @@ build_gpu_proxy() {
     log_info "│ Driver Shim:    $([ -f $SHIM_DIR/libcuda.so.1 ] && echo 'installed' || echo 'not built')"
     log_info "│ NVML Shim:      $([ -f $SHIM_DIR/libnvidia-ml.so.1 ] && echo 'installed' || echo 'not built')"
     log_info "│ cuBLAS Stub:    $([ -f $SHIM_DIR/libcublas_stub.so ] && echo 'installed' || echo 'not built')"
-    log_info "│ cuBLAS Lt Stub: $([ -f $SHIM_DIR/libcublasLt_stub.so ] && echo 'installed' || echo 'not built')"
+    log_info "│ cuDNN Stub:     $([ -f $SHIM_DIR/libcudnn_stub.so ] && echo 'installed' || echo 'not built')"
+    log_info "│ PyTorch Stubs:  $([ -f $SHIM_DIR/libcuda_pytorch_stubs.so ] && echo 'installed' || echo 'not built')"
     log_info "│ Daemon:         $([ -f /usr/local/bin/gpu-proxy-daemon ] && echo 'installed' || echo 'not built')"
     log_info "└──────────────────────────────────────────────────┘"
     echo ""
