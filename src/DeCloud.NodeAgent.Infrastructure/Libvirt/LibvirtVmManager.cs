@@ -2076,6 +2076,22 @@ public class LibvirtVmManager : IVmManager
     mknod -m 666 /dev/nvidia0 c 195 0 2>/dev/null || true
     mknod -m 666 /dev/nvidiactl c 195 255 2>/dev/null || true
     mknod -m 666 /dev/nvidia-uvm c 510 0 2>/dev/null || true
+  - |
+    # Ollama 0.18+ uses its own runner library directories under /usr/local/lib/ollama/
+    # (e.g. cuda_v12/, cuda_v13/) with RUNPATH set to that directory. The runner's
+    # dynamic linker searches ONLY that directory first, bypassing system paths,
+    # LD_LIBRARY_PATH, and ldconfig cache entirely. Without CUDA shims in the runner
+    # directory, GPU detection silently fails and Ollama falls back to CPU-only.
+    for runner_dir in /usr/local/lib/ollama/cuda_v*; do
+      [ -d ""$runner_dir"" ] || continue
+      for lib in libcuda.so.1 libcudart.so.12 libcublas.so.12 libcublasLt.so.12 libnvidia-ml.so.1; do
+        [ -f ""$runner_dir/$lib"" ] && continue
+        src=""/usr/local/lib/$lib""
+        [ -f ""$src"" ] || continue
+        cp ""$src"" ""$runner_dir/$lib""
+        echo ""DeCloud GPU proxy: installed $lib in $runner_dir""
+      done
+    done
 ";
 
         var runcmdIndex = result.IndexOf("\nruncmd:", StringComparison.Ordinal);
