@@ -1102,6 +1102,16 @@ static int handle_cublas_lt_matmul(ConnectionCtx *ctx,
 
     if (ctx->cu_ctx) cuCtxSetCurrent(ctx->cu_ctx);
 
+    /* Sync to ensure preceding async kernel launches have completed
+     * before cublasLt reads their output. */
+    cudaError_t sync_err = cudaDeviceSynchronize();
+    if (sync_err != cudaSuccess) {
+        LOG_ERR("CID %u: lt_matmul: pre-GEMM sync failed (err=%d)",
+                ctx->peer_cid, sync_err);
+        return send_response(ctx->fd, GPU_CMD_CUBLAS_LT_MATMUL,
+                             (int32_t)sync_err, NULL, 0);
+    }
+
     /* Build operation descriptor from raw stored values */
     cublasLtMatmulDesc_t op_desc = NULL;
     cublasStatus_t cs = cublasLtMatmulDescCreate(
@@ -1334,6 +1344,18 @@ static int handle_cublas_gemm_strided(ConnectionCtx *ctx,
     }
 
     if (ctx->cu_ctx) cuCtxSetCurrent(ctx->cu_ctx);
+
+    /* Sync to ensure preceding async kernel launches have completed
+     * before cuBLAS reads their output.  During graph replay, the shim
+     * sends kernel RPCs that return immediately (async launch); without
+     * this sync the GEMM can read stale data → corrupted output. */
+    cudaError_t sync_err = cudaDeviceSynchronize();
+    if (sync_err != cudaSuccess) {
+        LOG_ERR("CID %u: gemm_strided: pre-GEMM sync failed (err=%d)",
+                ctx->peer_cid, sync_err);
+        return send_response(ctx->fd, GPU_CMD_CUBLAS_GEMM_STRIDED,
+                             (int32_t)sync_err, NULL, 0);
+    }
 
     cublasStatus_t cs = cublasGemmStridedBatchedEx(
         ctx->cublas_handle,
