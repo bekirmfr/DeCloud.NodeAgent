@@ -2054,14 +2054,16 @@ public class LibvirtVmManager : IVmManager
     # silent dlopen failure of libggml-cuda.so due to version tag mismatch.
     if [ -f /run/decloud/libcublas_stub.so ]; then
       cp /run/decloud/libcublas_stub.so /usr/local/lib/
-      echo 'cuBLAS stub installed (libcublas_stub.so)'
+      ln -sf /usr/local/lib/libcublas_stub.so /usr/local/lib/libcublas.so.12
+      echo 'cuBLAS stub installed (libcublas_stub.so → libcublas.so.12)'
     fi
     # Install cuBLAS Lt stub (separate build with correct @@libcublasLt.so.12 version tags)
     # Required by PyTorch: libtorch_cuda.so performs versioned symbol lookup at dlopen time.
     # The terminal bundled-lib scan copies this to replace PyTorch's bundled libcublasLt.so.12.
     if [ -f /run/decloud/libcublasLt_stub.so ]; then
       cp /run/decloud/libcublasLt_stub.so /usr/local/lib/
-      echo 'cuBLAS Lt stub installed (libcublasLt_stub.so)'
+      ln -sf /usr/local/lib/libcublasLt_stub.so /usr/local/lib/libcublasLt.so.12
+      echo 'cuBLAS Lt stub installed (libcublasLt_stub.so → libcublasLt.so.12)'
     fi
     # Install cuDNN stub — satisfies DT_NEEDED: libcudnn.so.8 from libtorch_cuda.so
     # and libtorch_python.so. Without this PyTorch fails to import on a clean VM.
@@ -2085,9 +2087,12 @@ public class LibvirtVmManager : IVmManager
     for runner_dir in /usr/local/lib/ollama/cuda_v*; do
       [ -d ""$runner_dir"" ] || continue
       for lib in libcuda.so.1 libcudart.so.12 libcublas.so.12 libcublasLt.so.12 libnvidia-ml.so.1; do
-        [ -f ""$runner_dir/$lib"" ] && continue
         src=""/usr/local/lib/$lib""
         [ -f ""$src"" ] || continue
+        # Back up original if not already backed up, then overwrite with shim
+        if [ -f ""$runner_dir/$lib"" ] && [ ! -f ""$runner_dir/${lib}.orig"" ]; then
+          cp ""$runner_dir/$lib"" ""$runner_dir/${lib}.orig""
+        fi
         cp ""$src"" ""$runner_dir/$lib""
         echo ""DeCloud GPU proxy: installed $lib in $runner_dir""
       done
