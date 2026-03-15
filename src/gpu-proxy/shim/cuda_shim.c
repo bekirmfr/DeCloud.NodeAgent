@@ -112,12 +112,16 @@ static void diag_log(const char *fmt, ...)
  * old no-op stubs, cudaGraphLaunch did nothing → 0 computation →
  * gibberish from token 2 onward.
  *
- * Fix: record every kernel launch during capture.  On cudaGraphLaunch,
- * replay the recorded launches via RPC.  During capture, kernels also
- * execute eagerly (the stream isn't truly in capture mode), so the
- * first token gets correct results from eager execution; the graph
- * launch is a redundant (but harmless) replay.  Subsequent tokens
- * skip the capture phase entirely and rely on graph launch replay.
+ * Fix: record every kernel launch during capture but do NOT execute
+ * them eagerly.  On cudaGraphLaunch, replay the recorded launches
+ * via RPC — that is the sole execution.
+ *
+ * The old approach executed kernels eagerly during capture AND replayed
+ * them via cudaGraphLaunch, causing double-execution.  Any kernel that
+ * uses atomicAdd (flash-attention softmax denominator, reductions) or
+ * writes in-place (RMSNorm, residual add) produced corrupted results
+ * on the replay pass because device memory had already been mutated
+ * by the eager pass.  Symptom: garbled / interleaved token output.
  * ================================================================ */
 
 #define GRAPH_MAX_RECORDED_OPS  16384
@@ -1487,6 +1491,15 @@ cudaError_t cudaLaunchKernel(const void *func, dim3 gridDim, dim3 blockDim,
              req->grid_dim_x, req->grid_dim_y, req->grid_dim_z,
              req->block_dim_x, req->block_dim_y, req->block_dim_z,
              req->args_total_size);
+    }
+
+    /* During graph capture, only record — do NOT execute.
+     * Real CUDA semantics: kernels are not executed during capture,
+     * only during cudaGraphLaunch.  Eager execution here caused
+     * double-execution → corrupted atomics/in-place ops → gibberish. */
+    if (g_graph_capturing) {
+        free(req_buf);
+        return cudaSuccess;
     }
 
     __sync_fetch_and_add(&g_diag_kernel_launches, 1);
