@@ -684,41 +684,69 @@ CUresult cuCtxDestroy_v2(CUcontext ctx)
 typedef void *CUstream;
 typedef void *CUevent;
 
-/* Dummy handle value — non-NULL to satisfy NULL checks */
-#define DUMMY_STREAM ((CUstream)(uintptr_t)0xDEC10001)
+/* Dummy handle value — non-NULL to satisfy NULL checks (used only for events) */
 #define DUMMY_EVENT  ((CUevent)(uintptr_t)0xDEC10002)
 
 CUresult cuStreamCreate(CUstream *phStream, unsigned int flags)
 {
-    (void)flags;
-    if (phStream) *phStream = DUMMY_STREAM;
-    return CUDA_SUCCESS;
+    if (!phStream) return CUDA_ERROR_INVALID_VALUE;
+
+    GpuStreamCreateRequest req = { .flags = flags };
+    GpuStreamCreateResponse resp;
+    memset(&resp, 0, sizeof(resp));
+    int err = transport_rpc_call(GPU_CMD_STREAM_CREATE, &req, sizeof(req),
+                                 &resp, sizeof(resp), NULL);
+    if (err == 0) {
+        *phStream = (CUstream)(uintptr_t)resp.stream_handle;
+        TRANSPORT_LOG("cuStreamCreate(flags=%u) → %p", flags, *phStream);
+    } else {
+        *phStream = NULL;
+        TRANSPORT_LOG("cuStreamCreate(flags=%u) FAILED (err=%d)", flags, err);
+    }
+    return (CUresult)err;
 }
 
 CUresult cuStreamCreateWithPriority(CUstream *phStream, unsigned int flags,
                                      int priority)
 {
-    (void)flags; (void)priority;
-    if (phStream) *phStream = DUMMY_STREAM;
-    return CUDA_SUCCESS;
+    /* Daemon's cudaStreamCreateWithFlags doesn't support priority;
+     * create a normal stream with the given flags. */
+    (void)priority;
+    return cuStreamCreate(phStream, flags);
 }
 
 CUresult cuStreamSynchronize(CUstream hStream)
 {
-    (void)hStream;
-    return CUDA_SUCCESS;
+    GpuStreamSynchronizeRequest req = {
+        .stream_handle = (uint64_t)(uintptr_t)hStream,
+    };
+    int err = transport_rpc_call(GPU_CMD_STREAM_SYNCHRONIZE, &req, sizeof(req),
+                                 NULL, 0, NULL);
+    TRANSPORT_LOG("cuStreamSynchronize(%p) → %d", hStream, err);
+    return (CUresult)err;
 }
 
 CUresult cuStreamDestroy(CUstream hStream)
 {
-    (void)hStream;
-    return CUDA_SUCCESS;
+    GpuStreamDestroyRequest req = {
+        .stream_handle = (uint64_t)(uintptr_t)hStream,
+    };
+    int err = transport_rpc_call(GPU_CMD_STREAM_DESTROY, &req, sizeof(req),
+                                 NULL, 0, NULL);
+    TRANSPORT_LOG("cuStreamDestroy(%p) → %d", hStream, err);
+    return (CUresult)err;
 }
 
 CUresult cuStreamQuery(CUstream hStream)
 {
-    (void)hStream;
-    return CUDA_SUCCESS;
+    /* Use stream synchronize as a conservative query — if it succeeds,
+     * the stream is complete. This avoids adding a new RPC command. */
+    GpuStreamSynchronizeRequest req = {
+        .stream_handle = (uint64_t)(uintptr_t)hStream,
+    };
+    int err = transport_rpc_call(GPU_CMD_STREAM_SYNCHRONIZE, &req, sizeof(req),
+                                 NULL, 0, NULL);
+    return (CUresult)err;
 }
 
 CUresult cuStreamWaitEvent(CUstream hStream, CUevent hEvent,
@@ -1134,6 +1162,66 @@ CUresult cuMemGetAllocationGranularity(size_t *granularity,
 }
 
 /* ================================================================
+ * Device Pointer Tracking
+ *
+ * Track device pointers returned by cuMemAlloc so that generic
+ * cuMemcpy/cuMemcpyAsync can detect the transfer direction.
+ * Without this, generic copy functions cannot distinguish device
+ * pointers from host pointers and would default to D2D (Bug 22).
+ * ================================================================ */
+
+#define MAX_TRACKED_ALLOCS 16384
+
+typedef struct {
+    uint64_t ptr;
+    uint64_t size;
+} TrackedAlloc;
+
+static TrackedAlloc g_tracked_allocs[MAX_TRACKED_ALLOCS];
+static int          g_tracked_count = 0;
+static pthread_mutex_t g_tracked_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void track_device_ptr(uint64_t ptr, uint64_t size)
+{
+    pthread_mutex_lock(&g_tracked_lock);
+    if (g_tracked_count < MAX_TRACKED_ALLOCS) {
+        g_tracked_allocs[g_tracked_count].ptr  = ptr;
+        g_tracked_allocs[g_tracked_count].size = size;
+        g_tracked_count++;
+    }
+    pthread_mutex_unlock(&g_tracked_lock);
+}
+
+static void untrack_device_ptr(uint64_t ptr)
+{
+    pthread_mutex_lock(&g_tracked_lock);
+    for (int i = 0; i < g_tracked_count; i++) {
+        if (g_tracked_allocs[i].ptr == ptr) {
+            g_tracked_allocs[i] = g_tracked_allocs[g_tracked_count - 1];
+            g_tracked_count--;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_tracked_lock);
+}
+
+static int is_device_ptr(uint64_t ptr)
+{
+    if (ptr == 0) return 0;
+    int found = 0;
+    pthread_mutex_lock(&g_tracked_lock);
+    for (int i = 0; i < g_tracked_count; i++) {
+        if (ptr >= g_tracked_allocs[i].ptr &&
+            ptr < g_tracked_allocs[i].ptr + g_tracked_allocs[i].size) {
+            found = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_tracked_lock);
+    return found;
+}
+
+/* ================================================================
  * Driver API Memory Forwarding (CRITICAL for GPU inference)
  *
  * libcublas.so.12 allocates GPU memory through the CUDA Driver API
@@ -1156,6 +1244,7 @@ static CUresult cu_mem_alloc(CUdeviceptr *dptr, size_t bytesize)
                                  &resp, sizeof(resp), NULL);
     if (err == 0) {
         *dptr = (CUdeviceptr)resp.device_ptr;
+        track_device_ptr(resp.device_ptr, (uint64_t)bytesize);
         TRANSPORT_LOG("cuMemAlloc(%zu) → 0x%llx", bytesize,
                       (unsigned long long)resp.device_ptr);
     } else {
@@ -1170,6 +1259,7 @@ static CUresult cu_mem_free(CUdeviceptr dptr)
     GpuFreeRequest req = { .device_ptr = (uint64_t)dptr };
     int err = transport_rpc_call(GPU_CMD_FREE, &req, sizeof(req),
                                  NULL, 0, NULL);
+    if (err == 0) untrack_device_ptr((uint64_t)dptr);
     TRANSPORT_LOG("cuMemFree(0x%llx) → %d", (unsigned long long)dptr, err);
     return (CUresult)err;
 }
@@ -1371,16 +1461,37 @@ static CUresult cu_memcpy_DtoD_async(CUdeviceptr dst, CUdeviceptr src,
     return cu_memcpy_DtoD(dst, src, byteCount);
 }
 
+static CUresult cu_memcpy_auto(CUdeviceptr dst, CUdeviceptr src, size_t byteCount)
+{
+    int dst_dev = is_device_ptr((uint64_t)dst);
+    int src_dev = is_device_ptr((uint64_t)src);
+
+    if (src_dev && !dst_dev) {
+        /* Device → Host */
+        return cu_memcpy_DtoH((void *)(uintptr_t)dst, src, byteCount);
+    } else if (!src_dev && dst_dev) {
+        /* Host → Device */
+        return cu_memcpy_HtoD(dst, (const void *)(uintptr_t)src, byteCount);
+    } else if (src_dev && dst_dev) {
+        /* Device → Device */
+        return cu_memcpy_DtoD(dst, src, byteCount);
+    } else {
+        /* Host → Host */
+        memcpy((void *)(uintptr_t)dst, (const void *)(uintptr_t)src, byteCount);
+        return CUDA_SUCCESS;
+    }
+}
+
 static CUresult cu_memcpy_async(CUdeviceptr dst, CUdeviceptr src,
                                  size_t byteCount, CUstream hStream)
 {
     (void)hStream;
-    return cu_memcpy_DtoD(dst, src, byteCount);
+    return cu_memcpy_auto(dst, src, byteCount);
 }
 
 static CUresult cu_memcpy(CUdeviceptr dst, CUdeviceptr src, size_t byteCount)
 {
-    return cu_memcpy_DtoD(dst, src, byteCount);
+    return cu_memcpy_auto(dst, src, byteCount);
 }
 
 /* cuMemsetD8Async, cuMemsetD32Async — map to synchronous */
