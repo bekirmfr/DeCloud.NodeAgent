@@ -642,8 +642,10 @@ static int handle_free(ConnectionCtx *ctx, const void *payload, uint32_t len)
     return send_response(ctx->fd, GPU_CMD_FREE, (int32_t)err, NULL, 0);
 }
 
-static int handle_memcpy(int fd, const void *payload, uint32_t payload_len)
+static int handle_memcpy(ConnectionCtx *ctx, const void *payload, uint32_t payload_len)
 {
+    int fd = ctx->fd;
+
     if (payload_len < sizeof(GpuMemcpyRequest)) {
         return send_response(fd, GPU_CMD_MEMCPY, -1, NULL, 0);
     }
@@ -653,6 +655,11 @@ static int handle_memcpy(int fd, const void *payload, uint32_t payload_len)
 
     const uint8_t *extra_data = (const uint8_t *)payload + sizeof(req);
     uint32_t extra_len = payload_len - sizeof(req);
+
+    /* Ensure CUDA context is set for this connection — critical when
+     * kernels and memcpy arrive on the same connection but the context
+     * was only set by handle_launch_kernel previously. */
+    if (ctx->cu_ctx) cuCtxSetCurrent(ctx->cu_ctx);
 
     cudaError_t err;
 
@@ -1969,7 +1976,7 @@ static void *connection_handler(void *arg)
             rc = handle_free(ctx, buf, hdr.payload_len);
             break;
         case GPU_CMD_MEMCPY:
-            rc = handle_memcpy(fd, buf, hdr.payload_len);
+            rc = handle_memcpy(ctx, buf, hdr.payload_len);
             break;
         case GPU_CMD_MEMSET:
             rc = handle_memset(fd, buf, hdr.payload_len);
