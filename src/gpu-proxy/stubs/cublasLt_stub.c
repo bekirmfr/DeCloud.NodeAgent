@@ -296,11 +296,17 @@ cublasStatus_t cublasLtMatmulDescSetAttribute(
     case CUBLASLT_MATMUL_DESC_EPILOGUE:
         if (sizeInBytes >= sizeof(int)) {
             e->epilogue = *(const int *)buf;
-            STUB_LOG("cublasLtMatmulDescSetAttribute: EPILOGUE=%d", e->epilogue);
+            STUB_LOG("cublasLtMatmulDescSetAttribute: EPILOGUE=%d sizeInBytes=%zu raw8=%llu",
+                     e->epilogue, sizeInBytes,
+                     *(const unsigned long long *)buf);
         }
         break;
     case CUBLASLT_MATMUL_DESC_BIAS_POINTER:
-        if (sizeInBytes >= sizeof(uint64_t)) e->bias_ptr = *(const uint64_t *)buf;
+        if (sizeInBytes >= sizeof(uint64_t)) {
+            e->bias_ptr = *(const uint64_t *)buf;
+            STUB_LOG("cublasLtMatmulDescSetAttribute: BIAS_POINTER=%llu sizeInBytes=%zu",
+                     (unsigned long long)e->bias_ptr, sizeInBytes);
+        }
         break;
     default:
         STUB_LOG("cublasLtMatmulDescSetAttribute: unhandled attr=%d sizeInBytes=%zu val_int=%d val_u64=%llu",
