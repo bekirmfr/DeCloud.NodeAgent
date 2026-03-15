@@ -318,8 +318,13 @@ cublasStatus_t cublasLtMatmulDescGetAttribute(
 {
     LtMatmulDescEntry *e = (LtMatmulDescEntry *)matmulDesc;
     if (sizeWritten) *sizeWritten = 0;
+
     if (!e || !e->in_use || !buf) return CUBLAS_STATUS_SUCCESS;
 
+    STUB_LOG("cublasLtMatmulDescSetAttribute: attr=%d sizeInBytes=%zu val4=%d val8=%llu",
+             attr, sizeInBytes,
+             (sizeInBytes >= 4) ? *(const int *)buf : 0,
+             (sizeInBytes >= 8) ? *(const unsigned long long *)buf : 0ULL);
     switch (attr) {
     case CUBLASLT_MATMUL_DESC_COMPUTE_TYPE:
         if (sizeInBytes >= sizeof(int)) {
