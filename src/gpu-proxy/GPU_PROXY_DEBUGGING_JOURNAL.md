@@ -481,17 +481,21 @@ Fresh VM deployment. Generated 512×512 photorealistic red apple image at 1.61 i
 
 ---
 
-### Bug 22: Ollama Long-Text GPU Gibberish — FIXED ✅
+### Bug 22: Ollama Long-Text GPU Gibberish — INVESTIGATING 🔍
 
-**Symptom:** GPU inference produces word-salad gibberish on any non-trivial prompt. CPU inference (`num_gpu:0`) produces perfect output. Short generations sometimes worked because they completed within the first graph capture cycle.
+**Symptom:** GPU inference produces word-salad gibberish on any non-trivial prompt. CPU inference (`num_gpu:0`) produces perfect output. Short generations sometimes worked because they completed within the first graph capture cycle. **Reproduced on clean VM** — not environment-specific.
 
-**Root cause:** CUDA graph no-op stubs. ggml with `USE_GRAPHS=1` (hardcoded by Ollama) launches kernels **only** during `cudaStreamBeginCapture`…`cudaStreamEndCapture`, then replays them via `cudaGraphLaunch` for every subsequent token. The proxy's `cudaGraphLaunch` was a no-op → **zero GPU computation** after the first graph capture → gibberish.
+**Root cause:** CUDA graph no-op stubs. ggml with `USE_GRAPHS=1` (hardcoded by Ollama at compile time) launches kernels **only** during `cudaStreamBeginCapture`…`cudaStreamEndCapture`, then replays them via `cudaGraphLaunch` for every subsequent token. The proxy's `cudaGraphLaunch` was a no-op → **zero GPU computation** after the first graph capture → gibberish.
 
 Flow with old code:
 1. Token 1: `cudaStreamBeginCapture` (no-op) → kernels execute eagerly → `cudaGraphLaunch` (no-op) → correct output
 2. Token 2+: no capture → `cudaGraphLaunch` (no-op) → **no kernels execute** → stale logits → gibberish
 
-**Fix:** Implemented CUDA graph capture & replay in `cuda_shim.c`:
+**`GGML_CUDA_DISABLE_GRAPHS=1` confirmed ineffective.** Ollama's bundled ggml has `USE_GRAPHS=1` hardcoded at compile time — the env var only works with ggml builds where graphs are optional. The shim sets this env var as belt-and-suspenders, but it **cannot be relied upon** for deployments using Ollama's prebuilt binaries.
+
+**Key lesson:** Never trust an application-level env var to disable a feature that's hardcoded at compile time. The proxy must handle what the binary actually does, not what we wish it would do.
+
+**Fix (implemented, needs verification):** Implemented CUDA graph capture & replay in `cuda_shim.c`:
 - `cudaStreamBeginCapture`: enters capture mode, allocates recording buffer
 - `cudaLaunchKernel`: during capture, records serialized RPC payload (deep copy of args) in addition to executing eagerly
 - `cudaStreamEndCapture`: ends capture, stores the recording
@@ -499,9 +503,12 @@ Flow with old code:
 - `cudaGraphLaunch`: **replays all recorded kernel launches** via RPC
 - `cudaGraphExecUpdate`: replaces stored recording with latest capture
 - `cudaStreamIsCapturing`: returns `Active` during capture (was always `None`)
-- Constructor: also sets `GGML_CUDA_DISABLE_GRAPHS=1` as belt-and-suspenders
 
 First token gets a harmless double execution (eager + replay). Subsequent tokens get exactly one execution (replay only). All ggml kernel args contain device pointers that remain stable across tokens — the GPU reads updated data at those pointers on each replay.
+
+**Current status:** Graph capture/replay code is implemented, but gibberish persists on clean VM. Added comprehensive diagnostic logging (`touch /tmp/gpu-proxy-diag` + restart Ollama → logs to `/tmp/gpu-proxy-diag.log`). Diagnostic script: `src/gpu-proxy/diag-gpu-proxy.sh`.
+
+**Workaround:** `num_gpu:0` (CPU-only inference) confirmed working while fix is being debugged.
 
 ---
 
@@ -533,6 +540,8 @@ Replaced manual per-stub copy block with `make install-all-shims-compat` delegat
 
 21. **CUDA graph no-op stubs silently break multi-token inference.** ggml launches kernels only during graph capture; `cudaGraphLaunch` must replay them. A no-op `cudaGraphLaunch` means zero computation after the first capture cycle.
 
+22. **`GGML_CUDA_DISABLE_GRAPHS=1` is unreliable.** Ollama's bundled ggml has `USE_GRAPHS=1` hardcoded at compile time — env vars only work with optional-graph builds. Never trust an application-level env var to disable a compile-time feature. The proxy must handle what the binary actually does.
+
 ---
 
 ## Production Status (2026-03-15)
@@ -540,7 +549,7 @@ Replaced manual per-stub copy block with `make install-all-shims-compat` delegat
 | Workload | Status | Notes |
 |----------|--------|-------|
 | Ollama / ggml short generation | ✅ Production | GPU confirmed, short context |
-| Ollama / ggml long generation | ✅ Fixed | Bug 22 — graph capture/replay |
+| Ollama / ggml long generation | 🔍 Investigating | Bug 22 — graph capture/replay implemented, verifying on clean VM |
 | PyTorch inference (eager) | ✅ Confirmed | All transformer ops incl. bias |
 | PyTorch full fine-tuning | ✅ Confirmed | 1,252 tok/s, 409ms/step |
 | PyTorch LoRA (PEFT) | ✅ Confirmed | 1,038 tok/s, 493ms/step, 1,360MB VRAM |
@@ -552,7 +561,7 @@ Replaced manual per-stub copy block with `make install-all-shims-compat` delegat
 
 | Item | Priority | Notes |
 |------|----------|-------|
-| Bug 22 — Ollama long-text GPU gibberish | ~~Medium~~ | ✅ Fixed — CUDA graph capture/replay |
+| Bug 22 — Ollama long-text GPU gibberish | **High** | Graph capture/replay implemented, needs verification. Diag logging added. |
 | Bug 19 — cuDNN context struct layout | Low | Parked — nvproxy reference needed |
 | vLLM template validation | High | VMEM_PROXY=1 already set |
 | React frontend migration | Low | Backlog |
