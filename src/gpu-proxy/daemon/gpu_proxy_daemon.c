@@ -1111,8 +1111,15 @@ static int handle_cublas_lt_matmul(ConnectionCtx *ctx,
                                    &req.transa, sizeof(req.transa));
     cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_TRANSB,
                                    &req.transb, sizeof(req.transb));
-    /* Epilogue-based bias skipped — cublasLt EPILOGUE_BIAS fails for small
-     * n dimensions (e.g. n=2). Bias is added manually via cublasSaxpy below. */
+    if (req.epilogue) {
+        cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_EPILOGUE,
+                                       &req.epilogue, sizeof(req.epilogue));
+    }
+    if (req.bias_ptr) {
+        void *bias_ptr = (void *)(uintptr_t)req.bias_ptr;
+        cublasLtMatmulDescSetAttribute(op_desc, CUBLASLT_MATMUL_DESC_BIAS_POINTER,
+                                       &bias_ptr, sizeof(bias_ptr));
+    }
 
     /* Build matrix layouts verbatim from raw stored rows/cols/ld/type.
      * No m/n/k derivation — cublasLtMatmul determines dimensions from
@@ -1162,23 +1169,7 @@ static int handle_cublas_lt_matmul(ConnectionCtx *ctx,
 
     cudaDeviceSynchronize();
 
-    /* Manual bias addition: D[:,j] += bias[:] for each column j.
-     * cublasSaxpy adds bias (length=m) to each column of D (stride=m).
-     * epilogue==4 is CUBLASLT_EPILOGUE_BIAS. */
-    if (cs == CUBLAS_STATUS_SUCCESS && req.epilogue == 4 && req.bias_ptr) {
-        int m = (int)req.D_rows;
-        int n = (int)req.D_cols;
-        float one = 1.0f;
-        float *D    = (float *)(uintptr_t)req.D_ptr;
-        float *bias = (float *)(uintptr_t)req.bias_ptr;
-        if (ensure_cublas(ctx) == 0) {
-            for (int j = 0; j < n; j++) {
-                cublasSaxpy(ctx->cublas_handle, m, &one,
-                            bias, 1, D + (size_t)j * m, 1);
-            }
-        }
-        cudaDeviceSynchronize();
-    }
+    /* Bias applied via EPILOGUE_BIAS in op_desc above. */
 
     if (A_layout) cublasLtMatrixLayoutDestroy(A_layout);
     if (B_layout) cublasLtMatrixLayoutDestroy(B_layout);
