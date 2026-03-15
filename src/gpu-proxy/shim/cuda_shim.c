@@ -128,8 +128,9 @@ static void diag_log(const char *fmt, ...)
 #define GRAPH_MAX_EXEC_SLOTS    8
 
 typedef struct {
-    void    *rpc_payload;   /* deep copy of serialized GpuLaunchKernelRequest + args */
+    void    *rpc_payload;   /* deep copy of serialized RPC request (kernel or cuBLAS) */
     uint32_t rpc_len;
+    uint8_t  rpc_cmd;       /* GPU_CMD_LAUNCH_KERNEL, GPU_CMD_CUBLAS_GEMM_BATCHED, etc. */
 } GraphRecordedOp;
 
 typedef struct {
@@ -202,6 +203,41 @@ static void graph_exec_free(int idx)
 /* Encode slot index as an opaque pointer (offset by 0xDE000000 to avoid NULL) */
 #define GRAPH_EXEC_TO_PTR(idx)  ((cudaGraphExec_t)(uintptr_t)(0xDE000000 + (idx)))
 #define GRAPH_EXEC_FROM_PTR(p)  ((int)((uintptr_t)(p) - 0xDE000000))
+
+/* ================================================================
+ * Exported graph-capture helpers for cuBLAS/cublasLt stubs
+ *
+ * The cuBLAS stub (libcublas_stub.so) is a separate .so and cannot
+ * access our thread-local g_graph_capturing directly.  These functions
+ * let the stub query capture state and record cuBLAS RPC ops into the
+ * capture buffer, so they participate in graph replay correctly.
+ * ================================================================ */
+
+int decloud_graph_is_capturing(void)
+{
+    return g_graph_capturing;
+}
+
+int decloud_graph_record_op(uint8_t cmd, const void *payload, uint32_t len)
+{
+    if (!g_graph_capturing) return -1;
+    if (g_graph_capture_buf.count >= GRAPH_MAX_RECORDED_OPS) return -1;
+
+    GraphRecord *cap = &g_graph_capture_buf;
+    if (cap->count >= cap->capacity) {
+        int new_cap = cap->capacity ? cap->capacity * 2 : 256;
+        if (new_cap > GRAPH_MAX_RECORDED_OPS) new_cap = GRAPH_MAX_RECORDED_OPS;
+        cap->ops = (GraphRecordedOp *)realloc(cap->ops,
+                    new_cap * sizeof(GraphRecordedOp));
+        cap->capacity = new_cap;
+    }
+    GraphRecordedOp *op = &cap->ops[cap->count++];
+    op->rpc_cmd     = cmd;
+    op->rpc_len     = len;
+    op->rpc_payload = malloc(len);
+    memcpy(op->rpc_payload, payload, len);
+    return 0;
+}
 
 /* Mask all FP exceptions in SSE MXCSR and x87 FCW.
  * Replaces fedisableexcept(FE_ALL_EXCEPT) — no -lm dependency. */
@@ -1483,6 +1519,7 @@ cudaError_t cudaLaunchKernel(const void *func, dim3 gridDim, dim3 blockDim,
             cap->capacity = new_cap;
         }
         GraphRecordedOp *op = &cap->ops[cap->count++];
+        op->rpc_cmd     = GPU_CMD_LAUNCH_KERNEL;
         op->rpc_len     = req_len;
         op->rpc_payload = malloc(req_len);
         memcpy(op->rpc_payload, req_buf, req_len);
@@ -2052,7 +2089,7 @@ cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream)
 
     int errors = 0;
     for (int i = 0; i < rec->count; i++) {
-        int err = rpc_call(GPU_CMD_LAUNCH_KERNEL,
+        int err = rpc_call(rec->ops[i].rpc_cmd,
                  rec->ops[i].rpc_payload, rec->ops[i].rpc_len,
                  NULL, 0, NULL);
         if (err != 0) errors++;
