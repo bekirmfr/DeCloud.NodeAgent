@@ -245,10 +245,10 @@ all-shims-compat: | $(BUILD_DIR)
 	               stubs/cublas_stub.c -ldl && \
 	           echo '==> Building cuBLAS Lt stub...' && \
 	           gcc -Wall -Wextra -O2 -shared -fPIC \
-					-Wl,-soname,libcublasLt.so.12 \
-					-Wl,--version-script=stubs/libcublasLt.version \
-					-o build/libcublasLt_stub.so \
-					stubs/cublasLt_stub.c && \
+	               -Wl,-soname,libcublasLt.so.12 \
+	               -Wl,--version-script=stubs/libcublasLt.version \
+	               -o build/libcublasLt_stub.so \
+	               stubs/cublasLt_stub.c && \
 	           echo '==> Building PyTorch compat stubs...' && \
 	           gcc -Wall -Wextra -O2 -shared -fPIC \
 	               -Wl,-soname,libcuda_pytorch_stubs.so \

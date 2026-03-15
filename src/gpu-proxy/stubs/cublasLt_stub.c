@@ -68,8 +68,8 @@
 #define CUBLASLT_MATMUL_DESC_SCALE_TYPE    1
 #define CUBLASLT_MATMUL_DESC_TRANSA        3
 #define CUBLASLT_MATMUL_DESC_TRANSB        4
-#define CUBLASLT_MATMUL_DESC_EPILOGUE      8
-#define CUBLASLT_MATMUL_DESC_BIAS_POINTER  7
+#define CUBLASLT_MATMUL_DESC_EPILOGUE      7
+#define CUBLASLT_MATMUL_DESC_BIAS_POINTER  8
 
 /* cublasLtMatrixLayout attribute enum values (cuBLAS 12 ABI) */
 #define CUBLASLT_MATRIX_LAYOUT_TYPE                  0
@@ -294,12 +294,11 @@ cublasStatus_t cublasLtMatmulDescSetAttribute(
         if (sizeInBytes >= sizeof(int)) e->transb = *(const int *)buf;
         break;
     case CUBLASLT_MATMUL_DESC_EPILOGUE:
-        if (sizeInBytes >= sizeof(int)) {
+        if (sizeInBytes >= sizeof(int))
             e->epilogue = *(const int *)buf;
-            STUB_LOG("cublasLtMatmulDescSetAttribute: EPILOGUE=%d sizeInBytes=%zu raw8=%llu",
-                     e->epilogue, sizeInBytes,
-                     *(const unsigned long long *)buf);
-        }
+        STUB_LOG("cublasLtMatmulDescSetAttribute: EPILOGUE=%d sizeInBytes=%zu raw8=%llu",
+                 e->epilogue, sizeInBytes,
+                 sizeInBytes >= 8 ? *(const unsigned long long *)buf : 0ULL);
         break;
     case CUBLASLT_MATMUL_DESC_BIAS_POINTER:
         if (sizeInBytes >= sizeof(uint64_t)) {
