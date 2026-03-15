@@ -2063,6 +2063,12 @@ public class LibvirtVmManager : IVmManager
       cp /run/decloud/libcublasLt_stub.so /usr/local/lib/
       echo 'cuBLAS Lt stub installed (libcublasLt_stub.so)'
     fi
+    # Install cuDNN stub — satisfies DT_NEEDED: libcudnn.so.8 from libtorch_cuda.so
+    # and libtorch_python.so. Without this PyTorch fails to import on a clean VM.
+    if [ -f /run/decloud/libcudnn_stub.so ]; then
+      cp /run/decloud/libcudnn_stub.so /usr/local/lib/libcudnn.so.8
+      echo 'cuDNN stub installed (libcudnn.so.8)'
+    fi
     ldconfig 2>/dev/null || true
   - |
     # Create dummy NVIDIA device nodes (needed by frameworks that stat these).
@@ -2108,6 +2114,15 @@ public class LibvirtVmManager : IVmManager
             "          cp \"$dir/libcublasLt.so.12\" \"$dir/libcublasLt.so.12.orig\"\n" +
             "          cp /usr/local/lib/libcublasLt_stub.so \"$dir/libcublasLt.so.12\" 2>/dev/null || \\\n" +
             "            cp /usr/local/lib/libcublas_stub.so \"$dir/libcublasLt.so.12\"\n" +
+            "        fi\n" +
+            "        # Replace bundled libcudnn*.so.8 files in same venv directory\n" +
+            "        if [ -f /usr/local/lib/libcudnn.so.8 ]; then\n" +
+            "          for cudnn_lib in \"$dir\"/libcudnn*.so.8; do\n" +
+            "            [ -f \"$cudnn_lib\" ] || continue\n" +
+            "            [ -f \"${cudnn_lib}.orig\" ] && continue\n" +
+            "            cp \"$cudnn_lib\" \"${cudnn_lib}.orig\"\n" +
+            "            cp /usr/local/lib/libcudnn.so.8 \"$cudnn_lib\"\n" +
+            "          done\n" +
             "        fi\n" +
             "        echo \"DeCloud GPU proxy: replaced bundled cuBLAS in $dir\"\n" +
             "      done\n" +

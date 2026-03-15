@@ -1,0 +1,8 @@
+/* Version script for libcudnn.so.8
+ * Tags all exported symbols with @@libcudnn.so.8 so that versioned
+ * symbol imports in libtorch_cuda.so and libtorch_python.so resolve
+ * correctly (e.g. cudnnGetRNNLinLayerMatrixParams@@libcudnn.so.8).
+ */
+libcudnn.so.8 {
+    global: *;
+};

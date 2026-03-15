@@ -1312,6 +1312,18 @@ build_gpu_proxy() {
         log_success "libcublasLt_stub.so OK ($cublaslt_syms versioned symbols)"
     fi
 
+    local cudnn_syms=0
+    if [ -f "$SHIM_DIR/libcudnn_stub.so" ]; then
+        cudnn_syms=$(objdump -T "$SHIM_DIR/libcudnn_stub.so" 2>/dev/null | grep -c "libcudnn.so.8" || true)
+    fi
+    if [ "$cudnn_syms" -lt 84 ]; then
+        log_error "libcudnn_stub.so has only $cudnn_syms versioned symbols (expected 84+) — PyTorch will fail to import"
+        log_error "Likely cause: make build failed silently and stale artifact was installed"
+        log_error "Fix: check $LOG_DIR/install.log, then re-run install.sh"
+    else
+        log_success "libcudnn_stub.so OK ($cudnn_syms versioned symbols)"
+    fi
+
     return 0
 }
 

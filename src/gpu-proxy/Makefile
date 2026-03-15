@@ -13,6 +13,7 @@
 #   make nvml-shim    — build NVML shim (libnvidia-ml.so.1)
 #   make cublas-stub  — build cuBLAS stub with correct version tags
 #   make cublaslt-stub — build cuBLAS Lt stub (DT_NEEDED placeholder)
+#   make cudnn-stub   — build cuDNN stub (@@libcudnn.so.8 tags, PyTorch DT_NEEDED)
 #   make pytorch-stub — build PyTorch compat stubs (libcuda_pytorch_stubs.so)
 #   make all-shims    — build ALL shims + stubs (no Docker, host glibc)
 #   make shim-compat  — build runtime shim in Ubuntu 20.04 container
@@ -48,12 +49,13 @@ DRIVER_SHIM    := $(BUILD_DIR)/libcuda.so.1
 NVML_SHIM      := $(BUILD_DIR)/libnvidia-ml.so.1
 CUBLAS_STUB    := $(BUILD_DIR)/libcublas_stub.so
 CUBLASLT_STUB  := $(BUILD_DIR)/libcublasLt_stub.so
+CUDNN_STUB     := $(BUILD_DIR)/libcudnn_stub.so
 PYTORCH_STUB   := $(BUILD_DIR)/libcuda_pytorch_stubs.so
 
 # Transport header dependency (shared by all shims)
 TRANSPORT_DEPS := shim/transport.h shim/transport.c proto/gpu_proxy_proto.h
 
-.PHONY: all daemon shim driver-shim nvml-shim cublas-stub cublaslt-stub pytorch-stub \
+.PHONY: all daemon shim driver-shim nvml-shim cublas-stub cublaslt-stub cudnn-stub pytorch-stub \
         all-shims shim-compat all-shims-compat pytorch-stub-compat \
         test clean \
         install install-shim-compat install-all-shims install-all-shims-compat
@@ -64,13 +66,14 @@ all: daemon shim
 # all-shims: build ALL shims + stubs on host (no Docker).
 # Used by install.sh when Docker is unavailable.
 # ----------------------------------------------------------------
-all-shims: shim driver-shim nvml-shim cublas-stub cublaslt-stub pytorch-stub
+all-shims: shim driver-shim nvml-shim cublas-stub cublaslt-stub cudnn-stub pytorch-stub
 	@echo "All shims built (host glibc — may have compat issues on older distros):"
 	@echo "  $(SHIM)            (Runtime API, LD_PRELOAD)"
 	@echo "  $(DRIVER_SHIM)     (Driver API, dlopen target)"
 	@echo "  $(NVML_SHIM)       (NVML, dlopen target)"
 	@echo "  $(CUBLAS_STUB)     (cuBLAS stub, @@libcublas.so.12 tags)"
 	@echo "  $(CUBLASLT_STUB)   (cuBLAS Lt stub, DT_NEEDED placeholder)"
+	@echo "  $(CUDNN_STUB)      (cuDNN stub, @@libcudnn.so.8 tags)"
 	@echo "  $(PYTORCH_STUB)    (PyTorch compat stubs, @@libcudart.so.12 tags)"
 
 # ----------------------------------------------------------------
@@ -152,6 +155,21 @@ $(CUBLASLT_STUB): stubs/cublasLt_stub.c stubs/libcublasLt.version | $(BUILD_DIR)
 		-Wl,-soname,libcublasLt.so.12 \
 		-Wl,--version-script=stubs/libcublasLt.version \
 		-o $@ $
+
+# ----------------------------------------------------------------
+# cuDNN Stub (libcudnn.so.8): satisfies DT_NEEDED: libcudnn.so.8 from
+# libtorch_cuda.so and libtorch_python.so. All 85 symbols return
+# CUDNN_STATUS_NOT_INITIALIZED(1) — PyTorch falls back to native
+# attention kernels (Bug 19 — cuDNN export table context struct unknown).
+# Versioned @@libcudnn.so.8 tags required by libtorch_cuda.so symbol lookup.
+# ----------------------------------------------------------------
+cudnn-stub: $(CUDNN_STUB)
+
+$(CUDNN_STUB): stubs/libcudnn_stub.c stubs/libcudnn.version | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -shared -fPIC \
+		-Wl,-soname,libcudnn.so.8 \
+		-Wl,--version-script=stubs/libcudnn.version \
+		-o $@ $<
 
 # ----------------------------------------------------------------
 # PyTorch Compatibility Stubs (libcuda_pytorch_stubs.so)
@@ -249,6 +267,12 @@ all-shims-compat: | $(BUILD_DIR)
 	               -Wl,--version-script=stubs/libcublasLt.version \
 	               -o build/libcublasLt_stub.so \
 	               stubs/cublasLt_stub.c && \
+	           echo '==> Building cuDNN stub...' && \
+	           gcc -Wall -Wextra -O2 -shared -fPIC \
+	               -Wl,-soname,libcudnn.so.8 \
+	               -Wl,--version-script=stubs/libcudnn.version \
+	               -o build/libcudnn_stub.so \
+	               stubs/libcudnn_stub.c && \
 	           echo '==> Building PyTorch compat stubs...' && \
 	           gcc -Wall -Wextra -O2 -shared -fPIC \
 	               -Wl,-soname,libcuda_pytorch_stubs.so \
@@ -262,6 +286,7 @@ all-shims-compat: | $(BUILD_DIR)
 	@echo "  $(BUILD_DIR)/libnvidia-ml.so.1               (NVML, dlopen target)"
 	@echo "  $(BUILD_DIR)/libcublas_stub.so               (cuBLAS stub, @@libcublas.so.12 tags)"
 	@echo "  $(BUILD_DIR)/libcublasLt_stub.so             (cuBLAS Lt stub, DT_NEEDED placeholder)"
+	@echo "  $(BUILD_DIR)/libcudnn_stub.so                (cuDNN stub, @@libcudnn.so.8 tags)"
 	@echo "  $(BUILD_DIR)/libcuda_pytorch_stubs.so        (PyTorch compat stubs, @@libcudart.so.12 tags)"
 
 # ----------------------------------------------------------------
@@ -325,6 +350,8 @@ install-all-shims-compat: all-shims-compat
 	install -m 644 $(CUBLAS_STUB) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcublas_stub.so
 	# cuBLAS Lt stub (DT_NEEDED placeholder)
 	install -m 644 $(CUBLASLT_STUB) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcublasLt_stub.so
+	# cuDNN stub (DT_NEEDED: libcudnn.so.8 from libtorch_cuda.so / libtorch_python.so)
+	install -m 644 $(CUDNN_STUB) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcudnn_stub.so
 	# PyTorch compat stubs (must precede libdecloud_cuda_shim.so in LD_PRELOAD)
 	install -m 644 $(PYTORCH_STUB) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcuda_pytorch_stubs.so
 	# Convenience copies for VM deployment (Ollama/llama.cpp expect these names)
@@ -341,6 +368,7 @@ install-all-shims: all-shims
 	ln -sf libnvidia-ml.so.1 $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libnvidia-ml.so
 	install -m 644 $(CUBLAS_STUB) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcublas_stub.so
 	install -m 644 $(CUBLASLT_STUB) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcublasLt_stub.so
+	install -m 644 $(CUDNN_STUB) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcudnn_stub.so
 	install -m 644 $(PYTORCH_STUB) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcuda_pytorch_stubs.so
 	cp $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libdecloud_cuda_shim.so \
 	   $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcudart.so.12
