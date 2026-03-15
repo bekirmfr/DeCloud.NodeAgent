@@ -1184,7 +1184,6 @@ build_gpu_proxy() {
 
         install -d /usr/local/bin
         install -m 755 "$GPU_PROXY_SRC/build/gpu-proxy-daemon" /usr/local/bin/
-        log_success "Daemon installed → /usr/local/bin/gpu-proxy-daemon"
 
         # Restart daemon if it was previously running
         if [ "$daemon_was_running" = true ] && [ -n "$daemon_args" ]; then
@@ -1200,8 +1199,6 @@ build_gpu_proxy() {
             log_warn "Could not read previous daemon args — restart manually"
         fi
 
-        install -d /usr/local/bin
-        install -m 755 "$GPU_PROXY_SRC/build/gpu-proxy-daemon" /usr/local/bin/
         log_success "Daemon installed → /usr/local/bin/gpu-proxy-daemon"
     elif [ "$daemon_built" = true ]; then
         log_warn "Daemon binary not found at $GPU_PROXY_SRC/build/gpu-proxy-daemon — skipping install"
@@ -1231,6 +1228,7 @@ build_gpu_proxy() {
     log_info "│ Driver Shim:    $([ -f $SHIM_DIR/libcuda.so.1 ] && echo 'installed' || echo 'not built')"
     log_info "│ NVML Shim:      $([ -f $SHIM_DIR/libnvidia-ml.so.1 ] && echo 'installed' || echo 'not built')"
     log_info "│ cuBLAS Stub:    $([ -f $SHIM_DIR/libcublas_stub.so ] && echo 'installed' || echo 'not built')"
+    log_info "│ cuBLAS Lt Stub: $([ -f $SHIM_DIR/libcublasLt_stub.so ] && echo 'installed' || echo 'not built')"
     log_info "│ cuDNN Stub:     $([ -f $SHIM_DIR/libcudnn_stub.so ] && echo 'installed' || echo 'not built')"
     log_info "│ PyTorch Stubs:  $([ -f $SHIM_DIR/libcuda_pytorch_stubs.so ] && echo 'installed' || echo 'not built')"
     log_info "│ Daemon:         $([ -f /usr/local/bin/gpu-proxy-daemon ] && echo 'installed' || echo 'not built')"
