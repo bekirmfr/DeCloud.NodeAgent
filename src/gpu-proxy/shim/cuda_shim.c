@@ -35,11 +35,106 @@
  * the critical ggml flags here so they're present when ggml reads them.
  * ================================================================ */
 
-/* Global flag: when true (default), CUDA graph stubs return cudaSuccess (no-op).
+/* Global flag: when true (default), CUDA graph stubs return cudaSuccess.
  * When false, they return cudaErrorNotSupported (honest).
  * Defaults to 1 for safety — set DECLOUD_GPU_GRAPH_NOOP=0 to disable. */
 static int g_graph_noop = 1;
 static int g_debug_log = 0;
+
+/* ================================================================
+ * CUDA Graph Capture & Replay (Bug 22 fix)
+ *
+ * ggml with USE_GRAPHS=1 launches kernels ONLY during graph capture,
+ * then replays via cudaGraphLaunch for subsequent tokens.  With the
+ * old no-op stubs, cudaGraphLaunch did nothing → 0 computation →
+ * gibberish from token 2 onward.
+ *
+ * Fix: record every kernel launch during capture.  On cudaGraphLaunch,
+ * replay the recorded launches via RPC.  During capture, kernels also
+ * execute eagerly (the stream isn't truly in capture mode), so the
+ * first token gets correct results from eager execution; the graph
+ * launch is a redundant (but harmless) replay.  Subsequent tokens
+ * skip the capture phase entirely and rely on graph launch replay.
+ * ================================================================ */
+
+#define GRAPH_MAX_RECORDED_OPS  16384
+#define GRAPH_MAX_EXEC_SLOTS    8
+
+typedef struct {
+    void    *rpc_payload;   /* deep copy of serialized GpuLaunchKernelRequest + args */
+    uint32_t rpc_len;
+} GraphRecordedOp;
+
+typedef struct {
+    GraphRecordedOp *ops;
+    int              count;
+    int              capacity;
+} GraphRecord;
+
+/* Per-graph-exec slot */
+typedef struct {
+    GraphRecord record;
+    int         in_use;
+} GraphExecSlot;
+
+static GraphExecSlot  g_graph_exec_slots[GRAPH_MAX_EXEC_SLOTS];
+static pthread_mutex_t g_graph_exec_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Capture state (thread-local — ggml uses a single thread for CUDA ops) */
+static __thread int          g_graph_capturing = 0;
+static __thread GraphRecord  g_graph_capture_buf;
+
+static void graph_record_free(GraphRecord *rec)
+{
+    if (!rec->ops) return;
+    for (int i = 0; i < rec->count; i++)
+        free(rec->ops[i].rpc_payload);
+    free(rec->ops);
+    rec->ops = NULL;
+    rec->count = 0;
+    rec->capacity = 0;
+}
+
+static void graph_record_copy(GraphRecord *dst, const GraphRecord *src)
+{
+    dst->count    = src->count;
+    dst->capacity = src->count;
+    dst->ops      = (GraphRecordedOp *)calloc(src->count, sizeof(GraphRecordedOp));
+    for (int i = 0; i < src->count; i++) {
+        dst->ops[i].rpc_len     = src->ops[i].rpc_len;
+        dst->ops[i].rpc_payload = malloc(src->ops[i].rpc_len);
+        memcpy(dst->ops[i].rpc_payload, src->ops[i].rpc_payload,
+               src->ops[i].rpc_len);
+    }
+}
+
+static int graph_exec_alloc(void)
+{
+    pthread_mutex_lock(&g_graph_exec_lock);
+    for (int i = 0; i < GRAPH_MAX_EXEC_SLOTS; i++) {
+        if (!g_graph_exec_slots[i].in_use) {
+            g_graph_exec_slots[i].in_use = 1;
+            memset(&g_graph_exec_slots[i].record, 0, sizeof(GraphRecord));
+            pthread_mutex_unlock(&g_graph_exec_lock);
+            return i;
+        }
+    }
+    pthread_mutex_unlock(&g_graph_exec_lock);
+    return -1;
+}
+
+static void graph_exec_free(int idx)
+{
+    if (idx < 0 || idx >= GRAPH_MAX_EXEC_SLOTS) return;
+    pthread_mutex_lock(&g_graph_exec_lock);
+    graph_record_free(&g_graph_exec_slots[idx].record);
+    g_graph_exec_slots[idx].in_use = 0;
+    pthread_mutex_unlock(&g_graph_exec_lock);
+}
+
+/* Encode slot index as an opaque pointer (offset by 0xDE000000 to avoid NULL) */
+#define GRAPH_EXEC_TO_PTR(idx)  ((cudaGraphExec_t)(uintptr_t)(0xDE000000 + (idx)))
+#define GRAPH_EXEC_FROM_PTR(p)  ((int)((uintptr_t)(p) - 0xDE000000))
 
 /* Mask all FP exceptions in SSE MXCSR and x87 FCW.
  * Replaces fedisableexcept(FE_ALL_EXCEPT) — no -lm dependency. */
@@ -122,6 +217,11 @@ static void shim_init(void)
         g_debug_log = 1;
         fprintf(stderr, "[cudart-shim] constructor: %d app env vars loaded\n", count);
     }
+
+    /* Belt-and-suspenders: ask ggml to disable CUDA graphs if it checks
+     * this env var.  Graph replay is now implemented below, but disabling
+     * graphs avoids the overhead of capture+replay when the env var works. */
+    setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 0); /* don't overwrite if user set it */
 
     mask_fpe_exceptions();
     /* NOTE: We intentionally do NOT install a SIGFPE handler here.
@@ -1273,6 +1373,24 @@ cudaError_t cudaLaunchKernel(const void *func, dim3 gridDim, dim3 blockDim,
         dest += sz;
     }
 
+    /* Record this launch if we're inside a graph capture.
+     * We save a copy of the serialized payload so cudaGraphLaunch
+     * can replay it on subsequent tokens. */
+    if (g_graph_capturing && g_graph_capture_buf.count < GRAPH_MAX_RECORDED_OPS) {
+        GraphRecord *cap = &g_graph_capture_buf;
+        if (cap->count >= cap->capacity) {
+            int new_cap = cap->capacity ? cap->capacity * 2 : 256;
+            if (new_cap > GRAPH_MAX_RECORDED_OPS) new_cap = GRAPH_MAX_RECORDED_OPS;
+            cap->ops = (GraphRecordedOp *)realloc(cap->ops,
+                        new_cap * sizeof(GraphRecordedOp));
+            cap->capacity = new_cap;
+        }
+        GraphRecordedOp *op = &cap->ops[cap->count++];
+        op->rpc_len     = req_len;
+        op->rpc_payload = malloc(req_len);
+        memcpy(op->rpc_payload, req_buf, req_len);
+    }
+
     int err = rpc_call(GPU_CMD_LAUNCH_KERNEL, req_buf, req_len,
                        NULL, 0, NULL);
     free(req_buf);
@@ -1688,52 +1806,107 @@ cudaError_t cudaFuncGetAttributes(cudaFuncAttributes_t *attr, const void *func)
     return cudaSuccess;
 }
 
-/* Graph API stubs — ALL return cudaSuccess (no-ops).
+/* ================================================================
+ * CUDA Graph Capture & Replay
  *
- * Ollama v0.17 hardcodes USE_GRAPHS=1, ignoring GGML_CUDA_DISABLE_GRAPHS.
- * ggml wraps graph calls in CUDA_CHECK() which aborts on ANY non-zero return.
- * Since kernels execute eagerly via RPC (not deferred), graph capture is
- * meaningless — we let the entire graph lifecycle succeed as silent no-ops.
- */
+ * ggml with USE_GRAPHS=1 launches kernels ONLY during graph capture,
+ * then replays via cudaGraphLaunch for subsequent tokens.
+ *
+ * During capture, the stream is NOT truly in capture mode (our
+ * cudaStreamBeginCapture is lightweight), so kernels execute eagerly.
+ * We also record each launch.  On cudaGraphLaunch we replay the
+ * recorded launches.  The first token thus gets a harmless double-
+ * execution; subsequent tokens get exactly one execution (the replay).
+ *
+ * ggml wraps graph calls in CUDA_CHECK() which aborts on ANY non-zero
+ * return, so every graph API must return cudaSuccess.
+ * ================================================================ */
 typedef void *cudaGraph_t;
 typedef void *cudaGraphExec_t;
 typedef int cudaGraphExecUpdateResult;
 
-static int g_dummy_graph = 0xDEC10001;
-static int g_dummy_graph_exec = 0xDEC10002;
+/* The "graph" from cudaStreamEndCapture is just a pointer to the
+ * thread-local capture buffer.  It is consumed by cudaGraphInstantiate
+ * or cudaGraphExecUpdate before the next capture begins. */
+static int g_dummy_graph_tag = 0xDEC10001;
 
 cudaError_t cudaGraphDestroy(cudaGraph_t graph)
 {
+    /* Nothing to free — the capture buffer is owned by g_graph_capture_buf
+     * and freed on next capture or at process exit. */
     (void)graph;
-    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
+    return cudaSuccess;
 }
 
 cudaError_t cudaGraphExecDestroy(cudaGraphExec_t graphExec)
 {
-    (void)graphExec;
-    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
+    if (!g_graph_noop) return cudaErrorNotSupported;
+    int idx = GRAPH_EXEC_FROM_PTR(graphExec);
+    graph_exec_free(idx);
+    return cudaSuccess;
 }
 
 cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
                                  cudaGraphExecUpdateResult *updateResult_out)
 {
-    (void)hGraphExec; (void)hGraph;
-    if (updateResult_out) *updateResult_out = 0;
-    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
+    if (!g_graph_noop) {
+        if (updateResult_out) *updateResult_out = 1; /* error */
+        return cudaSuccess;
+    }
+    (void)hGraph;
+    /* Replace the exec's recorded ops with the latest capture buffer */
+    int idx = GRAPH_EXEC_FROM_PTR(hGraphExec);
+    if (idx >= 0 && idx < GRAPH_MAX_EXEC_SLOTS && g_graph_exec_slots[idx].in_use) {
+        pthread_mutex_lock(&g_graph_exec_lock);
+        graph_record_free(&g_graph_exec_slots[idx].record);
+        graph_record_copy(&g_graph_exec_slots[idx].record, &g_graph_capture_buf);
+        pthread_mutex_unlock(&g_graph_exec_lock);
+        if (updateResult_out) *updateResult_out = 0; /* success */
+    } else {
+        if (updateResult_out) *updateResult_out = 1; /* error → forces re-instantiate */
+    }
+    return cudaSuccess;
 }
 
 cudaError_t cudaGraphInstantiate(cudaGraphExec_t *pGraphExec, cudaGraph_t graph,
                                   void *pErrorNode, char *pLogBuffer, size_t bufferSize)
 {
     (void)graph; (void)pErrorNode; (void)pLogBuffer; (void)bufferSize;
-    if (pGraphExec && g_graph_noop) *pGraphExec = (cudaGraphExec_t)&g_dummy_graph_exec;
-    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
+    if (!g_graph_noop) return cudaErrorNotSupported;
+
+    int idx = graph_exec_alloc();
+    if (idx < 0) {
+        /* All slots full — reuse slot 0 */
+        graph_exec_free(0);
+        idx = graph_exec_alloc();
+    }
+    if (idx >= 0) {
+        pthread_mutex_lock(&g_graph_exec_lock);
+        graph_record_copy(&g_graph_exec_slots[idx].record, &g_graph_capture_buf);
+        pthread_mutex_unlock(&g_graph_exec_lock);
+    }
+    if (pGraphExec) *pGraphExec = GRAPH_EXEC_TO_PTR(idx >= 0 ? idx : 0);
+    return cudaSuccess;
 }
 
 cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream)
 {
-    (void)graphExec; (void)stream;
-    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
+    (void)stream;
+    if (!g_graph_noop) return cudaErrorNotSupported;
+
+    int idx = GRAPH_EXEC_FROM_PTR(graphExec);
+    if (idx < 0 || idx >= GRAPH_MAX_EXEC_SLOTS || !g_graph_exec_slots[idx].in_use)
+        return cudaSuccess; /* no-op for unknown handles */
+
+    GraphRecord *rec = &g_graph_exec_slots[idx].record;
+    SHIM_LOG("cudaGraphLaunch: replaying %d recorded kernel launches", rec->count);
+
+    for (int i = 0; i < rec->count; i++) {
+        rpc_call(GPU_CMD_LAUNCH_KERNEL,
+                 rec->ops[i].rpc_payload, rec->ops[i].rpc_len,
+                 NULL, 0, NULL);
+    }
+    return cudaSuccess;
 }
 
 /* Managed memory */
@@ -1849,20 +2022,34 @@ typedef enum {
 cudaError_t cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode_t mode)
 {
     (void)stream; (void)mode;
-    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
+    if (!g_graph_noop) return cudaErrorNotSupported;
+
+    /* Free any previous capture buffer and start fresh */
+    graph_record_free(&g_graph_capture_buf);
+    g_graph_capturing = 1;
+    SHIM_LOG("cudaStreamBeginCapture: recording started");
+    return cudaSuccess;
 }
 
 cudaError_t cudaStreamEndCapture(cudaStream_t stream, cudaGraph_t *pGraph)
 {
     (void)stream;
-    if (pGraph && g_graph_noop) *pGraph = (cudaGraph_t)&g_dummy_graph;
-    return g_graph_noop ? cudaSuccess : cudaErrorNotSupported;
+    if (!g_graph_noop) return cudaErrorNotSupported;
+
+    g_graph_capturing = 0;
+    SHIM_LOG("cudaStreamEndCapture: recorded %d kernel launches",
+             g_graph_capture_buf.count);
+    /* Return a token so ggml can pass it to cudaGraphInstantiate/Update */
+    if (pGraph) *pGraph = (cudaGraph_t)&g_dummy_graph_tag;
+    return cudaSuccess;
 }
 
 cudaError_t cudaStreamIsCapturing(cudaStream_t stream, cudaStreamCaptureStatus_t *pCaptureStatus)
 {
     (void)stream;
-    if (pCaptureStatus) *pCaptureStatus = cudaStreamCaptureStatusNone;
+    if (pCaptureStatus)
+        *pCaptureStatus = g_graph_capturing ? cudaStreamCaptureStatusActive
+                                            : cudaStreamCaptureStatusNone;
     return cudaSuccess;
 }
 

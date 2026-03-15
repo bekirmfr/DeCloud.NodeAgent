@@ -481,15 +481,27 @@ Fresh VM deployment. Generated 512×512 photorealistic red apple image at 1.61 i
 
 ---
 
-### Bug 22: Ollama Long-Text GPU Gibberish — PARKED 🚧
+### Bug 22: Ollama Long-Text GPU Gibberish — FIXED ✅
 
-**Symptom:** GPU inference produces garbage from token 1 on long prompts (`eval_count: 4`). CPU inference produces perfect output.
+**Symptom:** GPU inference produces word-salad gibberish on any non-trivial prompt. CPU inference (`num_gpu:0`) produces perfect output. Short generations sometimes worked because they completed within the first graph capture cycle.
 
-**Investigation:** `objdump -T libggml-cuda.so | grep cublas` → **empty** — ggml uses zero cuBLAS/cublasLt, only custom CUDA kernels. Bug 21 fix has no effect on this path. Short generations work correctly on GPU.
+**Root cause:** CUDA graph no-op stubs. ggml with `USE_GRAPHS=1` (hardcoded by Ollama) launches kernels **only** during `cudaStreamBeginCapture`…`cudaStreamEndCapture`, then replays them via `cudaGraphLaunch` for every subsequent token. The proxy's `cudaGraphLaunch` was a no-op → **zero GPU computation** after the first graph capture → gibberish.
 
-**Root cause:** Unknown. Custom ggml CUDA kernels produce wrong logits beyond ~10 token context. Requires kernel-level investigation (nvprof, output comparison vs CPU reference).
+Flow with old code:
+1. Token 1: `cudaStreamBeginCapture` (no-op) → kernels execute eagerly → `cudaGraphLaunch` (no-op) → correct output
+2. Token 2+: no capture → `cudaGraphLaunch` (no-op) → **no kernels execute** → stale logits → gibberish
 
-**Tracking:** Bug 22 — parked. Ollama short generation confirmed working on GPU.
+**Fix:** Implemented CUDA graph capture & replay in `cuda_shim.c`:
+- `cudaStreamBeginCapture`: enters capture mode, allocates recording buffer
+- `cudaLaunchKernel`: during capture, records serialized RPC payload (deep copy of args) in addition to executing eagerly
+- `cudaStreamEndCapture`: ends capture, stores the recording
+- `cudaGraphInstantiate`: associates recording with a graph exec slot
+- `cudaGraphLaunch`: **replays all recorded kernel launches** via RPC
+- `cudaGraphExecUpdate`: replaces stored recording with latest capture
+- `cudaStreamIsCapturing`: returns `Active` during capture (was always `None`)
+- Constructor: also sets `GGML_CUDA_DISABLE_GRAPHS=1` as belt-and-suspenders
+
+First token gets a harmless double execution (eager + replay). Subsequent tokens get exactly one execution (replay only). All ggml kernel args contain device pointers that remain stable across tokens — the GPU reads updated data at those pointers on each replay.
 
 ---
 
@@ -519,6 +531,8 @@ Replaced manual per-stub copy block with `make install-all-shims-compat` delegat
 
 20. **`su -` strips environment variables.** Pass debug vars inside the `su - user -c "VAR=val command"` form.
 
+21. **CUDA graph no-op stubs silently break multi-token inference.** ggml launches kernels only during graph capture; `cudaGraphLaunch` must replay them. A no-op `cudaGraphLaunch` means zero computation after the first capture cycle.
+
 ---
 
 ## Production Status (2026-03-15)
@@ -526,7 +540,7 @@ Replaced manual per-stub copy block with `make install-all-shims-compat` delegat
 | Workload | Status | Notes |
 |----------|--------|-------|
 | Ollama / ggml short generation | ✅ Production | GPU confirmed, short context |
-| Ollama / ggml long generation | ❌ Bug 22 | GPU gibberish, parked |
+| Ollama / ggml long generation | ✅ Fixed | Bug 22 — graph capture/replay |
 | PyTorch inference (eager) | ✅ Confirmed | All transformer ops incl. bias |
 | PyTorch full fine-tuning | ✅ Confirmed | 1,252 tok/s, 409ms/step |
 | PyTorch LoRA (PEFT) | ✅ Confirmed | 1,038 tok/s, 493ms/step, 1,360MB VRAM |
@@ -538,7 +552,7 @@ Replaced manual per-stub copy block with `make install-all-shims-compat` delegat
 
 | Item | Priority | Notes |
 |------|----------|-------|
-| Bug 22 — Ollama long-text GPU gibberish | Medium | Custom ggml CUDA kernel issue, parked |
+| Bug 22 — Ollama long-text GPU gibberish | ~~Medium~~ | ✅ Fixed — CUDA graph capture/replay |
 | Bug 19 — cuDNN context struct layout | Low | Parked — nvproxy reference needed |
 | vLLM template validation | High | VMEM_PROXY=1 already set |
 | React frontend migration | Low | Backlog |
