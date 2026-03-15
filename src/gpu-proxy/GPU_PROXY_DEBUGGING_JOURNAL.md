@@ -21,6 +21,10 @@
 | 10 | Mar 5-6 | **TCP_QUICKACK fix (0.07→436 tok/s)**, generic proxy refactor, production deployment |
 | 11 | Mar 6-13 | PyTorch CUDA 12 compatibility, Bug 17b/17c SIGFPE chain, **PyTorch inference confirmed** |
 | 12 | Mar 13 | **PyTorch full training + LoRA fine-tuning confirmed**; cublasLt debug gate |
+| 13 | Mar 14 | cuGetExportTable stub, cuDNN investigation, Bug 19 parked |
+| 14 | Mar 15 | **cublasLt bias fix (Bug 21)**, **SD Forge image generation confirmed**, libcudnn stub, Bug 22 parked |
+| 11 | Mar 6-13 | PyTorch CUDA 12 compatibility, Bug 17b/17c SIGFPE chain, **PyTorch inference confirmed** |
+| 12 | Mar 13 | **PyTorch full training + LoRA fine-tuning confirmed**; cublasLt debug gate |
 
 ---
 
@@ -444,3 +448,98 @@ a customer-reported bottleneck or when nvproxy source is reviewed.
 | Llama-3.2-1B LoRA benchmark | Medium | Validates real-world fine-tuning target |
 | `.orig` guard content-check fix (Bug 9) | Low | Prevents re-replacement on redeploy |
 | GPU_PROXY_DEBUGGING_JOURNAL.md sync | ✅ Done | This update |
+---
+
+## Session 14: cublasLt Bias Fix + SD Forge Confirmed (Mar 15) ⭐⭐⭐
+
+### Bug 21: cublasLt EPILOGUE/BIAS_POINTER Constants Swapped — FIXED ✅
+
+**Symptom:** `torch.addmm` (every `nn.Linear` with bias) returned wrong results. SD Forge generated flat/grey images. Ollama GPU long-text generations produced gibberish from token 1.
+
+**Root cause:** `CUBLASLT_MATMUL_DESC_EPILOGUE` and `CUBLASLT_MATMUL_DESC_BIAS_POINTER` attribute index constants were swapped in `cublasLt_stub.c`:
+```
+Wrong:   EPILOGUE=7  BIAS_POINTER=8
+Correct: EPILOGUE=8  BIAS_POINTER=7   (CUDA 12.1 ABI)
+```
+Additionally, PyTorch 2.3 passes EPILOGUE as 4 bytes (attr=8) and BIAS_POINTER as an 8-byte device pointer (attr=7). Swapped constants caused every descriptor setup to write to the wrong fields, producing silently incorrect GEMM results.
+
+**Fix (`stubs/cublasLt_stub.c`):** Corrected `#define` values. Epilogue and bias_ptr now set via `cublasLtMatmulDescSetAttribute` into op_desc before `cublasLtMatmul`. Saxpy fallback removed.
+
+**Verification:**
+```
+Linear(  64->320) diff_std=0.00000008  ✅
+Linear( 320->320) diff_std=0.00000011  ✅
+Linear(1280->320) diff_std=0.00000013  ✅
+addmm mean: 99.90 (expected ~100), diff max: 0.000000  ✅
+```
+
+---
+
+### SD Forge GPU Image Generation — CONFIRMED ✅
+
+Fresh VM deployment. Generated 512×512 photorealistic red apple image at 1.61 it/s, 20 steps. `ExecStartPre` in systemd service correctly replaces venv stubs (cublas, cublasLt, cudnn) on every service start.
+
+---
+
+### Bug 22: Ollama Long-Text GPU Gibberish — PARKED 🚧
+
+**Symptom:** GPU inference produces garbage from token 1 on long prompts (`eval_count: 4`). CPU inference produces perfect output.
+
+**Investigation:** `objdump -T libggml-cuda.so | grep cublas` → **empty** — ggml uses zero cuBLAS/cublasLt, only custom CUDA kernels. Bug 21 fix has no effect on this path. Short generations work correctly on GPU.
+
+**Root cause:** Unknown. Custom ggml CUDA kernels produce wrong logits beyond ~10 token context. Requires kernel-level investigation (nvprof, output comparison vs CPU reference).
+
+**Tracking:** Bug 22 — parked. Ollama short generation confirmed working on GPU.
+
+---
+
+### libcudnn Stub Infrastructure — NEW ✅
+
+`libtorch_cuda.so` and `libtorch_python.so` have `DT_NEEDED: libcudnn.so.8`. Without this stub PyTorch fails to import entirely on a clean VM.
+
+New files: `stubs/libcudnn_stub.c` (85 symbols, all returning `CUDNN_STATUS_NOT_INITIALIZED(1)`) and `stubs/libcudnn.version`. Deployed via `make all-shims-compat` → 9p share → cloud-init → `/usr/local/lib/libcudnn.so.8`. `ExecStartPre` replaces venv-bundled cudnn libs on every service start.
+
+**Verification:** `libcudnn_stub.so OK (87 versioned symbols)` ✅
+
+---
+
+### install.sh Refactor
+
+Replaced manual per-stub copy block with `make install-all-shims-compat` delegation — Makefile is now the single source of truth for stub installation.
+
+---
+
+### Key Lessons Learned (Session 14)
+
+17. **cublasLt attribute constants must be verified against actual CUDA headers.** `EPILOGUE=8`, `BIAS_POINTER=7` — wrong values cause silent incorrect results, not crashes.
+
+18. **PyTorch passes EPILOGUE as 4 bytes (attr=8), BIAS_POINTER as 8 bytes (attr=7).** Read with correct types. Confirmed via `DECLOUD_GPU_DEBUG=1` `SetAttribute` logging.
+
+19. **ggml uses zero cuBLAS.** All ggml CUDA compute is custom kernels — cuBLAS/cublasLt fixes have no effect on Ollama generation quality.
+
+20. **`su -` strips environment variables.** Pass debug vars inside the `su - user -c "VAR=val command"` form.
+
+---
+
+## Production Status (2026-03-15)
+
+| Workload | Status | Notes |
+|----------|--------|-------|
+| Ollama / ggml short generation | ✅ Production | GPU confirmed, short context |
+| Ollama / ggml long generation | ❌ Bug 22 | GPU gibberish, parked |
+| PyTorch inference (eager) | ✅ Confirmed | All transformer ops incl. bias |
+| PyTorch full fine-tuning | ✅ Confirmed | 1,252 tok/s, 409ms/step |
+| PyTorch LoRA (PEFT) | ✅ Confirmed | 1,038 tok/s, 493ms/step, 1,360MB VRAM |
+| JupyterLab kernel | ✅ Confirmed | Via systemd EnvironmentFile |
+| Stable Diffusion Forge | ✅ Confirmed | Image generation 1.61 it/s |
+| cuDNN-accelerated conv | ❌ Blocked | Bug 19 — parked |
+
+## Pending Items
+
+| Item | Priority | Notes |
+|------|----------|-------|
+| Bug 22 — Ollama long-text GPU gibberish | Medium | Custom ggml CUDA kernel issue, parked |
+| Bug 19 — cuDNN context struct layout | Low | Parked — nvproxy reference needed |
+| vLLM template validation | High | VMEM_PROXY=1 already set |
+| React frontend migration | Low | Backlog |
+| `cuLaunchKernelEx` grid dims | Low | Parses 1×1×1 defaults |
