@@ -1291,6 +1291,17 @@ cudaError_t cudaMemcpy(void *dst, const void *src, size_t count,
             .count = (uint64_t)count,
             .kind  = GPU_MEMCPY_DEVICE_TO_DEVICE,
         };
+
+        /* During graph capture, record D2D copies — do NOT execute.
+         * The source buffer may be a kernel output that hasn't been
+         * computed yet (kernel only recorded).  Eager execution reads
+         * stale data; recording ensures the copy runs during replay
+         * after the source kernel has actually written its output. */
+        if (g_graph_capturing) {
+            decloud_graph_record_op(GPU_CMD_MEMCPY, &req, sizeof(req));
+            return cudaSuccess;
+        }
+
         return rpc_call(GPU_CMD_MEMCPY, &req, sizeof(req), NULL, 0, NULL);
     }
 
@@ -1317,6 +1328,17 @@ cudaError_t cudaMemset(void *devPtr, int value, size_t count)
         .value = value,
         .count = (uint64_t)count,
     };
+
+    /* During graph capture, record — do NOT execute.
+     * cudaMemsetAsync is captured as a memset node in real CUDA graphs.
+     * Eager execution here followed by no replay causes buffers to hold
+     * stale data on subsequent graph launches (e.g., flash-attention
+     * accumulators not re-zeroed → corrupted softmax). */
+    if (g_graph_capturing) {
+        decloud_graph_record_op(GPU_CMD_MEMSET, &req, sizeof(req));
+        return cudaSuccess;
+    }
+
     return rpc_call(GPU_CMD_MEMSET, &req, sizeof(req), NULL, 0, NULL);
 }
 
