@@ -150,11 +150,12 @@ $(CUBLAS_STUB): stubs/cublas_stub.c stubs/libcublas.version proto/gpu_proxy_prot
 # ----------------------------------------------------------------
 cublaslt-stub: $(CUBLASLT_STUB)
 
-$(CUBLASLT_STUB): stubs/cublasLt_stub.c stubs/libcublasLt.version | $(BUILD_DIR)
+$(CUBLASLT_STUB): stubs/cublasLt_stub.c stubs/libcublasLt.version proto/gpu_proxy_proto.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -shared -fPIC \
 		-Wl,-soname,libcublasLt.so.12 \
 		-Wl,--version-script=stubs/libcublasLt.version \
-		-o $@ $<
+		-o $@ $< \
+		-ldl
 
 # ----------------------------------------------------------------
 # cuDNN Stub (libcudnn.so.8): satisfies DT_NEEDED: libcudnn.so.8 from
@@ -262,11 +263,11 @@ all-shims-compat: | $(BUILD_DIR)
 	               -o build/libcublas_stub.so \
 	               stubs/cublas_stub.c -ldl && \
 	           echo '==> Building cuBLAS Lt stub...' && \
-	           gcc -Wall -Wextra -O2 -shared -fPIC \
+	           gcc -Wall -Wextra -O2 -I/src -shared -fPIC \
 	               -Wl,-soname,libcublasLt.so.12 \
 	               -Wl,--version-script=stubs/libcublasLt.version \
 	               -o build/libcublasLt_stub.so \
-	               stubs/cublasLt_stub.c && \
+	               stubs/cublasLt_stub.c -ldl && \
 	           echo '==> Building cuDNN stub...' && \
 	           gcc -Wall -Wextra -O2 -shared -fPIC \
 	               -Wl,-soname,libcudnn.so.8 \

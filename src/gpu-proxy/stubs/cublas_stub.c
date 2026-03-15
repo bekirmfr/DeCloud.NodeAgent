@@ -102,6 +102,38 @@ static rpc_call_fn get_rpc(void)
 }
 
 /* ================================================================
+ * Graph capture bridge — resolves helpers from cuda_shim.so
+ *
+ * During CUDA graph capture, cuBLAS calls must be RECORDED (not
+ * executed immediately).  ggml populates pointer arrays via kernels
+ * that are also only recorded — executing cuBLAS immediately would
+ * read uninitialised pointer arrays → CUBLAS_STATUS_EXECUTION_FAILED.
+ * ================================================================ */
+typedef int (*graph_is_capturing_fn)(void);
+typedef int (*graph_record_op_fn)(uint8_t cmd, const void *payload, uint32_t len);
+
+static graph_is_capturing_fn g_graph_is_capturing = NULL;
+static graph_record_op_fn    g_graph_record_op    = NULL;
+static int g_graph_resolved = 0;
+
+static void resolve_graph_helpers(void)
+{
+    if (!g_graph_resolved) {
+        g_graph_is_capturing = (graph_is_capturing_fn)dlsym(RTLD_DEFAULT,
+                                    "decloud_graph_is_capturing");
+        g_graph_record_op = (graph_record_op_fn)dlsym(RTLD_DEFAULT,
+                                    "decloud_graph_record_op");
+        g_graph_resolved = 1;
+    }
+}
+
+static int is_graph_capturing(void)
+{
+    resolve_graph_helpers();
+    return g_graph_is_capturing ? g_graph_is_capturing() : 0;
+}
+
+/* ================================================================
  * Handle / stream / mode management
  * ================================================================ */
 
@@ -249,9 +281,16 @@ cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t h, int ta, int tb,
     if (alpha) memcpy(req.alpha, alpha, scalar_size);
     if (beta)  memcpy(req.beta,  beta,  scalar_size);
 
+    /* During graph capture, record — do NOT execute.
+     * Kernels that set up data for this GEMM are also only recorded. */
+    if (is_graph_capturing() && g_graph_record_op) {
+        g_graph_record_op(GPU_CMD_CUBLAS_GEMM_STRIDED, &req, sizeof(req));
+        return CUBLAS_STATUS_SUCCESS;
+    }
+
     int err = rpc(GPU_CMD_CUBLAS_GEMM_STRIDED,
                   &req, sizeof(req), NULL, 0, NULL);
-    
+
     mask_fpe_exceptions();
     return err ? CUBLAS_STATUS_EXECUTION_FAILED : CUBLAS_STATUS_SUCCESS;
 }
@@ -307,6 +346,15 @@ cublasStatus_t cublasGemmBatchedEx(cublasHandle_t h, int ta, int tb,
 
     if (alpha) memcpy(req.alpha, alpha, scalar_size);
     if (beta)  memcpy(req.beta,  beta,  scalar_size);
+
+    /* During graph capture, record — do NOT execute.
+     * ggml's k_compute_batched_ptrs kernel populates the pointer arrays
+     * and is also only recorded; executing the GEMM now would read
+     * uninitialised device memory → CUBLAS_STATUS_EXECUTION_FAILED. */
+    if (is_graph_capturing() && g_graph_record_op) {
+        g_graph_record_op(GPU_CMD_CUBLAS_GEMM_BATCHED, &req, sizeof(req));
+        return CUBLAS_STATUS_SUCCESS;
+    }
 
     int err = rpc(GPU_CMD_CUBLAS_GEMM_BATCHED,
                   &req, sizeof(req), NULL, 0, NULL);

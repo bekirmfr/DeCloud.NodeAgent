@@ -153,6 +153,33 @@ static rpc_call_fn get_rpc(void)
 }
 
 /* ================================================================
+ * Graph capture bridge — resolves helpers from cuda_shim.so
+ * ================================================================ */
+typedef int (*graph_is_capturing_fn)(void);
+typedef int (*graph_record_op_fn)(uint8_t cmd, const void *payload, uint32_t len);
+
+static graph_is_capturing_fn g_graph_is_capturing = NULL;
+static graph_record_op_fn    g_graph_record_op    = NULL;
+static int g_graph_resolved = 0;
+
+static void resolve_graph_helpers(void)
+{
+    if (!g_graph_resolved) {
+        g_graph_is_capturing = (graph_is_capturing_fn)dlsym(RTLD_DEFAULT,
+                                    "decloud_graph_is_capturing");
+        g_graph_record_op = (graph_record_op_fn)dlsym(RTLD_DEFAULT,
+                                    "decloud_graph_record_op");
+        g_graph_resolved = 1;
+    }
+}
+
+static int is_graph_capturing(void)
+{
+    resolve_graph_helpers();
+    return g_graph_is_capturing ? g_graph_is_capturing() : 0;
+}
+
+/* ================================================================
  * Descriptor state tables
  *
  * Handles ARE pointers into these static arrays — no heap allocation,
@@ -663,13 +690,19 @@ cublasStatus_t cublasLtMatmul(
              req.batchCount, (C == D) ? "==" : "!=",
              req.epilogue, (unsigned long long)req.bias_ptr);
 
+    /* During graph capture, record — do NOT execute. */
+    if (is_graph_capturing() && g_graph_record_op) {
+        g_graph_record_op(GPU_CMD_CUBLAS_LT_MATMUL, &req, sizeof(req));
+        return CUBLAS_STATUS_SUCCESS;
+    }
+
     int err = rpc(GPU_CMD_CUBLAS_LT_MATMUL,
                   &req, sizeof(req), NULL, 0, NULL);
     if (err) {
         STUB_LOG("cublasLtMatmul: RPC failed (err=%d)", err);
         return CUBLAS_STATUS_NOT_SUPPORTED;
     }
-    
+
     /* Mask FPE on exit — PyTorch's CublasHandlePool enables MXCSR exceptions
      * during init. Masking here ensures the calling thread's MXCSR is safe
      * for CPU code (e.g. temperature sampling) that runs after our return. */
