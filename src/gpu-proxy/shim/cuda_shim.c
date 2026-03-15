@@ -23,6 +23,9 @@
 #include <arpa/inet.h>
 #include <signal.h>
 #include <ucontext.h>
+#include <time.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 #include "proto/gpu_proxy_proto.h"
 
@@ -40,6 +43,65 @@
  * Defaults to 1 for safety — set DECLOUD_GPU_GRAPH_NOOP=0 to disable. */
 static int g_graph_noop = 1;
 static int g_debug_log = 0;
+
+/* ================================================================
+ * Diagnostic file logging — writes to /tmp/gpu-proxy-diag.log
+ * Enabled by:  touch /tmp/gpu-proxy-diag   (or DECLOUD_GPU_DIAG=1)
+ * Always appends so multiple processes show interleaved logs.
+ * ================================================================ */
+#define DIAG_LOG_PATH "/tmp/gpu-proxy-diag.log"
+#define DIAG_TRIGGER  "/tmp/gpu-proxy-diag"
+
+static int g_diag_enabled = 0;
+static FILE *g_diag_fp = NULL;
+static pthread_mutex_t g_diag_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Atomic counters for summary stats */
+static volatile int g_diag_kernel_launches = 0;
+static volatile int g_diag_graph_begins = 0;
+static volatile int g_diag_graph_ends = 0;
+static volatile int g_diag_graph_instantiates = 0;
+static volatile int g_diag_graph_launches = 0;
+static volatile int g_diag_graph_updates = 0;
+static volatile int g_diag_memcpy_h2d = 0;
+static volatile int g_diag_memcpy_d2h = 0;
+static volatile int g_diag_mallocs = 0;
+static volatile int g_diag_rpc_errors = 0;
+
+static void diag_init(void)
+{
+    /* Check trigger file or env var */
+    struct stat st;
+    if (stat(DIAG_TRIGGER, &st) == 0 || getenv("DECLOUD_GPU_DIAG")) {
+        g_diag_fp = fopen(DIAG_LOG_PATH, "a");
+        if (g_diag_fp) {
+            g_diag_enabled = 1;
+            setvbuf(g_diag_fp, NULL, _IOLBF, 0); /* line-buffered */
+        }
+    }
+}
+
+static void diag_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void diag_log(const char *fmt, ...)
+{
+    if (!g_diag_enabled) return;
+    pthread_mutex_lock(&g_diag_lock);
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    localtime_r(&ts.tv_sec, &tm);
+    fprintf(g_diag_fp, "[%02d:%02d:%02d.%03ld pid=%d] ",
+            tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000,
+            (int)getpid());
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(g_diag_fp, fmt, ap);
+    va_end(ap);
+    fputc('\n', g_diag_fp);
+    pthread_mutex_unlock(&g_diag_lock);
+}
+
+#define DIAG(fmt, ...) do { if (g_diag_enabled) diag_log(fmt, ##__VA_ARGS__); } while(0)
 
 /* ================================================================
  * CUDA Graph Capture & Replay (Bug 22 fix)
@@ -177,6 +239,15 @@ int feenableexcept(int excepts)
 __attribute__((constructor))
 static void shim_init(void)
 {
+    /* Init diagnostics early — before any other work */
+    diag_init();
+
+    /* Read /proc/self/exe for process identification */
+    char exe_path[256] = {0};
+    readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    DIAG("=== CUDART SHIM CONSTRUCTOR START ===");
+    DIAG("Process: %s (pid=%d, ppid=%d)", exe_path, getpid(), getppid());
+
     /* Read config file and propagate app-specific env vars.
      * Cloud-init templates write application env vars here (e.g.,
      * GGML_CUDA_FORCE_MMQ=1 for Ollama, CUDA_VISIBLE_DEVICES for PyTorch).
@@ -185,6 +256,7 @@ static void shim_init(void)
     FILE *f = fopen("/etc/decloud/gpu-proxy.env", "r");
     int count = 0;
     if (f) {
+        DIAG("Opened /etc/decloud/gpu-proxy.env");
         char line[512];
         while (fgets(line, sizeof(line), f)) {
             char *p = line;
@@ -198,10 +270,13 @@ static void shim_init(void)
             char *key = p;
             char *val = eq + 1;
 
+            DIAG("  env-file: %s=%s", key, strcmp(key, "DECLOUD_GPU_PROXY_TOKEN") == 0 ? "<redacted>" : val);
+
             /* Skip transport config (handled by transport layer) and LD_PRELOAD */
             /* Consume proxy-level flags we handle internally */
             if (strcmp(key, "DECLOUD_GPU_GRAPH_NOOP") == 0) {
                 g_graph_noop = (val[0] == '1');
+                DIAG("  → g_graph_noop = %d", g_graph_noop);
                 continue;
             }
             if (strncmp(key, "DECLOUD_", 8) == 0) continue;
@@ -211,6 +286,8 @@ static void shim_init(void)
             count++;
         }
         fclose(f);
+    } else {
+        DIAG("WARNING: cannot open /etc/decloud/gpu-proxy.env: %s", strerror(errno));
     }
 
     if (getenv("DECLOUD_GPU_DEBUG")) {
@@ -222,6 +299,16 @@ static void shim_init(void)
      * this env var.  Graph replay is now implemented below, but disabling
      * graphs avoids the overhead of capture+replay when the env var works. */
     setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 0); /* don't overwrite if user set it */
+
+    /* Dump critical env state for diagnostics */
+    DIAG("Env state after constructor:");
+    DIAG("  GGML_CUDA_DISABLE_GRAPHS=%s", getenv("GGML_CUDA_DISABLE_GRAPHS") ?: "(unset)");
+    DIAG("  GGML_CUDA_FORCE_MMQ=%s", getenv("GGML_CUDA_FORCE_MMQ") ?: "(unset)");
+    DIAG("  CUDA_VISIBLE_DEVICES=%s", getenv("CUDA_VISIBLE_DEVICES") ?: "(unset)");
+    DIAG("  LD_PRELOAD=%s", getenv("LD_PRELOAD") ?: "(unset)");
+    DIAG("  g_graph_noop=%d, g_debug_log=%d", g_graph_noop, g_debug_log);
+    DIAG("  app env vars loaded from file: %d", count);
+    DIAG("=== CUDART SHIM CONSTRUCTOR END ===");
 
     mask_fpe_exceptions();
     /* NOTE: We intentionally do NOT install a SIGFPE handler here.
@@ -1068,14 +1155,19 @@ cudaError_t cudaMalloc(void **devPtr, size_t size)
 {
     if (!devPtr) return cudaErrorInvalidValue;
 
+    __sync_fetch_and_add(&g_diag_mallocs, 1);
     GpuMallocRequest req = { .size = (uint64_t)size };
     GpuMallocResponse resp;
     int err = rpc_call(GPU_CMD_MALLOC, &req, sizeof(req),
                        &resp, sizeof(resp), NULL);
     if (err == cudaSuccess) {
         *devPtr = (void *)(uintptr_t)resp.device_ptr;
+        DIAG("cudaMalloc: %zu bytes → devPtr=0x%lx (total mallocs=%d)",
+             size, (unsigned long)resp.device_ptr, g_diag_mallocs);
     } else {
         *devPtr = NULL;
+        DIAG("cudaMalloc: %zu bytes FAILED err=%d (total mallocs=%d)",
+             size, err, g_diag_mallocs);
     }
     return err;
 }
@@ -1389,10 +1481,20 @@ cudaError_t cudaLaunchKernel(const void *func, dim3 gridDim, dim3 blockDim,
         op->rpc_len     = req_len;
         op->rpc_payload = malloc(req_len);
         memcpy(op->rpc_payload, req_buf, req_len);
+        DIAG("  graph-capture: recorded op #%d (func=0x%lx, grid=%ux%ux%u, block=%ux%ux%u, args=%u bytes)",
+             cap->count, (unsigned long)req->host_func_ptr,
+             req->grid_dim_x, req->grid_dim_y, req->grid_dim_z,
+             req->block_dim_x, req->block_dim_y, req->block_dim_z,
+             req->args_total_size);
     }
 
+    __sync_fetch_and_add(&g_diag_kernel_launches, 1);
     int err = rpc_call(GPU_CMD_LAUNCH_KERNEL, req_buf, req_len,
                        NULL, 0, NULL);
+    if (err != 0) {
+        __sync_fetch_and_add(&g_diag_rpc_errors, 1);
+        DIAG("cudaLaunchKernel FAILED: err=%d (func=0x%lx)", err, (unsigned long)(uintptr_t)func);
+    }
     free(req_buf);
     return err;
 }
@@ -1698,6 +1800,18 @@ cublasStatus_t cublasGetMathMode(cublasHandle_t handle, int *mode)
 __attribute__((destructor))
 static void shim_cleanup(void)
 {
+    DIAG("=== CUDART SHIM DESTRUCTOR (pid=%d) ===", getpid());
+    DIAG("  Kernel launches:       %d", g_diag_kernel_launches);
+    DIAG("  Graph begins:          %d", g_diag_graph_begins);
+    DIAG("  Graph ends:            %d", g_diag_graph_ends);
+    DIAG("  Graph instantiates:    %d", g_diag_graph_instantiates);
+    DIAG("  Graph launches:        %d", g_diag_graph_launches);
+    DIAG("  Graph updates:         %d", g_diag_graph_updates);
+    DIAG("  cudaMalloc calls:      %d", g_diag_mallocs);
+    DIAG("  RPC errors:            %d", g_diag_rpc_errors);
+    DIAG("  g_graph_noop:          %d", g_graph_noop);
+    DIAG("=== END STATS ===");
+
     pthread_mutex_lock(&g_conn_lock);
     if (g_conn_fd >= 0) {
         GpuProxyHeader hdr = {
@@ -1712,6 +1826,11 @@ static void shim_cleanup(void)
         g_conn_fd = -1;
     }
     pthread_mutex_unlock(&g_conn_lock);
+
+    if (g_diag_fp) {
+        fclose(g_diag_fp);
+        g_diag_fp = NULL;
+    }
 }
 /* ================================================================
  * Additional stubs required by libggml-cuda.so
@@ -1849,6 +1968,7 @@ cudaError_t cudaGraphExecDestroy(cudaGraphExec_t graphExec)
 cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
                                  cudaGraphExecUpdateResult *updateResult_out)
 {
+    __sync_fetch_and_add(&g_diag_graph_updates, 1);
     if (!g_graph_noop) {
         if (updateResult_out) *updateResult_out = 1; /* error */
         return cudaSuccess;
@@ -1862,8 +1982,12 @@ cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
         graph_record_copy(&g_graph_exec_slots[idx].record, &g_graph_capture_buf);
         pthread_mutex_unlock(&g_graph_exec_lock);
         if (updateResult_out) *updateResult_out = 0; /* success */
+        DIAG("cudaGraphExecUpdate: slot %d updated with %d ops (call #%d)",
+             idx, g_graph_exec_slots[idx].record.count, g_diag_graph_updates);
     } else {
         if (updateResult_out) *updateResult_out = 1; /* error → forces re-instantiate */
+        DIAG("cudaGraphExecUpdate: slot %d INVALID → error result (call #%d)",
+             idx, g_diag_graph_updates);
     }
     return cudaSuccess;
 }
@@ -1874,9 +1998,11 @@ cudaError_t cudaGraphInstantiate(cudaGraphExec_t *pGraphExec, cudaGraph_t graph,
     (void)graph; (void)pErrorNode; (void)pLogBuffer; (void)bufferSize;
     if (!g_graph_noop) return cudaErrorNotSupported;
 
+    __sync_fetch_and_add(&g_diag_graph_instantiates, 1);
     int idx = graph_exec_alloc();
     if (idx < 0) {
         /* All slots full — reuse slot 0 */
+        DIAG("cudaGraphInstantiate: all %d slots full, reusing slot 0", GRAPH_MAX_EXEC_SLOTS);
         graph_exec_free(0);
         idx = graph_exec_alloc();
     }
@@ -1886,6 +2012,9 @@ cudaError_t cudaGraphInstantiate(cudaGraphExec_t *pGraphExec, cudaGraph_t graph,
         pthread_mutex_unlock(&g_graph_exec_lock);
     }
     if (pGraphExec) *pGraphExec = GRAPH_EXEC_TO_PTR(idx >= 0 ? idx : 0);
+    DIAG("cudaGraphInstantiate: slot=%d, ops=%d (call #%d)",
+         idx, idx >= 0 ? g_graph_exec_slots[idx].record.count : 0,
+         g_diag_graph_instantiates);
     return cudaSuccess;
 }
 
@@ -1894,17 +2023,28 @@ cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream)
     (void)stream;
     if (!g_graph_noop) return cudaErrorNotSupported;
 
+    __sync_fetch_and_add(&g_diag_graph_launches, 1);
     int idx = GRAPH_EXEC_FROM_PTR(graphExec);
-    if (idx < 0 || idx >= GRAPH_MAX_EXEC_SLOTS || !g_graph_exec_slots[idx].in_use)
+    if (idx < 0 || idx >= GRAPH_MAX_EXEC_SLOTS || !g_graph_exec_slots[idx].in_use) {
+        DIAG("cudaGraphLaunch: UNKNOWN handle %p (idx=%d) → no-op! (call #%d)",
+             graphExec, idx, g_diag_graph_launches);
         return cudaSuccess; /* no-op for unknown handles */
+    }
 
     GraphRecord *rec = &g_graph_exec_slots[idx].record;
     SHIM_LOG("cudaGraphLaunch: replaying %d recorded kernel launches", rec->count);
+    DIAG("cudaGraphLaunch: replaying %d ops from slot %d (call #%d)",
+         rec->count, idx, g_diag_graph_launches);
 
+    int errors = 0;
     for (int i = 0; i < rec->count; i++) {
-        rpc_call(GPU_CMD_LAUNCH_KERNEL,
+        int err = rpc_call(GPU_CMD_LAUNCH_KERNEL,
                  rec->ops[i].rpc_payload, rec->ops[i].rpc_len,
                  NULL, 0, NULL);
+        if (err != 0) errors++;
+    }
+    if (errors > 0) {
+        DIAG("cudaGraphLaunch: %d/%d replay RPCs FAILED", errors, rec->count);
     }
     return cudaSuccess;
 }
@@ -2024,10 +2164,13 @@ cudaError_t cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode_t 
     (void)stream; (void)mode;
     if (!g_graph_noop) return cudaErrorNotSupported;
 
+    __sync_fetch_and_add(&g_diag_graph_begins, 1);
     /* Free any previous capture buffer and start fresh */
     graph_record_free(&g_graph_capture_buf);
     g_graph_capturing = 1;
     SHIM_LOG("cudaStreamBeginCapture: recording started");
+    DIAG("cudaStreamBeginCapture: stream=%p, mode=%d, recording started (call #%d)",
+         stream, (int)mode, g_diag_graph_begins);
     return cudaSuccess;
 }
 
@@ -2037,8 +2180,11 @@ cudaError_t cudaStreamEndCapture(cudaStream_t stream, cudaGraph_t *pGraph)
     if (!g_graph_noop) return cudaErrorNotSupported;
 
     g_graph_capturing = 0;
+    __sync_fetch_and_add(&g_diag_graph_ends, 1);
     SHIM_LOG("cudaStreamEndCapture: recorded %d kernel launches",
              g_graph_capture_buf.count);
+    DIAG("cudaStreamEndCapture: recorded %d kernel launches (call #%d)",
+         g_graph_capture_buf.count, g_diag_graph_ends);
     /* Return a token so ggml can pass it to cudaGraphInstantiate/Update */
     if (pGraph) *pGraph = (cudaGraph_t)&g_dummy_graph_tag;
     return cudaSuccess;
