@@ -154,7 +154,7 @@ $(CUBLASLT_STUB): stubs/cublasLt_stub.c stubs/libcublasLt.version | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -shared -fPIC \
 		-Wl,-soname,libcublasLt.so.12 \
 		-Wl,--version-script=stubs/libcublasLt.version \
-		-o $@ $
+		-o $@ $<
 
 # ----------------------------------------------------------------
 # cuDNN Stub (libcudnn.so.8): satisfies DT_NEEDED: libcudnn.so.8 from

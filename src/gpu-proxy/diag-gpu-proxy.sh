@@ -78,6 +78,22 @@ cmd_collect() {
         done
         echo ""
 
+        echo "=== Ollama runner directories (0.18+ GPU shim injection) ==="
+        for runner_dir in /usr/local/lib/ollama/cuda_v*; do
+            if [ -d "$runner_dir" ]; then
+                echo "  $runner_dir:"
+                for lib in libcuda.so.1 libcudart.so.12 libcublas.so.12 libcublasLt.so.12 libnvidia-ml.so.1; do
+                    if [ -f "$runner_dir/$lib" ]; then
+                        echo "    $lib: $(ls -la "$runner_dir/$lib" | awk '{print $5}')"
+                    else
+                        echo "    $lib: MISSING (GPU detection will fail!)"
+                    fi
+                done
+            fi
+        done
+        [ ! -d /usr/local/lib/ollama ] && echo "  /usr/local/lib/ollama: NOT FOUND (not Ollama 0.18+)"
+        echo ""
+
         echo "=== LD_PRELOAD in running Ollama processes ==="
         for pid in $(pgrep -f ollama 2>/dev/null || true); do
             echo "  PID $pid ($(readlink /proc/$pid/exe 2>/dev/null || echo unknown)):"
