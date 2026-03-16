@@ -2336,8 +2336,23 @@ static CUresult cu_func_get_attribute(int *value, int attrib, CUfunction func)
 
 static CUresult cu_func_set_attribute(CUfunction func, int attrib, int value)
 {
-    (void)func; (void)attrib; (void)value;
-    return CUDA_SUCCESS;  /* Silently accept */
+    uint64_t handle = (uint64_t)(uintptr_t)func;
+    DriverFunctionSlot *fs = find_driver_function(handle);
+    if (!fs) {
+        TRANSPORT_LOG("cuFuncSetAttribute: unknown function handle 0x%lx", (unsigned long)handle);
+        return CUDA_SUCCESS;  /* non-fatal */
+    }
+
+    GpuFuncSetAttributeRequest req = {
+        .host_func_ptr = fs->opaque_handle,
+        .attr  = attrib,
+        .value = value,
+    };
+    int err = transport_rpc_call(GPU_CMD_FUNC_SET_ATTRIBUTE,
+                                  &req, sizeof(req), NULL, 0, NULL);
+    TRANSPORT_LOG("cuFuncSetAttribute('%s', attr=%d, value=%d) -> %d",
+                   fs->name, attrib, value, err);
+    return CUDA_SUCCESS;  /* always succeed — ggml wraps in CUDA_CHECK */
 }
 
 static CUresult cu_func_set_cache_config(CUfunction func, int config)

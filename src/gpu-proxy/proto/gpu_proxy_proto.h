@@ -69,6 +69,7 @@ typedef enum {
     /* True GPU Presence — kernel attribute & occupancy queries */
     GPU_CMD_FUNC_GET_ATTRIBUTES    = 0x54,
     GPU_CMD_OCCUPANCY_MAX_BLOCKS    = 0x55,
+    GPU_CMD_FUNC_SET_ATTRIBUTE     = 0x59,
 
     /* Virtual memory management (CUDA 10.2+) */
     GPU_CMD_VMEM_CREATE             = 0x70,
@@ -343,6 +344,18 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     int32_t numBlocks;
 } GpuOccupancyMaxBlocksResponse;
+
+/* --- FUNC_SET_ATTRIBUTE (0x59) ---
+ *
+ * Forwards cudaFuncSetAttribute to the daemon.  Critical for flash-attention
+ * kernels that need cudaFuncAttributeMaxDynamicSharedMemorySize > 48KB.
+ * Without this, cuLaunchKernel on the daemon fails with INVALID_VALUE.
+ */
+typedef struct __attribute__((packed)) {
+    uint64_t host_func_ptr;  /* VM-side function pointer (maps to CUfunction) */
+    int32_t  attr;           /* cudaFuncAttribute enum value */
+    int32_t  value;          /* attribute value */
+} GpuFuncSetAttributeRequest;
 
 /* --- CUBLAS GEMM BATCHED (0x56) ---
  *

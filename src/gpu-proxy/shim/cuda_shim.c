@@ -68,6 +68,7 @@ static volatile int g_diag_memcpy_h2d = 0;
 static volatile int g_diag_memcpy_d2h = 0;
 static volatile int g_diag_mallocs = 0;
 static volatile int g_diag_rpc_errors = 0;
+static volatile int g_diag_kernels_captured_not_exec = 0;  /* kernels recorded during capture (not executed) */
 
 static void diag_init(void)
 {
@@ -1588,6 +1589,7 @@ cudaError_t cudaLaunchKernel(const void *func, dim3 gridDim, dim3 blockDim,
      * only during cudaGraphLaunch.  Eager execution here caused
      * double-execution → corrupted atomics/in-place ops → gibberish. */
     if (g_graph_capturing) {
+        __sync_fetch_and_add(&g_diag_kernels_captured_not_exec, 1);
         free(req_buf);
         return cudaSuccess;
     }
@@ -1779,7 +1781,28 @@ cudaError_t cudaDeviceSetCacheConfig(int config) { (void)config; return cudaSucc
 
 cudaError_t cudaFuncSetAttribute(const void *func, int attr, int value)
 {
-    (void)func; (void)attr; (void)value;
+    RegisteredFunction *rf = find_registered_function(
+        (uint64_t)(uintptr_t)func);
+    if (!rf) {
+        SHIM_LOG("cudaFuncSetAttribute: unknown function %p", func);
+        return cudaSuccess; /* non-fatal — function may not need this attr */
+    }
+    if (!rf->registered) {
+        ensure_module_uploaded(rf->module_index);
+    }
+
+    GpuFuncSetAttributeRequest req = {
+        .host_func_ptr = (uint64_t)(uintptr_t)func,
+        .attr  = attr,
+        .value = value,
+    };
+    int err = rpc_call(GPU_CMD_FUNC_SET_ATTRIBUTE,
+                       &req, sizeof(req), NULL, 0, NULL);
+    SHIM_LOG("cudaFuncSetAttribute(%s, attr=%d, value=%d) -> %d",
+             rf->device_name, attr, value, err);
+    /* Always return success — ggml wraps this in CUDA_CHECK.
+     * If the daemon doesn't support this command, kernels may still
+     * work with the default shared memory limit. */
     return cudaSuccess;
 }
 
@@ -1906,6 +1929,7 @@ static void shim_cleanup(void)
 {
     DIAG("=== CUDART SHIM DESTRUCTOR (pid=%d) ===", getpid());
     DIAG("  Kernel launches:       %d", g_diag_kernel_launches);
+    DIAG("  Kernels captured (no exec): %d", g_diag_kernels_captured_not_exec);
     DIAG("  Graph begins:          %d", g_diag_graph_begins);
     DIAG("  Graph ends:            %d", g_diag_graph_ends);
     DIAG("  Graph instantiates:    %d", g_diag_graph_instantiates);
