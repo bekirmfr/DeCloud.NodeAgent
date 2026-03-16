@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <unistd.h>
 #include <dlfcn.h>
 
 /* Set transport log prefix before including shared transport */
@@ -96,6 +97,15 @@ static int g_vmem_proxy = 0;
 /* When true (default), graph capture stubs return CUDA_SUCCESS (no-op).
  * Set DECLOUD_GPU_GRAPH_NOOP=0 to return NOT_SUPPORTED instead. */
 static int g_driver_graph_noop = 1;
+
+/* Driver shim statistics — written to diag file in destructor */
+static uint64_t g_drv_kernel_launches = 0;
+static uint64_t g_drv_kernel_ex_launches = 0;
+static uint64_t g_drv_module_loads = 0;
+static uint64_t g_drv_func_lookups = 0;
+static uint64_t g_drv_memalloc_calls = 0;
+static uint64_t g_drv_memcpy_calls = 0;
+static uint64_t g_drv_rpc_errors = 0;
 
 /* ================================================================
  * Graph-capture helpers (shared with cuda_shim.c via dlsym)
@@ -731,6 +741,21 @@ CUresult cuCtxDestroy_v2(CUcontext ctx)
 typedef void *CUstream;
 typedef void *CUevent;
 
+/* CUlaunchConfig — CUDA 11.6+ extended launch configuration.
+ * Used by cuLaunchKernelEx to pass grid/block dims + stream + attrs. */
+typedef struct {
+    unsigned int gridDimX;
+    unsigned int gridDimY;
+    unsigned int gridDimZ;
+    unsigned int blockDimX;
+    unsigned int blockDimY;
+    unsigned int blockDimZ;
+    unsigned int sharedMemBytes;
+    CUstream     hStream;
+    void        *attrs;       /* CUlaunchAttribute *attrs -- opaque for us */
+    unsigned int numAttrs;
+} CUlaunchConfig;
+
 /* Dummy handle value — non-NULL to satisfy NULL checks (used only for events) */
 #define DUMMY_EVENT  ((CUevent)(uintptr_t)0xDEC10002)
 
@@ -1283,6 +1308,7 @@ static int is_device_ptr(uint64_t ptr)
 
 static CUresult cu_mem_alloc(CUdeviceptr *dptr, size_t bytesize)
 {
+    g_drv_memalloc_calls++;
     if (!dptr) return CUDA_ERROR_INVALID_VALUE;
 
     GpuMallocRequest req = { .size = (uint64_t)bytesize };
@@ -1568,6 +1594,7 @@ static CUresult cu_memset_D32_async(CUdeviceptr dptr, unsigned int ui,
 
 static CUresult cu_module_load_data(CUmodule *module, const void *image)
 {
+    g_drv_module_loads++;
     if (!module || !image) return CUDA_ERROR_INVALID_VALUE;
 
     /* Detect image format and size */
@@ -1747,6 +1774,7 @@ static CUresult cu_module_unload(CUmodule module)
 static CUresult cu_module_get_function(CUfunction *func, CUmodule module,
                                         const char *name)
 {
+    g_drv_func_lookups++;
     if (!func || !name) return CUDA_ERROR_INVALID_VALUE;
 
     int mod_slot = (int)(uintptr_t)module - 1;
@@ -1852,6 +1880,7 @@ static CUresult cu_launch_kernel_driver(CUfunction f,
                                          void **extra)
 {
     (void)extra;
+    g_drv_kernel_launches++;
 
     uint64_t handle = (uint64_t)(uintptr_t)f;
     DriverFunctionSlot *fs = find_driver_function(handle);
@@ -1927,19 +1956,31 @@ static CUresult cu_launch_kernel_driver(CUfunction f,
 }
 
 /* cuLaunchKernelEx — CUDA 11.6+, extended config struct.
- * cuBLAS typically uses the non-Ex version, but we provide this
- * as a fallback that forwards with default dimensions. */
+ * Parses CUlaunchConfig to extract grid/block dims and stream,
+ * then delegates to the standard kernel launch path. */
 static CUresult cu_launch_kernel_ex(const void *config,
                                      CUfunction f,
                                      void **kernelParams,
                                      void **extra)
 {
-    /* TODO: Parse CUlaunchConfig struct for grid/block/stream if cuBLAS
-     * actually uses this path. For now, forward with 1x1x1 defaults.
-     * Evidence from logs: "cuLaunchKernelEx: forwarding with defaults" */
-    TRANSPORT_LOG("cuLaunchKernelEx: forwarding with default dims");
-    (void)config;
-    return cu_launch_kernel_driver(f, 1, 1, 1, 1, 1, 1, 0, NULL, kernelParams, extra);
+    g_drv_kernel_ex_launches++;
+    if (!config) {
+        TRANSPORT_LOG("cuLaunchKernelEx: NULL config, using 1x1x1 fallback");
+        return cu_launch_kernel_driver(f, 1, 1, 1, 1, 1, 1, 0, NULL, kernelParams, extra);
+    }
+
+    const CUlaunchConfig *cfg = (const CUlaunchConfig *)config;
+
+    TRANSPORT_LOG("cuLaunchKernelEx: grid=[%u,%u,%u] block=[%u,%u,%u] shm=%u",
+                  cfg->gridDimX, cfg->gridDimY, cfg->gridDimZ,
+                  cfg->blockDimX, cfg->blockDimY, cfg->blockDimZ,
+                  cfg->sharedMemBytes);
+
+    return cu_launch_kernel_driver(f,
+                                    cfg->gridDimX, cfg->gridDimY, cfg->gridDimZ,
+                                    cfg->blockDimX, cfg->blockDimY, cfg->blockDimZ,
+                                    cfg->sharedMemBytes, cfg->hStream,
+                                    kernelParams, extra);
 }
 
 /* ================================================================
@@ -2317,6 +2358,27 @@ CUresult cuGetProcAddress_v2(const char *symbol, void **pfn,
 __attribute__((destructor))
 static void driver_shim_cleanup(void)
 {
+    /* Write stats to the shared diag file (same as runtime shim) */
+    FILE *diag = fopen("/tmp/gpu-proxy-diag.log", "a");
+    if (diag) {
+        fprintf(diag, "=== DRIVER SHIM DESTRUCTOR (pid=%d) ===\n", getpid());
+        fprintf(diag, "  cuLaunchKernel calls:   %lu\n", (unsigned long)g_drv_kernel_launches);
+        fprintf(diag, "  cuLaunchKernelEx calls: %lu\n", (unsigned long)g_drv_kernel_ex_launches);
+        fprintf(diag, "  Module loads:           %lu\n", (unsigned long)g_drv_module_loads);
+        fprintf(diag, "  Function lookups:       %lu\n", (unsigned long)g_drv_func_lookups);
+        fprintf(diag, "  cuMemAlloc calls:       %lu\n", (unsigned long)g_drv_memalloc_calls);
+        fprintf(diag, "  cuMemcpy calls:         %lu\n", (unsigned long)g_drv_memcpy_calls);
+        fprintf(diag, "  RPC errors:             %lu\n", (unsigned long)g_drv_rpc_errors);
+        fprintf(diag, "  g_debug_log:            %d\n", g_debug_log);
+        fprintf(diag, "=== END DRIVER STATS ===\n");
+        fclose(diag);
+    }
+
+    if (g_drv_log_fp) {
+        fclose(g_drv_log_fp);
+        g_drv_log_fp = NULL;
+    }
+
     transport_disconnect();
 }
 
