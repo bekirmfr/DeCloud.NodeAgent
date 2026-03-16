@@ -1077,8 +1077,14 @@ CUresult cuStreamQuery(CUstream hStream)
 CUresult cuStreamWaitEvent(CUstream hStream, CUevent hEvent,
                             unsigned int flags)
 {
-    (void)hStream; (void)hEvent; (void)flags;
-    return CUDA_SUCCESS;
+    GpuStreamWaitEventRequest req = {
+        .stream_handle = (uint64_t)(uintptr_t)hStream,
+        .event_handle  = (uint64_t)(uintptr_t)hEvent,
+        .flags         = flags,
+    };
+    int err = transport_rpc_call(GPU_CMD_STREAM_WAIT_EVENT,
+                                 &req, sizeof(req), NULL, 0, NULL);
+    return (CUresult)err;
 }
 
 CUresult cuStreamGetCtx(CUstream hStream, CUcontext *pctx)
@@ -1342,8 +1348,9 @@ CUresult cuCtxGetApiVersion(CUcontext ctx, unsigned int *version)
 
 CUresult cuCtxSynchronize(void)
 {
-    /* No-op — proxy daemon handles synchronization */
-    return CUDA_SUCCESS;
+    int err = transport_rpc_call(GPU_CMD_DEVICE_SYNCHRONIZE,
+                                 NULL, 0, NULL, 0, NULL);
+    return (CUresult)err;
 }
 
 CUresult cuCtxPushCurrent(CUcontext ctx)

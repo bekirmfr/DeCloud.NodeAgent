@@ -47,11 +47,17 @@ typedef enum {
     GPU_CMD_CTX_CREATE             = 0x22,
     GPU_CMD_MEM_GET_INFO           = 0x23,
     GPU_CMD_CTX_DESTROY            = 0x24,
+    GPU_CMD_GET_LAST_ERROR         = 0x25,
+    GPU_CMD_CTX_SYNCHRONIZE        = 0x26,
+    GPU_CMD_DEVICE_RESET           = 0x27,
+    GPU_CMD_SET_DEVICE_FLAGS       = 0x28,
+    GPU_CMD_CACHE_CONFIG           = 0x29,
 
     /* Stream management */
     GPU_CMD_STREAM_CREATE          = 0x30,
     GPU_CMD_STREAM_DESTROY         = 0x31,
     GPU_CMD_STREAM_SYNCHRONIZE     = 0x32,
+    GPU_CMD_STREAM_WAIT_EVENT      = 0x33,
 
     /* Event management */
     GPU_CMD_EVENT_CREATE           = 0x40,
@@ -257,6 +263,28 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint64_t stream_handle;
 } GpuStreamSynchronizeRequest;
+
+/* --- STREAM_WAIT_EVENT --- */
+typedef struct __attribute__((packed)) {
+    uint64_t stream_handle;
+    uint64_t event_handle;
+    uint32_t flags;
+} GpuStreamWaitEventRequest;
+
+/* --- GET_LAST_ERROR --- */
+typedef struct __attribute__((packed)) {
+    int32_t  error;        /* cudaError_t from cudaGetLastError() */
+} GpuGetLastErrorResponse;
+
+/* --- SET_DEVICE_FLAGS --- */
+typedef struct __attribute__((packed)) {
+    uint32_t flags;
+} GpuSetDeviceFlagsRequest;
+
+/* --- CACHE_CONFIG --- */
+typedef struct __attribute__((packed)) {
+    int32_t config;        /* cudaFuncCache enum value */
+} GpuCacheConfigRequest;
 
 /* --- EVENTS --- */
 typedef struct __attribute__((packed)) {

@@ -1750,8 +1750,26 @@ cudaError_t cudaDriverGetVersion(int *version)
     return cudaSuccess;
 }
 
-cudaError_t cudaGetLastError(void) { return cudaSuccess; }
-cudaError_t cudaPeekAtLastError(void) { return cudaSuccess; }
+cudaError_t cudaGetLastError(void)
+{
+    GpuGetLastErrorResponse resp;
+    int err = rpc_call(GPU_CMD_GET_LAST_ERROR, NULL, 0, &resp, sizeof(resp), NULL);
+    if (err != 0) return cudaSuccess;
+    return (cudaError_t)resp.error;
+}
+
+cudaError_t cudaPeekAtLastError(void)
+{
+    /* Peek doesn't reset the error — but the daemon's cudaPeekAtLastError
+     * also doesn't reset, so we can just forward it the same way.
+     * We use status field 1 to tell daemon to use Peek variant. */
+    GpuGetLastErrorResponse resp;
+    int32_t peek_flag = 1;
+    int err = rpc_call(GPU_CMD_GET_LAST_ERROR, &peek_flag, sizeof(peek_flag),
+                       &resp, sizeof(resp), NULL);
+    if (err != 0) return cudaSuccess;
+    return (cudaError_t)resp.error;
+}
 
 const char *cudaGetErrorString(cudaError_t error)
 {
@@ -1775,9 +1793,25 @@ const char *cudaGetErrorName(cudaError_t error)
     }
 }
 
-cudaError_t cudaDeviceReset(void) { return cudaSuccess; }
-cudaError_t cudaSetDeviceFlags(unsigned int flags) { (void)flags; return cudaSuccess; }
-cudaError_t cudaDeviceSetCacheConfig(int config) { (void)config; return cudaSuccess; }
+cudaError_t cudaDeviceReset(void)
+{
+    int err = rpc_call(GPU_CMD_DEVICE_RESET, NULL, 0, NULL, 0, NULL);
+    return (cudaError_t)err;
+}
+
+cudaError_t cudaSetDeviceFlags(unsigned int flags)
+{
+    GpuSetDeviceFlagsRequest req = { .flags = flags };
+    int err = rpc_call(GPU_CMD_SET_DEVICE_FLAGS, &req, sizeof(req), NULL, 0, NULL);
+    return (cudaError_t)err;
+}
+
+cudaError_t cudaDeviceSetCacheConfig(int config)
+{
+    GpuCacheConfigRequest req = { .config = config };
+    int err = rpc_call(GPU_CMD_CACHE_CONFIG, &req, sizeof(req), NULL, 0, NULL);
+    return (cudaError_t)err;
+}
 
 cudaError_t cudaFuncSetAttribute(const void *func, int attr, int value)
 {
@@ -2350,8 +2384,13 @@ cudaError_t cudaStreamIsCapturing(cudaStream_t stream, cudaStreamCaptureStatus_t
 
 cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event, unsigned int flags)
 {
-    (void)stream; (void)event; (void)flags;
-    return cudaSuccess;
+    GpuStreamWaitEventRequest req = {
+        .stream_handle = (uint64_t)(uintptr_t)stream,
+        .event_handle  = (uint64_t)(uintptr_t)event,
+        .flags         = flags,
+    };
+    int err = rpc_call(GPU_CMD_STREAM_WAIT_EVENT, &req, sizeof(req), NULL, 0, NULL);
+    return (cudaError_t)err;
 }
 
 /* ================================================================
