@@ -153,9 +153,12 @@ static uint64_t g_drv_stream_resolve_misses = 0;
  * ================================================================ */
 typedef int (*graph_is_capturing_fn)(void);
 typedef int (*graph_record_op_fn)(uint8_t cmd, const void *payload, uint32_t len);
+typedef int (*graph_record_op_ex_fn)(uint8_t cmd, const void *payload, uint32_t len,
+                                      void *rpc_fn);
 
-static graph_is_capturing_fn g_drv_graph_is_capturing = NULL;
-static graph_record_op_fn    g_drv_graph_record_op    = NULL;
+static graph_is_capturing_fn  g_drv_graph_is_capturing  = NULL;
+static graph_record_op_fn     g_drv_graph_record_op     = NULL;
+static graph_record_op_ex_fn  g_drv_graph_record_op_ex  = NULL;
 static int g_drv_graph_resolved = 0;
 
 static void resolve_drv_graph_helpers(void)
@@ -165,6 +168,8 @@ static void resolve_drv_graph_helpers(void)
                                         "decloud_graph_is_capturing");
         g_drv_graph_record_op = (graph_record_op_fn)dlsym(RTLD_DEFAULT,
                                         "decloud_graph_record_op");
+        g_drv_graph_record_op_ex = (graph_record_op_ex_fn)dlsym(RTLD_DEFAULT,
+                                        "decloud_graph_record_op_ex");
         g_drv_graph_resolved = 1;
     }
 }
@@ -2026,8 +2031,17 @@ static CUresult cu_launch_kernel_driver(CUfunction f,
      * this check, flash-attention kernels execute eagerly during capture
      * with uncomputed Q/K/V inputs, then are NOT replayed during
      * cudaGraphLaunch → garbled first token. */
-    if (drv_is_graph_capturing() && g_drv_graph_record_op) {
-        g_drv_graph_record_op(GPU_CMD_LAUNCH_KERNEL, req_buf, req_len);
+    if (drv_is_graph_capturing() && (g_drv_graph_record_op_ex || g_drv_graph_record_op)) {
+        /* Use the _ex variant so the recorded op replays through the
+         * driver shim's connection (where these functions are registered),
+         * not the runtime shim's connection.  This fixes garbled output
+         * caused by flash-attention kernels failing find_function()
+         * during graph replay on the wrong connection. */
+        if (g_drv_graph_record_op_ex)
+            g_drv_graph_record_op_ex(GPU_CMD_LAUNCH_KERNEL, req_buf, req_len,
+                                      (void *)transport_rpc_call);
+        else
+            g_drv_graph_record_op(GPU_CMD_LAUNCH_KERNEL, req_buf, req_len);
         TRANSPORT_LOG("cuLaunchKernel('%s', grid=[%u,%u,%u], block=[%u,%u,%u]) → graph-recorded",
                       fs->name, gridDimX, gridDimY, gridDimZ,
                       blockDimX, blockDimY, blockDimZ);
