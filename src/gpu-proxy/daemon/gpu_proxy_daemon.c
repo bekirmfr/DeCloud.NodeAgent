@@ -1473,6 +1473,89 @@ static int handle_func_set_attribute(ConnectionCtx *ctx,
 }
 
 /* ================================================================
+ * Command handlers — forwarded stubs (thin proxy)
+ * ================================================================ */
+
+static int handle_stream_wait_event(ConnectionCtx *ctx,
+                                     const void *payload,
+                                     uint32_t payload_len)
+{
+    if (payload_len < sizeof(GpuStreamWaitEventRequest)) {
+        return send_response(ctx->fd, GPU_CMD_STREAM_WAIT_EVENT, -1, NULL, 0);
+    }
+
+    GpuStreamWaitEventRequest req;
+    memcpy(&req, payload, sizeof(req));
+
+    cudaStream_t stream = resolve_stream(ctx, req.stream_handle);
+    cudaEvent_t event = resolve_event(ctx, req.event_handle);
+    if (!event) {
+        LOG_ERR("CID %u: stream_wait_event: event 0x%lx not found",
+                ctx->peer_cid, (unsigned long)req.event_handle);
+        return send_response(ctx->fd, GPU_CMD_STREAM_WAIT_EVENT, -1, NULL, 0);
+    }
+
+    cudaError_t err = cudaStreamWaitEvent(stream, event, req.flags);
+    return send_response(ctx->fd, GPU_CMD_STREAM_WAIT_EVENT, (int32_t)err, NULL, 0);
+}
+
+static int handle_get_last_error(ConnectionCtx *ctx,
+                                  const void *payload,
+                                  uint32_t payload_len)
+{
+    cudaError_t cuda_err;
+    if (payload_len >= sizeof(int32_t)) {
+        int32_t peek_flag;
+        memcpy(&peek_flag, payload, sizeof(peek_flag));
+        cuda_err = (peek_flag != 0) ? cudaPeekAtLastError() : cudaGetLastError();
+    } else {
+        cuda_err = cudaGetLastError();
+    }
+
+    GpuGetLastErrorResponse resp = { .error = (int32_t)cuda_err };
+    return send_response(ctx->fd, GPU_CMD_GET_LAST_ERROR, 0,
+                         &resp, sizeof(resp));
+}
+
+static int handle_ctx_synchronize(int fd)
+{
+    cudaError_t err = cudaDeviceSynchronize();
+    return send_response(fd, GPU_CMD_CTX_SYNCHRONIZE, (int32_t)err, NULL, 0);
+}
+
+static int handle_device_reset(int fd)
+{
+    cudaError_t err = cudaDeviceReset();
+    return send_response(fd, GPU_CMD_DEVICE_RESET, (int32_t)err, NULL, 0);
+}
+
+static int handle_set_device_flags(int fd, const void *payload, uint32_t payload_len)
+{
+    if (payload_len < sizeof(GpuSetDeviceFlagsRequest)) {
+        return send_response(fd, GPU_CMD_SET_DEVICE_FLAGS, -1, NULL, 0);
+    }
+
+    GpuSetDeviceFlagsRequest req;
+    memcpy(&req, payload, sizeof(req));
+
+    cudaError_t err = cudaSetDeviceFlags(req.flags);
+    return send_response(fd, GPU_CMD_SET_DEVICE_FLAGS, (int32_t)err, NULL, 0);
+}
+
+static int handle_cache_config(int fd, const void *payload, uint32_t payload_len)
+{
+    if (payload_len < sizeof(GpuCacheConfigRequest)) {
+        return send_response(fd, GPU_CMD_CACHE_CONFIG, -1, NULL, 0);
+    }
+
+    GpuCacheConfigRequest req;
+    memcpy(&req, payload, sizeof(req));
+
+    cudaError_t err = cudaDeviceSetCacheConfig((enum cudaFuncCache)req.config);
+    return send_response(fd, GPU_CMD_CACHE_CONFIG, (int32_t)err, NULL, 0);
+}
+
+/* ================================================================
  * Command handler — kernel launch
  * ================================================================ */
 
@@ -2085,6 +2168,26 @@ static void *connection_handler(void *arg)
             break;
         case GPU_CMD_STREAM_SYNCHRONIZE:
             rc = handle_stream_synchronize(ctx, buf, hdr.payload_len);
+            break;
+        case GPU_CMD_STREAM_WAIT_EVENT:
+            rc = handle_stream_wait_event(ctx, buf, hdr.payload_len);
+            break;
+
+        /* Forwarded stubs */
+        case GPU_CMD_GET_LAST_ERROR:
+            rc = handle_get_last_error(ctx, buf, hdr.payload_len);
+            break;
+        case GPU_CMD_CTX_SYNCHRONIZE:
+            rc = handle_ctx_synchronize(fd);
+            break;
+        case GPU_CMD_DEVICE_RESET:
+            rc = handle_device_reset(fd);
+            break;
+        case GPU_CMD_SET_DEVICE_FLAGS:
+            rc = handle_set_device_flags(fd, buf, hdr.payload_len);
+            break;
+        case GPU_CMD_CACHE_CONFIG:
+            rc = handle_cache_config(fd, buf, hdr.payload_len);
             break;
 
         /* Event operations */
