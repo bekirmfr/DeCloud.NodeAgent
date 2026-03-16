@@ -30,6 +30,8 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <dlfcn.h>
+#include <sys/stat.h>
+#include <pthread.h>
 
 /* Set transport log prefix before including shared transport */
 #define TRANSPORT_LOG_PREFIX "cuda-driver-shim"
@@ -98,6 +100,38 @@ static int g_vmem_proxy = 0;
  * Set DECLOUD_GPU_GRAPH_NOOP=0 to return NOT_SUPPORTED instead. */
 static int g_driver_graph_noop = 1;
 
+/* ================================================================
+ * Diagnostic file logging — writes to /tmp/gpu-proxy-diag.log
+ * Enabled by:  touch /tmp/gpu-proxy-diag   (or DECLOUD_GPU_DIAG=1)
+ * Mirrors the runtime shim's diagnostic system.
+ * ================================================================ */
+#define DRV_DIAG_LOG_PATH "/tmp/gpu-proxy-diag.log"
+#define DRV_DIAG_TRIGGER  "/tmp/gpu-proxy-diag"
+
+static int g_drv_diag_enabled = 0;
+static FILE *g_drv_diag_fp = NULL;
+static pthread_mutex_t g_drv_diag_lock = PTHREAD_MUTEX_INITIALIZER;
+
+#define DRV_DIAG(fmt, ...) do { \
+    if (g_drv_diag_enabled && g_drv_diag_fp) { \
+        pthread_mutex_lock(&g_drv_diag_lock); \
+        fprintf(g_drv_diag_fp, "[drv-shim pid=%d] " fmt "\n", getpid(), ##__VA_ARGS__); \
+        fflush(g_drv_diag_fp); \
+        pthread_mutex_unlock(&g_drv_diag_lock); \
+    } \
+} while(0)
+
+static void drv_diag_init(void)
+{
+    struct stat st;
+    if (stat(DRV_DIAG_TRIGGER, &st) == 0 || getenv("DECLOUD_GPU_DIAG")) {
+        g_drv_diag_fp = fopen(DRV_DIAG_LOG_PATH, "a");
+        if (g_drv_diag_fp) {
+            g_drv_diag_enabled = 1;
+        }
+    }
+}
+
 /* Driver shim statistics — written to diag file in destructor */
 static uint64_t g_drv_kernel_launches = 0;
 static uint64_t g_drv_kernel_ex_launches = 0;
@@ -106,6 +140,7 @@ static uint64_t g_drv_func_lookups = 0;
 static uint64_t g_drv_memalloc_calls = 0;
 static uint64_t g_drv_memcpy_calls = 0;
 static uint64_t g_drv_rpc_errors = 0;
+static uint64_t g_drv_stream_resolve_misses = 0;
 
 /* ================================================================
  * Graph-capture helpers (shared with cuda_shim.c via dlsym)
@@ -309,6 +344,14 @@ static inline void mask_fpe_exceptions(void)
 __attribute__((constructor))
 static void driver_shim_init(void)
 {
+    /* Init diagnostics early — before any other work */
+    drv_diag_init();
+
+    char exe_path[256] = {0};
+    readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    DRV_DIAG("=== DRIVER SHIM CONSTRUCTOR START ===");
+    DRV_DIAG("Process: %s (pid=%d, ppid=%d)", exe_path, getpid(), getppid());
+
     /* Load config early — cuGetProcAddress is called before cuInit */
     g_debug_log = (transport_getenv("DECLOUD_GPU_DEBUG") != NULL);
     if (g_debug_log) {
@@ -320,11 +363,45 @@ static void driver_shim_init(void)
     const char *vmem = transport_getenv("DECLOUD_GPU_VMEM_PROXY");
     if (vmem && vmem[0] == '1') g_vmem_proxy = 1;
 
+    /* Read /etc/decloud/gpu-proxy.env for DECLOUD_GPU_DIAG flag */
+    FILE *f = fopen("/etc/decloud/gpu-proxy.env", "r");
+    if (f) {
+        char line[512];
+        while (fgets(line, sizeof(line), f)) {
+            char *p = line;
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '\0' || *p == '\n' || *p == '#') continue;
+            char *nl = strchr(p, '\n');
+            if (nl) *nl = '\0';
+            char *eq = strchr(p, '=');
+            if (!eq) continue;
+            *eq = '\0';
+            if (strcmp(p, "DECLOUD_GPU_DIAG") == 0 && eq[1] == '1') {
+                if (!g_drv_diag_enabled) {
+                    g_drv_diag_fp = fopen(DRV_DIAG_LOG_PATH, "a");
+                    if (g_drv_diag_fp) g_drv_diag_enabled = 1;
+                }
+            }
+            if (strcmp(p, "DECLOUD_GPU_DEBUG") == 0) {
+                g_debug_log = 1;
+                if (!g_drv_log_fp)
+                    g_drv_log_fp = fopen("/tmp/gpu-driver-debug.log", "a");
+            }
+        }
+        fclose(f);
+    }
+
+    DRV_DIAG("  g_driver_graph_noop=%d, g_debug_log=%d, g_vmem_proxy=%d",
+             g_driver_graph_noop, g_debug_log, g_vmem_proxy);
+    DRV_DIAG("  LD_PRELOAD=%s", getenv("LD_PRELOAD") ?: "(unset)");
+
     /* Initialize fake context pointer — zeroed 512-byte buffer gives
      * cuDNN a safe dereferenceable address. Full cuDNN init (Bug 19)
      * requires context struct layout — parked pending nvproxy reference. */
     memset(g_fake_ctx_buf, 0, sizeof(g_fake_ctx_buf));
     g_fake_ctx = (CUcontext)g_fake_ctx_buf;
+
+    DRV_DIAG("=== DRIVER SHIM CONSTRUCTOR END ===");
 }
 
 /* ================================================================
@@ -1848,6 +1925,14 @@ static CUresult cu_module_get_function(CUfunction *func, CUmodule module,
 
     TRANSPORT_LOG("cuModuleGetFunction('%s') → handle=0x%lx, %u params",
                   name, (unsigned long)handle, fs->num_params);
+    DRV_DIAG("cuModuleGetFunction('%s') → handle=0x%lx, %u params",
+             name, (unsigned long)handle, fs->num_params);
+    if (g_drv_diag_enabled && fs->num_params > 0) {
+        for (uint32_t p = 0; p < fs->num_params && p < 8; p++)
+            DRV_DIAG("  param[%u]: size=%u", p, fs->param_sizes[p]);
+        if (fs->num_params > 8)
+            DRV_DIAG("  ... (%u more params)", fs->num_params - 8);
+    }
     return CUDA_SUCCESS;
 }
 
@@ -1949,6 +2034,23 @@ static CUresult cu_launch_kernel_driver(CUfunction f,
                                  NULL, 0, NULL);
     free(req_buf);
 
+    if (err != 0) {
+        g_drv_rpc_errors++;
+        DRV_DIAG("cuLaunchKernel('%s') FAILED err=%d grid=[%u,%u,%u] block=[%u,%u,%u] args=%u",
+                 fs->name, err, gridDimX, gridDimY, gridDimZ,
+                 blockDimX, blockDimY, blockDimZ, args_total);
+    }
+    /* Log first 5 launches and every 100th for diagnostics */
+    if (g_drv_diag_enabled &&
+        (g_drv_kernel_launches <= 5 || g_drv_kernel_launches % 100 == 0)) {
+        DRV_DIAG("cuLaunchKernel #%lu '%s' grid=[%u,%u,%u] block=[%u,%u,%u] "
+                 "shm=%u stream=0x%lx params=%u args=%u → %d",
+                 (unsigned long)g_drv_kernel_launches, fs->name,
+                 gridDimX, gridDimY, gridDimZ,
+                 blockDimX, blockDimY, blockDimZ,
+                 sharedMemBytes, (unsigned long)(uintptr_t)hStream,
+                 fs->num_params, args_total, err);
+    }
     TRANSPORT_LOG("cuLaunchKernel('%s', grid=[%u,%u,%u], block=[%u,%u,%u], args=%u bytes) → %d",
                   fs->name, gridDimX, gridDimY, gridDimZ,
                   blockDimX, blockDimY, blockDimZ, args_total, err);
@@ -2369,9 +2471,21 @@ static void driver_shim_cleanup(void)
         fprintf(diag, "  cuMemAlloc calls:       %lu\n", (unsigned long)g_drv_memalloc_calls);
         fprintf(diag, "  cuMemcpy calls:         %lu\n", (unsigned long)g_drv_memcpy_calls);
         fprintf(diag, "  RPC errors:             %lu\n", (unsigned long)g_drv_rpc_errors);
+        fprintf(diag, "  Stream resolve misses:  %lu\n", (unsigned long)g_drv_stream_resolve_misses);
         fprintf(diag, "  g_debug_log:            %d\n", g_debug_log);
+        fprintf(diag, "  g_drv_diag_enabled:     %d\n", g_drv_diag_enabled);
         fprintf(diag, "=== END DRIVER STATS ===\n");
         fclose(diag);
+    }
+
+    if (g_drv_diag_fp) {
+        DRV_DIAG("=== DRIVER SHIM DESTRUCTOR (pid=%d) ===", getpid());
+        DRV_DIAG("  cuLaunchKernel calls: %lu, RPC errors: %lu, stream misses: %lu",
+                 (unsigned long)g_drv_kernel_launches,
+                 (unsigned long)g_drv_rpc_errors,
+                 (unsigned long)g_drv_stream_resolve_misses);
+        fclose(g_drv_diag_fp);
+        g_drv_diag_fp = NULL;
     }
 
     if (g_drv_log_fp) {

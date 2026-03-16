@@ -1468,6 +1468,14 @@ static int handle_launch_kernel(ConnectionCtx *ctx, const void *payload, uint32_
 
     if (ctx->cu_ctx) cuCtxSetCurrent(ctx->cu_ctx);
 
+    /* Sync to ensure preceding async work (from ANY connection sharing
+     * this primary context) has completed before we launch.  The runtime
+     * shim and driver shim use separate connections, so a GEMM on
+     * connection A may still be in flight when a flash-attention kernel
+     * arrives on connection B.  Without this sync, the kernel could
+     * read stale/in-progress data → garbled output. */
+    cudaDeviceSynchronize();
+
     /*
      * Build the void* args[] array for cuLaunchKernel.
      * The shim serialized each parameter value contiguously.
