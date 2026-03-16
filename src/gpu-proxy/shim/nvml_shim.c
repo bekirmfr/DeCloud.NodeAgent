@@ -5,10 +5,12 @@
  * frameworks find via dlopen(). NVML is NVIDIA's Management Library,
  * used for runtime VRAM monitoring and device enumeration.
  *
- * Ollama's NVML discovery:
+ * Ollama's NVML discovery (mem_nvml.cpp):
  *   1. dlopen("libnvidia-ml.so.1")
- *   2. dlsym("nvmlInit_v2"), dlsym("nvmlDeviceGetHandleByIndex_v2"), etc.
- *   3. nvmlInit_v2() --> nvmlDeviceGetHandleByIndex_v2() --> nvmlDeviceGetMemoryInfo()
+ *   2. dlsym these 6 symbols:
+ *        nvmlInit_v2, nvmlShutdown, nvmlDeviceGetHandleByUUID,
+ *        nvmlDeviceGetMemoryInfo, nvmlDeviceGetName, nvmlErrorString
+ *   3. nvmlInit_v2() --> nvmlDeviceGetHandleByUUID() --> nvmlDeviceGetMemoryInfo()
  *   4. Uses VRAM info to decide how many model layers to offload to GPU
  *
  * Each function forwards to the same GPU proxy daemon via TCP/vsock,
@@ -144,6 +146,26 @@ nvmlReturn_t nvmlDeviceGetHandleByIndex_v2(unsigned int index, nvmlDevice_t *dev
     return NVML_SUCCESS;
 }
 
+nvmlReturn_t nvmlDeviceGetHandleByUUID(const char *uuid, nvmlDevice_t *device)
+{
+    TRANSPORT_LOG("nvmlDeviceGetHandleByUUID(%s)", uuid ? uuid : "(null)");
+    if (!device) return NVML_ERROR_INVALID_ARGUMENT;
+
+    /*
+     * Ollama calls this with the UUID from cudaDeviceGetProperties.
+     * We only have one virtual GPU (device 0), so accept any UUID
+     * and return the handle for device 0.
+     */
+    if (g_nvml_device_count < 0) {
+        unsigned int count;
+        nvmlReturn_t rc = nvmlDeviceGetCount_v2(&count);
+        if (rc != NVML_SUCCESS) return rc;
+    }
+
+    *device = (nvmlDevice_t)(uintptr_t)(0 + 1);
+    return NVML_SUCCESS;
+}
+
 nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t device, nvmlMemory_t *memory)
 {
     if (!memory) return NVML_ERROR_INVALID_ARGUMENT;
@@ -210,6 +232,17 @@ nvmlReturn_t nvmlDeviceGetUUID(nvmlDevice_t device, char *uuid, unsigned int len
 /* ================================================================
  * Additional stubs for NVML functions some frameworks check
  * ================================================================ */
+
+const char *nvmlErrorString(nvmlReturn_t result)
+{
+    switch (result) {
+        case NVML_SUCCESS:                return "Success";
+        case NVML_ERROR_UNINITIALIZED:    return "Uninitialized";
+        case NVML_ERROR_INVALID_ARGUMENT: return "Invalid Argument";
+        case NVML_ERROR_NOT_FOUND:        return "Not Found";
+        default:                          return "Unknown Error";
+    }
+}
 
 nvmlReturn_t nvmlSystemGetDriverVersion(char *version, unsigned int length)
 {
