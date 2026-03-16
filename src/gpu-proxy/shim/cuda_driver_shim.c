@@ -181,6 +181,177 @@ static int drv_is_graph_capturing(void)
 }
 
 /* ================================================================
+ * Driver-API graph wrappers (delegate to runtime shim)
+ *
+ * ggml/llama.cpp resolves graph functions via cuGetProcAddress
+ * (driver API: cuStreamBeginCapture, cuGraphInstantiate, cuGraphLaunch)
+ * rather than the runtime API (cudaStreamBeginCapture, etc.).
+ *
+ * Previously these were stubbed to graph_success_stub which returned
+ * CUDA_SUCCESS but did nothing.  Result: cuStreamBeginCapture was a
+ * no-op so the capture flag was never set, kernels executed eagerly
+ * during capture (one good eval), then cuGraphLaunch was a no-op so
+ * subsequent tokens got zero computation → garbled output.
+ *
+ * Fix: resolve the runtime shim's cuda* implementations via dlsym
+ * and delegate to them.  The runtime shim handles capture/replay
+ * properly.  Handle types (CUgraph/cudaGraph_t, etc.) are all void*
+ * and error codes (CUresult/cudaError_t) are both int with 0=success.
+ * ================================================================ */
+
+typedef int (*rt_stream_begin_capture_fn)(void *, int);
+typedef int (*rt_stream_end_capture_fn)(void *, void **);
+typedef int (*rt_graph_instantiate_with_flags_fn)(void **, void *, unsigned long long);
+typedef int (*rt_graph_instantiate_fn)(void **, void *, void *, char *, size_t);
+typedef int (*rt_graph_launch_fn)(void *, void *);
+typedef int (*rt_graph_exec_destroy_fn)(void *);
+typedef int (*rt_graph_destroy_fn)(void *);
+typedef int (*rt_graph_exec_update_fn)(void *, void *, int *);
+typedef int (*rt_stream_is_capturing_fn)(void *, int *);
+
+static rt_stream_begin_capture_fn        g_rt_begin_capture  = NULL;
+static rt_stream_end_capture_fn          g_rt_end_capture    = NULL;
+static rt_graph_instantiate_with_flags_fn g_rt_inst_flags    = NULL;
+static rt_graph_instantiate_fn           g_rt_inst           = NULL;
+static rt_graph_launch_fn               g_rt_launch         = NULL;
+static rt_graph_exec_destroy_fn         g_rt_exec_destroy   = NULL;
+static rt_graph_destroy_fn              g_rt_graph_destroy  = NULL;
+static rt_graph_exec_update_fn          g_rt_exec_update    = NULL;
+static rt_stream_is_capturing_fn        g_rt_is_capturing   = NULL;
+static int g_rt_graph_resolved = 0;
+
+static void resolve_rt_graph_funcs(void)
+{
+    if (g_rt_graph_resolved) return;
+    g_rt_begin_capture = (rt_stream_begin_capture_fn)
+        dlsym(RTLD_DEFAULT, "cudaStreamBeginCapture");
+    g_rt_end_capture = (rt_stream_end_capture_fn)
+        dlsym(RTLD_DEFAULT, "cudaStreamEndCapture");
+    g_rt_inst_flags = (rt_graph_instantiate_with_flags_fn)
+        dlsym(RTLD_DEFAULT, "cudaGraphInstantiateWithFlags");
+    g_rt_inst = (rt_graph_instantiate_fn)
+        dlsym(RTLD_DEFAULT, "cudaGraphInstantiate");
+    g_rt_launch = (rt_graph_launch_fn)
+        dlsym(RTLD_DEFAULT, "cudaGraphLaunch");
+    g_rt_exec_destroy = (rt_graph_exec_destroy_fn)
+        dlsym(RTLD_DEFAULT, "cudaGraphExecDestroy");
+    g_rt_graph_destroy = (rt_graph_destroy_fn)
+        dlsym(RTLD_DEFAULT, "cudaGraphDestroy");
+    g_rt_exec_update = (rt_graph_exec_update_fn)
+        dlsym(RTLD_DEFAULT, "cudaGraphExecUpdate");
+    g_rt_is_capturing = (rt_stream_is_capturing_fn)
+        dlsym(RTLD_DEFAULT, "cudaStreamIsCapturing");
+    g_rt_graph_resolved = 1;
+    DRV_DIAG("resolve_rt_graph_funcs: begin=%p end=%p inst_flags=%p inst=%p "
+             "launch=%p exec_destroy=%p graph_destroy=%p update=%p is_cap=%p",
+             g_rt_begin_capture, g_rt_end_capture, g_rt_inst_flags, g_rt_inst,
+             g_rt_launch, g_rt_exec_destroy, g_rt_graph_destroy,
+             g_rt_exec_update, g_rt_is_capturing);
+}
+
+static CUresult cu_stream_begin_capture(void *stream, int mode)
+{
+    resolve_rt_graph_funcs();
+    if (g_rt_begin_capture)
+        return (CUresult)g_rt_begin_capture(stream, mode);
+    return CUDA_SUCCESS;
+}
+
+static CUresult cu_stream_end_capture(void *stream, void **phGraph)
+{
+    resolve_rt_graph_funcs();
+    if (g_rt_end_capture)
+        return (CUresult)g_rt_end_capture(stream, phGraph);
+    return CUDA_SUCCESS;
+}
+
+static CUresult cu_graph_instantiate_flags(void **phExec, void *hGraph,
+                                           unsigned long long flags)
+{
+    resolve_rt_graph_funcs();
+    if (g_rt_inst_flags)
+        return (CUresult)g_rt_inst_flags(phExec, hGraph, flags);
+    return CUDA_SUCCESS;
+}
+
+static CUresult cu_graph_instantiate(void **phExec, void *hGraph,
+                                     void *phErrorNode, char *logBuffer,
+                                     size_t bufferSize)
+{
+    resolve_rt_graph_funcs();
+    if (g_rt_inst)
+        return (CUresult)g_rt_inst(phExec, hGraph, phErrorNode,
+                                   logBuffer, bufferSize);
+    /* Fall back to WithFlags variant */
+    if (g_rt_inst_flags)
+        return (CUresult)g_rt_inst_flags(phExec, hGraph, 0);
+    return CUDA_SUCCESS;
+}
+
+/* cuGraphInstantiateWithParams — newer CUDA 12+ API.
+ * The params struct contains error info we don't use;
+ * delegate to the simpler WithFlags variant. */
+static CUresult cu_graph_instantiate_with_params(void **phExec, void *hGraph,
+                                                  void *params)
+{
+    (void)params;
+    return cu_graph_instantiate_flags(phExec, hGraph, 0);
+}
+
+static CUresult cu_graph_launch(void *hExec, void *hStream)
+{
+    resolve_rt_graph_funcs();
+    if (g_rt_launch)
+        return (CUresult)g_rt_launch(hExec, hStream);
+    return CUDA_SUCCESS;
+}
+
+static CUresult cu_graph_exec_destroy(void *hExec)
+{
+    resolve_rt_graph_funcs();
+    if (g_rt_exec_destroy)
+        return (CUresult)g_rt_exec_destroy(hExec);
+    return CUDA_SUCCESS;
+}
+
+static CUresult cu_graph_destroy(void *hGraph)
+{
+    resolve_rt_graph_funcs();
+    if (g_rt_graph_destroy)
+        return (CUresult)g_rt_graph_destroy(hGraph);
+    return CUDA_SUCCESS;
+}
+
+static CUresult cu_graph_exec_update(void *hExec, void *hGraph,
+                                     int *updateResult)
+{
+    resolve_rt_graph_funcs();
+    if (g_rt_exec_update)
+        return (CUresult)g_rt_exec_update(hExec, hGraph, updateResult);
+    if (updateResult) *updateResult = 0; /* success */
+    return CUDA_SUCCESS;
+}
+
+static CUresult cu_stream_is_capturing(void *stream, int *captureStatus)
+{
+    resolve_rt_graph_funcs();
+    if (g_rt_is_capturing)
+        return (CUresult)g_rt_is_capturing(stream, captureStatus);
+    if (captureStatus) *captureStatus = 0; /* not capturing */
+    return CUDA_SUCCESS;
+}
+
+/* cuStreamGetCaptureInfo — returns capture status + graph handle.
+ * ggml may query this to check if capture is active. */
+static CUresult cu_stream_get_capture_info(void *stream, int *captureStatus,
+                                           unsigned long long *id)
+{
+    CUresult r = cu_stream_is_capturing(stream, captureStatus);
+    if (id) *id = 0;
+    return r;
+}
+
+/* ================================================================
  * cuGetExportTable — per-GUID instrumented tables (Bug 19)
  *
  * cuBLAS and cuDNN call cuGetExportTable to obtain internal driver
@@ -2428,11 +2599,81 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn,
         }
     }
 
-    /* Graph creation/execution cannot work through network proxy.
-     * Only block graph mutation ops; let query ops through with safe defaults. */
-    if (strncmp(symbol, "cuGraph", 7) == 0 ||
-        strncmp(symbol, "cuStreamBeginCapture", 20) == 0 ||
-        strncmp(symbol, "cuStreamEndCapture", 18) == 0) {
+    /* Graph operations -- dispatch to runtime shim wrappers for
+     * capture/instantiate/launch, stub the rest for compatibility.
+     * Previously ALL cuGraph and cuStreamBeginCapture were stubbed to
+     * graph_success_stub (no capture/replay = garbled output). */
+    if (strncmp(symbol, "cuStreamBeginCapture", 20) == 0) {
+        *pfn = (void *)cu_stream_begin_capture;
+        TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-capture]",
+                      symbol, cudaVersion, *pfn);
+        return CUDA_SUCCESS;
+    }
+    if (strncmp(symbol, "cuStreamEndCapture", 18) == 0) {
+        *pfn = (void *)cu_stream_end_capture;
+        TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-capture]",
+                      symbol, cudaVersion, *pfn);
+        return CUDA_SUCCESS;
+    }
+    if (strncmp(symbol, "cuStreamIsCapturing", 19) == 0) {
+        *pfn = (void *)cu_stream_is_capturing;
+        TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-query]",
+                      symbol, cudaVersion, *pfn);
+        return CUDA_SUCCESS;
+    }
+    if (strncmp(symbol, "cuStreamGetCaptureInfo", 21) == 0) {
+        *pfn = (void *)cu_stream_get_capture_info;
+        TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-query]",
+                      symbol, cudaVersion, *pfn);
+        return CUDA_SUCCESS;
+    }
+    if (strcmp(symbol, "cuGraphInstantiateWithFlags") == 0 ||
+        strcmp(symbol, "cuGraphInstantiateWithFlags_v2") == 0) {
+        *pfn = (void *)cu_graph_instantiate_flags;
+        TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-inst]",
+                      symbol, cudaVersion, *pfn);
+        return CUDA_SUCCESS;
+    }
+    if (strcmp(symbol, "cuGraphInstantiate") == 0 ||
+        strcmp(symbol, "cuGraphInstantiate_v2") == 0) {
+        *pfn = (void *)cu_graph_instantiate;
+        TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-inst]",
+                      symbol, cudaVersion, *pfn);
+        return CUDA_SUCCESS;
+    }
+    if (strncmp(symbol, "cuGraphInstantiateWithParams", 28) == 0) {
+        *pfn = (void *)cu_graph_instantiate_with_params;
+        TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-inst]",
+                      symbol, cudaVersion, *pfn);
+        return CUDA_SUCCESS;
+    }
+    if (strcmp(symbol, "cuGraphLaunch") == 0 ||
+        strcmp(symbol, "cuGraphLaunch_ptsz") == 0) {
+        *pfn = (void *)cu_graph_launch;
+        TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-launch]",
+                      symbol, cudaVersion, *pfn);
+        return CUDA_SUCCESS;
+    }
+    if (strcmp(symbol, "cuGraphExecDestroy") == 0) {
+        *pfn = (void *)cu_graph_exec_destroy;
+        TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-destroy]",
+                      symbol, cudaVersion, *pfn);
+        return CUDA_SUCCESS;
+    }
+    if (strcmp(symbol, "cuGraphDestroy") == 0) {
+        *pfn = (void *)cu_graph_destroy;
+        TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-destroy]",
+                      symbol, cudaVersion, *pfn);
+        return CUDA_SUCCESS;
+    }
+    if (strncmp(symbol, "cuGraphExecUpdate", 17) == 0) {
+        *pfn = (void *)cu_graph_exec_update;
+        TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-update]",
+                      symbol, cudaVersion, *pfn);
+        return CUDA_SUCCESS;
+    }
+    /* Other cuGraph* functions (cuGraphAddKernelNode, etc.) — stub */
+    if (strncmp(symbol, "cuGraph", 7) == 0) {
         *pfn = g_driver_graph_noop
              ? (void *)graph_success_stub
              : (void *)graph_not_supported_stub;
