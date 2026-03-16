@@ -1438,6 +1438,41 @@ static int handle_occupancy_max_blocks(ConnectionCtx *ctx,
 }
 
 /* ================================================================
+ * Command handler — cudaFuncSetAttribute
+ * ================================================================ */
+
+static int handle_func_set_attribute(ConnectionCtx *ctx,
+                                      const void *payload,
+                                      uint32_t payload_len)
+{
+    if (payload_len < sizeof(GpuFuncSetAttributeRequest)) {
+        return send_response(ctx->fd, GPU_CMD_FUNC_SET_ATTRIBUTE, -1, NULL, 0);
+    }
+
+    GpuFuncSetAttributeRequest req;
+    memcpy(&req, payload, sizeof(req));
+
+    FunctionSlot *fs = find_function(ctx, req.host_func_ptr);
+    if (!fs) {
+        LOG_ERR("CID %u: func_set_attribute: function 0x%lx not found",
+                ctx->peer_cid, (unsigned long)req.host_func_ptr);
+        return send_response(ctx->fd, GPU_CMD_FUNC_SET_ATTRIBUTE, -1, NULL, 0);
+    }
+
+    if (ctx->cu_ctx) cuCtxSetCurrent(ctx->cu_ctx);
+
+    CUresult cr = cuFuncSetAttribute(fs->cu_func,
+                                      (CUfunction_attribute)req.attr,
+                                      req.value);
+
+    LOG_DBG("CID %u: cuFuncSetAttribute('%s', attr=%d, value=%d) -> %d",
+            ctx->peer_cid, fs->name, req.attr, req.value, cr);
+
+    return send_response(ctx->fd, GPU_CMD_FUNC_SET_ATTRIBUTE, (int32_t)cr,
+                         NULL, 0);
+}
+
+/* ================================================================
  * Command handler — kernel launch
  * ================================================================ */
 
@@ -2030,6 +2065,10 @@ static void *connection_handler(void *arg)
             break;
         case GPU_CMD_OCCUPANCY_MAX_BLOCKS:
             rc = handle_occupancy_max_blocks(ctx, buf, hdr.payload_len);
+            break;
+
+        case GPU_CMD_FUNC_SET_ATTRIBUTE:
+            rc = handle_func_set_attribute(ctx, buf, hdr.payload_len);
             break;
 
         /* Kernel launch */
