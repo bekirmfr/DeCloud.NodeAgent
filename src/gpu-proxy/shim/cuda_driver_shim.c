@@ -1672,6 +1672,7 @@ static CUresult cu_memset_D32_async(CUdeviceptr dptr, unsigned int ui,
 static CUresult cu_module_load_data(CUmodule *module, const void *image)
 {
     g_drv_module_loads++;
+    DRV_DIAG("cuModuleLoadData #%lu called", (unsigned long)g_drv_module_loads);
     if (!module || !image) return CUDA_ERROR_INVALID_VALUE;
 
     /* Detect image format and size */
@@ -1970,8 +1971,12 @@ static CUresult cu_launch_kernel_driver(CUfunction f,
     uint64_t handle = (uint64_t)(uintptr_t)f;
     DriverFunctionSlot *fs = find_driver_function(handle);
     if (!fs) {
+        g_drv_rpc_errors++;
         TRANSPORT_LOG("cuLaunchKernel: unknown function handle 0x%lx",
                       (unsigned long)handle);
+        DRV_DIAG("ERROR: cuLaunchKernel unknown handle 0x%lx (launch #%lu) — "
+                 "function not registered via cuModuleGetFunction",
+                 (unsigned long)handle, (unsigned long)g_drv_kernel_launches);
         return CUDA_ERROR_INVALID_VALUE;
     }
 
@@ -2431,6 +2436,10 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn,
          * the driver supports this function. If actually called,
          * the stub returns CUDA_ERROR_NOT_SUPPORTED. */
         *pfn = (void *)generic_not_supported_stub;
+    }
+
+    if (*pfn == (void *)generic_not_supported_stub) {
+        DRV_DIAG("cuGetProcAddress('%s', v%d) → STUB (unimplemented)", symbol, cudaVersion);
     }
 
     TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p%s",
