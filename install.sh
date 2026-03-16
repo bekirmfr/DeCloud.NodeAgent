@@ -1058,15 +1058,25 @@ build_gpu_proxy() {
     #   - libdecloud_cuda_shim.so  (Runtime API, LD_PRELOAD)
     #   - libcuda.so.1             (Driver API, dlopen target for Ollama/llama.cpp)
     #   - libnvidia-ml.so.1        (NVML, dlopen target for VRAM monitoring)
-    local shim_target="all-shims"
+    # Determine whether to use Docker-based compat build or dynamic host build.
+    # NOTE: We only record the target here — the actual build+install is done in
+    # one step below via install-all-shims[-compat] to avoid building twice.
+    local use_compat=false
     if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
         log_info "Building all GPU shims (Docker compat — glibc 2.31, universal)..."
-        shim_target="all-shims-compat"
+        use_compat=true
     else
         log_info "Docker not available — building dynamic shims (may have glibc compat issues)"
         log_info "For universal compatibility: install Docker and re-run"
     fi
-    make -C "$GPU_PROXY_SRC" "$shim_target" 2>&1 | tee -a "$LOG_DIR/install.log"
+
+    # Build shims (the install target depends on the build target, so this
+    # builds AND installs in one pass — no redundant second Docker build).
+    local install_target="install-all-shims"
+    if [ "$use_compat" = true ]; then
+        install_target="install-all-shims-compat"
+    fi
+    make -C "$GPU_PROXY_SRC" "$install_target" 2>&1 | tee -a "$LOG_DIR/install.log"
     local make_exit=${PIPESTATUS[0]}
     if [ "$make_exit" -ne 0 ]; then
         log_error "Shim build failed (exit=$make_exit) — stale artifacts in build/ will NOT be deployed"
@@ -1132,24 +1142,11 @@ build_gpu_proxy() {
         log_info "GPU_MODE=${GPU_MODE} — daemon not needed (passthrough uses VFIO, not proxy)"
     fi
 
-    # --- Install built artifacts ---
+    # --- Verify install (already done above in the combined build+install step) ---
     # CRITICAL: Shims go ONLY to decloud-gpu-shim/ (for VM delivery via 9p share).
     # NEVER install to /usr/local/lib/ directly — that poisons the host's ldconfig
     # cache and causes the daemon to load our shim instead of the real CUDA runtime
     # (circular dependency: daemon → shim → tries to connect to daemon → timeout).
-    log_info "Installing GPU proxy artifacts..."
-
-    # Delegate all stub installation to the Makefile — single source of truth.
-    # install-all-shims-compat installs all shims + stubs to /usr/local/lib/decloud-gpu-shim/
-    local install_target="install-all-shims-compat"
-    if ! command -v docker &>/dev/null || ! docker info &>/dev/null 2>&1; then
-        install_target="install-all-shims"
-    fi
-    make -C "$GPU_PROXY_SRC" "$install_target" 2>&1 | tee -a "$LOG_DIR/install.log"
-    if [ "${PIPESTATUS[0]}" -ne 0 ]; then
-        log_error "Shim install failed — check $LOG_DIR/install.log"
-        return 1
-    fi
     local SHIM_DIR="/usr/local/lib/decloud-gpu-shim"
 
     # Daemon → /usr/local/bin (this is fine — daemon is a standalone binary)
