@@ -2097,6 +2097,29 @@ public class LibvirtVmManager : IVmManager
         echo ""DeCloud GPU proxy: installed $lib in $runner_dir""
       done
     done
+  - |
+    # Ollama's systemd service doesn't source /etc/profile.d/ or inherit shell
+    # LD_PRELOAD, so its runner subprocesses never load our CUDA shims — causing
+    # garbled output (flash-attention kernels bypass the GPU proxy entirely).
+    # Create a systemd drop-in that injects LD_PRELOAD and GPU env vars into
+    # the Ollama service environment.
+    if systemctl list-unit-files ollama.service >/dev/null 2>&1; then
+      mkdir -p /etc/systemd/system/ollama.service.d
+      {
+        echo '[Service]'
+        echo 'Environment=""LD_PRELOAD=/usr/local/lib/libdecloud_cuda_shim.so:/usr/local/lib/libcuda_pytorch_stubs.so""'
+        # Source GPU env vars from the config file (transport, token, app-specific)
+        if [ -f /etc/decloud/gpu-proxy.env ]; then
+          grep -v '^\s*#' /etc/decloud/gpu-proxy.env | grep -v '^\s*$' | grep -v '^LD_PRELOAD=' | while IFS='=' read -r key val; do
+            key=$(echo ""$key"" | xargs)
+            val=$(echo ""$val"" | xargs)
+            [ -n ""$key"" ] && echo ""Environment=\""${key}=${val}\""""
+          done
+        fi
+      } > /etc/systemd/system/ollama.service.d/gpu-proxy.conf
+      systemctl daemon-reload
+      echo ""DeCloud GPU proxy: created Ollama systemd drop-in for LD_PRELOAD""
+    fi
 ";
 
         var runcmdIndex = result.IndexOf("\nruncmd:", StringComparison.Ordinal);

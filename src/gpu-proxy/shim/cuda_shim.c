@@ -127,10 +127,19 @@ static void diag_log(const char *fmt, ...)
 #define GRAPH_MAX_RECORDED_OPS  16384
 #define GRAPH_MAX_EXEC_SLOTS    8
 
+/* Function pointer type for RPC calls — matches both rpc_call() and
+ * transport_rpc_call() signatures.  Used to route graph-replay ops
+ * through the correct daemon connection (runtime shim vs driver shim). */
+typedef int (*graph_rpc_fn_t)(uint8_t cmd,
+                               const void *req, uint32_t req_len,
+                               void *resp, uint32_t resp_len,
+                               uint32_t *actual);
+
 typedef struct {
     void    *rpc_payload;   /* deep copy of serialized RPC request (kernel or cuBLAS) */
     uint32_t rpc_len;
     uint8_t  rpc_cmd;       /* GPU_CMD_LAUNCH_KERNEL, GPU_CMD_CUBLAS_GEMM_BATCHED, etc. */
+    graph_rpc_fn_t rpc_fn;  /* RPC function for replay (NULL → use default rpc_call) */
 } GraphRecordedOp;
 
 typedef struct {
@@ -169,7 +178,9 @@ static void graph_record_copy(GraphRecord *dst, const GraphRecord *src)
     dst->capacity = src->count;
     dst->ops      = (GraphRecordedOp *)calloc(src->count, sizeof(GraphRecordedOp));
     for (int i = 0; i < src->count; i++) {
+        dst->ops[i].rpc_cmd     = src->ops[i].rpc_cmd;
         dst->ops[i].rpc_len     = src->ops[i].rpc_len;
+        dst->ops[i].rpc_fn      = src->ops[i].rpc_fn;
         dst->ops[i].rpc_payload = malloc(src->ops[i].rpc_len);
         memcpy(dst->ops[i].rpc_payload, src->ops[i].rpc_payload,
                src->ops[i].rpc_len);
@@ -218,7 +229,21 @@ int decloud_graph_is_capturing(void)
     return g_graph_capturing;
 }
 
+/* Forward declaration */
+int decloud_graph_record_op_ex(uint8_t cmd, const void *payload, uint32_t len,
+                                void *rpc_fn);
+
 int decloud_graph_record_op(uint8_t cmd, const void *payload, uint32_t len)
+{
+    return decloud_graph_record_op_ex(cmd, payload, len, NULL);
+}
+
+/* Extended variant: records an op with a specific RPC function for replay.
+ * The driver shim passes its own transport_rpc_call so that driver-API
+ * kernels (flash-attention) are replayed through the driver connection
+ * where those functions are registered, not the runtime shim's connection. */
+int decloud_graph_record_op_ex(uint8_t cmd, const void *payload, uint32_t len,
+                                void *rpc_fn)
 {
     if (!g_graph_capturing) return -1;
     if (g_graph_capture_buf.count >= GRAPH_MAX_RECORDED_OPS) return -1;
@@ -234,6 +259,7 @@ int decloud_graph_record_op(uint8_t cmd, const void *payload, uint32_t len)
     GraphRecordedOp *op = &cap->ops[cap->count++];
     op->rpc_cmd     = cmd;
     op->rpc_len     = len;
+    op->rpc_fn      = (graph_rpc_fn_t)rpc_fn;
     op->rpc_payload = malloc(len);
     memcpy(op->rpc_payload, payload, len);
     return 0;
@@ -2116,9 +2142,13 @@ cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream)
 
     int errors = 0;
     for (int i = 0; i < rec->count; i++) {
-        int err = rpc_call(rec->ops[i].rpc_cmd,
-                 rec->ops[i].rpc_payload, rec->ops[i].rpc_len,
-                 NULL, 0, NULL);
+        /* Use the recorded RPC function if set (driver-shim ops use
+         * the driver connection where their functions are registered),
+         * otherwise fall back to the runtime shim's rpc_call. */
+        graph_rpc_fn_t fn = rec->ops[i].rpc_fn ? rec->ops[i].rpc_fn : rpc_call;
+        int err = fn(rec->ops[i].rpc_cmd,
+                     rec->ops[i].rpc_payload, rec->ops[i].rpc_len,
+                     NULL, 0, NULL);
         if (err != 0) errors++;
     }
     if (errors > 0) {
