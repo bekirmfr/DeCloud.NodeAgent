@@ -33,6 +33,17 @@
 /* Set transport log prefix before including shared transport */
 #define TRANSPORT_LOG_PREFIX "cuda-driver-shim"
 #include "transport.h"
+
+/* Override TRANSPORT_LOG to write to a file instead of stderr,
+ * because ollama swallows stderr from the ggml runner process. */
+#undef TRANSPORT_LOG
+static FILE *g_drv_log_fp = NULL;
+#define TRANSPORT_LOG(fmt, ...) do { \
+    if (g_debug_log && g_drv_log_fp) { \
+        fprintf(g_drv_log_fp, "[cuda-driver-shim] " fmt "\n", ##__VA_ARGS__); \
+        fflush(g_drv_log_fp); \
+    } \
+} while(0)
 #include "transport.c"
 
 /* ================================================================
@@ -290,6 +301,9 @@ static void driver_shim_init(void)
 {
     /* Load config early — cuGetProcAddress is called before cuInit */
     g_debug_log = (transport_getenv("DECLOUD_GPU_DEBUG") != NULL);
+    if (g_debug_log) {
+        g_drv_log_fp = fopen("/tmp/gpu-driver-debug.log", "a");
+    }
     const char *gnoop = transport_getenv("DECLOUD_GPU_GRAPH_NOOP");
     if (gnoop && gnoop[0] == '0') g_driver_graph_noop = 0;
 

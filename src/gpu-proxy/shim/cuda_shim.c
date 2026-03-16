@@ -320,6 +320,11 @@ static void shim_init(void)
                 DIAG("  → g_graph_noop = %d", g_graph_noop);
                 continue;
             }
+            if (strcmp(key, "DECLOUD_GPU_DEBUG") == 0) {
+                g_debug_log = 1;
+                DIAG("  → g_debug_log = 1");
+                continue;
+            }
             if (strncmp(key, "DECLOUD_", 8) == 0) continue;
             if (strcmp(key, "LD_PRELOAD") == 0) continue;
 
