@@ -33,6 +33,17 @@
 /* Set transport log prefix before including shared transport */
 #define TRANSPORT_LOG_PREFIX "cuda-driver-shim"
 #include "transport.h"
+
+/* Override TRANSPORT_LOG to write to a file instead of stderr,
+ * because ollama swallows stderr from the ggml runner process. */
+#undef TRANSPORT_LOG
+static FILE *g_drv_log_fp = NULL;
+#define TRANSPORT_LOG(fmt, ...) do { \
+    if (g_debug_log && g_drv_log_fp) { \
+        fprintf(g_drv_log_fp, "[cuda-driver-shim] " fmt "\n", ##__VA_ARGS__); \
+        fflush(g_drv_log_fp); \
+    } \
+} while(0)
 #include "transport.c"
 
 /* ================================================================
@@ -85,6 +96,39 @@ static int g_vmem_proxy = 0;
 /* When true (default), graph capture stubs return CUDA_SUCCESS (no-op).
  * Set DECLOUD_GPU_GRAPH_NOOP=0 to return NOT_SUPPORTED instead. */
 static int g_driver_graph_noop = 1;
+
+/* ================================================================
+ * Graph-capture helpers (shared with cuda_shim.c via dlsym)
+ *
+ * cuLaunchKernel is used by ggml's flash-attention kernels (driver API).
+ * Without graph capture awareness, these kernels execute eagerly during
+ * cudaStreamBeginCapture and are NOT replayed during cudaGraphLaunch,
+ * causing the first generated token to be garbled (flash attention runs
+ * with uncomputed Q/K/V during capture, then isn't replayed).
+ * ================================================================ */
+typedef int (*graph_is_capturing_fn)(void);
+typedef int (*graph_record_op_fn)(uint8_t cmd, const void *payload, uint32_t len);
+
+static graph_is_capturing_fn g_drv_graph_is_capturing = NULL;
+static graph_record_op_fn    g_drv_graph_record_op    = NULL;
+static int g_drv_graph_resolved = 0;
+
+static void resolve_drv_graph_helpers(void)
+{
+    if (!g_drv_graph_resolved) {
+        g_drv_graph_is_capturing = (graph_is_capturing_fn)dlsym(RTLD_DEFAULT,
+                                        "decloud_graph_is_capturing");
+        g_drv_graph_record_op = (graph_record_op_fn)dlsym(RTLD_DEFAULT,
+                                        "decloud_graph_record_op");
+        g_drv_graph_resolved = 1;
+    }
+}
+
+static int drv_is_graph_capturing(void)
+{
+    resolve_drv_graph_helpers();
+    return g_drv_graph_is_capturing ? g_drv_graph_is_capturing() : 0;
+}
 
 /* ================================================================
  * cuGetExportTable — per-GUID instrumented tables (Bug 19)
@@ -257,6 +301,9 @@ static void driver_shim_init(void)
 {
     /* Load config early — cuGetProcAddress is called before cuInit */
     g_debug_log = (transport_getenv("DECLOUD_GPU_DEBUG") != NULL);
+    if (g_debug_log) {
+        g_drv_log_fp = fopen("/tmp/gpu-driver-debug.log", "a");
+    }
     const char *gnoop = transport_getenv("DECLOUD_GPU_GRAPH_NOOP");
     if (gnoop && gnoop[0] == '0') g_driver_graph_noop = 0;
 
@@ -1814,38 +1861,15 @@ static CUresult cu_launch_kernel_driver(CUfunction f,
         return CUDA_ERROR_INVALID_VALUE;
     }
 
-    if (fs->num_params == 0) {
-        /* Daemon couldn't introspect params (cuFuncGetParamInfo unavailable).
-         * Launch with zero-length args — some kernels have no params,
-         * and the daemon handles the zero-param case. */
-        TRANSPORT_LOG("cuLaunchKernel('%s'): 0 introspected params, launching with no args",
-                      fs->name);
-
-        GpuLaunchKernelRequest req = {
-            .host_func_ptr   = handle,
-            .grid_dim_x      = gridDimX,
-            .grid_dim_y      = gridDimY,
-            .grid_dim_z      = gridDimZ,
-            .block_dim_x     = blockDimX,
-            .block_dim_y     = blockDimY,
-            .block_dim_z     = blockDimZ,
-            .shared_mem_bytes = (uint64_t)sharedMemBytes,
-            .stream_handle   = (uint64_t)(uintptr_t)hStream,
-            .num_params      = 0,
-            .args_total_size = 0,
-        };
-        int err = transport_rpc_call(GPU_CMD_LAUNCH_KERNEL, &req, sizeof(req),
-                                     NULL, 0, NULL);
-        TRANSPORT_LOG("cuLaunchKernel('%s', grid=[%u,%u,%u], block=[%u,%u,%u], 0 args) → %d",
-                      fs->name, gridDimX, gridDimY, gridDimZ,
-                      blockDimX, blockDimY, blockDimZ, err);
-        return (CUresult)err;
-    }
-
     /* Calculate total serialized args size */
     uint32_t args_total = 0;
     for (uint32_t i = 0; i < fs->num_params; i++)
         args_total += fs->param_sizes[i];
+
+    if (fs->num_params == 0) {
+        TRANSPORT_LOG("cuLaunchKernel('%s'): 0 introspected params, launching with no args",
+                      fs->name);
+    }
 
     /* Build request: header + serialized args */
     uint32_t req_len = (uint32_t)(sizeof(GpuLaunchKernelRequest) + args_total);
@@ -1875,6 +1899,21 @@ static CUresult cu_launch_kernel_driver(CUfunction f,
             memset(dest, 0, sz);
         }
         dest += sz;
+    }
+
+    /* During graph capture, record this kernel — do NOT execute.
+     * ggml's flash-attention uses the driver API (cuLaunchKernel) while
+     * most other kernels use the runtime API (cudaLaunchKernel).  Without
+     * this check, flash-attention kernels execute eagerly during capture
+     * with uncomputed Q/K/V inputs, then are NOT replayed during
+     * cudaGraphLaunch → garbled first token. */
+    if (drv_is_graph_capturing() && g_drv_graph_record_op) {
+        g_drv_graph_record_op(GPU_CMD_LAUNCH_KERNEL, req_buf, req_len);
+        TRANSPORT_LOG("cuLaunchKernel('%s', grid=[%u,%u,%u], block=[%u,%u,%u]) → graph-recorded",
+                      fs->name, gridDimX, gridDimY, gridDimZ,
+                      blockDimX, blockDimY, blockDimZ);
+        free(req_buf);
+        return CUDA_SUCCESS;
     }
 
     int err = transport_rpc_call(GPU_CMD_LAUNCH_KERNEL, req_buf, req_len,
