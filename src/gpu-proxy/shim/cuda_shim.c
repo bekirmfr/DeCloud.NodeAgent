@@ -2096,17 +2096,16 @@ cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
     return cudaSuccess;
 }
 
-cudaError_t cudaGraphInstantiate(cudaGraphExec_t *pGraphExec, cudaGraph_t graph,
-                                  void *pErrorNode, char *pLogBuffer, size_t bufferSize)
+/* Shared implementation for all cudaGraphInstantiate variants */
+static cudaError_t graph_instantiate_impl(cudaGraphExec_t *pGraphExec, const char *variant)
 {
-    (void)graph; (void)pErrorNode; (void)pLogBuffer; (void)bufferSize;
     if (!g_graph_noop) return cudaErrorNotSupported;
 
     __sync_fetch_and_add(&g_diag_graph_instantiates, 1);
     int idx = graph_exec_alloc();
     if (idx < 0) {
         /* All slots full — reuse slot 0 */
-        DIAG("cudaGraphInstantiate: all %d slots full, reusing slot 0", GRAPH_MAX_EXEC_SLOTS);
+        DIAG("%s: all %d slots full, reusing slot 0", variant, GRAPH_MAX_EXEC_SLOTS);
         graph_exec_free(0);
         idx = graph_exec_alloc();
     }
@@ -2116,10 +2115,28 @@ cudaError_t cudaGraphInstantiate(cudaGraphExec_t *pGraphExec, cudaGraph_t graph,
         pthread_mutex_unlock(&g_graph_exec_lock);
     }
     if (pGraphExec) *pGraphExec = GRAPH_EXEC_TO_PTR(idx >= 0 ? idx : 0);
-    DIAG("cudaGraphInstantiate: slot=%d, ops=%d (call #%d)",
-         idx, idx >= 0 ? g_graph_exec_slots[idx].record.count : 0,
+    DIAG("%s: slot=%d, ops=%d (call #%d)",
+         variant, idx, idx >= 0 ? g_graph_exec_slots[idx].record.count : 0,
          g_diag_graph_instantiates);
     return cudaSuccess;
+}
+
+cudaError_t cudaGraphInstantiate(cudaGraphExec_t *pGraphExec, cudaGraph_t graph,
+                                  void *pErrorNode, char *pLogBuffer, size_t bufferSize)
+{
+    (void)graph; (void)pErrorNode; (void)pLogBuffer; (void)bufferSize;
+    return graph_instantiate_impl(pGraphExec, "cudaGraphInstantiate");
+}
+
+/* CUDA 11.4+ variant used by newer ggml/llama.cpp instead of cudaGraphInstantiate.
+ * Previously only in the PyTorch stubs (which returned a NULL handle → graph
+ * launch became a no-op → 2000+ kernels never executed → garbled output). */
+cudaError_t cudaGraphInstantiateWithFlags(cudaGraphExec_t *pGraphExec,
+                                           cudaGraph_t graph,
+                                           unsigned long long flags)
+{
+    (void)graph; (void)flags;
+    return graph_instantiate_impl(pGraphExec, "cudaGraphInstantiateWithFlags");
 }
 
 cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream)

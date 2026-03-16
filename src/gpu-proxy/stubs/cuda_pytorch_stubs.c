@@ -238,13 +238,22 @@ cudaError_t cudaIpcGetMemHandle(cudaIpcMemHandle_t *handle, void *devPtr)
 
 /* ══════════════════════════════════════════════════════════════════════
  * 12. cudaGraphInstantiateWithFlags
- *     CUDA graphs not supported in proxy mode — return empty exec handle.
+ *     MOVED to the main CUDA shim (cuda_shim.c) where it can use the
+ *     graph noop infrastructure to properly record and replay captured
+ *     kernels.  The old stub here returned a NULL exec handle, causing
+ *     cudaGraphLaunch to silently no-op → 2000+ kernels never executed
+ *     → garbled output in Ollama/llama.cpp.
+ *
+ *     Keeping a thin forwarder here so that if the PyTorch stubs .so
+ *     is loaded WITHOUT the main shim, this symbol still resolves.
  * ══════════════════════════════════════════════════════════════════════ */
 cudaError_t cudaGraphInstantiateWithFlags(cudaGraphExec_t *pGraphExec,
                                            cudaGraph_t graph,
                                            unsigned long long flags)
 {
     (void)graph; (void)flags;
+    /* When the main shim is loaded (LD_PRELOAD), its version of this
+     * function takes priority.  This fallback only runs standalone. */
     if (pGraphExec) *pGraphExec = 0;
     return cudaSuccess;
 }
