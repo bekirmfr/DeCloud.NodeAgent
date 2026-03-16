@@ -1465,8 +1465,8 @@ static int handle_func_set_attribute(ConnectionCtx *ctx,
                                       (CUfunction_attribute)req.attr,
                                       req.value);
 
-    LOG_DBG("CID %u: cuFuncSetAttribute('%s', attr=%d, value=%d) -> %d",
-            ctx->peer_cid, fs->name, req.attr, req.value, cr);
+    LOG_DBG("CID %u: cuFuncSetAttribute(0x%lx, attr=%d, value=%d) -> %d",
+            ctx->peer_cid, (unsigned long)req.host_func_ptr, req.attr, req.value, cr);
 
     return send_response(ctx->fd, GPU_CMD_FUNC_SET_ATTRIBUTE, (int32_t)cr,
                          NULL, 0);
