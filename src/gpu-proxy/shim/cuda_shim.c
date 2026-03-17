@@ -2362,45 +2362,37 @@ typedef enum {
 cudaError_t cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode_t mode)
 {
     (void)stream; (void)mode;
-    if (!g_graph_noop) return cudaErrorNotSupported;
-
     __sync_fetch_and_add(&g_diag_graph_begins, 1);
-    /* Transparent pass-through: do NOT set g_graph_capturing.
-     * Kernels continue to execute eagerly during the "capture" phase.
-     * This avoids the bug where some kernel types (cuGraphAddKernelNode
-     * from static cudart) bypass our capture, leaving the replay buffer
-     * empty → zero computation on graph launch → gibberish. */
-    g_graph_in_capture_phase = 1;
-    SHIM_LOG("cudaStreamBeginCapture: pass-through (kernels execute eagerly)");
-    DIAG("cudaStreamBeginCapture: stream=%p, mode=%d, pass-through mode (call #%d)",
-         stream, (int)mode, g_diag_graph_begins);
-    return cudaSuccess;
+    /* Reject graph capture entirely — force llama.cpp/ggml to fall back
+     * to direct kernel execution (no capture/instantiate/launch cycle).
+     * The pass-through mode (eager execution during capture + no-op launch)
+     * causes garbled/doubled text output in Ollama, likely due to subtle
+     * interactions between the graph lifecycle and kernel execution ordering.
+     * With graphs disabled, all kernels execute directly and synchronously
+     * through the RPC transport — no graph-related state to go wrong. */
+    SHIM_LOG("cudaStreamBeginCapture: REJECTED (graphs disabled, direct execution)");
+    DIAG("cudaStreamBeginCapture: REJECTED — graphs disabled (call #%d)",
+         g_diag_graph_begins);
+    return cudaErrorNotSupported;
 }
 
 cudaError_t cudaStreamEndCapture(cudaStream_t stream, cudaGraph_t *pGraph)
 {
     (void)stream;
-    if (!g_graph_noop) return cudaErrorNotSupported;
-
     g_graph_in_capture_phase = 0;
     __sync_fetch_and_add(&g_diag_graph_ends, 1);
-    SHIM_LOG("cudaStreamEndCapture: pass-through (no actual capture)");
-    DIAG("cudaStreamEndCapture: pass-through, returning dummy graph (call #%d)",
-         g_diag_graph_ends);
-    /* Return a token so ggml can pass it to cudaGraphInstantiate/Update */
-    if (pGraph) *pGraph = (cudaGraph_t)&g_dummy_graph_tag;
-    return cudaSuccess;
+    /* Graphs are disabled — BeginCapture was rejected, so EndCapture
+     * should not normally be called.  Return error for safety. */
+    if (pGraph) *pGraph = NULL;
+    return cudaErrorNotSupported;
 }
 
 cudaError_t cudaStreamIsCapturing(cudaStream_t stream, cudaStreamCaptureStatus_t *pCaptureStatus)
 {
     (void)stream;
-    /* Report Active between BeginCapture and EndCapture so ggml
-     * considers the capture in progress (even though kernels execute
-     * eagerly in pass-through mode). */
+    /* Graphs are disabled — always report not capturing. */
     if (pCaptureStatus)
-        *pCaptureStatus = g_graph_in_capture_phase ? cudaStreamCaptureStatusActive
-                                                   : cudaStreamCaptureStatusNone;
+        *pCaptureStatus = cudaStreamCaptureStatusNone;
     return cudaSuccess;
 }
 
