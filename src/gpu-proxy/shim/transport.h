@@ -6,7 +6,8 @@
  *
  * Two modes controlled by TRANSPORT_SHARED_RPC_ONLY:
  *   - Undefined (runtime shim): full TCP/vsock transport
- *   - Defined (driver/NVML shim): delegates RPC to runtime shim
+ *   - Defined (driver/NVML shim): prefers shared RPC via runtime shim,
+ *     falls back to direct TCP/vsock when LD_PRELOAD is stripped
  */
 
 #ifndef DECLOUD_GPU_PROXY_TRANSPORT_H

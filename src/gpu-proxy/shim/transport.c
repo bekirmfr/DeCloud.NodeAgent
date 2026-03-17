@@ -6,9 +6,12 @@
  * Two modes:
  *   1. Full mode (runtime shim) — owns the TCP/vsock connection to the
  *      daemon and exports decloud_shared_rpc_call() for other shims.
- *   2. Shared-only mode (driver shim, NVML shim) — no connection code;
- *      delegates ALL RPC calls through the runtime shim's exported
- *      function.  Define TRANSPORT_SHARED_RPC_ONLY before including.
+ *   2. Shared-preferred mode (driver shim, NVML shim) — tries to
+ *      delegate RPC calls through the runtime shim's exported function
+ *      (single-channel).  If the runtime shim is not loaded (e.g.
+ *      Ollama strips LD_PRELOAD from runner subprocesses), falls back
+ *      to opening its own direct TCP/vsock connection.
+ *      Define TRANSPORT_SHARED_RPC_ONLY before including.
  *
  * Both modes provide:
  *   - transport_getenv()       config-file-aware getenv
@@ -16,7 +19,7 @@
  *   - transport_ensure_connected()
  *   - transport_disconnect()
  *
- * Environment variables (full mode only):
+ * Environment variables:
  *   DECLOUD_GPU_PROXY_CID   -- vsock CID (default: VMADDR_CID_HOST = 2)
  *   DECLOUD_GPU_PROXY_PORT  -- port (default: 9999)
  *   DECLOUD_GPU_PROXY_HOST  -- TCP host (default: 192.168.122.1)
@@ -27,6 +30,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <errno.h>
+#include <sys/socket.h>
+#include <linux/vm_sockets.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
 
 #include "transport.h"
 
@@ -115,11 +126,16 @@ static int transport_get_env_int(const char *name, int def)
 }
 
 /* ================================================================
- * MODE: Shared-RPC-only (driver shim, NVML shim)
+ * Shared RPC delegation (TRANSPORT_SHARED_RPC_ONLY mode)
  *
- * No sockets, no connection state.  Every RPC call is delegated
- * to the runtime shim via decloud_shared_rpc_call(), discovered
- * once via dlsym().
+ * When the runtime shim is loaded via LD_PRELOAD, the driver and
+ * NVML shims can delegate all RPC through it to share a single
+ * TCP connection.  This is the preferred path for unified stream/
+ * event tables on the daemon side.
+ *
+ * When LD_PRELOAD is stripped (Ollama runner subprocesses), the
+ * runtime shim is absent and dlsym() fails.  In that case we fall
+ * through to the direct connection code below.
  * ================================================================ */
 #ifdef TRANSPORT_SHARED_RPC_ONLY
 
@@ -130,77 +146,35 @@ typedef int (*shared_rpc_fn_t)(uint8_t cmd,
                                 void *resp_buf, uint32_t resp_buf_size,
                                 uint32_t *resp_actual_len);
 static shared_rpc_fn_t g_transport_shared_rpc = NULL;
+static int g_shared_rpc_checked = 0;
 
-static int transport_resolve_shared_rpc(void)
+/* Returns 1 if shared RPC is available, 0 otherwise. */
+static int transport_try_shared_rpc(void)
 {
-    if (g_transport_shared_rpc) return 0;
+    if (g_transport_shared_rpc) return 1;
+    if (g_shared_rpc_checked) return 0;
+    g_shared_rpc_checked = 1;
+
     g_transport_shared_rpc = (shared_rpc_fn_t)dlsym(RTLD_DEFAULT,
                                                       "decloud_shared_rpc_call");
     if (g_transport_shared_rpc) {
         TRANSPORT_LOG("Using runtime shim's shared RPC (single-channel mode)");
-        return 0;
+        return 1;
     }
-    TRANSPORT_LOG("ERROR: decloud_shared_rpc_call not found — "
-                  "runtime shim (libdecloud_cuda_shim.so) must be loaded");
-    return -1;
-}
-
-int transport_ensure_connected(void)
-{
-    transport_load_config_file();
-    return transport_resolve_shared_rpc();
-}
-
-int transport_rpc_call(uint8_t cmd,
-                       const void *req_payload, uint32_t req_len,
-                       void *resp_buf, uint32_t resp_buf_size,
-                       uint32_t *resp_actual_len)
-{
-    if (!g_transport_shared_rpc && transport_resolve_shared_rpc() < 0)
-        return TRANSPORT_ERROR_NO_DEVICE;
-    return g_transport_shared_rpc(cmd, req_payload, req_len,
-                                   resp_buf, resp_buf_size,
-                                   resp_actual_len);
-}
-
-void transport_disconnect(void)
-{
-    /* Nothing to do — runtime shim owns the connection. */
-}
-
-/* Unused in shared-RPC mode but declared in transport.h */
-int transport_parse_hex_token(const char *hex, uint8_t *out, int len)
-{
-    if (!hex || strlen(hex) != (size_t)(len * 2)) return -1;
-    for (int i = 0; i < len; i++) {
-        unsigned int byte;
-        if (sscanf(&hex[i * 2], "%02x", &byte) != 1) return -1;
-        out[i] = (uint8_t)byte;
-    }
+    TRANSPORT_LOG("Runtime shim not loaded — falling back to direct connection "
+                  "(Ollama runner may have stripped LD_PRELOAD)");
     return 0;
 }
-int transport_read_exact(int fd, void *buf, size_t len)
-    { (void)fd; (void)buf; (void)len; return -1; }
-int transport_write_exact(int fd, const void *buf, size_t len)
-    { (void)fd; (void)buf; (void)len; return -1; }
 
-#else /* !TRANSPORT_SHARED_RPC_ONLY */
+#endif /* TRANSPORT_SHARED_RPC_ONLY */
 
 /* ================================================================
- * MODE: Full transport (runtime shim)
+ * Direct connection code (always compiled)
  *
- * Owns the TCP/vsock connection.  Exports decloud_shared_rpc_call()
- * so driver/NVML shims can piggyback on this connection.
+ * In full mode (runtime shim): this is the only transport.
+ * In shared-preferred mode: used as fallback when the runtime
+ * shim is not loaded (LD_PRELOAD stripped by Ollama).
  * ================================================================ */
-
-#include <unistd.h>
-#include <pthread.h>
-#include <errno.h>
-#include <sys/socket.h>
-#include <linux/vm_sockets.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <arpa/inet.h>
 
 static pthread_mutex_t g_transport_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_transport_fd = -1;
@@ -314,6 +288,13 @@ int transport_ensure_connected(void)
 {
     transport_load_config_file();
 
+#ifdef TRANSPORT_SHARED_RPC_ONLY
+    /* Prefer shared RPC when runtime shim is available */
+    if (transport_try_shared_rpc())
+        return 0;
+    /* Runtime shim not loaded — fall through to direct connection */
+#endif
+
     pthread_mutex_lock(&g_transport_lock);
     if (g_transport_fd >= 0) {
         pthread_mutex_unlock(&g_transport_lock);
@@ -409,6 +390,16 @@ int transport_rpc_call(uint8_t cmd,
                        void *resp_buf, uint32_t resp_buf_size,
                        uint32_t *resp_actual_len)
 {
+#ifdef TRANSPORT_SHARED_RPC_ONLY
+    /* Prefer shared RPC when runtime shim is available */
+    if (g_transport_shared_rpc || transport_try_shared_rpc()) {
+        return g_transport_shared_rpc(cmd, req_payload, req_len,
+                                       resp_buf, resp_buf_size,
+                                       resp_actual_len);
+    }
+    /* Runtime shim not loaded — fall through to direct connection */
+#endif
+
     if (transport_ensure_connected() < 0)
         return TRANSPORT_ERROR_NO_DEVICE;
 
@@ -470,6 +461,12 @@ err:
 
 void transport_disconnect(void)
 {
+#ifdef TRANSPORT_SHARED_RPC_ONLY
+    /* If using shared RPC, the runtime shim owns the connection */
+    if (g_transport_shared_rpc)
+        return;
+#endif
+
     pthread_mutex_lock(&g_transport_lock);
     if (g_transport_fd >= 0) {
         GpuProxyHeader hdr = {
@@ -485,5 +482,3 @@ void transport_disconnect(void)
     }
     pthread_mutex_unlock(&g_transport_lock);
 }
-
-#endif /* TRANSPORT_SHARED_RPC_ONLY */
