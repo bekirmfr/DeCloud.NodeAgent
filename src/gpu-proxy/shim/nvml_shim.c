@@ -27,11 +27,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <dlfcn.h>
 
-/* Set transport log prefix before including shared transport */
+/* Set transport log prefix before including shared transport.
+ * TRANSPORT_SHARED_RPC_ONLY: delegate all RPC through the runtime shim. */
 #define TRANSPORT_LOG_PREFIX "nvml-shim"
 #include "transport.h"
+#define TRANSPORT_SHARED_RPC_ONLY
 #include "transport.c"
 
 /* ================================================================
