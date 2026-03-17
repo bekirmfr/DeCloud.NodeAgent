@@ -120,7 +120,7 @@ nvml-shim: $(NVML_SHIM)
 $(NVML_SHIM): shim/nvml_shim.c $(TRANSPORT_DEPS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -shared -fPIC \
 		-o $@ $< \
-		-lpthread
+		-lpthread -ldl
 
 # ----------------------------------------------------------------
 # cuBLAS Stub (libcublas.so.12): separate library with correct
@@ -254,7 +254,7 @@ all-shims-compat: | $(BUILD_DIR)
 	           echo '==> Building NVML shim...' && \
 	           gcc -Wall -Wextra -O2 -I/src -shared -fPIC \
 	               -o build/libnvidia-ml.so.1 \
-	               shim/nvml_shim.c -lpthread && \
+	               shim/nvml_shim.c -lpthread -ldl && \
 	           ln -sf libnvidia-ml.so.1 build/libnvidia-ml.so && \
 	           echo '==> Building cuBLAS stub...' && \
 	           gcc -Wall -Wextra -O2 -I/src -shared -fPIC \

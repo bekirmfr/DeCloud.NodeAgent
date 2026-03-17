@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <dlfcn.h>
 
 /* Set transport log prefix before including shared transport */
 #define TRANSPORT_LOG_PREFIX "nvml-shim"
