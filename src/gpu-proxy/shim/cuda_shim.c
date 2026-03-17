@@ -340,7 +340,6 @@ static void shim_init(void)
 
             DIAG("  env-file: %s=%s", key, strcmp(key, "DECLOUD_GPU_PROXY_TOKEN") == 0 ? "<redacted>" : val);
 
-            /* Skip transport config (handled by transport layer) and LD_PRELOAD */
             /* Consume proxy-level flags we handle internally */
             if (strcmp(key, "DECLOUD_GPU_GRAPH_NOOP") == 0) {
                 g_graph_noop = (val[0] == '1');
@@ -352,6 +351,18 @@ static void shim_init(void)
                 DIAG("  → g_debug_log = 1");
                 continue;
             }
+
+            /* Propagate DECLOUD_GPU_PROXY_* transport vars so that
+             * ensure_connected() can find them via getenv() even when
+             * Ollama strips the environment in runner subprocesses.
+             * Use setenv(..., 0) to preserve any existing env value. */
+            if (strncmp(key, "DECLOUD_GPU_PROXY_", 18) == 0) {
+                setenv(key, val, 0);
+                DIAG("  → setenv %s (transport)", key);
+                continue;
+            }
+
+            /* Skip remaining DECLOUD_* internal vars and LD_PRELOAD */
             if (strncmp(key, "DECLOUD_", 8) == 0) continue;
             if (strcmp(key, "LD_PRELOAD") == 0) continue;
 

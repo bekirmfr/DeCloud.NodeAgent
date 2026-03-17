@@ -2015,6 +2015,14 @@ public class LibvirtVmManager : IVmManager
       else
         cp /run/decloud/libdecloud_cuda_shim.so /usr/local/lib/
         chmod 755 /usr/local/lib/libdecloud_cuda_shim.so
+        # Also install as libcudart.so.12 — Ollama runner dirs need this name
+        # (same binary, soname is libcudart.so.12)
+        if [ -f /run/decloud/libcudart.so.12 ]; then
+          cp /run/decloud/libcudart.so.12 /usr/local/lib/
+          chmod 755 /usr/local/lib/libcudart.so.12
+        else
+          cp /usr/local/lib/libdecloud_cuda_shim.so /usr/local/lib/libcudart.so.12
+        fi
         # PyTorch compat stubs (no-ops for Ollama, required for PyTorch/vLLM/Forge)
         if [ -f /run/decloud/libcuda_pytorch_stubs.so ]; then
           cp /run/decloud/libcuda_pytorch_stubs.so /usr/local/lib/
