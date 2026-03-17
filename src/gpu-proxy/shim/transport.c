@@ -1,10 +1,22 @@
 /*
  * DeCloud GPU Proxy -- Shared Transport Implementation
  *
- * TCP/vsock connection, RPC call, and I/O helpers.
- * Included directly into each shim .so via the build system.
+ * Included directly into each shim .so via #include.
  *
- * Environment variables:
+ * Two modes:
+ *   1. Full mode (runtime shim) — owns the TCP/vsock connection to the
+ *      daemon and exports decloud_shared_rpc_call() for other shims.
+ *   2. Shared-only mode (driver shim, NVML shim) — no connection code;
+ *      delegates ALL RPC calls through the runtime shim's exported
+ *      function.  Define TRANSPORT_SHARED_RPC_ONLY before including.
+ *
+ * Both modes provide:
+ *   - transport_getenv()       config-file-aware getenv
+ *   - transport_rpc_call()     send RPC and receive response
+ *   - transport_ensure_connected()
+ *   - transport_disconnect()
+ *
+ * Environment variables (full mode only):
  *   DECLOUD_GPU_PROXY_CID   -- vsock CID (default: VMADDR_CID_HOST = 2)
  *   DECLOUD_GPU_PROXY_PORT  -- port (default: 9999)
  *   DECLOUD_GPU_PROXY_HOST  -- TCP host (default: 192.168.122.1)
@@ -15,79 +27,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <pthread.h>
-#include <errno.h>
-#include <sys/socket.h>
-#include <linux/vm_sockets.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <arpa/inet.h>
 
 #include "transport.h"
-
-/* ================================================================
- * Shared RPC -- delegate to runtime shim's connection if available
- * ================================================================
- *
- * When the driver shim (libcuda.so.1) is loaded alongside the runtime
- * shim (libdecloud_cuda_shim.so), we want BOTH shims to use a SINGLE
- * TCP connection to the daemon.  This eliminates cross-connection issues:
- * - Streams/events created on one connection are visible to the other
- * - Function tables are unified
- * - No need for cudaDeviceSynchronize() between every kernel launch
- *
- * The runtime shim exports decloud_shared_rpc_call().  At init time,
- * the driver shim looks for it via dlsym().  If found, ALL transport
- * RPC calls are delegated through it.
- *
- * Guarded by RTLD_DEFAULT — only active when <dlfcn.h> is included
- * by the parent file (driver shim: yes, NVML shim: no).
- */
-#ifdef RTLD_DEFAULT
-typedef int (*shared_rpc_fn_t)(uint8_t cmd,
-                                const void *req_payload, uint32_t req_len,
-                                void *resp_buf, uint32_t resp_buf_size,
-                                uint32_t *resp_actual_len);
-static shared_rpc_fn_t g_transport_shared_rpc = NULL;
-static int g_transport_shared_rpc_resolved = 0;
-
-static void transport_resolve_shared_rpc(void)
-{
-    if (g_transport_shared_rpc_resolved) return;
-    g_transport_shared_rpc_resolved = 1;
-    g_transport_shared_rpc = (shared_rpc_fn_t)dlsym(RTLD_DEFAULT,
-                                                      "decloud_shared_rpc_call");
-    if (g_transport_shared_rpc) {
-        TRANSPORT_LOG("Using runtime shim's shared RPC connection (single-channel mode)");
-    }
-}
-#endif /* RTLD_DEFAULT */
-
-/* ================================================================
- * Connection state (per-process, shared across threads)
- * ================================================================ */
-
-static pthread_mutex_t g_transport_lock = PTHREAD_MUTEX_INITIALIZER;
-static int g_transport_fd = -1;
-static int g_transport_initialized = 0;
 
 /* Error code returned on transport failures (matches cudaErrorNoDevice) */
 #define TRANSPORT_ERROR_NO_DEVICE 100
 
 /* ================================================================
- * Helpers
- * ================================================================ */
-
-/* Config file fallback path -- read when env vars are missing.
- * Ollama's runner subprocess strips non-OLLAMA_ env vars, so
- * DECLOUD_GPU_PROXY_* are lost. This file provides a fallback.
+ * Config file reading (shared by all modes)
+ * ================================================================
  *
- * CRITICAL: We MUST NOT call setenv() here. Go's runtime runs
+ * Ollama's runner subprocess strips non-OLLAMA_ env vars, so
+ * DECLOUD_GPU_PROXY_* are lost.  This reads /etc/decloud/gpu-proxy.env
+ * as a fallback.
+ *
+ * CRITICAL: We MUST NOT call setenv() here.  Go's runtime runs
  * multiple OS threads and setenv() modifies the global `environ`
  * array without synchronization, causing SIGSEGV in cgo context.
- * Instead, we store config values in local static buffers and
- * provide transport_getenv() that checks local config first. */
+ */
 #define GPU_PROXY_CONFIG_FILE "/etc/decloud/gpu-proxy.env"
 
 #define MAX_CONFIG_ENTRIES 16
@@ -103,8 +60,6 @@ static ConfigEntry g_config_entries[MAX_CONFIG_ENTRIES];
 static int g_config_count = 0;
 static int g_config_file_loaded = 0;
 
-/* Load KEY=VALUE pairs from the config file into local storage.
- * Thread-safe: only reads, never calls setenv(). */
 static void transport_load_config_file(void)
 {
     if (g_config_file_loaded) return;
@@ -115,27 +70,20 @@ static void transport_load_config_file(void)
 
     char line[512];
     while (fgets(line, sizeof(line), f) && g_config_count < MAX_CONFIG_ENTRIES) {
-        /* Strip leading whitespace */
         char *p = line;
         while (*p == ' ' || *p == '\t') p++;
-
-        /* Skip empty lines and comments */
         if (*p == '\0' || *p == '\n' || *p == '#') continue;
 
-        /* Strip trailing newline */
         char *nl = strchr(p, '\n');
         if (nl) *nl = '\0';
 
-        /* Find '=' separator */
         char *eq = strchr(p, '=');
         if (!eq) continue;
 
-        /* Split into key and value */
         *eq = '\0';
         char *key = p;
         char *val = eq + 1;
 
-        /* Store locally (env vars still take precedence at lookup time) */
         ConfigEntry *ce = &g_config_entries[g_config_count++];
         strncpy(ce->key, key, MAX_CONFIG_KEY_LEN - 1);
         ce->key[MAX_CONFIG_KEY_LEN - 1] = '\0';
@@ -145,15 +93,13 @@ static void transport_load_config_file(void)
     fclose(f);
 }
 
-/* Thread-safe getenv: checks real env first, then local config file.
- * NEVER calls setenv(). Safe for use in Go cgo context. */
+/* Thread-safe getenv: checks real env first, then config file.
+ * NEVER calls setenv(). */
 static const char *transport_getenv(const char *name)
 {
-    /* Real env takes precedence */
     const char *val = getenv(name);
     if (val) return val;
 
-    /* Fall back to config file entries */
     transport_load_config_file();
     for (int i = 0; i < g_config_count; i++) {
         if (strcmp(g_config_entries[i].key, name) == 0)
@@ -167,6 +113,98 @@ static int transport_get_env_int(const char *name, int def)
     const char *val = transport_getenv(name);
     return val ? atoi(val) : def;
 }
+
+/* ================================================================
+ * MODE: Shared-RPC-only (driver shim, NVML shim)
+ *
+ * No sockets, no connection state.  Every RPC call is delegated
+ * to the runtime shim via decloud_shared_rpc_call(), discovered
+ * once via dlsym().
+ * ================================================================ */
+#ifdef TRANSPORT_SHARED_RPC_ONLY
+
+#include <dlfcn.h>
+
+typedef int (*shared_rpc_fn_t)(uint8_t cmd,
+                                const void *req_payload, uint32_t req_len,
+                                void *resp_buf, uint32_t resp_buf_size,
+                                uint32_t *resp_actual_len);
+static shared_rpc_fn_t g_transport_shared_rpc = NULL;
+
+static int transport_resolve_shared_rpc(void)
+{
+    if (g_transport_shared_rpc) return 0;
+    g_transport_shared_rpc = (shared_rpc_fn_t)dlsym(RTLD_DEFAULT,
+                                                      "decloud_shared_rpc_call");
+    if (g_transport_shared_rpc) {
+        TRANSPORT_LOG("Using runtime shim's shared RPC (single-channel mode)");
+        return 0;
+    }
+    TRANSPORT_LOG("ERROR: decloud_shared_rpc_call not found — "
+                  "runtime shim (libdecloud_cuda_shim.so) must be loaded");
+    return -1;
+}
+
+int transport_ensure_connected(void)
+{
+    transport_load_config_file();
+    return transport_resolve_shared_rpc();
+}
+
+int transport_rpc_call(uint8_t cmd,
+                       const void *req_payload, uint32_t req_len,
+                       void *resp_buf, uint32_t resp_buf_size,
+                       uint32_t *resp_actual_len)
+{
+    if (!g_transport_shared_rpc && transport_resolve_shared_rpc() < 0)
+        return TRANSPORT_ERROR_NO_DEVICE;
+    return g_transport_shared_rpc(cmd, req_payload, req_len,
+                                   resp_buf, resp_buf_size,
+                                   resp_actual_len);
+}
+
+void transport_disconnect(void)
+{
+    /* Nothing to do — runtime shim owns the connection. */
+}
+
+/* Unused in shared-RPC mode but declared in transport.h */
+int transport_parse_hex_token(const char *hex, uint8_t *out, int len)
+{
+    if (!hex || strlen(hex) != (size_t)(len * 2)) return -1;
+    for (int i = 0; i < len; i++) {
+        unsigned int byte;
+        if (sscanf(&hex[i * 2], "%02x", &byte) != 1) return -1;
+        out[i] = (uint8_t)byte;
+    }
+    return 0;
+}
+int transport_read_exact(int fd, void *buf, size_t len)
+    { (void)fd; (void)buf; (void)len; return -1; }
+int transport_write_exact(int fd, const void *buf, size_t len)
+    { (void)fd; (void)buf; (void)len; return -1; }
+
+#else /* !TRANSPORT_SHARED_RPC_ONLY */
+
+/* ================================================================
+ * MODE: Full transport (runtime shim)
+ *
+ * Owns the TCP/vsock connection.  Exports decloud_shared_rpc_call()
+ * so driver/NVML shims can piggyback on this connection.
+ * ================================================================ */
+
+#include <unistd.h>
+#include <pthread.h>
+#include <errno.h>
+#include <sys/socket.h>
+#include <linux/vm_sockets.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+
+static pthread_mutex_t g_transport_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_transport_fd = -1;
+static int g_transport_initialized = 0;
 
 int transport_parse_hex_token(const char *hex, uint8_t *out, int len)
 {
@@ -239,11 +277,8 @@ static int transport_try_tcp(int port)
         return -1;
     }
 
-    /* Disable Nagle — critical for low-latency RPC */
     int nodelay = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
-
-    /* Disable delayed ACK — eliminates 40ms ato delay on small RPCs */
     int quickack = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
 
@@ -277,7 +312,6 @@ static int transport_try_vsock(int port)
 
 int transport_ensure_connected(void)
 {
-    /* Load config from file if env vars are missing (Ollama strips them) */
     transport_load_config_file();
 
     pthread_mutex_lock(&g_transport_lock);
@@ -286,14 +320,6 @@ int transport_ensure_connected(void)
         return 0;
     }
 
-    /* Respect DECLOUD_GPU_PROXY_TRANSPORT env:
-     *   "tcp"   → skip vsock (essential in Docker/containers where vsock hangs)
-     *   "vsock" → skip TCP
-     *   unset   → try TCP first, vsock fallback
-     *            (TCP-first because Ollama's runner subprocess strips env vars,
-     *             so we rely on defaults: 192.168.122.1:9999 with empty token.
-     *             vsock can hang in containers and adds 500ms+ timeout.)
-     */
     const char *transport_mode = transport_getenv("DECLOUD_GPU_PROXY_TRANSPORT");
     int port = transport_get_env_int("DECLOUD_GPU_PROXY_PORT", GPU_PROXY_PORT);
     int try_vsock = 1, try_tcp = 1;
@@ -306,12 +332,10 @@ int transport_ensure_connected(void)
     int fd = -1;
     int is_tcp = 0;
 
-    /* Try TCP first (default for VM→host communication) */
     if (try_tcp) {
         fd = transport_try_tcp(port);
         if (fd >= 0) is_tcp = 1;
     }
-    /* Fall back to vsock if TCP failed */
     if (fd < 0 && try_vsock) {
         fd = transport_try_vsock(port);
     }
@@ -323,7 +347,6 @@ int transport_ensure_connected(void)
 
     g_transport_fd = fd;
 
-    /* Build HELLO with auth token (for TCP) */
     GpuHelloRequest hello = {
         .shim_version = GPU_PROXY_VERSION,
         .pid = (uint32_t)getpid(),
@@ -386,17 +409,6 @@ int transport_rpc_call(uint8_t cmd,
                        void *resp_buf, uint32_t resp_buf_size,
                        uint32_t *resp_actual_len)
 {
-    /* Delegate to the runtime shim's connection if available.
-     * This ensures both shims share a single daemon connection. */
-#ifdef RTLD_DEFAULT
-    transport_resolve_shared_rpc();
-    if (g_transport_shared_rpc) {
-        return g_transport_shared_rpc(cmd, req_payload, req_len,
-                                       resp_buf, resp_buf_size,
-                                       resp_actual_len);
-    }
-#endif
-
     if (transport_ensure_connected() < 0)
         return TRANSPORT_ERROR_NO_DEVICE;
 
@@ -415,11 +427,9 @@ int transport_rpc_call(uint8_t cmd,
         if (transport_write_exact(g_transport_fd, req_payload, req_len) < 0) goto err;
     }
 
-    /* Re-arm TCP_QUICKACK before reading response (Linux resets it per-operation) */
     int qa = 1;
     setsockopt(g_transport_fd, IPPROTO_TCP, TCP_QUICKACK, &qa, sizeof(qa));
 
-    /* Read response header */
     GpuProxyHeader resp_hdr;
     if (transport_read_exact(g_transport_fd, &resp_hdr, sizeof(resp_hdr)) < 0) goto err;
     if (resp_hdr.magic != GPU_PROXY_MAGIC) {
@@ -427,13 +437,11 @@ int transport_rpc_call(uint8_t cmd,
         goto err;
     }
 
-    /* Read response payload */
     if (resp_hdr.payload_len > 0) {
         if (resp_buf && resp_hdr.payload_len <= resp_buf_size) {
             if (transport_read_exact(g_transport_fd, resp_buf, resp_hdr.payload_len) < 0)
                 goto err;
         } else {
-            /* Drain excess data */
             char drain[4096];
             uint32_t remaining = resp_hdr.payload_len;
             while (remaining > 0) {
@@ -477,3 +485,5 @@ void transport_disconnect(void)
     }
     pthread_mutex_unlock(&g_transport_lock);
 }
+
+#endif /* TRANSPORT_SHARED_RPC_ONLY */
