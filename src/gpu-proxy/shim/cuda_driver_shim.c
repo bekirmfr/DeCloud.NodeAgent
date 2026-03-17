@@ -334,6 +334,28 @@ static CUresult cu_graph_destroy(void *hGraph)
     return CUDA_SUCCESS;
 }
 
+/* cuGraphGetNodes — return the number of captured operations.
+ * ggml checks this after cudaStreamEndCapture to verify the graph
+ * is non-empty.  Without this, cuGraphGetNodes fell through to
+ * graph_success_stub which didn't set numNodes → ggml saw stale
+ * count (usually 0) → skipped graph execution → garbled output. */
+static CUresult cu_graph_get_nodes(void *hGraph, void *nodes, size_t *numNodes)
+{
+    (void)hGraph; (void)nodes;
+    if (numNodes) {
+        /* Query the runtime shim's capture buffer count */
+        typedef int (*get_count_fn)(void);
+        static get_count_fn s_fn = NULL;
+        static int s_resolved = 0;
+        if (!s_resolved) {
+            s_fn = (get_count_fn)dlsym(RTLD_DEFAULT, "decloud_graph_captured_count");
+            s_resolved = 1;
+        }
+        *numNodes = s_fn ? (size_t)s_fn() : 0;
+    }
+    return CUDA_SUCCESS;
+}
+
 static CUresult cu_graph_exec_update(void *hExec, void *hGraph,
                                      int *updateResult)
 {
@@ -2736,6 +2758,12 @@ CUresult cuGetProcAddress(const char *symbol, void **pfn,
     if (strncmp(symbol, "cuGraphExecUpdate", 17) == 0) {
         *pfn = (void *)cu_graph_exec_update;
         TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-update]",
+                      symbol, cudaVersion, *pfn);
+        return CUDA_SUCCESS;
+    }
+    if (strcmp(symbol, "cuGraphGetNodes") == 0) {
+        *pfn = (void *)cu_graph_get_nodes;
+        TRANSPORT_LOG("cuGetProcAddress(\"%s\", v%d) → %p [graph-get-nodes]",
                       symbol, cudaVersion, *pfn);
         return CUDA_SUCCESS;
     }
