@@ -2411,6 +2411,10 @@ int main(int argc, char **argv)
         }
     }
 
+    /* Also enable verbose via environment variable (useful when launched by NodeAgent) */
+    if (!g_verbose && getenv("GPU_PROXY_VERBOSE"))
+        g_verbose = 1;
+
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
     signal(SIGPIPE, SIG_IGN);
