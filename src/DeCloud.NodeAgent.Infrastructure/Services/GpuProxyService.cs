@@ -67,6 +67,14 @@ public class GpuProxyService
     /// </summary>
     public int KernelTimeoutSeconds { get; set; } = 30;
 
+    /// <summary>
+    /// Enable verbose (debug) logging on the daemon.
+    /// When true, passes -v to the daemon and sets GPU_PROXY_VERBOSE=1,
+    /// which enables LOG_DBG messages for all CUDA calls, kernel launches,
+    /// memcpy operations, etc. Useful for diagnosing gibberish output or crashes.
+    /// </summary>
+    public bool VerboseLogging { get; set; } = false;
+
     public bool IsRunning => _isRunning;
 
     public GpuProxyService(
@@ -230,15 +238,20 @@ public class GpuProxyService
                 DaemonPath, DaemonPort);
 
             // Always enable TCP listener — needed for WSL2 and as fallback
+            var verboseFlag = VerboseLogging ? " -v" : "";
             var psi = new ProcessStartInfo
             {
                 FileName = DaemonPath,
-                Arguments = $"-p {DaemonPort} -t 0 -T 192.168.122.1",
+                Arguments = $"-p {DaemonPort} -t 0 -T 192.168.122.1{verboseFlag}",
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true,
             };
+
+            // Also set env var so daemon picks up verbose mode even without -v flag
+            if (VerboseLogging)
+                psi.Environment["GPU_PROXY_VERBOSE"] = "1";
 
             // WSL2: The daemon binary has -rpath=/usr/local/cuda/lib baked in from the build,
             // which points to nvidia-cuda-toolkit stubs that can't see the real GPU.
