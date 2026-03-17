@@ -34,8 +34,8 @@
 #include <pthread.h>
 
 /* Set transport log prefix before including shared transport.
- * TRANSPORT_SHARED_RPC_ONLY: no TCP connection code — all RPC calls
- * are delegated through the runtime shim's decloud_shared_rpc_call(). */
+ * TRANSPORT_SHARED_RPC_ONLY: prefer shared RPC via runtime shim,
+ * fall back to direct TCP/vsock when LD_PRELOAD is stripped. */
 #define TRANSPORT_LOG_PREFIX "cuda-driver-shim"
 #include "transport.h"
 
