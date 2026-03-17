@@ -682,6 +682,11 @@ static int handle_memcpy(ConnectionCtx *ctx, const void *payload, uint32_t paylo
         if (!buf) {
             return send_response(fd, GPU_CMD_MEMCPY, -1, NULL, 0);
         }
+        /* Sync to ensure all preceding async kernel launches have
+         * completed before reading their output.  Without this,
+         * kernels on non-blocking streams may still be running when
+         * cudaMemcpy reads the output buffer → stale/partial data. */
+        cudaDeviceSynchronize();
         err = cudaMemcpy(buf, src, (size_t)req.count,
                          cudaMemcpyDeviceToHost);
         LOG_DBG("cudaMemcpy D2H %lu bytes from %p (err=%d)",

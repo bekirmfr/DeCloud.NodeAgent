@@ -264,24 +264,19 @@ static void resolve_rt_graph_funcs(void)
 static CUresult cu_stream_begin_capture(void *stream, int mode)
 {
     (void)stream; (void)mode;
-    /* Pass-through mode: return SUCCESS but don't start real capture.
-     * The runtime shim (if loaded) tracks the capture phase for
-     * cudaStreamIsCapturing queries, but does NOT suppress kernel
-     * execution.  Kernels execute eagerly for correct output. */
-    resolve_rt_graph_funcs();
-    if (g_rt_begin_capture)
-        g_rt_begin_capture(stream, mode);
-    DRV_DIAG("cu_stream_begin_capture: pass-through (eager execution continues)");
-    return CUDA_SUCCESS;
+    /* Reject graph capture — force direct kernel execution.
+     * Graph pass-through mode caused garbled/doubled text in Ollama.
+     * With graphs disabled, ggml falls back to direct execution. */
+    DRV_DIAG("cu_stream_begin_capture: REJECTED (graphs disabled)");
+    return CUDA_ERROR_NOT_SUPPORTED;
 }
 
 static CUresult cu_stream_end_capture(void *stream, void **phGraph)
 {
-    resolve_rt_graph_funcs();
-    if (g_rt_end_capture)
-        g_rt_end_capture(stream, phGraph);
-    DRV_DIAG("cu_stream_end_capture: pass-through");
-    return CUDA_SUCCESS;
+    (void)stream;
+    if (phGraph) *phGraph = NULL;
+    DRV_DIAG("cu_stream_end_capture: REJECTED (graphs disabled)");
+    return CUDA_ERROR_NOT_SUPPORTED;
 }
 
 /* ----------------------------------------------------------------
@@ -323,7 +318,7 @@ static CUresult cu_graph_instantiate_with_params(void **phExec, void *hGraph,
 static CUresult cu_graph_launch(void *hExec, void *hStream)
 {
     (void)hExec; (void)hStream;
-    DRV_DIAG("cu_graph_launch: pass-through no-op (kernels already executed eagerly)");
+    DRV_DIAG("cu_graph_launch: no-op (graphs disabled)");
     return CUDA_SUCCESS;
 }
 
@@ -362,9 +357,8 @@ static CUresult cu_graph_exec_update(void *hExec, void *hGraph,
 
 static CUresult cu_stream_is_capturing(void *stream, int *captureStatus)
 {
-    resolve_rt_graph_funcs();
-    if (g_rt_is_capturing)
-        return (CUresult)g_rt_is_capturing(stream, captureStatus);
+    (void)stream;
+    /* Graphs are disabled — always report not capturing. */
     if (captureStatus) *captureStatus = 0; /* not capturing */
     return CUDA_SUCCESS;
 }
