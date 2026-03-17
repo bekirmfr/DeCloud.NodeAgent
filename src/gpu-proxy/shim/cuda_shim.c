@@ -532,6 +532,7 @@ typedef struct {
     uint64_t host_func_ptr;
     uint32_t num_params;
     uint32_t param_sizes[GPU_MAX_KERNEL_PARAMS];
+    uint32_t param_offsets[GPU_MAX_KERNEL_PARAMS];
     int      registered;
     char     device_name[1024];
     int      module_index;
@@ -1487,7 +1488,10 @@ static int ensure_module_uploaded(int mod_idx)
         if (err == 0) {
             rf->num_params = fresp.num_params;
             if (rf->num_params > GPU_MAX_KERNEL_PARAMS) rf->num_params = GPU_MAX_KERNEL_PARAMS;
-            for (uint32_t p = 0; p < rf->num_params; p++) rf->param_sizes[p] = fresp.param_sizes[p];
+            for (uint32_t p = 0; p < rf->num_params; p++) {
+                rf->param_sizes[p] = fresp.param_sizes[p];
+                rf->param_offsets[p] = fresp.param_offsets[p];
+            }
             rf->registered = 1;
         }
     }

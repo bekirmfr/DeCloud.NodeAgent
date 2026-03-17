@@ -932,6 +932,8 @@ static int handle_register_function(ConnectionCtx *ctx, const void *payload, uin
     resp.num_params = fs->num_params;
     memcpy(resp.param_sizes, fs->param_sizes,
            fs->num_params * sizeof(uint32_t));
+    memcpy(resp.param_offsets, fs->param_offsets,
+           fs->num_params * sizeof(uint32_t));
 
     return send_response(ctx->fd, GPU_CMD_REGISTER_FUNCTION, 0,
                          &resp, sizeof(resp));

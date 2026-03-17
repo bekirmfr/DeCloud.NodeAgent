@@ -66,6 +66,14 @@ typedef int CUresult;
 #define CUDA_ERROR_FILE_NOT_FOUND  301
 #define CUDA_ERROR_NOT_SUPPORTED   801
 
+/* CU_LAUNCH_PARAM_* sentinel values for the 'extra' parameter of cuLaunchKernel.
+ * When kernelParams is NULL, the caller packs all arguments into a single buffer
+ * and passes it via the extra array using these sentinels.  cuBLAS and some
+ * compiler-generated code use this mechanism. */
+#define CU_LAUNCH_PARAM_END            ((void *)0x00)
+#define CU_LAUNCH_PARAM_BUFFER_POINTER ((void *)0x01)
+#define CU_LAUNCH_PARAM_BUFFER_SIZE    ((void *)0x02)
+
 typedef int CUdevice;
 typedef void *CUcontext;
 typedef void *CUmodule;
@@ -141,6 +149,7 @@ static uint64_t g_drv_memalloc_calls = 0;
 static uint64_t g_drv_memcpy_calls = 0;
 static uint64_t g_drv_rpc_errors = 0;
 static uint64_t g_drv_stream_resolve_misses = 0;
+static uint64_t g_drv_extra_launches = 0;  /* kernels using extra instead of kernelParams */
 
 /* ================================================================
  * Graph-capture helpers (shared with cuda_shim.c via dlsym)
@@ -642,6 +651,7 @@ typedef struct {
     char     name[1024];
     uint32_t num_params;
     uint32_t param_sizes[GPU_MAX_KERNEL_PARAMS];
+    uint32_t param_offsets[GPU_MAX_KERNEL_PARAMS];
     int      in_use;
     int      attrs_cached;
     GpuFuncGetAttributesResponse cached_attrs;
@@ -2100,8 +2110,10 @@ static CUresult cu_module_get_function(CUfunction *func, CUmodule module,
     fs->num_params = resp.num_params;
     if (fs->num_params > GPU_MAX_KERNEL_PARAMS)
         fs->num_params = GPU_MAX_KERNEL_PARAMS;
-    for (uint32_t p = 0; p < fs->num_params; p++)
+    for (uint32_t p = 0; p < fs->num_params; p++) {
         fs->param_sizes[p] = resp.param_sizes[p];
+        fs->param_offsets[p] = resp.param_offsets[p];
+    }
     fs->in_use = 1;
 
     *func = (CUfunction)(uintptr_t)handle;
@@ -2148,7 +2160,6 @@ static CUresult cu_launch_kernel_driver(CUfunction f,
                                          void **kernelParams,
                                          void **extra)
 {
-    (void)extra;
     g_drv_kernel_launches++;
 
     uint64_t handle = (uint64_t)(uintptr_t)f;
@@ -2161,6 +2172,32 @@ static CUresult cu_launch_kernel_driver(CUfunction f,
                  "function not registered via cuModuleGetFunction",
                  (unsigned long)handle, (unsigned long)g_drv_kernel_launches);
         return CUDA_ERROR_INVALID_VALUE;
+    }
+
+    /* Parse the 'extra' parameter if kernelParams is NULL.
+     * cuBLAS and some compiler-generated code pass arguments via a packed
+     * buffer using CU_LAUNCH_PARAM_BUFFER_POINTER / _BUFFER_SIZE sentinels
+     * instead of the kernelParams array.  We extract the buffer pointer and
+     * then unpack individual parameters using the param_offsets obtained
+     * during function registration (from cuFuncGetParamInfo). */
+    const void *extra_buf = NULL;
+    size_t      extra_buf_size = 0;
+
+    if (!kernelParams && extra) {
+        for (int e = 0; extra[e] != CU_LAUNCH_PARAM_END; e++) {
+            if (extra[e] == CU_LAUNCH_PARAM_BUFFER_POINTER) {
+                extra_buf = extra[++e];
+            } else if (extra[e] == CU_LAUNCH_PARAM_BUFFER_SIZE) {
+                extra_buf_size = *(size_t *)extra[++e];
+            }
+        }
+        if (extra_buf) {
+            g_drv_extra_launches++;
+            DRV_DIAG("cuLaunchKernel('%s'): using extra buffer %p (%zu bytes) "
+                     "instead of kernelParams (extra launch #%lu)",
+                     fs->name, extra_buf, extra_buf_size,
+                     (unsigned long)g_drv_extra_launches);
+        }
     }
 
     /* Calculate total serialized args size */
@@ -2196,7 +2233,12 @@ static CUresult cu_launch_kernel_driver(CUfunction f,
     for (uint32_t i = 0; i < fs->num_params; i++) {
         uint32_t sz = fs->param_sizes[i];
         if (kernelParams && kernelParams[i]) {
+            /* Standard path: each kernelParams[i] points to param value */
             memcpy(dest, kernelParams[i], sz);
+        } else if (extra_buf && fs->param_offsets[i] + sz <= extra_buf_size) {
+            /* Extra-buffer path: extract param from packed buffer using
+             * the offset reported by cuFuncGetParamInfo during registration */
+            memcpy(dest, (const uint8_t *)extra_buf + fs->param_offsets[i], sz);
         } else {
             memset(dest, 0, sz);
         }
@@ -2757,6 +2799,7 @@ static void driver_shim_cleanup(void)
         fprintf(diag, "  cuMemAlloc calls:       %lu\n", (unsigned long)g_drv_memalloc_calls);
         fprintf(diag, "  cuMemcpy calls:         %lu\n", (unsigned long)g_drv_memcpy_calls);
         fprintf(diag, "  RPC errors:             %lu\n", (unsigned long)g_drv_rpc_errors);
+        fprintf(diag, "  Extra-buffer launches:  %lu\n", (unsigned long)g_drv_extra_launches);
         fprintf(diag, "  Stream resolve misses:  %lu\n", (unsigned long)g_drv_stream_resolve_misses);
         fprintf(diag, "  g_debug_log:            %d\n", g_debug_log);
         fprintf(diag, "  g_drv_diag_enabled:     %d\n", g_drv_diag_enabled);
@@ -2766,8 +2809,9 @@ static void driver_shim_cleanup(void)
 
     if (g_drv_diag_fp) {
         DRV_DIAG("=== DRIVER SHIM DESTRUCTOR (pid=%d) ===", getpid());
-        DRV_DIAG("  cuLaunchKernel calls: %lu, RPC errors: %lu, stream misses: %lu",
+        DRV_DIAG("  cuLaunchKernel calls: %lu, extra-buf launches: %lu, RPC errors: %lu, stream misses: %lu",
                  (unsigned long)g_drv_kernel_launches,
+                 (unsigned long)g_drv_extra_launches,
                  (unsigned long)g_drv_rpc_errors,
                  (unsigned long)g_drv_stream_resolve_misses);
         fclose(g_drv_diag_fp);
