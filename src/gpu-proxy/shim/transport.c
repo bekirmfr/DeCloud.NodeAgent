@@ -40,7 +40,11 @@
  * The runtime shim exports decloud_shared_rpc_call().  At init time,
  * the driver shim looks for it via dlsym().  If found, ALL transport
  * RPC calls are delegated through it.
+ *
+ * Guarded by RTLD_DEFAULT — only active when <dlfcn.h> is included
+ * by the parent file (driver shim: yes, NVML shim: no).
  */
+#ifdef RTLD_DEFAULT
 typedef int (*shared_rpc_fn_t)(uint8_t cmd,
                                 const void *req_payload, uint32_t req_len,
                                 void *resp_buf, uint32_t resp_buf_size,
@@ -58,6 +62,7 @@ static void transport_resolve_shared_rpc(void)
         TRANSPORT_LOG("Using runtime shim's shared RPC connection (single-channel mode)");
     }
 }
+#endif /* RTLD_DEFAULT */
 
 /* ================================================================
  * Connection state (per-process, shared across threads)
@@ -383,12 +388,14 @@ int transport_rpc_call(uint8_t cmd,
 {
     /* Delegate to the runtime shim's connection if available.
      * This ensures both shims share a single daemon connection. */
+#ifdef RTLD_DEFAULT
     transport_resolve_shared_rpc();
     if (g_transport_shared_rpc) {
         return g_transport_shared_rpc(cmd, req_payload, req_len,
                                        resp_buf, resp_buf_size,
                                        resp_actual_len);
     }
+#endif
 
     if (transport_ensure_connected() < 0)
         return TRANSPORT_ERROR_NO_DEVICE;
