@@ -1122,16 +1122,25 @@ build_gpu_proxy() {
         fi
 
         log_info "CUDA lib dir: $cuda_lib_dir"
+
+        # Remove stale binary so we can detect a fresh build failure
+        rm -f "$GPU_PROXY_SRC/build/gpu-proxy-daemon"
+
         make -C "$GPU_PROXY_SRC" daemon \
             CUDA_HOME="$CUDA_HOME" \
             CUDA_LIB="$cuda_lib_dir" \
             2>&1 | tee -a "$LOG_DIR/install.log"
+        local daemon_make_exit=${PIPESTATUS[0]}
 
-        if [ -f "$GPU_PROXY_SRC/build/gpu-proxy-daemon" ]; then
+        if [ "$daemon_make_exit" -ne 0 ]; then
+            log_error "GPU proxy daemon build failed (make exit=$daemon_make_exit)"
+            log_info "Check logs: $LOG_DIR/install.log"
+            log_info "Shim is still available — daemon can be built later"
+        elif [ -f "$GPU_PROXY_SRC/build/gpu-proxy-daemon" ]; then
             daemon_built=true
             log_success "GPU proxy daemon built: $GPU_PROXY_SRC/build/gpu-proxy-daemon"
         else
-            log_warn "GPU proxy daemon build failed (binary not found)"
+            log_error "GPU proxy daemon build reported success but binary not found"
             ls -la "$GPU_PROXY_SRC/build/" 2>/dev/null || log_info "Build directory does not exist"
             log_info "Shim is still available — daemon can be built later"
         fi
