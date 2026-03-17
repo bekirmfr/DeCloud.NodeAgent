@@ -2193,10 +2193,14 @@ cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
         if (updateResult_out) *updateResult_out = 1; /* error */
         return cudaSuccess;
     }
-    /* Pass-through mode: always report success so ggml reuses
-     * the existing graph exec (which is a no-op on launch). */
-    if (updateResult_out) *updateResult_out = 0; /* success — topology "matches" */
-    DIAG("cudaGraphExecUpdate: pass-through success (call #%d)", g_diag_graph_updates);
+    /* Pass-through mode: report FAILURE so ggml always re-captures.
+     * Since our BeginCapture executes kernels eagerly (pass-through),
+     * re-capture == re-execution, which is what we need for correct
+     * output on every token.  Returning success here would make ggml
+     * skip re-capture and just call GraphLaunch (a no-op in our shim),
+     * resulting in zero computation for 2nd+ tokens → garbled output. */
+    if (updateResult_out) *updateResult_out = 1; /* failure — force re-capture */
+    DIAG("cudaGraphExecUpdate: pass-through FAIL (force re-capture, call #%d)", g_diag_graph_updates);
     return cudaSuccess;
 }
 

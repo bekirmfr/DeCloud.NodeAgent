@@ -355,8 +355,8 @@ static CUresult cu_graph_exec_update(void *hExec, void *hGraph,
                                      int *updateResult)
 {
     (void)hExec; (void)hGraph;
-    if (updateResult) *updateResult = 0; /* success */
-    DRV_DIAG("cu_graph_exec_update: pass-through success");
+    if (updateResult) *updateResult = 1; /* failure — force re-capture */
+    DRV_DIAG("cu_graph_exec_update: pass-through FAIL (force re-capture)");
     return CUDA_SUCCESS;
 }
 
