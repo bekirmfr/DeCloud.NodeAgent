@@ -106,23 +106,34 @@ static void diag_log(const char *fmt, ...)
 #define DIAG(fmt, ...) do { if (g_diag_enabled) diag_log(fmt, ##__VA_ARGS__); } while(0)
 
 /* ================================================================
- * CUDA Graph Capture & Replay (Bug 22 fix)
+ * CUDA Graph "Transparent Pass-Through" (Bug 22 final fix)
  *
- * ggml with USE_GRAPHS=1 launches kernels ONLY during graph capture,
- * then replays via cudaGraphLaunch for subsequent tokens.  With the
- * old no-op stubs, cudaGraphLaunch did nothing → 0 computation →
- * gibberish from token 2 onward.
+ * ggml with USE_GRAPHS=1 wraps kernel launches in cudaStreamBeginCapture
+ * / cudaStreamEndCapture and replays via cudaGraphLaunch.  In real CUDA,
+ * kernels are NOT executed during capture — only during graph launch.
  *
- * Fix: record every kernel launch during capture but do NOT execute
- * them eagerly.  On cudaGraphLaunch, replay the recorded launches
- * via RPC — that is the sole execution.
+ * The proxy cannot reliably capture all kernel types:
+ *   - Runtime API kernels (cudaLaunchKernel) → intercepted by this shim
+ *   - Driver API kernels (cuLaunchKernel)    → intercepted by driver shim
+ *   - Static-cudart kernels via cuGraphAddKernelNode → NOT intercepted
  *
- * The old approach executed kernels eagerly during capture AND replayed
- * them via cudaGraphLaunch, causing double-execution.  Any kernel that
- * uses atomicAdd (flash-attention softmax denominator, reductions) or
- * writes in-place (RMSNorm, residual add) produced corrupted results
- * on the replay pass because device memory had already been mutated
- * by the eager pass.  Symptom: garbled / interleaved token output.
+ * Previous approach (capture + replay) failed because some kernels went
+ * through cuGraphAddKernelNode (which our driver shim stubs as no-op),
+ * resulting in empty graph replay → zero computation → gibberish.
+ *
+ * New approach: "transparent pass-through"
+ *   - cudaStreamBeginCapture returns SUCCESS but does NOT set the
+ *     capture flag.  Kernels execute eagerly as normal.
+ *   - cudaStreamEndCapture returns SUCCESS with a dummy graph.
+ *   - cudaGraphGetNodes reports a non-zero node count so ggml
+ *     considers the capture successful.
+ *   - cudaGraphInstantiate/ExecUpdate/Launch are harmless no-ops.
+ *   - The actual computation already happened during the "capture"
+ *     phase (eager execution), so D2H reads correct results.
+ *
+ * This gives ggml the illusion of working CUDA graphs while every
+ * kernel actually executes eagerly.  No double execution, no missed
+ * kernels, no stale data.
  * ================================================================ */
 
 #define GRAPH_MAX_RECORDED_OPS  16384
@@ -158,8 +169,13 @@ typedef struct {
 static GraphExecSlot  g_graph_exec_slots[GRAPH_MAX_EXEC_SLOTS];
 static pthread_mutex_t g_graph_exec_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* Capture state (thread-local — ggml uses a single thread for CUDA ops) */
+/* Capture state (thread-local — ggml uses a single thread for CUDA ops).
+ * g_graph_capturing: controls kernel suppression during capture (always 0
+ *   in pass-through mode — kernels execute eagerly).
+ * g_graph_in_capture_phase: tracks whether we're between BeginCapture
+ *   and EndCapture, for cudaStreamIsCapturing queries only. */
 static __thread int          g_graph_capturing = 0;
+static __thread int          g_graph_in_capture_phase = 0;
 static __thread GraphRecord  g_graph_capture_buf;
 
 static void graph_record_free(GraphRecord *rec)
@@ -227,7 +243,10 @@ static void graph_exec_free(int idx)
 
 int decloud_graph_is_capturing(void)
 {
-    return g_graph_capturing;
+    /* Return 0 in pass-through mode — we do NOT want the driver shim
+     * to suppress cuLaunchKernel execution during the "capture" phase.
+     * Kernels must execute eagerly for correct output. */
+    return 0;
 }
 
 /* Forward declaration */
@@ -2168,27 +2187,16 @@ cudaError_t cudaGraphExecDestroy(cudaGraphExec_t graphExec)
 cudaError_t cudaGraphExecUpdate(cudaGraphExec_t hGraphExec, cudaGraph_t hGraph,
                                  cudaGraphExecUpdateResult *updateResult_out)
 {
+    (void)hGraphExec; (void)hGraph;
     __sync_fetch_and_add(&g_diag_graph_updates, 1);
     if (!g_graph_noop) {
         if (updateResult_out) *updateResult_out = 1; /* error */
         return cudaSuccess;
     }
-    (void)hGraph;
-    /* Replace the exec's recorded ops with the latest capture buffer */
-    int idx = GRAPH_EXEC_FROM_PTR(hGraphExec);
-    if (idx >= 0 && idx < GRAPH_MAX_EXEC_SLOTS && g_graph_exec_slots[idx].in_use) {
-        pthread_mutex_lock(&g_graph_exec_lock);
-        graph_record_free(&g_graph_exec_slots[idx].record);
-        graph_record_copy(&g_graph_exec_slots[idx].record, &g_graph_capture_buf);
-        pthread_mutex_unlock(&g_graph_exec_lock);
-        if (updateResult_out) *updateResult_out = 0; /* success */
-        DIAG("cudaGraphExecUpdate: slot %d updated with %d ops (call #%d)",
-             idx, g_graph_exec_slots[idx].record.count, g_diag_graph_updates);
-    } else {
-        if (updateResult_out) *updateResult_out = 1; /* error → forces re-instantiate */
-        DIAG("cudaGraphExecUpdate: slot %d INVALID → error result (call #%d)",
-             idx, g_diag_graph_updates);
-    }
+    /* Pass-through mode: always report success so ggml reuses
+     * the existing graph exec (which is a no-op on launch). */
+    if (updateResult_out) *updateResult_out = 0; /* success — topology "matches" */
+    DIAG("cudaGraphExecUpdate: pass-through success (call #%d)", g_diag_graph_updates);
     return cudaSuccess;
 }
 
@@ -2198,22 +2206,11 @@ static cudaError_t graph_instantiate_impl(cudaGraphExec_t *pGraphExec, const cha
     if (!g_graph_noop) return cudaErrorNotSupported;
 
     __sync_fetch_and_add(&g_diag_graph_instantiates, 1);
-    int idx = graph_exec_alloc();
-    if (idx < 0) {
-        /* All slots full — reuse slot 0 */
-        DIAG("%s: all %d slots full, reusing slot 0", variant, GRAPH_MAX_EXEC_SLOTS);
-        graph_exec_free(0);
-        idx = graph_exec_alloc();
-    }
-    if (idx >= 0) {
-        pthread_mutex_lock(&g_graph_exec_lock);
-        graph_record_copy(&g_graph_exec_slots[idx].record, &g_graph_capture_buf);
-        pthread_mutex_unlock(&g_graph_exec_lock);
-    }
-    if (pGraphExec) *pGraphExec = GRAPH_EXEC_TO_PTR(idx >= 0 ? idx : 0);
-    DIAG("%s: slot=%d, ops=%d (call #%d)",
-         variant, idx, idx >= 0 ? g_graph_exec_slots[idx].record.count : 0,
-         g_diag_graph_instantiates);
+    /* Pass-through mode: return a dummy exec handle.  GraphLaunch is a
+     * no-op anyway — the real computation happened during "capture". */
+    if (pGraphExec) *pGraphExec = GRAPH_EXEC_TO_PTR(0);
+    DIAG("%s: pass-through, returning dummy exec (call #%d)",
+         variant, g_diag_graph_instantiates);
     return cudaSuccess;
 }
 
@@ -2237,36 +2234,14 @@ cudaError_t cudaGraphInstantiateWithFlags(cudaGraphExec_t *pGraphExec,
 
 cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream)
 {
-    (void)stream;
+    (void)graphExec; (void)stream;
     if (!g_graph_noop) return cudaErrorNotSupported;
 
     __sync_fetch_and_add(&g_diag_graph_launches, 1);
-    int idx = GRAPH_EXEC_FROM_PTR(graphExec);
-    if (idx < 0 || idx >= GRAPH_MAX_EXEC_SLOTS || !g_graph_exec_slots[idx].in_use) {
-        DIAG("cudaGraphLaunch: UNKNOWN handle %p (idx=%d) → no-op! (call #%d)",
-             graphExec, idx, g_diag_graph_launches);
-        return cudaSuccess; /* no-op for unknown handles */
-    }
-
-    GraphRecord *rec = &g_graph_exec_slots[idx].record;
-    SHIM_LOG("cudaGraphLaunch: replaying %d recorded kernel launches", rec->count);
-    DIAG("cudaGraphLaunch: replaying %d ops from slot %d (call #%d)",
-         rec->count, idx, g_diag_graph_launches);
-
-    int errors = 0;
-    for (int i = 0; i < rec->count; i++) {
-        /* Use the recorded RPC function if set (driver-shim ops use
-         * the driver connection where their functions are registered),
-         * otherwise fall back to the runtime shim's rpc_call. */
-        graph_rpc_fn_t fn = rec->ops[i].rpc_fn ? rec->ops[i].rpc_fn : rpc_call;
-        int err = fn(rec->ops[i].rpc_cmd,
-                     rec->ops[i].rpc_payload, rec->ops[i].rpc_len,
-                     NULL, 0, NULL);
-        if (err != 0) errors++;
-    }
-    if (errors > 0) {
-        DIAG("cudaGraphLaunch: %d/%d replay RPCs FAILED", errors, rec->count);
-    }
+    /* Pass-through mode: no-op.  The actual computation already happened
+     * eagerly during the "capture" phase (cudaStreamBeginCapture does not
+     * suppress kernel execution).  This launch is purely ceremonial. */
+    DIAG("cudaGraphLaunch: pass-through no-op (call #%d)", g_diag_graph_launches);
     return cudaSuccess;
 }
 
@@ -2386,11 +2361,14 @@ cudaError_t cudaStreamBeginCapture(cudaStream_t stream, cudaStreamCaptureMode_t 
     if (!g_graph_noop) return cudaErrorNotSupported;
 
     __sync_fetch_and_add(&g_diag_graph_begins, 1);
-    /* Free any previous capture buffer and start fresh */
-    graph_record_free(&g_graph_capture_buf);
-    g_graph_capturing = 1;
-    SHIM_LOG("cudaStreamBeginCapture: recording started");
-    DIAG("cudaStreamBeginCapture: stream=%p, mode=%d, recording started (call #%d)",
+    /* Transparent pass-through: do NOT set g_graph_capturing.
+     * Kernels continue to execute eagerly during the "capture" phase.
+     * This avoids the bug where some kernel types (cuGraphAddKernelNode
+     * from static cudart) bypass our capture, leaving the replay buffer
+     * empty → zero computation on graph launch → gibberish. */
+    g_graph_in_capture_phase = 1;
+    SHIM_LOG("cudaStreamBeginCapture: pass-through (kernels execute eagerly)");
+    DIAG("cudaStreamBeginCapture: stream=%p, mode=%d, pass-through mode (call #%d)",
          stream, (int)mode, g_diag_graph_begins);
     return cudaSuccess;
 }
@@ -2400,12 +2378,11 @@ cudaError_t cudaStreamEndCapture(cudaStream_t stream, cudaGraph_t *pGraph)
     (void)stream;
     if (!g_graph_noop) return cudaErrorNotSupported;
 
-    g_graph_capturing = 0;
+    g_graph_in_capture_phase = 0;
     __sync_fetch_and_add(&g_diag_graph_ends, 1);
-    SHIM_LOG("cudaStreamEndCapture: recorded %d kernel launches",
-             g_graph_capture_buf.count);
-    DIAG("cudaStreamEndCapture: recorded %d kernel launches (call #%d)",
-         g_graph_capture_buf.count, g_diag_graph_ends);
+    SHIM_LOG("cudaStreamEndCapture: pass-through (no actual capture)");
+    DIAG("cudaStreamEndCapture: pass-through, returning dummy graph (call #%d)",
+         g_diag_graph_ends);
     /* Return a token so ggml can pass it to cudaGraphInstantiate/Update */
     if (pGraph) *pGraph = (cudaGraph_t)&g_dummy_graph_tag;
     return cudaSuccess;
@@ -2414,9 +2391,12 @@ cudaError_t cudaStreamEndCapture(cudaStream_t stream, cudaGraph_t *pGraph)
 cudaError_t cudaStreamIsCapturing(cudaStream_t stream, cudaStreamCaptureStatus_t *pCaptureStatus)
 {
     (void)stream;
+    /* Report Active between BeginCapture and EndCapture so ggml
+     * considers the capture in progress (even though kernels execute
+     * eagerly in pass-through mode). */
     if (pCaptureStatus)
-        *pCaptureStatus = g_graph_capturing ? cudaStreamCaptureStatusActive
-                                            : cudaStreamCaptureStatusNone;
+        *pCaptureStatus = g_graph_in_capture_phase ? cudaStreamCaptureStatusActive
+                                                   : cudaStreamCaptureStatusNone;
     return cudaSuccess;
 }
 
@@ -2431,16 +2411,21 @@ cudaError_t cudaGraphGetNodes(cudaGraph_t graph,
                                size_t *numNodes)
 {
     (void)graph; (void)nodes;
-    if (numNodes) *numNodes = (size_t)g_graph_capture_buf.count;
-    DIAG("cudaGraphGetNodes: returning %d nodes", g_graph_capture_buf.count);
+    /* Always report at least 1 node so ggml considers the graph valid.
+     * In pass-through mode, no actual capture happens — kernels executed
+     * eagerly during the "capture" phase.  Returning 0 would make ggml
+     * think capture failed, potentially causing fallback issues or
+     * repeated capture retries. */
+    if (numNodes) *numNodes = 1;
+    DIAG("cudaGraphGetNodes: returning 1 (pass-through mode)");
     return cudaSuccess;
 }
 
-/* Exported for the driver shim and other stubs to query capture count
- * without needing access to thread-local g_graph_capture_buf. */
+/* Exported for the driver shim and other stubs to query capture count.
+ * Always returns 1 in pass-through mode so ggml considers the graph valid. */
 int decloud_graph_captured_count(void)
 {
-    return g_graph_capture_buf.count;
+    return 1;
 }
 
 cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event, unsigned int flags)
