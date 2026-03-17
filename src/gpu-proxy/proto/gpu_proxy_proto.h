@@ -230,6 +230,7 @@ typedef struct __attribute__((packed)) {
 typedef struct __attribute__((packed)) {
     uint32_t num_params;
     uint32_t param_sizes[GPU_MAX_KERNEL_PARAMS];
+    uint32_t param_offsets[GPU_MAX_KERNEL_PARAMS];
 } GpuRegisterFunctionResponse;
 
 /* --- LAUNCH_KERNEL --- */

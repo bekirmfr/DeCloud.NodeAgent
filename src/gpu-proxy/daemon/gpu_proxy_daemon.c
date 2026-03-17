@@ -932,6 +932,8 @@ static int handle_register_function(ConnectionCtx *ctx, const void *payload, uin
     resp.num_params = fs->num_params;
     memcpy(resp.param_sizes, fs->param_sizes,
            fs->num_params * sizeof(uint32_t));
+    memcpy(resp.param_offsets, fs->param_offsets,
+           fs->num_params * sizeof(uint32_t));
 
     return send_response(ctx->fd, GPU_CMD_REGISTER_FUNCTION, 0,
                          &resp, sizeof(resp));
@@ -1586,12 +1588,12 @@ static int handle_launch_kernel(ConnectionCtx *ctx, const void *payload, uint32_
 
     if (ctx->cu_ctx) cuCtxSetCurrent(ctx->cu_ctx);
 
-    /* Sync to ensure preceding async work (from ANY connection sharing
-     * this primary context) has completed before we launch.  The runtime
-     * shim and driver shim use separate connections, so a GEMM on
-     * connection A may still be in flight when a flash-attention kernel
-     * arrives on connection B.  Without this sync, the kernel could
-     * read stale/in-progress data → garbled output. */
+    /* Sync to ensure preceding async work has completed before we launch.
+     * NOTE: With single-channel mode (driver shim delegating through the
+     * runtime shim's connection), both API layers share one ConnectionCtx,
+     * so CUDA stream ordering within the connection handles correctness.
+     * This sync remains as a safety net for multi-client scenarios and
+     * legacy dual-channel mode (where it prevents cross-connection races). */
     cudaDeviceSynchronize();
 
     /*
