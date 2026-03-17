@@ -27,6 +27,39 @@
 #include "transport.h"
 
 /* ================================================================
+ * Shared RPC -- delegate to runtime shim's connection if available
+ * ================================================================
+ *
+ * When the driver shim (libcuda.so.1) is loaded alongside the runtime
+ * shim (libdecloud_cuda_shim.so), we want BOTH shims to use a SINGLE
+ * TCP connection to the daemon.  This eliminates cross-connection issues:
+ * - Streams/events created on one connection are visible to the other
+ * - Function tables are unified
+ * - No need for cudaDeviceSynchronize() between every kernel launch
+ *
+ * The runtime shim exports decloud_shared_rpc_call().  At init time,
+ * the driver shim looks for it via dlsym().  If found, ALL transport
+ * RPC calls are delegated through it.
+ */
+typedef int (*shared_rpc_fn_t)(uint8_t cmd,
+                                const void *req_payload, uint32_t req_len,
+                                void *resp_buf, uint32_t resp_buf_size,
+                                uint32_t *resp_actual_len);
+static shared_rpc_fn_t g_transport_shared_rpc = NULL;
+static int g_transport_shared_rpc_resolved = 0;
+
+static void transport_resolve_shared_rpc(void)
+{
+    if (g_transport_shared_rpc_resolved) return;
+    g_transport_shared_rpc_resolved = 1;
+    g_transport_shared_rpc = (shared_rpc_fn_t)dlsym(RTLD_DEFAULT,
+                                                      "decloud_shared_rpc_call");
+    if (g_transport_shared_rpc) {
+        TRANSPORT_LOG("Using runtime shim's shared RPC connection (single-channel mode)");
+    }
+}
+
+/* ================================================================
  * Connection state (per-process, shared across threads)
  * ================================================================ */
 
@@ -348,6 +381,15 @@ int transport_rpc_call(uint8_t cmd,
                        void *resp_buf, uint32_t resp_buf_size,
                        uint32_t *resp_actual_len)
 {
+    /* Delegate to the runtime shim's connection if available.
+     * This ensures both shims share a single daemon connection. */
+    transport_resolve_shared_rpc();
+    if (g_transport_shared_rpc) {
+        return g_transport_shared_rpc(cmd, req_payload, req_len,
+                                       resp_buf, resp_buf_size,
+                                       resp_actual_len);
+    }
+
     if (transport_ensure_connected() < 0)
         return TRANSPORT_ERROR_NO_DEVICE;
 

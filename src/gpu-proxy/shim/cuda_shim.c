@@ -830,6 +830,29 @@ err:
     return cudaErrorNoDevice;
 }
 
+/*
+ * Shared RPC entry point for the driver shim.
+ *
+ * The driver shim (libcuda.so.1) discovers this function via dlsym() and
+ * delegates ALL its RPC calls through it.  This ensures both the runtime
+ * and driver API shims share a SINGLE TCP connection to the daemon, which
+ * means a single ConnectionCtx with unified function/stream/event tables.
+ *
+ * Without this, the two shims open separate connections and the daemon
+ * treats them as independent clients — streams created on one connection
+ * are invisible to the other, and ordering between connections is only
+ * preserved by the cudaDeviceSynchronize() hammer.
+ */
+__attribute__((visibility("default")))
+int decloud_shared_rpc_call(uint8_t cmd,
+                             const void *req_payload, uint32_t req_len,
+                             void *resp_buf, uint32_t resp_buf_size,
+                             uint32_t *resp_actual_len)
+{
+    return rpc_call(cmd, req_payload, req_len,
+                    resp_buf, resp_buf_size, resp_actual_len);
+}
+
 /* ================================================================
  * Fat binary registration
  * ================================================================ */
