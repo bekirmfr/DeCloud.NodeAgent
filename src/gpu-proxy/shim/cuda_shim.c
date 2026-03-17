@@ -2420,6 +2420,29 @@ cudaError_t cudaStreamIsCapturing(cudaStream_t stream, cudaStreamCaptureStatus_t
     return cudaSuccess;
 }
 
+/* Return the number of captured ops in the graph.
+ * ggml checks this after cudaStreamEndCapture to verify the graph
+ * is non-empty.  The cuda_pytorch_stubs version returned 0 which made
+ * ggml think the capture was empty → skipped instantiation → no
+ * computation during graph replay → garbled output. */
+typedef void *cudaGraphNode_t;
+cudaError_t cudaGraphGetNodes(cudaGraph_t graph,
+                               cudaGraphNode_t *nodes,
+                               size_t *numNodes)
+{
+    (void)graph; (void)nodes;
+    if (numNodes) *numNodes = (size_t)g_graph_capture_buf.count;
+    DIAG("cudaGraphGetNodes: returning %d nodes", g_graph_capture_buf.count);
+    return cudaSuccess;
+}
+
+/* Exported for the driver shim and other stubs to query capture count
+ * without needing access to thread-local g_graph_capture_buf. */
+int decloud_graph_captured_count(void)
+{
+    return g_graph_capture_buf.count;
+}
+
 cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event, unsigned int flags)
 {
     GpuStreamWaitEventRequest req = {

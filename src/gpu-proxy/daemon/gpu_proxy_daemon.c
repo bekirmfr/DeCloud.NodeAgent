@@ -1594,7 +1594,15 @@ static int handle_launch_kernel(ConnectionCtx *ctx, const void *payload, uint32_
      * so CUDA stream ordering within the connection handles correctness.
      * This sync remains as a safety net for multi-client scenarios and
      * legacy dual-channel mode (where it prevents cross-connection races). */
-    cudaDeviceSynchronize();
+    {
+        cudaError_t sync_err = cudaDeviceSynchronize();
+        if (sync_err != cudaSuccess) {
+            LOG_ERR("CID %u: launch_kernel: pre-launch sync failed (err=%d)",
+                    ctx->peer_cid, sync_err);
+            return send_response(ctx->fd, GPU_CMD_LAUNCH_KERNEL,
+                                 (int32_t)sync_err, NULL, 0);
+        }
+    }
 
     /*
      * Build the void* args[] array for cuLaunchKernel.
@@ -1606,7 +1614,8 @@ static int handle_launch_kernel(ConnectionCtx *ctx, const void *payload, uint32_
 
     for (uint32_t i = 0; i < req.num_params && i < GPU_MAX_KERNEL_PARAMS; i++) {
         kernel_params[i] = (void *)(args_data + offset);
-        offset += fs->num_params > 0 ? fs->param_sizes[i] : sizeof(uint64_t);
+        offset += (fs->num_params > 0 && i < fs->num_params)
+                    ? fs->param_sizes[i] : sizeof(uint64_t);
     }
 
     /* Resolve stream */
