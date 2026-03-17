@@ -1,8 +1,8 @@
 # DeCloud GPU Proxy — Architecture Review
 
-**Date Range:** 2026-02-27 through 2026-03-13
+**Date Range:** 2026-02-27 through 2026-03-17
 **Authors:** BMA + Claude AI assistant
-**Status:** Production-ready — Generic proxy with template-driven configuration; PyTorch inference + training + LoRA confirmed
+**Status:** Production-ready — Generic proxy with template-driven configuration; Ollama GPU + PyTorch + SD Forge all confirmed
 
 ---
 
@@ -94,9 +94,10 @@ All application-specific behavior is controlled by `/etc/decloud/gpu-proxy.env`,
 
 | Flag | Default | Effect |
 |------|---------|--------|
-| `DECLOUD_GPU_GRAPH_NOOP` | 1 | Graph stubs return `cudaSuccess` (1) or `cudaErrorNotSupported` (0) |
 | `DECLOUD_GPU_VMEM_PROXY` | 0 | Virtual memory APIs proxy to daemon (1) or return `NOT_SUPPORTED` (0) |
 | `DECLOUD_GPU_DEBUG` | unset | Enable debug logging from shim constructor |
+
+> **Note:** `DECLOUD_GPU_GRAPH_NOOP` was removed in Session 15 (Mar 17). CUDA graphs now always return `cudaErrorNotSupported` / `CUDA_ERROR_NOT_SUPPORTED`, forcing applications to use direct kernel execution. See [Debugging Journal, Session 15](#) for rationale.
 
 **Config flow:** Orchestrator template → `DefaultEnvironmentVariables` → `EnsureGpuProxyShim` extracts `GGML_*`/`CUDA_*`/`DECLOUD_GPU_*` → writes to `/etc/decloud/gpu-proxy.env` → shim constructor reads and applies.
 
@@ -110,7 +111,7 @@ All application-specific behavior is controlled by `/etc/decloud/gpu-proxy.env`,
 
 **cuBLAS GEMM Proxy:** cuBLAS init requires `cuGetExportTable` (private NVIDIA internals, cannot be proxied). Solution: stub init, use ggml's MMQ path, proxy only `cublasGemmBatchedEx`/`cublasGemmStridedBatchedEx` for GQA attention.
 
-**Graph Stubs via cuGetProcAddress:** libcudart resolves `cudaStreamBeginCapture` through the driver API (`cuGetProcAddress`), bypassing the runtime shim. Both shims must return consistent results. Driver shim reads `DECLOUD_GPU_GRAPH_NOOP` in a `__attribute__((constructor))` before any CUDA call.
+**CUDA Graph Pass-Through:** CUDA graphs cannot be faithfully proxied — capture records host-side API calls but execution is remote. Both the runtime and driver shims return "not supported" for graph capture (`cudaStreamBeginCapture`, `cuStreamBeginCapture`), forcing applications to fall back to direct kernel execution. This is both simpler and more correct than the earlier no-op or capture/replay approaches. Note: libcudart resolves `cudaStreamBeginCapture` through the driver API (`cuGetProcAddress`), so both shims must return consistent results.
 
 **Real GPU Attributes:** `cu_func_get_attribute` queries daemon via RPC, caches per-function, falls back to safe defaults. Eliminates hardcoded sm_89 vendor dependency.
 
@@ -150,7 +151,7 @@ install.sh handles: Docker compat build (glibc 2.31), native daemon build, stale
 | cuBLAS GEMM proxy | ✅ | GQA attention via RPC |
 | cublasLtMatmul proxy | ✅ | PyTorch linear/attention GEMMs |
 | Real kernel attributes + occupancy | ✅ | Cached, with fallback |
-| Configurable graph stubs | ✅ | `DECLOUD_GPU_GRAPH_NOOP` |
+| CUDA graph pass-through | ✅ | Returns not-supported, forces direct kernel execution |
 | TCP_NODELAY + TCP_QUICKACK | ✅ | Sub-ms RPC latency |
 | Template-driven env vars | ✅ | Generic proxy |
 | Zero-touch VM deployment | ✅ | Cloud-init automated |
@@ -161,7 +162,7 @@ install.sh handles: Docker compat build (glibc 2.31), native daemon build, stale
 | CUDA 12.1 ABI offsets (SM8.9) | ✅ | Verified offset map committed |
 | Virtual memory (cuMem*) | ✅ Enabled | `DECLOUD_GPU_VMEM_PROXY=1` for PyTorch |
 | cublasLt debug gate | ✅ Fixed | `DECLOUD_GPU_DEBUG` gate (rebuild pending deploy) |
-| Stable Diffusion WebUI Forge | ⚠️ Partial | UI+model load OK; cuBLAS backward pending |
+| Stable Diffusion WebUI Forge | ✅ Confirmed | Image generation 1.61 it/s (Mar 15) |
 | cuDNN/cuFFT/cuSPARSE proxy | Deferred | For scientific computing |
 
 ---
