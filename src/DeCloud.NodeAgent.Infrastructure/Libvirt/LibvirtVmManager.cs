@@ -1876,7 +1876,7 @@ public class LibvirtVmManager : IVmManager
     ///
     /// Adds:
     ///   1. /etc/profile.d/gpu-proxy.sh — sets LD_PRELOAD and transport env vars for login shells
-    ///   2. /etc/decloud/gpu-proxy.env  — same config for non-login processes (0600, token-bearing)
+    ///   2. /etc/decloud/gpu-proxy.env  — same config for non-login processes (0644, read by shim constructors)
     ///   3. runcmd to mount 9p share from host and install the shim .so into /usr/local/lib/
     ///
     /// Transport selection:
@@ -1965,9 +1965,12 @@ public class LibvirtVmManager : IVmManager
     permissions: '0644'
     content: |
 {profileVars}
-  # GPU proxy: protected env file with auth token (root-only, used by systemd/non-login)
+  # GPU proxy: env file with transport config and auth token.
+  # Must be world-readable (0644) so service users (e.g. ollama) can read it.
+  # The shim constructor reads this file to recover env vars that get stripped
+  # when frameworks like Ollama spawn runner subprocesses with filtered environments.
   - path: /etc/decloud/gpu-proxy.env
-    permissions: '0600'
+    permissions: '0644'
     content: |
 {envFileVars}";
 
