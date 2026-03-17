@@ -1,8 +1,8 @@
 # DeCloud GPU Proxy — Debugging Journal
 
-**Date Range:** 2026-02-27 through 2026-03-13
+**Date Range:** 2026-02-27 through 2026-03-17
 **Authors:** BMA + Claude AI assistant
-**Status:** Active — PyTorch inference + training + LoRA confirmed production-ready
+**Status:** Active — PyTorch inference + training + LoRA + SD Forge + Ollama GPU all production-ready
 
 ---
 
@@ -22,9 +22,8 @@
 | 11 | Mar 6-13 | PyTorch CUDA 12 compatibility, Bug 17b/17c SIGFPE chain, **PyTorch inference confirmed** |
 | 12 | Mar 13 | **PyTorch full training + LoRA fine-tuning confirmed**; cublasLt debug gate |
 | 13 | Mar 14 | cuGetExportTable stub, cuDNN investigation, Bug 19 parked |
-| 14 | Mar 15 | **cublasLt bias fix (Bug 21)**, **SD Forge image generation confirmed**, libcudnn stub, Bug 22 parked |
-| 11 | Mar 6-13 | PyTorch CUDA 12 compatibility, Bug 17b/17c SIGFPE chain, **PyTorch inference confirmed** |
-| 12 | Mar 13 | **PyTorch full training + LoRA fine-tuning confirmed**; cublasLt debug gate |
+| 14 | Mar 15 | **cublasLt bias fix (Bug 21)**, **SD Forge image generation confirmed**, libcudnn stub, Bug 22 investigating |
+| 15 | Mar 17 | **Bug 22 FIXED** — CUDA graph pass-through mode, word doubling/garbling parked for future |
 
 ---
 
@@ -481,13 +480,13 @@ Fresh VM deployment. Generated 512×512 photorealistic red apple image at 1.61 i
 
 ---
 
-### Bug 22: Ollama Long-Text GPU Gibberish — INVESTIGATING 🔍
+### Bug 22: Ollama Long-Text GPU Gibberish — FIXED ✅
 
 **Symptom:** GPU inference produces word-salad gibberish on any non-trivial prompt. CPU inference (`num_gpu:0`) produces perfect output. Short generations sometimes worked because they completed within the first graph capture cycle. **Reproduced on clean VM** — not environment-specific.
 
 **Root cause:** CUDA graph no-op stubs. ggml with `USE_GRAPHS=1` (hardcoded by Ollama at compile time) launches kernels **only** during `cudaStreamBeginCapture`…`cudaStreamEndCapture`, then replays them via `cudaGraphLaunch` for every subsequent token. The proxy's `cudaGraphLaunch` was a no-op → **zero GPU computation** after the first graph capture → gibberish.
 
-Flow with old code:
+Flow with old code (graph no-op mode):
 1. Token 1: `cudaStreamBeginCapture` (no-op) → kernels execute eagerly → `cudaGraphLaunch` (no-op) → correct output
 2. Token 2+: no capture → `cudaGraphLaunch` (no-op) → **no kernels execute** → stale logits → gibberish
 
@@ -495,20 +494,40 @@ Flow with old code:
 
 **Key lesson:** Never trust an application-level env var to disable a feature that's hardcoded at compile time. The proxy must handle what the binary actually does, not what we wish it would do.
 
-**Fix (implemented, needs verification):** Implemented CUDA graph capture & replay in `cuda_shim.c`:
-- `cudaStreamBeginCapture`: enters capture mode, allocates recording buffer
-- `cudaLaunchKernel`: during capture, records serialized RPC payload (deep copy of args) in addition to executing eagerly
-- `cudaStreamEndCapture`: ends capture, stores the recording
-- `cudaGraphInstantiate`: associates recording with a graph exec slot
-- `cudaGraphLaunch`: **replays all recorded kernel launches** via RPC
-- `cudaGraphExecUpdate`: replaces stored recording with latest capture
-- `cudaStreamIsCapturing`: returns `Active` during capture (was always `None`)
+**Abandoned approach — capture & replay:** Implemented full graph recording in `cuda_shim.c` (recording kernel payloads during capture, replaying via `cudaGraphLaunch`). This approach suffered from double execution on the first token and still produced gibberish — the fundamental issue is that graph replay through a proxy cannot faithfully reproduce CUDA's internal graph scheduling semantics.
 
-First token gets a harmless double execution (eager + replay). Subsequent tokens get exactly one execution (replay only). All ggml kernel args contain device pointers that remain stable across tokens — the GPU reads updated data at those pointers on each replay.
+**Fix — CUDA graph pass-through mode (Session 15):** Instead of trying to emulate graph semantics, the shim now makes `cudaStreamBeginCapture` return `cudaErrorNotSupported` (error 71) and `cuStreamBeginCapture` return `CUDA_ERROR_NOT_SUPPORTED`. This forces ggml to fall back to its non-graph execution path where each kernel is launched directly via `cudaLaunchKernel`.
 
-**Current status:** Graph capture/replay code is implemented, but gibberish persists on clean VM. Added comprehensive diagnostic logging (`touch /tmp/gpu-proxy-diag` + restart Ollama → logs to `/tmp/gpu-proxy-diag.log`). Diagnostic script: `src/gpu-proxy/diag-gpu-proxy.sh`.
+How the pass-through fix works:
+1. `cudaStreamBeginCapture` → returns `cudaErrorNotSupported`
+2. ggml sees graph capture failed → falls back to direct kernel execution
+3. Every token: `cudaLaunchKernel` called directly → proxied to daemon → correct execution
+4. No graph replay, no double execution, no stale logits
 
-**Workaround:** `num_gpu:0` (CPU-only inference) confirmed working while fix is being debugged.
+Changes made:
+- `cuda_shim.c`: `cudaStreamBeginCapture` returns `cudaErrorNotSupported`, `cudaStreamEndCapture` returns `cudaErrorNotSupported`, `cudaStreamIsCapturing` returns `None`, `cudaGraphLaunch` is a harmless no-op
+- `cuda_driver_shim.c`: `cuStreamBeginCapture` returns `CUDA_ERROR_NOT_SUPPORTED`
+- Removed graph capture/replay recording infrastructure (recording buffers, replay logic)
+- `DECLOUD_GPU_GRAPH_NOOP` flag removed — pass-through (not-supported) is now the only behavior
+
+**Verification:** Ollama GPU inference produces coherent, correct output for long-text prompts. No gibberish. Confirmed on clean VM.
+
+**Impact on other workloads:**
+- PyTorch: ✅ Unaffected — does not use CUDA graphs by default; explicit `torch.cuda.CUDAGraph` usage would get an honest error
+- Stable Diffusion: ✅ Unaffected — no graph dependency
+- Ollama/ggml: ✅ Fixed — falls back to direct kernel execution
+
+#### Bug 22a: Word Doubling / Garbling — PARKED 🅿️
+
+**Symptom:** During investigation of Bug 22, occasional word doubling or garbling was observed in generated text (e.g., "the the", repeated tokens, slightly mangled words). This was intermittent and only appeared during testing of the graph capture/replay approach.
+
+**Status:** Parked for future reference. The pass-through fix (returning `cudaErrorNotSupported`) eliminates the code path that caused this issue. If word doubling resurfaces in the future, investigate:
+- Whether graph capture/replay code was accidentally re-enabled
+- RPC payload serialization correctness for kernel args during replay
+- Stream synchronization ordering between capture and eager execution paths
+- Potential race conditions in the recording buffer allocation
+
+**Workaround:** Not needed — the pass-through fix eliminates the root cause.
 
 ---
 
@@ -544,12 +563,42 @@ Replaced manual per-stub copy block with `make install-all-shims-compat` delegat
 
 ---
 
-## Production Status (2026-03-15)
+## Session 15: CUDA Graph Pass-Through Fix (Mar 17) ⭐⭐
+
+### Bug 22 Resolution: Pass-Through Instead of Emulation
+
+After Session 14's graph capture/replay approach failed to resolve the gibberish issue, we took a fundamentally different approach: **make the proxy honestly report that CUDA graphs are not supported**, forcing applications to fall back to direct kernel execution.
+
+**Why capture/replay failed:** Emulating CUDA graph semantics through a proxy is inherently fragile. The proxy cannot faithfully reproduce CUDA's internal graph scheduling, kernel fusion, or memory ordering guarantees. The double-execution on first token and incorrect replay on subsequent tokens produced the same gibberish we were trying to fix.
+
+**The pass-through solution:** Return `cudaErrorNotSupported` from `cudaStreamBeginCapture` (runtime) and `CUDA_ERROR_NOT_SUPPORTED` from `cuStreamBeginCapture` (driver). This is honest — the proxy genuinely cannot support CUDA graphs. Applications with graph fallback paths (ggml, PyTorch) automatically switch to direct kernel execution.
+
+**Changes:**
+- `cuda_shim.c`: Graph begin/end capture return not-supported; graph launch/instantiate remain harmless no-ops
+- `cuda_driver_shim.c`: Driver-side capture returns not-supported
+- Removed `DECLOUD_GPU_GRAPH_NOOP` flag — single consistent behavior
+- Removed graph capture/replay recording infrastructure
+- `stubs/cuda_pytorch_stubs.c`: `cudaStreamGetCaptureInfo_v2` already returns `captureStatus=None` — consistent
+
+**Verification:** Ollama long-text GPU inference produces coherent output. PyTorch and SD Forge unaffected (neither uses CUDA graphs by default).
+
+### Bug 22a: Word Doubling / Garbling — PARKED 🅿️
+
+Intermittent word doubling observed during capture/replay testing. Parked — the pass-through fix eliminates the code path that caused this. See Bug 22a notes above for future investigation pointers.
+
+### Key Lessons Learned (Session 15)
+
+23. **Don't emulate what you can't faithfully reproduce.** CUDA graph capture/replay through a proxy is fundamentally unsound — the proxy has no access to CUDA's internal graph scheduler. Returning "not supported" and letting applications fall back is both simpler and more correct.
+
+24. **Honest errors beat silent no-ops.** `cudaErrorNotSupported` triggers well-tested fallback paths in mature frameworks. Silent no-ops (returning success but doing nothing) cause subtle, hard-to-debug corruption.
+
+---
+
+## Production Status (2026-03-17)
 
 | Workload | Status | Notes |
 |----------|--------|-------|
-| Ollama / ggml short generation | ✅ Production | GPU confirmed, short context |
-| Ollama / ggml long generation | 🔍 Investigating | Bug 22 — graph capture/replay implemented, verifying on clean VM |
+| Ollama / ggml (all context lengths) | ✅ Production | Bug 22 fixed — graph pass-through mode, direct kernel execution |
 | PyTorch inference (eager) | ✅ Confirmed | All transformer ops incl. bias |
 | PyTorch full fine-tuning | ✅ Confirmed | 1,252 tok/s, 409ms/step |
 | PyTorch LoRA (PEFT) | ✅ Confirmed | 1,038 tok/s, 493ms/step, 1,360MB VRAM |
@@ -561,7 +610,7 @@ Replaced manual per-stub copy block with `make install-all-shims-compat` delegat
 
 | Item | Priority | Notes |
 |------|----------|-------|
-| Bug 22 — Ollama long-text GPU gibberish | **High** | Graph capture/replay implemented, needs verification. Diag logging added. |
+| Bug 22a — Word doubling/garbling | 🅿️ Parked | Only observed during capture/replay testing; pass-through fix eliminates root cause. Revisit if it resurfaces. |
 | Bug 19 — cuDNN context struct layout | Low | Parked — nvproxy reference needed |
 | vLLM template validation | High | VMEM_PROXY=1 already set |
 | React frontend migration | Low | Backlog |

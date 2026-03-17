@@ -115,19 +115,24 @@ typedef struct __attribute__((packed)) {
 
 ## 5. CUDA Graphs Strategy
 
-CUDA graphs cannot work through a proxy — capture records host-side API calls but execution is remote. The proxy handles this via configurable stubs:
+CUDA graphs cannot be faithfully proxied — capture records host-side API calls but execution is remote. Attempts to emulate graph capture/replay through the proxy (recording kernel payloads during capture, replaying via `cudaGraphLaunch`) proved unreliable, producing gibberish output due to inability to reproduce CUDA's internal graph scheduling semantics.
 
-**When `DECLOUD_GPU_GRAPH_NOOP=1` (default, Ollama):**
-- `cudaStreamBeginCapture` → return `cudaSuccess`
-- `cudaStreamEndCapture` → return `cudaSuccess` + dummy graph handle
-- `cudaGraphInstantiate` → return `cudaSuccess` + dummy exec handle
-- `cudaGraphLaunch` → return `cudaSuccess` (no-op, kernels ran eagerly)
+**Current approach — Pass-through mode (Session 15, Mar 17):**
+
+The proxy honestly reports that CUDA graphs are not supported, forcing applications to fall back to direct kernel execution:
+
+- `cudaStreamBeginCapture` → return `cudaErrorNotSupported`
+- `cuStreamBeginCapture` → return `CUDA_ERROR_NOT_SUPPORTED`
+- `cudaStreamEndCapture` → return `cudaErrorNotSupported`
 - `cudaStreamIsCapturing` → return `cudaStreamCaptureStatusNone`
+- `cudaGraphInstantiate` → return `cudaSuccess` + dummy handle (harmless no-op)
+- `cudaGraphLaunch` → return `cudaSuccess` (harmless no-op)
 
-**When `DECLOUD_GPU_GRAPH_NOOP=0` (future apps wanting honest errors):**
-- All graph stubs return `cudaErrorNotSupported`
+This is both simpler and more correct than the previous no-op approach. Applications with graph fallback paths (ggml, PyTorch) automatically switch to direct kernel execution. The `DECLOUD_GPU_GRAPH_NOOP` configuration flag has been removed — pass-through is now the only behavior.
 
-**Critical:** The driver shim's `cuGetProcAddress` must also check this flag because libcudart resolves `cuStreamBeginCapture` through the driver API, bypassing the runtime shim entirely. The driver shim reads the flag in an `__attribute__((constructor))` before any CUDA initialization.
+**Critical:** The driver shim's `cuGetProcAddress` must return consistent results because libcudart resolves `cuStreamBeginCapture` through the driver API, bypassing the runtime shim entirely.
+
+**Historical note:** The earlier `DECLOUD_GPU_GRAPH_NOOP=1` mode (graph ops return success as no-ops, kernels execute eagerly) caused Bug 22 — ggml's multi-token inference produced gibberish because `cudaGraphLaunch` was a no-op, resulting in zero GPU computation after the first capture cycle. See Debugging Journal Session 14-15 for the full investigation.
 
 ---
 
