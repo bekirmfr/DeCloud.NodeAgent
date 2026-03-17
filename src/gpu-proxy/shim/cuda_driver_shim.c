@@ -263,9 +263,15 @@ static void resolve_rt_graph_funcs(void)
 
 static CUresult cu_stream_begin_capture(void *stream, int mode)
 {
+    (void)stream; (void)mode;
+    /* Pass-through mode: return SUCCESS but don't start real capture.
+     * The runtime shim (if loaded) tracks the capture phase for
+     * cudaStreamIsCapturing queries, but does NOT suppress kernel
+     * execution.  Kernels execute eagerly for correct output. */
     resolve_rt_graph_funcs();
     if (g_rt_begin_capture)
-        return (CUresult)g_rt_begin_capture(stream, mode);
+        g_rt_begin_capture(stream, mode);
+    DRV_DIAG("cu_stream_begin_capture: pass-through (eager execution continues)");
     return CUDA_SUCCESS;
 }
 
@@ -273,16 +279,24 @@ static CUresult cu_stream_end_capture(void *stream, void **phGraph)
 {
     resolve_rt_graph_funcs();
     if (g_rt_end_capture)
-        return (CUresult)g_rt_end_capture(stream, phGraph);
+        g_rt_end_capture(stream, phGraph);
+    DRV_DIAG("cu_stream_end_capture: pass-through");
     return CUDA_SUCCESS;
 }
+
+/* ----------------------------------------------------------------
+ * Graph instantiate / launch / destroy — pass-through no-ops.
+ * Kernels already executed eagerly during "capture", so graph
+ * replay is unnecessary.  We hand back a dummy exec handle and
+ * accept all operations silently.
+ * ---------------------------------------------------------------- */
 
 static CUresult cu_graph_instantiate_flags(void **phExec, void *hGraph,
                                            unsigned long long flags)
 {
-    resolve_rt_graph_funcs();
-    if (g_rt_inst_flags)
-        return (CUresult)g_rt_inst_flags(phExec, hGraph, flags);
+    (void)hGraph; (void)flags;
+    if (phExec) *phExec = (void *)(uintptr_t)0xDEC10005;
+    DRV_DIAG("cu_graph_instantiate_flags: pass-through, dummy exec");
     return CUDA_SUCCESS;
 }
 
@@ -290,79 +304,59 @@ static CUresult cu_graph_instantiate(void **phExec, void *hGraph,
                                      void *phErrorNode, char *logBuffer,
                                      size_t bufferSize)
 {
-    resolve_rt_graph_funcs();
-    if (g_rt_inst)
-        return (CUresult)g_rt_inst(phExec, hGraph, phErrorNode,
-                                   logBuffer, bufferSize);
-    /* Fall back to WithFlags variant */
-    if (g_rt_inst_flags)
-        return (CUresult)g_rt_inst_flags(phExec, hGraph, 0);
+    (void)hGraph; (void)phErrorNode; (void)logBuffer; (void)bufferSize;
+    if (phExec) *phExec = (void *)(uintptr_t)0xDEC10005;
+    DRV_DIAG("cu_graph_instantiate: pass-through, dummy exec");
     return CUDA_SUCCESS;
 }
 
-/* cuGraphInstantiateWithParams — newer CUDA 12+ API.
- * The params struct contains error info we don't use;
- * delegate to the simpler WithFlags variant. */
+/* cuGraphInstantiateWithParams — newer CUDA 12+ API. */
 static CUresult cu_graph_instantiate_with_params(void **phExec, void *hGraph,
                                                   void *params)
 {
-    (void)params;
-    return cu_graph_instantiate_flags(phExec, hGraph, 0);
+    (void)hGraph; (void)params;
+    if (phExec) *phExec = (void *)(uintptr_t)0xDEC10005;
+    DRV_DIAG("cu_graph_instantiate_with_params: pass-through, dummy exec");
+    return CUDA_SUCCESS;
 }
 
 static CUresult cu_graph_launch(void *hExec, void *hStream)
 {
-    resolve_rt_graph_funcs();
-    if (g_rt_launch)
-        return (CUresult)g_rt_launch(hExec, hStream);
+    (void)hExec; (void)hStream;
+    DRV_DIAG("cu_graph_launch: pass-through no-op (kernels already executed eagerly)");
     return CUDA_SUCCESS;
 }
 
 static CUresult cu_graph_exec_destroy(void *hExec)
 {
-    resolve_rt_graph_funcs();
-    if (g_rt_exec_destroy)
-        return (CUresult)g_rt_exec_destroy(hExec);
+    (void)hExec;
+    DRV_DIAG("cu_graph_exec_destroy: pass-through no-op");
     return CUDA_SUCCESS;
 }
 
 static CUresult cu_graph_destroy(void *hGraph)
 {
-    resolve_rt_graph_funcs();
-    if (g_rt_graph_destroy)
-        return (CUresult)g_rt_graph_destroy(hGraph);
+    (void)hGraph;
+    DRV_DIAG("cu_graph_destroy: pass-through no-op");
     return CUDA_SUCCESS;
 }
 
-/* cuGraphGetNodes — return the number of captured operations.
- * ggml checks this after cudaStreamEndCapture to verify the graph
- * is non-empty.  Without this, cuGraphGetNodes fell through to
- * graph_success_stub which didn't set numNodes → ggml saw stale
- * count (usually 0) → skipped graph execution → garbled output. */
+/* cuGraphGetNodes — always return 1 node so ggml considers the
+ * graph non-empty and proceeds with its normal flow. */
 static CUresult cu_graph_get_nodes(void *hGraph, void *nodes, size_t *numNodes)
 {
     (void)hGraph; (void)nodes;
-    if (numNodes) {
-        /* Query the runtime shim's capture buffer count */
-        typedef int (*get_count_fn)(void);
-        static get_count_fn s_fn = NULL;
-        static int s_resolved = 0;
-        if (!s_resolved) {
-            s_fn = (get_count_fn)dlsym(RTLD_DEFAULT, "decloud_graph_captured_count");
-            s_resolved = 1;
-        }
-        *numNodes = s_fn ? (size_t)s_fn() : 0;
-    }
+    if (numNodes) *numNodes = 1;
+    DRV_DIAG("cu_graph_get_nodes: returning 1 (pass-through)");
     return CUDA_SUCCESS;
 }
 
 static CUresult cu_graph_exec_update(void *hExec, void *hGraph,
                                      int *updateResult)
 {
-    resolve_rt_graph_funcs();
-    if (g_rt_exec_update)
-        return (CUresult)g_rt_exec_update(hExec, hGraph, updateResult);
+    (void)hExec; (void)hGraph;
     if (updateResult) *updateResult = 0; /* success */
+    DRV_DIAG("cu_graph_exec_update: pass-through success");
     return CUDA_SUCCESS;
 }
 
