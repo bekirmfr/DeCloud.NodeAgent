@@ -51,7 +51,6 @@ write_files:
   # Environment file (read by systemd EnvironmentFile)
   - path: /etc/decloud-blockstore/blockstore.env
     permissions: '0640'
-    owner: blockstore:blockstore
     content: |
       BLOCKSTORE_LISTEN_PORT=__BLOCKSTORE_LISTEN_PORT__
       BLOCKSTORE_API_PORT=__BLOCKSTORE_API_PORT__
