@@ -2053,6 +2053,17 @@ download_node_agent() {
         cp -f "$DHT_TEMPLATE_DIR"/dht-node-*.gz.b64 "$DHT_CACHE_DIR/" 2>/dev/null || true
         log_info "Preserved DHT build cache"
     fi
+
+    # Preserve BlockStore binary build cache across reinstalls (same pattern as DHT).
+    local BLOCKSTORE_CACHE_DIR="/tmp/decloud-blockstore-build-cache"
+    local BLOCKSTORE_TEMPLATE_DIR="$INSTALL_DIR/DeCloud.NodeAgent/src/DeCloud.NodeAgent/CloudInit/Templates/blockstore-vm"
+
+    if [ -d "$BLOCKSTORE_TEMPLATE_DIR" ]; then
+        mkdir -p "$BLOCKSTORE_CACHE_DIR"
+        cp -f "$BLOCKSTORE_TEMPLATE_DIR/.blockstore-node-source.sha256" "$BLOCKSTORE_CACHE_DIR/" 2>/dev/null || true
+        cp -f "$BLOCKSTORE_TEMPLATE_DIR"/blockstore-node-*.gz.b64 "$BLOCKSTORE_CACHE_DIR/" 2>/dev/null || true
+        log_info "Preserved BlockStore build cache"
+    fi
     
     if [ -d "$INSTALL_DIR/DeCloud.NodeAgent" ]; then
         rm -rf "$INSTALL_DIR/DeCloud.NodeAgent"
@@ -2071,6 +2082,15 @@ download_node_agent() {
         cp -f "$DHT_CACHE_DIR"/dht-node-*.gz.b64 "$NEW_DHT_TEMPLATE_DIR/" 2>/dev/null || true
         rm -rf "$DHT_CACHE_DIR"
         log_info "Restored DHT build cache"
+    fi
+
+    # Restore BlockStore build cache so build.sh can skip unchanged builds
+    local NEW_BLOCKSTORE_TEMPLATE_DIR="$INSTALL_DIR/DeCloud.NodeAgent/src/DeCloud.NodeAgent/CloudInit/Templates/blockstore-vm"
+    if [ -d "$BLOCKSTORE_CACHE_DIR" ] && [ -d "$NEW_BLOCKSTORE_TEMPLATE_DIR" ]; then
+        cp -f "$BLOCKSTORE_CACHE_DIR/.blockstore-node-source.sha256" "$NEW_BLOCKSTORE_TEMPLATE_DIR/" 2>/dev/null || true
+        cp -f "$BLOCKSTORE_CACHE_DIR"/blockstore-node-*.gz.b64 "$NEW_BLOCKSTORE_TEMPLATE_DIR/" 2>/dev/null || true
+        rm -rf "$BLOCKSTORE_CACHE_DIR"
+        log_info "Restored BlockStore build cache"
     fi
     
     log_success "Code downloaded (commit: $COMMIT)"
@@ -2106,6 +2126,40 @@ build_dht_binary() {
         log_success "DHT binary built from source (hash-checked)"
     else
         log_warn "DHT binary build failed — pre-compiled binaries will be used"
+        log_info "This is not fatal; the existing .gz.b64 files will still work"
+    fi
+}
+
+build_blockstore_binary() {
+    log_step "Building Block Store node binary from source..."
+
+    local BLOCKSTORE_SRC="$INSTALL_DIR/DeCloud.NodeAgent/src/DeCloud.NodeAgent/CloudInit/Templates/blockstore-vm/blockstore-node-src"
+    local BUILD_SCRIPT="$BLOCKSTORE_SRC/build.sh"
+
+    if [ ! -f "$BUILD_SCRIPT" ]; then
+        log_warn "BlockStore build script not found at $BUILD_SCRIPT — skipping"
+        log_info "Pre-compiled binaries in the repo will be used instead"
+        return 0
+    fi
+
+    # Detect host architecture to only build what's needed
+    local HOST_ARCH
+    HOST_ARCH=$(uname -m)
+    case "$HOST_ARCH" in
+        x86_64|amd64) HOST_ARCH="amd64" ;;
+        aarch64|arm64) HOST_ARCH="arm64" ;;
+        *)
+            log_warn "Unknown architecture $HOST_ARCH — building both"
+            HOST_ARCH=""
+            ;;
+    esac
+
+    log_info "Building BlockStore binary for ${HOST_ARCH:-all architectures}..."
+
+    if bash "$BUILD_SCRIPT" $HOST_ARCH 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
+        log_success "BlockStore binary built from source (hash-checked)"
+    else
+        log_warn "BlockStore binary build failed — pre-compiled binaries will be used"
         log_info "This is not fatal; the existing .gz.b64 files will still work"
     fi
 }
@@ -2621,6 +2675,7 @@ main() {
     install_relay_nat_support
 
     build_dht_binary
+    build_blockstore_binary
     build_gpu_proxy
     build_node_agent
     create_configuration

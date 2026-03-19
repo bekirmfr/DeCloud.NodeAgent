@@ -176,6 +176,9 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             case VmType.Relay:
                 template = await InjectRelayExternalTemplatesAsync(template, ct);
                 break;
+            case VmType.BlockStore:
+                template = await InjectBlockStoreExternalTemplatesAsync(template, ct);
+                break;
             default:
 
                 break;
@@ -486,6 +489,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             VmType.Relay => "relay-vm-cloudinit.yaml",
             VmType.Dht => "dht-vm-cloudinit.yaml",
             VmType.Inference => "inference-vm-cloudinit.yaml",
+            VmType.BlockStore => "blockstore-vm-cloudinit.yaml",
             _ => "general-vm-cloudinit.yaml"
         };
 
@@ -534,6 +538,10 @@ public class CloudInitTemplateService : ICloudInitTemplateService
 
             case VmType.Inference:
                 await PopulateInferenceVariablesAsync(variables, spec, ct);
+                break;
+
+            case VmType.BlockStore:
+                await PopulateBlockStoreVariablesAsync(variables, spec, ct);
                 break;
 
             case VmType.General:
@@ -632,6 +640,205 @@ public class CloudInitTemplateService : ICloudInitTemplateService
         {
             _logger.LogError(ex, "Failed to derive WireGuard public key for relay VM {VmId}", spec.Id);
             throw;
+        }
+    }
+
+    private async Task PopulateBlockStoreVariablesAsync(
+        CloudInitTemplateVariables variables,
+        VmSpec spec,
+        CancellationToken ct)
+    {
+        // Block store configuration — ports and addresses come from orchestrator labels
+        variables.Custom["BLOCKSTORE_LISTEN_PORT"] =
+            spec.Labels?.GetValueOrDefault("blockstore-listen-port", "5001") ?? "5001";
+        variables.Custom["BLOCKSTORE_API_PORT"] =
+            spec.Labels?.GetValueOrDefault("blockstore-api-port", "5090") ?? "5090";
+        variables.Custom["BLOCKSTORE_ADVERTISE_IP"] =
+            spec.Labels?.GetValueOrDefault("blockstore-advertise-ip") ?? "";
+        variables.Custom["BLOCKSTORE_STORAGE_BYTES"] =
+            spec.Labels?.GetValueOrDefault("blockstore-storage-bytes") ?? spec.DiskBytes.ToString();
+        variables.Custom["BLOCKSTORE_BOOTSTRAP_PEERS"] =
+            spec.Labels?.GetValueOrDefault("blockstore-bootstrap-peers") ?? "";
+        variables.Custom["BLOCKSTORE_NODE_ID"] =
+            spec.Labels?.GetValueOrDefault("node-id") ?? "";
+        variables.Custom["NODE_REGION"] =
+            spec.Labels?.GetValueOrDefault("node-region") ?? "default";
+
+        // Auth token for bootstrap-poll → orchestrator authentication
+        // HMAC-SHA256(authToken, nodeId:vmId) — same pattern as DHT
+        variables.Custom["BLOCKSTORE_AUTH_TOKEN"] =
+            spec.Labels?.GetValueOrDefault("blockstore-auth-token") ?? "";
+
+        if (string.IsNullOrEmpty(variables.Custom["BLOCKSTORE_AUTH_TOKEN"]))
+        {
+            _logger.LogWarning(
+                "Block store VM {VmId} has no blockstore-auth-token label — " +
+                "bootstrap poll service will not be able to authenticate with orchestrator",
+                spec.Id);
+        }
+
+        // WireGuard mesh enrollment variables (same as DHT — passed from orchestrator labels)
+        variables.Custom["WG_RELAY_ENDPOINT"] = spec.Labels?.GetValueOrDefault("wg-relay-endpoint") ?? "";
+        variables.Custom["WG_RELAY_PUBKEY"]   = spec.Labels?.GetValueOrDefault("wg-relay-pubkey") ?? "";
+        variables.Custom["WG_TUNNEL_IP"]      = spec.Labels?.GetValueOrDefault("wg-tunnel-ip") ?? "";
+        variables.Custom["WG_RELAY_API"]      = spec.Labels?.GetValueOrDefault("wg-relay-api") ?? "";
+
+        // Load architecture-specific block store binary (gzip+base64 encoded, pre-built via build.sh)
+        var architecture = GetTargetArchitecture(spec);
+        var binaryGzB64 = await LoadBlockStoreBinaryAsync(architecture, ct);
+        variables.Custom["BLOCKSTORE_NODE_BINARY_GZ_BASE64"] = binaryGzB64;
+
+        _logger.LogInformation(
+            "Configured BlockStore variables for VM {VmId}: listenPort={ListenPort}, apiPort={ApiPort}, " +
+            "advertiseIp={AdvIP}, arch={Arch}, binarySize={BinaryKB}KB (gz+b64), " +
+            "storageBytes={StorageBytes}, authToken={HasToken}",
+            spec.Id,
+            variables.Custom["BLOCKSTORE_LISTEN_PORT"],
+            variables.Custom["BLOCKSTORE_API_PORT"],
+            variables.Custom["BLOCKSTORE_ADVERTISE_IP"],
+            architecture,
+            binaryGzB64.Length / 1024,
+            variables.Custom["BLOCKSTORE_STORAGE_BYTES"],
+            string.IsNullOrEmpty(variables.Custom["BLOCKSTORE_AUTH_TOKEN"]) ? "missing" : "present");
+    }
+
+    /// <summary>
+    /// Load the pre-built block store binary (gzip+base64-encoded) from disk.
+    /// If the .gz.b64 file doesn't exist, attempts to build it from the Go source
+    /// included in the deployment (blockstore-node-src/build.sh).
+    /// Mirrors LoadDhtBinaryAsync exactly.
+    /// </summary>
+    private async Task<string> LoadBlockStoreBinaryAsync(string architecture, CancellationToken ct)
+    {
+        var fileName = $"blockstore-node-{architecture}.gz.b64";
+        var filePath = Path.Combine(_templateBasePath, "blockstore-vm", fileName);
+
+        if (!File.Exists(filePath))
+        {
+            _logger.LogWarning(
+                "Block store binary not found at {Path} — attempting to build from source...",
+                filePath);
+
+            await BuildBlockStoreBinaryFromSourceAsync(architecture, ct);
+        }
+
+        if (!File.Exists(filePath))
+        {
+            _logger.LogError(
+                "Block store binary not found at {Path} after build attempt. " +
+                "Ensure Go 1.23+ is installed on this node, or pre-build with: " +
+                "bash CloudInit/Templates/blockstore-vm/blockstore-node-src/build.sh",
+                filePath);
+            throw new FileNotFoundException(
+                $"Block store binary not found at: {filePath}. " +
+                "Install Go 1.23+ and retry, or pre-build with: " +
+                "bash CloudInit/Templates/blockstore-vm/blockstore-node-src/build.sh",
+                filePath);
+        }
+
+        var content = await File.ReadAllTextAsync(filePath, ct);
+
+        if (string.IsNullOrWhiteSpace(content))
+            throw new InvalidOperationException($"Block store binary file is empty: {filePath}");
+
+        _logger.LogInformation(
+            "Loaded block store binary: {Path} ({SizeKB}KB gz+b64)",
+            filePath, content.Length / 1024);
+
+        return content.Trim();
+    }
+
+    /// <summary>
+    /// Build the block store binary from Go source on the current node.
+    /// The Go source and build.sh are included in the deployment output.
+    /// Requires Go 1.23+ installed on the host (auto-downloaded by build.sh if missing).
+    /// Mirrors BuildDhtBinaryFromSourceAsync exactly.
+    /// </summary>
+    private async Task BuildBlockStoreBinaryFromSourceAsync(string architecture, CancellationToken ct)
+    {
+        var buildScript = Path.Combine(
+            _templateBasePath, "blockstore-vm", "blockstore-node-src", "build.sh");
+
+        if (!File.Exists(buildScript))
+        {
+            _logger.LogError(
+                "Block store build script not found at {Path}. " +
+                "The Go source files may not have been included in the deployment.",
+                buildScript);
+            return;
+        }
+
+        _logger.LogInformation(
+            "Building block store binary for {Architecture} from Go source at {ScriptPath}...",
+            architecture, buildScript);
+
+        try
+        {
+            // Go build with dependency download can take several minutes on first run
+            var buildTimeout = TimeSpan.FromMinutes(5);
+
+            var result = await _executor.ExecuteAsync(
+                "bash",
+                $"{buildScript} {architecture}",
+                buildTimeout,
+                ct);
+
+            if (result.Success)
+            {
+                _logger.LogInformation(
+                    "Block store binary built successfully for {Architecture}",
+                    architecture);
+            }
+            else
+            {
+                _logger.LogError(
+                    "Failed to build block store binary for {Architecture}. Exit code: {ExitCode}. " +
+                    "Stderr: {Error}. Ensure Go 1.23+ is installed (apt install golang-go or via https://go.dev/dl/)",
+                    architecture,
+                    result.ExitCode,
+                    result.StandardError);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Exception while building block store binary for {Architecture}. " +
+                "Ensure Go 1.23+ is installed on this node.",
+                architecture);
+        }
+    }
+
+    private async Task<string> InjectBlockStoreExternalTemplatesAsync(
+        string template,
+        CancellationToken ct)
+    {
+        _logger.LogInformation("Loading external block store VM templates...");
+
+        try
+        {
+            var healthCheck   = await LoadExternalTemplateAsync("blockstore-health-check.sh",   "blockstore-vm", ct);
+            var notifyReady   = await LoadExternalTemplateAsync("blockstore-notify-ready.sh",   "blockstore-vm", ct);
+            var bootstrapPoll = await LoadExternalTemplateAsync("blockstore-bootstrap-poll.sh", "blockstore-vm", ct);
+            var wgMeshEnroll  = await LoadExternalTemplateAsync("wg-mesh-enroll.sh",            "shared",        ct);
+
+            var result = ReplaceWithIndentation(template, "__BLOCKSTORE_HEALTH_CHECK__",   healthCheck);
+            result     = ReplaceWithIndentation(result,   "__BLOCKSTORE_NOTIFY_READY__",   notifyReady);
+            result     = ReplaceWithIndentation(result,   "__BLOCKSTORE_BOOTSTRAP_POLL__", bootstrapPoll);
+            result     = ReplaceWithIndentation(result,   "__WG_MESH_ENROLL__",            wgMeshEnroll);
+
+            _logger.LogInformation(
+                "Injected block store external templates: health-check ({H} chars), " +
+                "notify-ready ({R} chars), bootstrap-poll ({P} chars), wg-enroll ({W} chars)",
+                healthCheck.Length, notifyReady.Length, bootstrapPoll.Length, wgMeshEnroll.Length);
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load external block store VM templates");
+            throw new InvalidOperationException(
+                "Failed to load block store VM templates. " +
+                "Ensure all files exist in the blockstore-vm/ template directory.", ex);
         }
     }
 
