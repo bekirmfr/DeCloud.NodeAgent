@@ -793,6 +793,48 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
 
             public_key = data['public_key']
 
+            # ── Stale peer eviction (re-registration with new keypair) ──────────
+            # If another peer already owns this tunnel IP with a different public
+            # key, WireGuard silently leaves AllowedIPs on the old key and the
+            # new peer gets no AllowedIPs, breaking all traffic routing.
+            # Fix: evict the old peer atomically before adding the new one.
+            try:
+                dump = subprocess.run(
+                    ['wg', 'show', WIREGUARD_INTERFACE, 'dump'],
+                    capture_output=True, text=True, timeout=5
+                )
+                if dump.returncode == 0:
+                    tunnel_ip = allowed_ips.split('/')[0].strip()
+                    for line in dump.stdout.strip().split('\n')[1:]:
+                        if not line.strip():
+                            continue
+                        fields = line.split('\t')
+                        if len(fields) < 4:
+                            continue
+                        existing_key = fields[0]
+                        existing_ips = fields[3] if fields[3] != '(none)' else ''
+                        if tunnel_ip in existing_ips and existing_key != public_key:
+                            evict = subprocess.run(
+                                ['wg', 'set', WIREGUARD_INTERFACE, 'peer', existing_key, 'remove'],
+                                capture_output=True, text=True, timeout=5
+                            )
+                            if evict.returncode == 0:
+                                remove_peer_metadata(existing_key)
+                                with peer_registration_lock:
+                                    peer_registration_times.pop(existing_key, None)
+                                logger.info(
+                                    f"Evicted stale peer {existing_key[:16]}... "
+                                    f"— tunnel IP {tunnel_ip} re-registered with new key"
+                                )
+                            else:
+                                logger.warning(
+                                    f"Failed to evict stale peer {existing_key[:16]}...: "
+                                    f"{evict.stderr.strip()}"
+                                )
+            except Exception as e:
+                logger.warning(f"Stale peer eviction check failed (non-fatal): {e}")
+            # ── End stale peer eviction ──────────────────────────────────────────
+
             # Build wg set command
             cmd = [
                 'wg', 'set', WIREGUARD_INTERFACE,
