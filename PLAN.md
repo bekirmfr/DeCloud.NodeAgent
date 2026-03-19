@@ -1,6 +1,6 @@
 # Block Store System VM — Design & Implementation Plan
 
-**Date:** 2026-02-16
+**Date:** 2026-02-16 (Updated: 2026-03-19)
 **Status:** Design Phase
 **Depends on:** DHT system VMs (production-verified 2026-02-15)
 **Follows patterns from:** Relay VMs, DHT VMs
@@ -47,7 +47,7 @@ This enables continuous VM disk replication, live migration on node failure, tem
                     │ CreateVm command (labels)
                     ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                    Node Agent                                      │
+│                        Node Agent                                  │
 │  ┌─────────────────────────┐  ┌────────────────────────────────┐ │
 │  │ CommandProcessorService  │  │ BlockStoreCallbackController   │ │
 │  │ - Renders cloud-init     │  │ POST /api/blockstore/ready     │ │
@@ -69,10 +69,10 @@ This enables continuous VM disk replication, live migration on node failure, tem
 │  │    GET  /health                                                │ │
 │  │    POST /blocks         (put block → returns CID)              │ │
 │  │    GET  /blocks/{cid}   (get block)                            │ │
-│  │    DELETE /blocks/{cid} (delete block)                          │ │
+│  │    DELETE /blocks/{cid} (delete block)                         │ │
 │  │    GET  /blocks         (list local blocks)                    │ │
 │  │    POST /dag            (put manifest + blocks atomically)     │ │
-│  │    GET  /dag/{cid}      (resolve DAG, return manifest)        │ │
+│  │    GET  /dag/{cid}      (resolve DAG, return manifest)         │ │
 │  │    GET  /stats          (storage usage stats)                  │ │
 │  │    POST /gc             (run garbage collection, LRU eviction) │ │
 │  └──────────────────────────────────────────────────────────────┘ │
@@ -266,8 +266,8 @@ GET /api/blockstore/locate/{cid}
             provider records. Used for audit and diagnostics.
 
 POST /api/blockstore/manifest
-  Request:  { vmId, rootCid, version, changedBlockCids: ["bafk..."], totalBytes }
-  Auth:     Internal
+  Request:  { vmId, nodeId, rootCid, version, changedBlockCids: ["bafk..."], totalBytes }
+  Auth:     Internal (nodeId must match vm.NodeId — see Section 7 for fencing)
   Response: { success, manifestVersion }
   Purpose:  Register an updated VM manifest from a lazysync cycle.
             Orchestrator records the new version. No replication plan is
@@ -731,8 +731,9 @@ Background lazysync daemon (runs on the node agent, cycles every ~5 minutes):
      → manifest.timestamp = now
 
   6. Register updated manifest with orchestrator:
-     → POST /api/blockstore/manifest { vmId, rootCid, version,
+     → POST /api/blockstore/manifest { vmId, nodeId, rootCid, version,
          changedBlockCids, totalBytes }
+     → Orchestrator validates nodeId matches vm.NodeId (Section 7 fencing)
      → Orchestrator records the new version (no replication plan returned)
 
   7. Blocks replicate via Kademlia scatter (autonomous, no orchestrator action):
@@ -751,48 +752,24 @@ Background lazysync daemon (runs on the node agent, cycles every ~5 minutes):
      → Under-replicated chunks are flagged but NOT actively pushed —
        Kademlia's re-publication handles recovery naturally
 
-  9. Reset QEMU dirty bitmap for next cycle
+  9. VMs with replicationFactor=0 (ephemeral) skip lazysync entirely — no
+     overlay replication, no manifest tracking. Dashboard shows ephemeral status.
 ```
 
-**What this eliminates:**
-- No full-disk replication — only overlay writes are tracked and replicated
-- No "full snapshot" events — the first sync seeds allocated overlay clusters, subsequent syncs only push dirty blocks
-- No "delta" manifests — there's one manifest per VM, chunks get replaced in-place
-- No delta chains to traverse during reconstruction
-- No delta consolidation — nothing to consolidate
-- No snapshot-type field — just `vm-overlay` manifests with monotonically increasing version numbers
+### 6.1.1 Initial Overlay Seeding
 
-**Recovery point:** If lazysync runs every 5 minutes and replication takes ~2 minutes, the recovery point is typically 5-7 minutes behind live state. This is crash-consistent (QEMU guarantees this) — the same guarantees as traditional hypervisor crash recovery.
-
-**Write coalescing:** If a VM writes the same chunk 100 times between lazysync cycles, only the final state is replicated. The intermediate writes are invisible — only the net change per cycle matters.
-
-**Bandwidth:** A VM writing 1 GB/hour generates ~17 MB per 5-minute cycle. This trickles out continuously rather than bursting during snapshot events.
-
-### 6.1.1 Initial Seeding
-
-When a VM is first enrolled in lazysync, the **allocated clusters of its overlay** must be pushed to the block store. Because the overlay is sparse (qcow2 only allocates clusters that have been written to), and the base image is excluded, initial seeding is dramatically smaller than the virtual disk size:
+New VMs start with a minimal overlay (just cloud-init writes + first-boot setup). The lazysync daemon begins pushing overlay blocks on the first cycle after the VM is provisioned. The allocated overlay clusters (not the full virtual disk) are chunked and replicated:
 
 ```
-VM with 100 GB virtual disk, freshly booted:
-  Base image:      ~2 GB  (debian-12-generic — NOT replicated, downloadable)
-  Overlay writes:  ~500 MB (cloud-init setup, package installs, config)
-  Allocated overlay clusters: ~500 chunks (1 MB each)
+New VM:
+  - Virtual disk size: 100 GB
+  - Overlay allocated clusters after first boot: ~500 MB
+  - Initial seed: ~500 blocks (1 MB each)
+  - Time to seed: ~2-5 minutes over typical node bandwidth
 
-  Initial seed: 500 MB → push to block store → Kademlia scatters to network
-  Time: seconds to minutes, not hours
-
-VM with 100 GB virtual disk, mature workload:
-  Base image:      ~2 GB  (NOT replicated)
-  Overlay writes:  ~5-15 GB (application data, logs, databases)
-  Allocated overlay clusters: ~5,000-15,000 chunks
-
-  Initial seed: 5-15 GB → push to block store → Kademlia scatters
-  Time: minutes, depending on network
-
-The lazysync daemon uses `qemu-img map` to discover which clusters
-in the overlay are allocated (vs. reading through to the base image).
-Only allocated clusters are chunked and replicated — zero/unallocated
-regions are not included in the manifest.
+Sparse overlay allocation via `qemu-img map`:
+  - Only allocated clusters are chunked and replicated — zero/unallocated
+    regions are not included in the manifest.
 ```
 
 The orchestrator tracks seeding state via its audit loop. VMs with `confirmedVersion == 0` (no chunks have ≥N providers yet) are flagged as "unprotected" in the dashboard. Seeding is rate-limited to avoid saturating the node's block store VM or network.
@@ -861,53 +838,37 @@ For each VM on Node A:
 
   3. For each candidate node, evaluate:
      scheduling_fit:      does the node meet VM's requirements? (filter)
-     available_resources: enough CPU/RAM/disk headroom? (filter)
-     base_image_cached:  does the node already have the base image? (bonus)
+     available_resources: enough CPU/RAM/disk headroom? (rank)
 
-     score = resource_headroom * weight_resources
-           + base_image_local * weight_image_cache
+     Block locality is NOT a factor — the target node fetches
+     overlay blocks via bitswap from scattered providers.
 
-     Block locality is NOT a factor. Overlay blocks are scattered across
-     many nodes via Kademlia — the target fetches them via bitswap from
-     wherever they exist. With N scattered providers per block, the
-     fetch fans out massively and parallelizes well.
+  4. Select best candidate based on scheduling fit + resource headroom
 
-  4. Select best candidate node (highest score that passes all filters)
+  5. Orchestrator updates vm.NodeId from A → B (Section 7 fencing)
 
-  5. Reconstruct VM disk on target node:
+  6. Orchestrator sends CreateVm command to Node B with:
+     - VM spec (CPU, RAM, disk, GPU mode, etc.)
+     - Manifest root CID (points to confirmed overlay state)
+     - Base image ID (Node B downloads or uses cached)
+     - Labels (for cloud-init regeneration)
 
-     a) Base image — ensure available:
-        The manifest contains baseImageId + baseImageHash.
-        If the target node's image cache already has it → done (common case,
-        many VMs share the same base image like debian-12-generic).
-        If not → download from image registry (same path as normal VM creation).
+  7. Node B:
+     a. Downloads base image (if not cached) from image registry
+     b. Creates empty overlay qcow2 backed by base image
+     c. Fetches overlay chunks via bitswap from scattered providers
+        (many sources → parallelized → fast)
+     d. Writes chunks into overlay at correct offsets
+     e. Regenerates cloud-init ISO from labels
+     f. Boots VM
 
-     b) Overlay — assemble from block store network:
-        Target node requests each chunk CID via bitswap.
-        Bitswap parallelizes across all providers — blocks are scattered
-        across many nodes, so the fetch is inherently distributed.
-        Write overlay chunks at their manifest offsets into a new qcow2 file
-        with backing file = base image path.
-
-     c) Cloud-init ISO — regenerate:
-        Orchestrator has all the VM's labels and configuration.
-        Node agent renders cloud-init template from labels (same as initial
-        VM creation). Generate new ISO.
-
-     d) Assemble VM directory:
-        /var/lib/decloud/vms/{vmId}/
-        ├── disk.qcow2       (overlay, reconstructed from manifest blocks)
-        ├── cloud-init.iso   (regenerated from labels)
-        ├── domain.xml       (generated from VmSpec)
-        └── metadata.json    (from orchestrator)
-
-  6. Boot VM on new node.
-     VM resumes from confirmed manifest state.
-     (~5-7 minutes of state lost since last confirmed lazysync)
+  8. VM resumes from confirmed state
+     (data loss = changes between confirmedVersion and currentVersion)
 ```
 
-Reconstruction is fast because:
-- **Base image**: likely already cached on the target node (shared across VMs of the same type). If not, it's a single download of a well-known artifact, not a block-by-block fetch.
+#### Why This Is Fast
+
+- **Base image**: probably cached on Node B (it's a standard image). If not, it's a single download of a well-known artifact, not a block-by-block fetch.
 - **Overlay**: only the allocated clusters — typically 1-10% of the virtual disk size. Blocks are scattered across many providers — bitswap fetches from the closest/fastest ones in parallel. More providers = faster reconstruction than pulling from 3 pre-selected replicas.
 - **Cloud-init**: regenerated in milliseconds from labels. Zero network transfer.
 - **No chain traversal**: the manifest IS the complete overlay state. Read chunks, write file, done.
@@ -951,197 +912,89 @@ Migration: orchestrator picks from {B, D, F, ...} based on scheduling fit.
 
 4. **Faster migration** — With N scattered providers (potentially 10-20+ nodes), bitswap parallelizes the fetch across many sources. Placement-aware replication with 3 pre-selected replicas means 3 sources. Scatter gives you many more.
 
-5. **No coupling** — Storage and compute are independent concerns. A node's replication duty doesn't depend on what VMs it could run.
+5. **No orchestrator bottleneck** — Replication happens autonomously via Kademlia. The orchestrator only audits provider counts.
 
-### 6.4 GC — Local LRU + Orchestrator Audit
+### 6.4 Adaptive XOR Threshold
 
-Garbage collection is **fully local** — each node manages its own 5% budget. The orchestrator **audits** replication health but does not control what individual nodes store or evict.
+Block store nodes decide whether to pull a block based on two factors:
 
-```
-Local GC (runs on each block store node):
-  1. Nodes store blocks they're close to in Kademlia XOR space
-  2. When usage approaches 85% of capacity → trigger LRU eviction
-  3. Evict least-recently-accessed blocks first
-  4. Hard refuse new writes at 95% capacity
-  5. Withdraw provider records for evicted blocks from DHT
-  6. Recently-accessed blocks (served via bitswap) naturally survive GC
+1. **XOR distance**: `distance(myPeerId, blockCid)` — closer = higher priority
+2. **Local free space**: more room = more aggressive pulling
 
-Orchestrator audit (background loop):
-  1. For each VM with confirmedVersion < currentVersion:
-     → Query DHT FindProviders for each chunk CID in latest manifest
-     → If ALL chunks have ≥N providers → advance confirmedVersion
-  2. If a chunk's provider count drops below threshold:
-     → Flag as under-replicated in dashboard
-     → Kademlia's natural re-publication handles recovery:
-       remaining providers re-announce, nearby nodes pull the block
-     → In rare cases of persistent under-replication, orchestrator
-       can publish a "re-replicate" hint via the DHT (fallback, not normal path)
-
-Self-healing example:
-  Chunk B has 15 providers. 3 nodes go offline → 12 providers remain.
-  Kademlia provider record TTL expires for the 3 offline nodes.
-  Remaining 12 providers re-announce. Nearby nodes in XOR space
-  that don't yet have the block discover it and pull via bitswap.
-  Provider count recovers to ~15 without any orchestrator intervention.
-
-GC lifecycle example:
-  confirmedVersion v1: chunks [A, B, C] → all have ≥N providers
-  confirmedVersion v2: chunks [A, D, C] → chunk D propagates, reaches ≥N
-  Chunk B is no longer fetched via bitswap (no VM references it)
-  → low access frequency → becomes LRU candidate → evicted during GC
-  → provider records for B expire after eviction (TTL) → B disappears
-  Block store nodes don't track manifests — eviction drives expiry,
-  not manifest awareness. No explicit "unpin" command needed
+```go
+// Pseudocode for pull decision
+func shouldPull(cid CID) bool {
+    distance := xorDistance(myPeerId, cid)
+    freePercent := (capacity - used) / capacity
+    
+    // Base threshold: only pull if we're in the K closest
+    // Adaptive: relax threshold when we have more space
+    threshold := baseThreshold * (1.0 + freePercent)
+    
+    return distance < threshold
+}
 ```
 
-### 6.5 Storage Budget Under the 5% Duty
+This naturally balances the network:
+- Nodes with lots of free space pull more aggressively → fill up → slow down
+- Nodes near capacity only pull blocks they're very close to in XOR space
+- No central coordinator needed
 
-The 5% cap constrains how many VM manifests a node can hold replicas of. With overlay-only replication, the effective cost per VM is dramatically lower than the virtual disk size:
+### 6.5 GossipSub Fast Path
 
-```
-Node B has 50 GB block store (5% of 1 TB):
+Standard Kademlia provider records are passive — they answer queries but don't push notifications. Waiting for periodic DHT scans to discover new blocks would add minutes of latency to replication.
 
-Currently stored (determined by Kademlia XOR proximity):
-  Scattered chunks from many VMs: ~12 GB total
-  (Node B doesn't know or care which VMs these chunks belong to —
-   it simply stores blocks it's close to in XOR space)
-  Free: 38 GB
-
-Compare to full-disk replication:
-  A single VM's full disk could consume 20-40 GB of Node B's budget.
-  With overlay-only: scattered chunks from dozens of VMs fit easily.
-
-Each node manages its own budget locally via LRU eviction.
-The aggregate across all nodes provides massive redundancy:
-  1,000 nodes × 50 GB average = 50 TB aggregate block store
-  A VM with 3 GB overlay replicated to ~15 nodes = 45 GB total
-  That's 0.09% of the network's capacity per VM.
-```
-
-Content addressing still provides deduplication on top of overlay-only savings: if two VMs install the same packages on the same base image, those overlay chunks share the same CID. And with lazysync, each cycle only adds the genuinely new blocks — unchanged chunks share the same CID and cost nothing.
-
-### 6.6 GossipSub Propagation Mechanism
-
-Standard Kademlia provider records tell you "who has block X" but don't trigger replication. Provider records are passive — they answer queries, not push notifications. The block store needs an active propagation mechanism to achieve scatter.
-
-The block store uses **GossipSub** (already deployed on every DHT VM) as the fast notification path, with DHT provider records as the durable fallback:
+GossipSub provides near-instant notification:
 
 ```
-Source block store (after lazysync pushes new blocks):
+Source block store (Node A) pushes new block:
+  1. Store block locally
+  2. Announce provider record to DHT
+  3. Publish CID to GossipSub topic "decloud/blockstore/new-blocks"
 
-  1. Store block in FlatFS, compute CID
-  2. Announce Provide(cid) to DHT (standard provider record)
-  3. Publish to GossipSub topic "decloud/blockstore/new-blocks":
-     { cid, size, sourcePeerId }
-
-Receiving block store nodes (subscribed to topic via DHT mesh):
-
-  1. Receive GossipSub message
+Receiving block stores (Nodes B, C, D, ...):
+  1. Receive GossipSub message with new CID
   2. Compute XOR distance: distance(myPeerId, cid)
-  3. Evaluate pull decision:
-     - Am I close enough?  (adaptive threshold — see below)
-     - Do I have capacity?  (5% budget check)
-     - Do I already have this block?  (dedup check)
-  4. If yes → add to bitswap want list → pull from source via bitswap
-  5. After storing → announce Provide(cid) to DHT (now I'm also a provider)
-  6. If no → ignore (some other node closer in XOR space will take it)
+  3. If close enough (adaptive threshold) → add to bitswap want list
+  4. Bitswap fetches block from Node A (or any other provider)
+  5. Store locally, announce provider record
 
-Durable fallback (handles missed GossipSub messages):
-
-  GossipSub is the primary mechanism. The natural lazysync refresh cycle
-  (every ~5 minutes) is the fallback: each cycle re-announces all current
-  blocks via Provide() and re-publishes new-block messages to GossipSub.
-  A node that missed a message will see the same CIDs again on the next
-  cycle. This catches:
-  - Blocks announced while the node was offline
-  - Blocks from before the node joined the network
-  - GossipSub messages lost due to network partition
-  With 10-20+ providers per block, one node not yet having a block is
-  irrelevant to durability — it will catch up within one or two cycles.
+Time from push to replication: seconds (not minutes)
 ```
 
-**Adaptive XOR threshold:** Nodes don't use a fixed distance cutoff. Instead, the threshold adapts to local capacity:
+For nodes that missed the GossipSub message (offline, network partition), periodic DHT neighborhood scans serve as the durable fallback. No orchestrator commands are needed — blocks scatter across the network autonomously.
 
-```
-threshold = base_distance × capacity_multiplier
+### 6.6 Handling "Scatter Window" Data Loss
 
-capacity_multiplier:
-  - usage < 50%:  1.5  (aggressive — pull blocks from a wider range)
-  - usage 50-75%: 1.0  (standard — pull nearby blocks only)
-  - usage 75-85%: 0.5  (conservative — only very close blocks)
-  - usage > 85%:  0.0  (GC mode — stop pulling, start evicting)
-
-This self-balances: nodes with more free space absorb more blocks.
-Nodes near capacity stop pulling and shed load via LRU eviction.
-No central coordination needed.
-```
-
-The block store binary subscribes to the GossipSub topic through its libp2p connection to the DHT network. It already connects to the DHT for provider records — subscribing to a topic is one additional call.
-
-### 6.7 Replication Factor (Per-VM Configurable)
-
-The replication factor N determines the **minimum provider count** required for `confirmedVersion` to advance. N is set per VM, ties directly to pricing, and defaults to 3.
-
-```
-N=0  Ephemeral VM. Lazysync does NOT run. No overlay blocks are pushed
-     to the block store. If the node dies, the VM is gone. Zero bandwidth,
-     zero block store cost. Cheapest tier.
-
-N=1  Minimal durability. Lazysync runs. Blocks push to local block store
-     and scatter via Kademlia. Orchestrator confirms when ≥1 remote provider
-     exists. Survives single node failure.
-
-N=3  Standard durability (default). Orchestrator waits for ≥3 providers in
-     the DHT before advancing confirmedVersion. Kademlia scatter typically
-     produces 10-20+ providers, but confirmed status requires 3.
-
-N=5+ Premium durability. Higher confirmation threshold. Greater confidence
-     that blocks are widely scattered before the version is considered safe.
-```
-
-**N is a confirmation threshold, not a replication target.** Kademlia scatter is passive — blocks end up on however many nodes are close in XOR space. N determines when the orchestrator considers the data "safe enough" to advance `confirmedVersion` and allow recovery from that version. Even N=3 VMs typically have blocks on 10-20+ nodes.
-
-**Cost model:** The primary cost lever is N=0 vs N>0 — whether lazysync runs at all. Once lazysync runs, the incremental cost of N=3 vs N=5 is minimal (slightly longer wait for confirmation). The real cost is bandwidth (lazysync pushes blocks) and block store capacity consumed across the network.
-
-The replication factor is stored on the VM model in the orchestrator and included in the manifest registration:
-
-```
-POST /api/blockstore/manifest
-  Request: { vmId, rootCid, version, changedBlockCids, totalBytes }
-
-  Orchestrator looks up VM's replicationFactor (N).
-  If N == 0 → reject (lazysync shouldn't be running for ephemeral VMs)
-  Otherwise → record version, audit loop checks for ≥N providers
-```
-
-### 6.8 Source-Offline Before Scatter (Alerting)
-
-There is an unavoidable window between "block pushed to local block store" and "block pulled by other nodes via Kademlia scatter." If the source node goes offline during this window, blocks with only 1 provider (the source) are lost.
+There's an inherent window between when a block is pushed to the source node's block store and when it scatters to other providers. If the source node dies in this window, the block may be lost.
 
 ```
 Timeline:
-  T+0:  Lazysync pushes blocks to local block store
-  T+1s: Provider records announced to DHT + GossipSub notification
-  T+5s: First remote node pulls via bitswap (2 providers now)
-  T+30s: Several remote nodes have pulled (5+ providers)
-  T+2m: Kademlia scatter stabilizes (~15 providers)
-
-If the source node dies at T+3s:
-  - Blocks with 2 providers survive (the one remote node that pulled)
-  - Blocks with 1 provider (source only) are lost
-  - The VM's overlay is partially recoverable
+  T=0:  Lazysync pushes block X to Node A's block store
+  T=1s: GossipSub notification sent
+  T=3s: Nodes B, C start pulling via bitswap
+  T=5s: Block X replicated to B, C (provider count = 3)
+  ---
+  T=2s: Node A crashes (before B, C finish pulling)
+        → Block X may be lost (only provider was A)
 ```
 
-The orchestrator handles this via alerting, not prevention:
+**Mitigation:**
+
+1. **confirmedVersion tracking**: The orchestrator doesn't advance `confirmedVersion` until all chunks have ≥N providers. Recovery uses `confirmedVersion`, not `currentVersion`. This means:
+   - If Node A dies at T=2s, the VM migrates using `confirmedVersion` (before block X)
+   - Block X (in `currentVersion` but not `confirmedVersion`) is lost
+   - Data loss = changes between confirmed and current
+
+2. **Source-offline alerting**: When a node goes offline, the orchestrator checks each VM's manifest state:
 
 ```
-Node A goes offline. Orchestrator detects failure.
+For each VM on the dead node:
 
-For each VM on Node A with replicationFactor > 0:
-
-  Case 1: confirmedVersion == 0 (never confirmed)
-    → Alert: "VM-X has replication enabled but no confirmed replicas.
-       Data may be lost. The VM cannot be migrated."
+  Case 1: confirmedVersion == 0
+    → No confirmed state exists. VM cannot be recovered.
+    → Alert: "VM-X has no confirmed state. Data may be lost.
+       The VM cannot be migrated."
     → Dashboard status: UNRECOVERABLE
 
   Case 2: confirmedVersion > 0 but < currentVersion
@@ -1161,7 +1014,7 @@ For each VM on Node A with replicationFactor > 0:
 
 This is the honest approach: the scatter window is small (seconds to minutes) and cannot be eliminated without synchronous replication (which would add latency to every write). The mitigation is visibility — the orchestrator tracks the gap between `currentVersion` and `confirmedVersion` and alerts when it matters.
 
-### 6.9 DHT Proximity Endpoint
+### 6.7 DHT Proximity Endpoint
 
 The block store binary needs to evaluate its position in Kademlia XOR space relative to a given CID. The block store has its own persistent peer ID and can compute `xor(myPeerId, cid)` locally — this is a trivial bitwise operation.
 
@@ -1181,7 +1034,7 @@ GET /proximity/{cid}
   than "what is my raw distance?" for deciding whether to store a block.
 ```
 
-For the **normal fast path** (GossipSub announce → pull decision), the block store uses local XOR distance + adaptive threshold (Section 6.6). The DHT proximity endpoint is used for:
+For the **normal fast path** (GossipSub announce → pull decision), the block store uses local XOR distance + adaptive threshold (Section 6.4). The DHT proximity endpoint is used for:
 - Periodic neighborhood scan (durable fallback)
 - Diagnostic queries ("why did/didn't this node store block X?")
 - Dashboard visualization of block distribution
@@ -1190,7 +1043,418 @@ This endpoint is added to the DHT VM's existing localhost HTTP API (port 5080), 
 
 ---
 
-## 7. Implementation Order
+## 7. Split-Brain / Zombie VM Prevention
+
+When a node fails and a VM is migrated to a new host, the original node may come back online with the VM still present locally. Without proper fencing, this creates a **split-brain** scenario: two instances of the same VM running simultaneously.
+
+### 7.1 The Problem
+
+```
+Timeline of a split-brain event:
+
+T=0        T=5min      T=8min       T=15min      T=20min
+ │           │           │            │            │
+ ▼           ▼           ▼            ▼            ▼
+
+Node A     Node A      Orchestrator  Node B      Node A
+running    fails       declares A    boots       comes back!
+VM-1       (crash,     dead,         VM-1        VM-1 resumes
+           network)    migrates      from        automatically
+                       to Node B     storage
+                                      │            │
+                                      ▼            ▼
+                                 ┌─────────┐  ┌─────────┐
+                                 │  VM-1   │  │  VM-1   │
+                                 │ (new)   │  │ (zombie)│
+                                 │ Node B  │  │ Node A  │
+                                 └─────────┘  └─────────┘
+                                      │            │
+                                      └─────┬──────┘
+                                            │
+                                            ▼
+                                 💥 TWO INSTANCES RUNNING
+```
+
+**Consequences of split-brain:**
+
+| Issue | Impact |
+|-------|--------|
+| **IP Conflict** | Both VMs have same WireGuard IP → routing chaos |
+| **State Divergence** | Node A has pre-crash state, Node B has migrated state + new writes |
+| **Identity Collision** | Same VM ID, same wallet association, same credentials |
+| **Data Corruption** | If both write to external services (DBs, APIs), inconsistent state |
+| **Lazysync Conflict** | Both nodes attempt to push manifest updates for the same VM |
+
+### 7.2 Solution: NodeId as Authority (KISS Approach)
+
+The `VirtualMachine` model already has a `NodeId` field that tracks which node is authorized to run the VM. Rather than creating a separate lease service, we use this existing field as the **single source of truth**.
+
+**Rule: Only the node whose ID matches `vm.NodeId` may run the VM.**
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│                      ORCHESTRATOR DB                          │
+│                                                               │
+│   VM-123:                                                     │
+│     NodeId: "node-B"    ← Authoritative assignment           │
+│     TargetNodeId: null                                        │
+│     Status: Running                                           │
+│                                                               │
+└───────────────────────────────────────────────────────────────┘
+                        │
+          ┌─────────────┴─────────────┐
+          │                           │
+          ▼                           ▼
+ ┌─────────────────┐         ┌─────────────────┐
+ │     Node A      │         │     Node B      │
+ │                 │         │                 │
+ │  "Am I node-B?" │         │  "Am I node-B?" │
+ │   NO → STOP VM  │         │   YES → RUN OK  │
+ │                 │         │                 │
+ └─────────────────┘         └─────────────────┘
+```
+
+This approach requires **no new services, no lease renewals, no fencing tokens** — just enforcement of an existing field.
+
+### 7.3 Node Agent Implementation
+
+#### 7.3.1 VM Reconciliation on Startup and Heartbeat
+
+The Node Agent reconciles local VMs against the orchestrator's authoritative state:
+
+```csharp
+// In HeartbeatService or a dedicated VmReconciliationService
+
+private async Task ReconcileLocalVmsAsync(CancellationToken ct)
+{
+    // Get all VMs running locally via libvirt
+    var localVms = await _libvirtManager.GetAllVmsAsync();
+    
+    foreach (var localVm in localVms)
+    {
+        // Skip system VMs (relay, DHT, blockstore) — managed separately
+        if (IsSystemVm(localVm.VmId))
+            continue;
+            
+        // Query orchestrator for authoritative VM state
+        var vmInfo = await _orchestratorClient.GetVmInfoAsync(localVm.VmId, ct);
+        
+        if (vmInfo == null)
+        {
+            // VM deleted from orchestrator — destroy locally
+            _logger.LogWarning(
+                "VM {VmId} not found in orchestrator, destroying orphan",
+                localVm.VmId);
+            await DestroyAndCleanupVmAsync(localVm.VmId);
+            continue;
+        }
+        
+        if (vmInfo.NodeId != _nodeId)
+        {
+            // We are NOT the authorized host — stop immediately
+            _logger.LogWarning(
+                "VM {VmId} assigned to node {AuthorizedNode}, not us ({OurNode}). " +
+                "Destroying zombie VM.",
+                localVm.VmId, vmInfo.NodeId, _nodeId);
+            
+            await DestroyAndCleanupVmAsync(localVm.VmId);
+        }
+    }
+}
+
+private async Task DestroyAndCleanupVmAsync(string vmId)
+{
+    // Force destroy the VM
+    await _libvirtManager.DestroyVmAsync(vmId);
+    
+    // Optionally clean up local disk to free space
+    // (the authoritative copy is now on the new node or in block store)
+    await _diskManager.CleanupVmDiskAsync(vmId);
+    
+    _logger.LogInformation("Zombie VM {VmId} destroyed and cleaned up", vmId);
+}
+```
+
+#### 7.3.2 Reconciliation Triggers
+
+Reconciliation runs at multiple points to ensure quick detection:
+
+| Trigger | Purpose |
+|---------|---------|
+| **Node Agent startup** | Catch VMs that were migrated while node was offline |
+| **Every heartbeat cycle** | Continuous verification (every 30-60 seconds) |
+| **On network reconnection** | After recovering from network partition |
+
+#### 7.3.3 Fail-Safe Behavior
+
+If the Node Agent cannot reach the orchestrator to verify VM ownership:
+
+```csharp
+private async Task ReconcileLocalVmsAsync(CancellationToken ct)
+{
+    foreach (var localVm in localVms)
+    {
+        try
+        {
+            var vmInfo = await _orchestratorClient.GetVmInfoAsync(localVm.VmId, ct);
+            // ... normal reconciliation logic
+        }
+        catch (HttpRequestException ex) when (IsTransientError(ex))
+        {
+            // Cannot reach orchestrator — what to do?
+            
+            // Option A: Keep running (availability over consistency)
+            // Suitable if network partitions are brief
+            _logger.LogWarning(
+                "Cannot verify VM {VmId} ownership — keeping running. " +
+                "Will retry on next heartbeat.",
+                localVm.VmId);
+            
+            // Option B: Stop after grace period (consistency over availability)
+            // if (localVm.LastVerifiedAt < DateTime.UtcNow.AddMinutes(-5))
+            // {
+            //     await DestroyAndCleanupVmAsync(localVm.VmId);
+            // }
+        }
+    }
+}
+```
+
+**Recommendation:** Use Option A (keep running) for most cases. Brief network partitions are more common than actual migrations. The zombie will be cleaned up when connectivity resumes.
+
+### 7.4 Migration Sequence with NodeId Update
+
+```
+BEFORE MIGRATION:
+┌─────────────────────────────────────────────────────────────┐
+│  VM-123:                                                     │
+│    NodeId: "node-A"        ← A is authorized                │
+│    TargetNodeId: null                                        │
+│    Status: Running                                           │
+└─────────────────────────────────────────────────────────────┘
+
+STEP 1: Orchestrator detects Node A failure (missed heartbeats)
+
+STEP 2: Orchestrator sets migration target
+┌─────────────────────────────────────────────────────────────┐
+│  VM-123:                                                     │
+│    NodeId: "node-A"                                          │
+│    TargetNodeId: "node-B"  ← Migration target set           │
+│    Status: Migrating                                         │
+└─────────────────────────────────────────────────────────────┘
+
+STEP 3: Orchestrator atomically transfers authority
+┌─────────────────────────────────────────────────────────────┐
+│  VM-123:                                                     │
+│    NodeId: "node-B"        ← B is NOW authorized            │
+│    TargetNodeId: null      ← Cleared                        │
+│    Status: Migrating                                         │
+└─────────────────────────────────────────────────────────────┘
+
+STEP 4: Orchestrator sends CreateVm command to Node B
+  - Node B downloads overlay from block store (confirmed manifest)
+  - Node B regenerates cloud-init from VM labels
+  - Node B boots VM
+
+STEP 5: Node B reports VM running → Status: Running
+
+STEP 6: Node A comes back online
+  - Heartbeat triggers reconciliation
+  - For each local VM: query orchestrator
+  - VM-123.NodeId = "node-B", but we're "node-A"
+  - Result: destroy local VM-123
+```
+
+### 7.5 Lazysync Fencing
+
+The lazysync daemon must also respect NodeId authority. A zombie VM should not push manifest updates:
+
+```csharp
+// In LazysyncDaemon on Node Agent
+
+private async Task SyncVmAsync(string vmId, CancellationToken ct)
+{
+    // Verify we're still the authoritative host before pushing
+    var vmInfo = await _orchestratorClient.GetVmInfoAsync(vmId, ct);
+    
+    if (vmInfo?.NodeId != _nodeId)
+    {
+        _logger.LogWarning(
+            "Skipping lazysync for VM {VmId} — we're not the authorized host",
+            vmId);
+        return;
+    }
+    
+    // Proceed with dirty block export and manifest push
+    // ...
+}
+```
+
+The orchestrator also validates manifest updates:
+
+```csharp
+// In BlockStoreController.cs
+
+[HttpPost("manifest")]
+public async Task<IActionResult> RegisterManifest([FromBody] ManifestUpdateRequest request)
+{
+    var vm = await _dataStore.GetVmAsync(request.VmId);
+    
+    if (vm == null)
+        return NotFound();
+    
+    // Verify the reporting node is the authorized host
+    if (vm.NodeId != request.NodeId)
+    {
+        _logger.LogWarning(
+            "Rejecting manifest update for VM {VmId} from node {ReportingNode} — " +
+            "authorized node is {AuthorizedNode}",
+            request.VmId, request.NodeId, vm.NodeId);
+        
+        return StatusCode(403, new { error = "Not authorized to update this VM's manifest" });
+    }
+    
+    // Process manifest update
+    // ...
+}
+```
+
+### 7.6 Network Fencing (Defense in Depth)
+
+As an additional layer, the orchestrator can revoke the zombie VM's network access:
+
+```
+On migration:
+1. Orchestrator updates vm.NodeId from A → B (primary fencing)
+2. Orchestrator notifies relay VMs: revoke WireGuard peer for Node A's VM-1 subnet
+3. Even if zombie VM keeps running, it cannot reach the network
+
+Result: Zombie VM is isolated — can run locally but cannot:
+- Communicate with users
+- Access external services
+- Push lazysync updates
+- Cause harm
+```
+
+This is implemented by extending the relay peer management:
+
+```csharp
+// In RelayNodeService.cs
+
+public async Task RevokeVmNetworkAccessAsync(string vmId, string oldNodeId, CancellationToken ct)
+{
+    var vm = await _dataStore.GetVmAsync(vmId);
+    if (vm == null) return;
+    
+    // Find the relay serving the old node
+    var oldNode = await _dataStore.GetNodeAsync(oldNodeId);
+    if (oldNode?.CgnatInfo?.RelayNodeId == null) return;
+    
+    var relay = await _dataStore.GetNodeAsync(oldNode.CgnatInfo.RelayNodeId);
+    if (relay?.RelayNodeInfo?.RelayVmId == null) return;
+    
+    // Remove the VM's WireGuard peer from the relay
+    // (The VM's tunnel IP was associated with the old node)
+    await RemoveWireGuardPeerAsync(relay, vm.NetworkConfig.TunnelIp, ct);
+    
+    _logger.LogInformation(
+        "Revoked network access for VM {VmId} on old node {OldNode}",
+        vmId, oldNodeId);
+}
+```
+
+### 7.7 Optional Enhancement: Assignment Version
+
+For extra protection against race conditions (e.g., NodeId bouncing due to flapping), add a version counter:
+
+```csharp
+public class VirtualMachine
+{
+    public string NodeId { get; set; }
+    public string? TargetNodeId { get; set; }
+    
+    /// <summary>
+    /// Incremented on every NodeId change. Used as fencing token
+    /// to detect stale assignments.
+    /// </summary>
+    public long NodeAssignmentVersion { get; set; } = 0;
+}
+```
+
+The Node Agent stores the version when it receives a CreateVm command. On reconciliation:
+
+```csharp
+if (localAssignmentVersion < orchestratorAssignmentVersion)
+{
+    // Our assignment is stale — we were migrated away and back
+    // but our local state is from a previous incarnation
+    await DestroyAndCleanupVmAsync(vmId);
+}
+```
+
+This handles edge cases where:
+- VM migrates A → B → A (same NodeId, but different incarnation)
+- Node has stale state from before migration
+
+### 7.8 Orchestrator Heartbeat Response Enhancement
+
+To reduce per-VM queries, the orchestrator can proactively inform nodes about invalid VMs:
+
+```csharp
+public class HeartbeatResponse
+{
+    // Existing fields...
+    public List<NodeCommand>? PendingCommands { get; set; }
+    public CgnatConfigResponse? CgnatConfig { get; set; }
+    
+    /// <summary>
+    /// VM IDs that this node should NOT be running.
+    /// Includes VMs that were migrated away, deleted, or never assigned to this node.
+    /// Node agent should destroy any of these found locally.
+    /// </summary>
+    public List<string>? InvalidVmIds { get; set; }
+}
+```
+
+The orchestrator populates this by comparing the node's reported running VMs against its authoritative records:
+
+```csharp
+// In HeartbeatService on Orchestrator
+
+private List<string> GetInvalidVmsForNode(string nodeId, List<string> reportedRunningVmIds)
+{
+    var invalidVms = new List<string>();
+    
+    foreach (var vmId in reportedRunningVmIds)
+    {
+        var vm = _dataStore.GetVm(vmId);
+        
+        // VM doesn't exist or belongs to different node
+        if (vm == null || vm.NodeId != nodeId)
+        {
+            invalidVms.Add(vmId);
+        }
+    }
+    
+    return invalidVms;
+}
+```
+
+### 7.9 Summary
+
+| Layer | Mechanism | Purpose |
+|-------|-----------|---------|
+| **Primary** | `NodeId` field check | Only authorized node runs VM |
+| **Reconciliation** | Startup + heartbeat checks | Detect and destroy zombies |
+| **Lazysync** | NodeId validation | Reject manifest updates from zombies |
+| **Network** | WireGuard peer revocation | Isolate zombies from network |
+| **Optional** | `NodeAssignmentVersion` | Handle edge cases with flapping |
+
+**Key principle:** The existing `NodeId` field is the authoritative lease. No separate lease service needed — just enforcement of what already exists.
+
+---
+
+## 8. Implementation Order
 
 ### Phase A: Orchestrator — Core Block Store
 
@@ -1237,14 +1501,26 @@ This endpoint is added to the DHT VM's existing localhost HTTP API (port 5080), 
 32. **Disk reconstruction** — ensure base image available (cache or download) + fetch overlay from scattered providers via bitswap + regenerate cloud-init ISO from labels
 33. **End-to-end migration test** — simulate node failure, verify VM rescheduling from confirmed manifest (base image + overlay from bitswap + cloud-init)
 
+### Phase E: Split-Brain / Zombie VM Prevention
+
+34. **VmReconciliationService** on Node Agent — startup + heartbeat reconciliation loop
+35. **GetVmInfoAsync** endpoint — lightweight VM ownership query for reconciliation
+36. **InvalidVmIds in HeartbeatResponse** — proactive notification of zombie VMs
+37. **Lazysync NodeId validation** — reject manifest updates from non-authoritative nodes
+38. **BlockStoreController NodeId check** — enforce on manifest POST endpoint
+39. **Network fencing** (optional) — WireGuard peer revocation on migration
+40. **NodeAssignmentVersion** (optional) — fencing token for edge cases
+41. **Integration test** — simulate node failure, migration, node return, verify zombie destroyed
+
 ---
 
-## 8. How This Connects to Future Features
+## 9. How This Connects to Future Features
 
-### Built-In (Phase A-D)
+### Built-In (Phase A-E)
 - **Continuous VM disk replication (lazysync)** — Core feature, not optional
 - **Live migration on node failure** — Core feature, the primary purpose of the block store
 - **Template image distribution** — Distribute base images via block store (dedup across nodes)
+- **Split-brain prevention** — Zero-config zombie VM detection and cleanup
 
 ### Near-Term Extensions
 - **On-demand VM migration** — User-initiated, not just failure-driven
@@ -1259,7 +1535,7 @@ This endpoint is added to the DHT VM's existing localhost HTTP API (port 5080), 
 
 ---
 
-## 9. Key Design Decisions
+## 10. Key Design Decisions
 
 ### Decision 1: Separate VM from DHT (not embedded)
 **Why:** DHT VMs are lightweight (512 MB RAM, 2 GB disk). Block storage needs different resources (more disk, similar RAM). Keeping them separate means:
@@ -1332,15 +1608,14 @@ LevelDB is only used for metadata (access times, block index, stats).
 - **Better recovery point**: ~5-7 minutes vs 30+ minutes with periodic deltas
 - **Simpler GC**: blocks become unreferenced when their manifest slot is updated. Track "is this block referenced by any confirmed manifest?" — if not, GC it
 - **Natural write coalescing**: if a chunk is written 100 times between cycles, only the final state is replicated
-- **Simpler reconstruction**: read manifest, assemble chunks in offset order. No delta patching
-- **QEMU native support**: QEMU's Changed Block Tracking (persistent dirty bitmaps, since 4.0+) and incremental backup provide crash-consistent dirty block exports without pausing the VM. This is the same mechanism that powers live migration in traditional hypervisors
+- **Simpler reconstruction**: read manifest, assemble chunks in offset order.
 
 ### Decision 10: Overlay-only replication (not full disk)
-**Why:** VMs use a qcow2 backing chain: a read-only base image (shared, downloadable) plus a per-VM writable overlay. The base image and cloud-init ISO are reconstructible artifacts. Only the overlay carries unique state. Replicating the overlay only instead of the full virtual disk provides:
-- **Dramatically smaller seeding**: a freshly booted 100 GB VM has ~500 MB of overlay writes, not 100 GB. Initial seed completes in seconds instead of hours
-- **Lower storage cost**: overlay-only replicas are typically 1-10% of virtual disk size. A node's 5% block store budget can hold replicas for dozens of VMs instead of 2-3
-- **Faster migration**: reconstruct = download base image (likely already cached) + assemble overlay (small, mostly local) + regenerate cloud-init (milliseconds). Base images are shared across VMs of the same type — a node running 10 Debian VMs downloads the base image once
-- **Sparse manifest**: only allocated overlay clusters appear in the manifest. `qemu-img map` discovers allocation without reading the full virtual disk
+**Why:** Replicating only the overlay layer (not the full virtual disk) reduces storage and bandwidth by 90%+:
+- **Base images are shared**: `debian-12-generic.qcow2` is the same for thousands of VMs. Store it once in the image registry, not replicated per-VM
+- **Overlays are sparse**: a 100 GB virtual disk might have 3 GB of actual writes. Replicate 3 GB, not 100 GB
+- **Cloud-init is regenerable**: the orchestrator has the VM's labels — regenerate the ISO in milliseconds
+- `qemu-img map` discovers allocation without reading the full virtual disk
 - **Natural fit with qcow2**: QEMU already tracks dirty blocks at the overlay level. The dirty bitmap covers overlay writes only — base image reads are invisible to CBT
 
 ### Decision 11: GossipSub fast path + DHT durable fallback (not pure Kademlia)
@@ -1359,35 +1634,32 @@ LevelDB is only used for metadata (access times, block index, stats).
 - The cost lever is primarily N=0 vs N>0 (whether lazysync runs at all). Once running, incremental cost of higher N is minimal — Kademlia scatters to many nodes regardless, N just sets the confirmation threshold
 - Ties directly to pricing tiers without complicating the replication mechanism
 
----
-
-## 10. Risk Assessment
-
-| Risk | Impact | Mitigation |
-|------|--------|------------|
-| Large Go binary size | Slow VM boot | Gzip+base64 encoding, ~5-8 MB compressed |
-| Storage quota enforcement | Disk full crashes | Hard refuse writes at 95%, GC trigger at 85% |
-| Bitswap flood | Network saturation | Rate limiting per peer, bandwidth caps |
-| Block loss (all providers offline) | VM cannot migrate | Kademlia scatter ensures 10-20+ providers per block across diverse nodes; entire region can fail without data loss |
-| Stale provider records | Failed retrievals | TTL on records, periodic re-announcement; Kademlia republishes automatically |
-| DHT dependency | Can't discover peers without DHT | Bootstrap poll as fallback, direct peer list |
-| 5% budget exceeded | Node disk pressure | Local LRU eviction enforces budget; hard refuse at 95% |
-| Overlay too large for 5% | Can't replicate heavy-write VMs | Overlay-only is typically 1-10% of virtual disk; dedup further reduces; scatter spreads cost across many nodes |
-| High write-rate VM | Lazysync generates heavy replication traffic | Rate limiting per VM; adaptive cycle interval (slower for hot VMs); write coalescing reduces effective dirty block count |
-| QEMU CBT compatibility | Older QEMU lacks persistent dirty bitmaps | Require QEMU ≥4.0; fallback to full re-scan if bitmap lost (rare) |
-| Initial seeding slow | VM unprotected during first sync | Overlay-only seeding is typically 500 MB–15 GB (not 100 GB); completes in minutes; track progress; prioritize new VMs |
-| Base image unavailable during migration | Can't reconstruct VM disk | Base images cached on most nodes; image registry as fallback; block store can distribute base images via bitswap |
-| Manifest version drift | Confirmed version lags far behind current | Alert when gap exceeds threshold; orchestrator can throttle lazysync cycle until Kademlia propagation catches up |
-| Orchestrator unavailable | Audit pauses, confirmedVersion stalls | Replication continues autonomously via Kademlia — blocks still scatter and providers re-announce. Lazysync continues locally, queues manifest registrations. Only confirmedVersion advancement pauses |
-| Kademlia hot spots | Blocks cluster on certain nodes | XOR metric statistically distributes evenly; LRU eviction naturally sheds excess; large network dilutes any clustering |
-| Over-replication waste | Blocks replicate to more nodes than needed | Benign — extra replicas improve durability and migration speed. LRU GC naturally trims excess as nodes fill up |
-| Source offline before scatter | Blocks lost if only provider dies | GossipSub + bitswap propagation completes in seconds; window is small. Orchestrator alerts on confirmedVersion=0 + node failure. Cannot be fully eliminated without synchronous replication |
-| GossipSub message loss | Blocks fail to propagate to nearby nodes | DHT provider records serve as durable fallback; periodic neighborhood scan catches missed blocks within 5-10 minutes |
-| Ephemeral VM data loss (N=0) | User loses all VM state on node failure | By design — user explicitly chose N=0. Dashboard shows ephemeral status. No alert on node failure |
+### Decision 13: NodeId as authority (not separate lease service)
+**Why:** The `VirtualMachine.NodeId` field already tracks which node is authorized to run a VM. Using this existing field as the fencing mechanism:
+- Requires no new services or database tables
+- Leverages existing heartbeat/reconciliation infrastructure
+- Simple to understand: "if NodeId != myNodeId, stop the VM"
+- Eliminates lease renewal complexity and potential lease expiration edge cases
+- Already used throughout the codebase for VM-to-node association
 
 ---
 
-## 11. Success Metrics
+## 11. Risk Assessment
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|------------|--------|------------|
+| Block store VM crash | Medium | Low | Self-healing reconciliation redeploys; blocks scattered across many providers |
+| Node storage full | Medium | Low | Quota enforcement (hard refuse at 95%); LRU GC naturally trims excess as nodes fill up |
+| Source offline before scatter | Low | Medium | GossipSub + bitswap propagation completes in seconds; window is small. Orchestrator alerts on confirmedVersion=0 + node failure. Cannot be fully eliminated without synchronous replication |
+| GossipSub message loss | Low | Low | DHT provider records serve as durable fallback; periodic neighborhood scan catches missed blocks within 5-10 minutes |
+| Ephemeral VM data loss (N=0) | N/A | N/A | By design — user explicitly chose N=0. Dashboard shows ephemeral status. No alert on node failure |
+| Split-brain / zombie VM | Medium | High | NodeId authority enforcement, reconciliation on startup/heartbeat, lazysync fencing, optional network fencing |
+| False positive zombie detection | Low | High | Conservative approach: keep running if orchestrator unreachable; version tracking for edge cases |
+| Reconciliation delays | Low | Medium | Multiple reconciliation triggers (startup, heartbeat, reconnection); InvalidVmIds in heartbeat response for proactive notification |
+
+---
+
+## 12. Success Metrics
 
 ### Phase A-C (Core Block Store)
 - Block Store VM deploys on all eligible nodes (≥100 GB storage, ≥2 GB RAM)
@@ -1417,3 +1689,11 @@ LevelDB is only used for metadata (access times, block index, stats).
 - Self-healing: provider count recovers autonomously when nodes leave/rejoin the network
 - Per-VM replication factor (N) correctly enforced: N=0 skips lazysync, N=3+ requires provider count confirmation
 - Source-offline alerting correctly classifies VMs as UNRECOVERABLE / RECOVERING / MIGRATING / LOST based on confirmedVersion and replicationFactor
+
+### Phase E (Split-Brain Prevention)
+- Zombie VMs destroyed within 60 seconds of node reconnection
+- No split-brain events in production (two instances of same VM never run simultaneously)
+- Lazysync manifest updates from zombie nodes rejected 100%
+- Network fencing (if enabled) isolates zombies within 30 seconds of migration
+- Reconciliation adds < 100ms to heartbeat cycle
+- False positive rate (valid VMs incorrectly destroyed): 0%
