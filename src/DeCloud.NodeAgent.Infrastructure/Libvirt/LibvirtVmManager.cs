@@ -1652,8 +1652,6 @@ public class LibvirtVmManager : IVmManager
                 variables["__HOST_MACHINE_ID__"] = _nodeMetadata.MachineId;
                 variables["__TIMESTAMP__"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-                // Orchestrator URL for direct DHT→orchestrator bootstrap polling
-                // (same pattern as relay VMs use for notify-orchestrator.sh)
                 variables["__ORCHESTRATOR_URL__"] = _nodeMetadata.OrchestratorUrl;
 
                 _logger.LogInformation(
@@ -1661,6 +1659,25 @@ public class LibvirtVmManager : IVmManager
                     spec.Id,
                     variables["__NODE_ID__"],
                     spec.Labels?.GetValueOrDefault("dht-advertise-ip") ?? "(from template)",
+                    _nodeMetadata.OrchestratorUrl);
+            }
+
+            // =====================================================
+            // STEP 5.7: Block Store VM metadata (from orchestrator labels)
+            // =====================================================
+            if (spec.VmType == VmType.BlockStore)
+            {
+                variables["__NODE_ID__"] = spec.Labels?.GetValueOrDefault("node-id")
+                                        ?? _nodeMetadata.NodeId;
+                variables["__HOST_MACHINE_ID__"] = _nodeMetadata.MachineId;
+                variables["__TIMESTAMP__"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                variables["__ORCHESTRATOR_URL__"] = _nodeMetadata.OrchestratorUrl;
+
+                _logger.LogInformation(
+                    "VM {VmId}: Set BlockStore metadata - NodeId={NodeId}, StorageBytes={Storage}, OrchestratorUrl={Url}",
+                    spec.Id,
+                    variables["__NODE_ID__"],
+                    spec.Labels?.GetValueOrDefault("blockstore-storage-bytes") ?? "(from template)",
                     _nodeMetadata.OrchestratorUrl);
             }
 

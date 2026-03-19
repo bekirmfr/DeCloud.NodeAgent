@@ -180,7 +180,6 @@ public class CloudInitTemplateService : ICloudInitTemplateService
                 template = await InjectBlockStoreExternalTemplatesAsync(template, ct);
                 break;
             default:
-
                 break;
         }
 

@@ -227,6 +227,9 @@ builder.Services.AddHostedService<VmReadinessMonitor>();
 // Auto-start GPU proxy daemon on non-IOMMU nodes with GPUs
 builder.Services.AddHostedService<GpuProxyStartupService>();
 
+// Build missing Go binaries (DHT node, Block Store node) proactively on startup
+builder.Services.AddHostedService<GoBinaryBuildStartupService>();
+
 // =====================================================
 // Security services for port validation and auditing
 // =====================================================

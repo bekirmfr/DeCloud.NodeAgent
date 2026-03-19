@@ -348,10 +348,10 @@ public class CommandProcessorService : BackgroundService
             Labels = labels
         };
 
-        // Defense-in-depth: reject duplicate system VMs (DHT/Relay) with the same name.
+        // Defense-in-depth: reject duplicate system VMs (DHT/Relay/BlockStore) with the same name.
         // The orchestrator's reconciliation loop can race and issue two CreateVm commands
         // for the same role before the first one is acknowledged.
-        if (vmSpec.VmType is VmType.Dht or VmType.Relay)
+        if (vmSpec.VmType is VmType.Dht or VmType.Relay or VmType.BlockStore)
         {
             var existingVms = await _vmManager.GetAllVmsAsync(ct);
             var duplicate = existingVms.FirstOrDefault(v =>
