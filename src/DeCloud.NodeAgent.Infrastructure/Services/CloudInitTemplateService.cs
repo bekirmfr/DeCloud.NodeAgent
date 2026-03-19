@@ -816,20 +816,31 @@ public class CloudInitTemplateService : ICloudInitTemplateService
 
         try
         {
-            var healthCheck   = await LoadExternalTemplateAsync("blockstore-health-check.sh",   "blockstore-vm", ct);
-            var notifyReady   = await LoadExternalTemplateAsync("blockstore-notify-ready.sh",   "blockstore-vm", ct);
-            var bootstrapPoll = await LoadExternalTemplateAsync("blockstore-bootstrap-poll.sh", "blockstore-vm", ct);
-            var wgMeshEnroll  = await LoadExternalTemplateAsync("wg-mesh-enroll.sh",            "shared",        ct);
+            var healthCheck    = await LoadExternalTemplateAsync("blockstore-health-check.sh",   "blockstore-vm", ct);
+            var notifyReady    = await LoadExternalTemplateAsync("blockstore-notify-ready.sh",   "blockstore-vm", ct);
+            var bootstrapPoll  = await LoadExternalTemplateAsync("blockstore-bootstrap-poll.sh", "blockstore-vm", ct);
+            var dashboardPy    = await LoadExternalTemplateAsync("blockstore-dashboard.py",      "blockstore-vm", ct);
+            var dashboardHtml  = await LoadExternalTemplateAsync("dashboard.html",               "blockstore-vm", ct);
+            var dashboardCss   = await LoadExternalTemplateAsync("dashboard.css",                "blockstore-vm", ct);
+            var dashboardJs    = await LoadExternalTemplateAsync("dashboard.js",                 "blockstore-vm", ct);
+            var wgMeshEnroll   = await LoadExternalTemplateAsync("wg-mesh-enroll.sh",            "shared",        ct);
 
-            var result = ReplaceWithIndentation(template, "__BLOCKSTORE_HEALTH_CHECK__",   healthCheck);
-            result     = ReplaceWithIndentation(result,   "__BLOCKSTORE_NOTIFY_READY__",   notifyReady);
-            result     = ReplaceWithIndentation(result,   "__BLOCKSTORE_BOOTSTRAP_POLL__", bootstrapPoll);
-            result     = ReplaceWithIndentation(result,   "__WG_MESH_ENROLL__",            wgMeshEnroll);
+            var result = ReplaceWithIndentation(template, "__BLOCKSTORE_HEALTH_CHECK__",    healthCheck);
+            result     = ReplaceWithIndentation(result,   "__BLOCKSTORE_NOTIFY_READY__",    notifyReady);
+            result     = ReplaceWithIndentation(result,   "__BLOCKSTORE_BOOTSTRAP_POLL__",  bootstrapPoll);
+            result     = ReplaceWithIndentation(result,   "__BLOCKSTORE_DASHBOARD_PY__",    dashboardPy);
+            result     = ReplaceWithIndentation(result,   "__BLOCKSTORE_DASHBOARD_HTML__",  dashboardHtml);
+            result     = ReplaceWithIndentation(result,   "__BLOCKSTORE_DASHBOARD_CSS__",   dashboardCss);
+            result     = ReplaceWithIndentation(result,   "__BLOCKSTORE_DASHBOARD_JS__",    dashboardJs);
+            result     = ReplaceWithIndentation(result,   "__WG_MESH_ENROLL__",             wgMeshEnroll);
 
             _logger.LogInformation(
                 "Injected block store external templates: health-check ({H} chars), " +
-                "notify-ready ({R} chars), bootstrap-poll ({P} chars), wg-enroll ({W} chars)",
-                healthCheck.Length, notifyReady.Length, bootstrapPoll.Length, wgMeshEnroll.Length);
+                "notify-ready ({R} chars), bootstrap-poll ({P} chars), " +
+                "dashboard-server ({DPy} chars), dashboard ({DH}+{DC}+{DJ} chars), wg-enroll ({W} chars)",
+                healthCheck.Length, notifyReady.Length, bootstrapPoll.Length,
+                dashboardPy.Length, dashboardHtml.Length, dashboardCss.Length, dashboardJs.Length,
+                wgMeshEnroll.Length);
 
             return result;
         }

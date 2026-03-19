@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeCloud Block Store — __VM_NAME__</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+    <div class="dashboard-container">
+
+        <!-- Header -->
+        <header class="dashboard-header">
+            <div class="header-left">
+                <h1 class="dashboard-title">
+                    <span class="icon">&#x26d3;</span>
+                    Block Store Node
+                </h1>
+                <div class="relay-metadata">
+                    <div class="metadata-item">
+                        <span class="label">VM:</span>
+                        <span class="value">__VM_NAME__</span>
+                    </div>
+                    <div class="metadata-item">
+                        <span class="label">Region:</span>
+                        <span class="value">__NODE_REGION__</span>
+                    </div>
+                    <div class="metadata-item">
+                        <span class="label">Node:</span>
+                        <span class="value" id="node-id-display">__NODE_ID__</span>
+                    </div>
+                    <div class="metadata-item">
+                        <span class="label">Listen:</span>
+                        <span class="value">__BLOCKSTORE_ADVERTISE_IP__:__BLOCKSTORE_LISTEN_PORT__</span>
+                    </div>
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="status-indicator">
+                    <div class="status-dot" id="overall-status"></div>
+                    <span class="status-text" id="status-text">Checking...</span>
+                </div>
+                <div class="last-update">Updated: <span id="last-update">—</span></div>
+            </div>
+        </header>
+
+        <!-- Alert Banner -->
+        <div class="alert-banner" id="alert-banner" style="display: none;">
+            <span class="alert-icon">&#x26a0;</span>
+            <span class="alert-message" id="alert-message"></span>
+            <button class="alert-close" onclick="closeAlert()">&#x2715;</button>
+        </div>
+
+        <!-- Row 1: Storage + Node Identity -->
+        <div class="content-grid">
+
+            <!-- Storage Utilization -->
+            <section class="card">
+                <div class="card-header">
+                    <h2 class="card-title">&#x1f4be; Storage</h2>
+                    <span class="card-badge" id="usage-badge">—</span>
+                </div>
+                <div class="card-body">
+                    <!-- Progress bar -->
+                    <div class="storage-bar-wrap">
+                        <div class="storage-bar-track">
+                            <div class="storage-bar-fill" id="storage-bar"></div>
+                        </div>
+                        <div class="storage-bar-labels">
+                            <span id="used-label">—</span>
+                            <span id="capacity-label">—</span>
+                        </div>
+                    </div>
+
+                    <div class="metrics-grid" style="margin-top: 1.5rem;">
+                        <div class="metric-item">
+                            <div class="metric-label">Blocks Stored</div>
+                            <div class="metric-value" id="block-count">—</div>
+                        </div>
+                        <div class="metric-item">
+                            <div class="metric-label">Manifests</div>
+                            <div class="metric-value" id="manifest-count">—</div>
+                        </div>
+                        <div class="metric-item">
+                            <div class="metric-label">Bitswap &#x2b06;</div>
+                            <div class="metric-value" id="bitswap-sent">—</div>
+                        </div>
+                        <div class="metric-item">
+                            <div class="metric-label">Bitswap &#x2b07;</div>
+                            <div class="metric-value" id="bitswap-recv">—</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Node Identity -->
+            <section class="card">
+                <div class="card-header">
+                    <h2 class="card-title">&#x1f9be; Node Identity</h2>
+                </div>
+                <div class="card-body">
+                    <div class="wireguard-info">
+                        <div class="info-row">
+                            <span class="info-label">Peer ID</span>
+                            <span class="info-value copy-target" id="peer-id"
+                                title="Click to copy" onclick="copyText(this)">—</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">VM ID</span>
+                            <span class="info-value" id="vm-id-display">__VM_ID__</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Advertise IP</span>
+                            <span class="info-value">__BLOCKSTORE_ADVERTISE_IP__</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">API Port</span>
+                            <span class="info-value">__BLOCKSTORE_API_PORT__</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Connected Peers</span>
+                            <span class="info-value" id="connected-peers">—</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">GossipSub</span>
+                            <span class="info-value">
+                                <span class="resource-badge badge-vm">decloud/blockstore/new-blocks</span>
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- Row 2: Stored Resources (full width) -->
+        <section class="card" style="margin-top: 1.5rem;">
+            <div class="card-header">
+                <h2 class="card-title">&#x1f4e6; Stored Resources</h2>
+                <span class="card-badge" id="resource-count-badge">0</span>
+            </div>
+            <div class="card-body" style="padding: 0;">
+                <div id="resources-table-wrap">
+                    <p class="empty-state-inline">Loading resources...</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Row 3: Connected Peers -->
+        <section class="card" style="margin-top: 1.5rem;">
+            <div class="card-header">
+                <h2 class="card-title">&#x1f4e1; Connected Peers</h2>
+                <span class="card-badge" id="peer-count-badge">0</span>
+            </div>
+            <div class="card-body">
+                <div id="peers-list">
+                    <p style="text-align:center; color:var(--text-muted); padding:2rem;">
+                        Loading...
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="dashboard-footer">
+            <div class="footer-content">
+                <span class="footer-text">DeCloud Block Store v1.0</span>
+                <span class="footer-separator">&#x2022;</span>
+                <span class="footer-text" id="footer-peers">0 peers</span>
+                <span class="footer-separator">&#x2022;</span>
+                <span class="footer-text">Region: __NODE_REGION__</span>
+                <span class="footer-separator">&#x2022;</span>
+                <span class="footer-text" id="footer-storage">Storage: —</span>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loading-overlay">
+        <div class="loading-spinner"></div>
+        <div class="loading-text">Loading Block Store dashboard...</div>
+    </div>
+
+    <script src="/static/dashboard.js"></script>
+</body>
+</html>

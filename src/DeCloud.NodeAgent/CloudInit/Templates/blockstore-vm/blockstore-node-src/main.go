@@ -1,7 +1,7 @@
 // DeCloud Block Store Node
 //
 // A libp2p node providing content-addressed distributed storage
-// for VM disk overlay replication (lazysync).
+// for VM disk overlay replication (lazysync) and AI model shard distribution.
 //
 // Storage:  FlatFS (IPFS-compatible, content-addressed blocks)
 // Exchange: Bitswap (block fetching from network peers)
@@ -56,25 +56,70 @@ import (
 // ═══════════════════════════════════════════════════════════════════
 
 const (
-	GossipSubTopic      = "decloud/blockstore/new-blocks"
-	IdentityKeyFile     = "identity.key"
-	PeerIDFile          = "peer-id"
-	BlocksSubdir        = "blocks"
-	StorageDir          = "/var/lib/decloud-blockstore"
+	GossipSubTopic  = "decloud/blockstore/new-blocks"
+	IdentityKeyFile = "identity.key"
+	PeerIDFile      = "peer-id"
+	BlocksSubdir    = "blocks"
+	DagsSubdir      = "dags" // ResourceManifest JSON files
+	StorageDir      = "/var/lib/decloud-blockstore"
 
 	// GC thresholds
 	GCTriggerPercent = 85
 	GCHardLimit      = 95
 
-	// XOR proximity thresholds (as fraction of keyspace, capacity-based)
-	// Lower capacity → wider pull radius
-	XORThresholdFull   = 0.05  // >75% full: pull top 5% closest
-	XORThresholdMedium = 0.10  // 50-75%:    pull top 10% closest
-	XORThresholdLight  = 0.20  // <50%:      pull top 20% closest
+	// XOR proximity thresholds (fraction of keyspace, capacity-adaptive)
+	XORThresholdFull   = 0.05
+	XORThresholdMedium = 0.10
+	XORThresholdLight  = 0.20
 
 	// Bitswap fetch timeout
 	BitswapTimeout = 30 * time.Second
 )
+
+// ═══════════════════════════════════════════════════════════════════
+// Resource types — what kind of data a manifest describes
+// ═══════════════════════════════════════════════════════════════════
+
+type ResourceType string
+
+const (
+	ResourceTypeVMOverlay     ResourceType = "VMOverlay"     // VM disk overlay chunks (lazysync)
+	ResourceTypeModelShard    ResourceType = "ModelShard"    // AI model weight shard
+	ResourceTypeLoRAAdapter   ResourceType = "LoRAAdapter"   // LoRA fine-tune adapter weights
+	ResourceTypeImageTemplate ResourceType = "ImageTemplate" // Base OS image template
+	ResourceTypeUnknown       ResourceType = "Unknown"
+)
+
+// ShardMetadata describes an AI model shard for distributed inference routing.
+// When a large model (e.g. Llama-3 70B) is split into shards, each shard covers
+// a range of transformer layers. Inference VMs use this to build a pipeline:
+// shard 0 (layers 0-15) → shard 1 (layers 16-31) → ... → output.
+type ShardMetadata struct {
+	ModelName      string `json:"modelName"`
+	ModelVersion   string `json:"modelVersion"`
+	ShardIndex     int    `json:"shardIndex"`
+	TotalShards    int    `json:"totalShards"`
+	LayerStart     int    `json:"layerStart"`
+	LayerEnd       int    `json:"layerEnd"`
+	ParameterCount int64  `json:"parameterCount"`
+	QuantBits      int    `json:"quantBits"` // 4, 8, 16, 32
+}
+
+// ResourceManifest tracks a stored resource: its type, owner, chunk CIDs,
+// and optional AI model shard metadata.
+// Persisted to /var/lib/decloud-blockstore/dags/{rootCid}.json.
+type ResourceManifest struct {
+	RootCid       string        `json:"rootCid"`
+	ResourceType  ResourceType  `json:"resourceType"`
+	ResourceID    string        `json:"resourceId"`    // vmId, model name, template slug
+	ResourceOwner string        `json:"resourceOwner"` // wallet address
+	Version       int           `json:"version"`
+	TotalBytes    int64         `json:"totalBytes"`
+	ChunkCIDs     []string      `json:"chunkCids"`
+	ShardMeta     *ShardMetadata `json:"shardMeta,omitempty"`
+	RegisteredAt  time.Time     `json:"registeredAt"`
+	UpdatedAt     time.Time     `json:"updatedAt"`
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // Config
@@ -93,7 +138,7 @@ type Config struct {
 }
 
 func parseConfig() Config {
-	cfg := Config{
+	return Config{
 		ListenPort:      envInt("BLOCKSTORE_LISTEN_PORT", 5001),
 		APIPort:         envInt("BLOCKSTORE_API_PORT", 5090),
 		AdvertiseIP:     envStr("BLOCKSTORE_ADVERTISE_IP", ""),
@@ -104,7 +149,6 @@ func parseConfig() Config {
 		OrchestratorURL: envStr("ORCHESTRATOR_URL", ""),
 		BootstrapPeers:  splitPeers(envStr("BLOCKSTORE_BOOTSTRAP_PEERS", "")),
 	}
-	return cfg
 }
 
 func envStr(key, def string) string {
@@ -141,11 +185,8 @@ func splitPeers(s string) []string {
 // Identity
 // ═══════════════════════════════════════════════════════════════════
 
-// loadOrCreateIdentity loads the persistent Ed25519 key from disk,
-// creating it on first boot. Identity survives VM restarts.
 func loadOrCreateIdentity(dir string) (crypto.PrivKey, error) {
 	keyPath := filepath.Join(dir, IdentityKeyFile)
-
 	if data, err := os.ReadFile(keyPath); err == nil {
 		priv, err := crypto.UnmarshalPrivateKey(data)
 		if err != nil {
@@ -155,21 +196,17 @@ func loadOrCreateIdentity(dir string) (crypto.PrivKey, error) {
 		return priv, nil
 	}
 
-	// First boot: generate new Ed25519 key
 	priv, _, err := crypto.GenerateEd25519Key(nil)
 	if err != nil {
 		return nil, fmt.Errorf("generate identity key: %w", err)
 	}
-
 	data, err := crypto.MarshalPrivateKey(priv)
 	if err != nil {
 		return nil, fmt.Errorf("marshal identity key: %w", err)
 	}
-
 	if err := os.WriteFile(keyPath, data, 0600); err != nil {
 		return nil, fmt.Errorf("write identity key: %w", err)
 	}
-
 	log.Printf("Generated new Ed25519 identity, saved to %s", keyPath)
 	return priv, nil
 }
@@ -179,17 +216,21 @@ func loadOrCreateIdentity(dir string) (crypto.PrivKey, error) {
 // ═══════════════════════════════════════════════════════════════════
 
 type BlockNode struct {
-	cfg     Config
-	host    host.Host
-	dht     *dht.IpfsDHT
-	pubsub  *pubsub.PubSub
-	bstore  blockstore.Blockstore
-	bsExch  *bitswap.Bitswap
+	cfg    Config
+	host   host.Host
+	dht    *dht.IpfsDHT
+	pubsub *pubsub.PubSub
+	bstore blockstore.Blockstore
+	bsExch *bitswap.Bitswap
 
-	// LRU tracking: CID string → last access time
+	// LRU tracking
 	accessMu    sync.Mutex
 	accessTimes map[string]time.Time
 	blockSizes  map[string]int64
+
+	// Manifest registry
+	manifestsMu sync.RWMutex
+	manifests   map[string]*ResourceManifest // rootCid → manifest
 
 	// Counters
 	mu              sync.RWMutex
@@ -202,22 +243,18 @@ type BlockNode struct {
 // ═══════════════════════════════════════════════════════════════════
 
 func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
-	if err := os.MkdirAll(StorageDir, 0755); err != nil {
-		return nil, fmt.Errorf("create storage dir: %w", err)
+	for _, sub := range []string{"", BlocksSubdir, DagsSubdir} {
+		if err := os.MkdirAll(filepath.Join(StorageDir, sub), 0755); err != nil {
+			return nil, fmt.Errorf("create dir %s: %w", sub, err)
+		}
 	}
 
-	// ── Identity ─────────────────────────────────────────────────
 	priv, err := loadOrCreateIdentity(StorageDir)
 	if err != nil {
 		return nil, fmt.Errorf("identity: %w", err)
 	}
 
-	// ── FlatFS blockstore ─────────────────────────────────────────
 	blocksDir := filepath.Join(StorageDir, BlocksSubdir)
-	if err := os.MkdirAll(blocksDir, 0755); err != nil {
-		return nil, fmt.Errorf("create blocks dir: %w", err)
-	}
-
 	shardFn, err := flatfs.ParseShardFunc("/repo/flatfs/shard/v1/next-to-last/2")
 	if err != nil {
 		return nil, fmt.Errorf("shard func: %w", err)
@@ -226,11 +263,8 @@ func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open flatfs: %w", err)
 	}
+	bs := blockstore.NewIdStore(blockstore.NewBlockstore(datastore.Batching(fds)))
 
-	bs := blockstore.NewBlockstore(datastore.Batching(fds))
-	bs = blockstore.NewIdStore(bs) // handles inline (identity) CIDs
-
-	// ── libp2p host ───────────────────────────────────────────────
 	listenAddr := fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", cfg.ListenPort)
 	h, err := libp2p.New(
 		libp2p.ListenAddrStrings(listenAddr),
@@ -241,15 +275,12 @@ func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
 	}
 
 	log.Printf("libp2p peer ID: %s", h.ID())
-	log.Printf("Listening on: %s/p2p/%s", listenAddr, h.ID())
 
-	// Write peer ID to file (for bootstrap-poll.sh and notify-ready.sh)
-	peerIDPath := filepath.Join(StorageDir, PeerIDFile)
-	if err := os.WriteFile(peerIDPath, []byte(h.ID().String()), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(StorageDir, PeerIDFile),
+		[]byte(h.ID().String()), 0644); err != nil {
 		log.Printf("Warning: could not write peer-id file: %v", err)
 	}
 
-	// ── Kademlia DHT client ───────────────────────────────────────
 	kadDHT, err := dht.New(ctx, h,
 		dht.Mode(dht.ModeClient),
 		dht.ProtocolPrefix("/decloud"),
@@ -257,22 +288,19 @@ func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create DHT: %w", err)
 	}
-
 	if err := kadDHT.Bootstrap(ctx); err != nil {
 		log.Printf("Warning: DHT bootstrap: %v", err)
 	}
 
-	// ── Bitswap exchange ──────────────────────────────────────────
 	bsNet := bsnetwork.NewFromIpfsHost(h, kadDHT)
 	bsExch := bitswap.New(ctx, bsNet, bs)
 
-	// ── GossipSub ─────────────────────────────────────────────────
 	ps, err := pubsub.NewGossipSub(ctx, h)
 	if err != nil {
 		return nil, fmt.Errorf("create pubsub: %w", err)
 	}
 
-	node := &BlockNode{
+	return &BlockNode{
 		cfg:         cfg,
 		host:        h,
 		dht:         kadDHT,
@@ -281,9 +309,8 @@ func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
 		bsExch:      bsExch,
 		accessTimes: make(map[string]time.Time),
 		blockSizes:  make(map[string]int64),
-	}
-
-	return node, nil
+		manifests:   make(map[string]*ResourceManifest),
+	}, nil
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -295,9 +322,7 @@ func (n *BlockNode) connectBootstrapPeers(ctx context.Context) {
 		log.Println("No bootstrap peers configured — running as genesis node")
 		return
 	}
-
 	log.Printf("Connecting to %d bootstrap peer(s)...", len(n.cfg.BootstrapPeers))
-
 	for _, addrStr := range n.cfg.BootstrapPeers {
 		maddr, err := multiaddr.NewMultiaddr(addrStr)
 		if err != nil {
@@ -309,7 +334,6 @@ func (n *BlockNode) connectBootstrapPeers(ctx context.Context) {
 			log.Printf("Parse bootstrap peer info %q: %v", addrStr, err)
 			continue
 		}
-
 		connCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		if err := n.host.Connect(connCtx, *pi); err != nil {
 			log.Printf("Connect to bootstrap peer %s: %v", pi.ID, err)
@@ -318,6 +342,46 @@ func (n *BlockNode) connectBootstrapPeers(ctx context.Context) {
 		}
 		cancel()
 	}
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Manifest registry
+// ═══════════════════════════════════════════════════════════════════
+
+func (n *BlockNode) loadExistingManifests(ctx context.Context) {
+	dagsDir := filepath.Join(StorageDir, DagsSubdir)
+	entries, err := os.ReadDir(dagsDir)
+	if err != nil {
+		return
+	}
+	count := 0
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dagsDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var m ResourceManifest
+		if err := json.Unmarshal(data, &m); err != nil {
+			continue
+		}
+		n.manifests[m.RootCid] = &m
+		count++
+	}
+	if count > 0 {
+		log.Printf("Loaded %d manifests from disk", count)
+	}
+}
+
+func (n *BlockNode) saveManifest(m *ResourceManifest) error {
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(StorageDir, DagsSubdir, m.RootCid+".json")
+	return os.WriteFile(path, data, 0644)
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -335,12 +399,10 @@ func (n *BlockNode) startGossipSubSubscription(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("join gossipsub topic: %w", err)
 	}
-
 	sub, err := topic.Subscribe()
 	if err != nil {
 		return fmt.Errorf("subscribe to topic: %w", err)
 	}
-
 	go func() {
 		log.Printf("Subscribed to GossipSub topic: %s", GossipSubTopic)
 		for {
@@ -352,72 +414,50 @@ func (n *BlockNode) startGossipSubSubscription(ctx context.Context) error {
 				log.Printf("GossipSub receive error: %v", err)
 				continue
 			}
-
-			// Don't process our own messages
 			if msg.ReceivedFrom == n.host.ID() {
 				continue
 			}
-
 			var ann NewBlockAnnouncement
 			if err := json.Unmarshal(msg.Data, &ann); err != nil {
 				continue
 			}
-
 			go n.handleNewBlockAnnouncement(ctx, ann)
 		}
 	}()
-
 	return nil
 }
 
-// handleNewBlockAnnouncement decides whether to pull an announced block
-// based on XOR proximity and current capacity utilization.
 func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlockAnnouncement) {
 	c, err := cid.Decode(ann.CID)
 	if err != nil {
 		return
 	}
-
-	// Skip if we already have it
 	has, _ := n.bstore.Has(ctx, c)
 	if has {
 		return
 	}
-
-	// Check capacity — don't pull if at hard limit
 	usedBytes, _ := n.usedBytes(ctx)
-	usagePercent := float64(usedBytes) / float64(n.cfg.StorageBytes) * 100
-	if usagePercent >= GCHardLimit {
+	usagePct := float64(usedBytes) / float64(n.cfg.StorageBytes) * 100
+	if usagePct >= GCHardLimit {
 		return
 	}
-
-	// Check XOR proximity
-	if !n.isWithinXORThreshold(c, usagePercent) {
+	if !n.isWithinXORThreshold(c, usagePct) {
 		return
 	}
-
-	// Pull via bitswap
 	pullCtx, cancel := context.WithTimeout(ctx, BitswapTimeout)
 	defer cancel()
-
 	blk, err := n.bsExch.GetBlock(pullCtx, c)
 	if err != nil {
 		return
 	}
-
 	if err := n.bstore.Put(ctx, blk); err != nil {
 		return
 	}
-
 	n.touchBlock(c.String(), int64(len(blk.RawData())))
-
 	n.mu.Lock()
 	n.bitswapReceived++
 	n.mu.Unlock()
-
-	// Announce we now hold this block to the DHT
 	_ = n.dht.Provide(ctx, c, true)
-
 	log.Printf("Pulled block %s (%d bytes) via GossipSub + bitswap", ann.CID[:12], len(blk.RawData()))
 }
 
@@ -425,20 +465,13 @@ func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlock
 // XOR proximity
 // ═══════════════════════════════════════════════════════════════════
 
-// isWithinXORThreshold returns true if this node is "close enough"
-// to the given CID in Kademlia XOR space to warrant pulling the block.
-// Threshold shrinks as capacity fills up (adaptive pull radius).
-func (n *BlockNode) isWithinXORThreshold(c cid.Cid, usagePercent float64) bool {
-	// Compute XOR distance between our peer ID hash and the CID
+func (n *BlockNode) isWithinXORThreshold(c cid.Cid, usagePct float64) bool {
 	peerHash := sha256.Sum256([]byte(n.host.ID()))
 	cidHash := sha256.Sum256(c.Bytes())
-
 	xorBytes := make([]byte, 32)
 	for i := range xorBytes {
 		xorBytes[i] = peerHash[i] ^ cidHash[i]
 	}
-
-	// Convert XOR distance to a fraction of the 256-bit keyspace
 	xorInt := new(big.Int).SetBytes(xorBytes)
 	maxInt := new(big.Int).Lsh(big.NewInt(1), 256)
 	xorFraction, _ := new(big.Float).Quo(
@@ -446,17 +479,15 @@ func (n *BlockNode) isWithinXORThreshold(c cid.Cid, usagePercent float64) bool {
 		new(big.Float).SetInt(maxInt),
 	).Float64()
 
-	// Adaptive threshold based on capacity
 	var threshold float64
 	switch {
-	case usagePercent >= 75:
+	case usagePct >= 75:
 		threshold = XORThresholdFull
-	case usagePercent >= 50:
+	case usagePct >= 50:
 		threshold = XORThresholdMedium
 	default:
 		threshold = XORThresholdLight
 	}
-
 	return xorFraction <= threshold
 }
 
@@ -476,29 +507,24 @@ func (n *BlockNode) touchBlock(cidStr string, size int64) {
 func (n *BlockNode) startGCLoop(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			usedBytes, _ := n.usedBytes(ctx)
-			usagePercent := float64(usedBytes) / float64(n.cfg.StorageBytes) * 100
-
-			if usagePercent >= GCTriggerPercent {
+			if float64(usedBytes)/float64(n.cfg.StorageBytes)*100 >= GCTriggerPercent {
 				freed, err := n.runGC(ctx)
 				if err != nil {
 					log.Printf("GC error: %v", err)
 				} else if freed > 0 {
-					log.Printf("GC freed %d bytes (was %.1f%% full)", freed, usagePercent)
+					log.Printf("GC freed %d bytes", freed)
 				}
 			}
 		}
 	}
 }
 
-// runGC evicts least-recently-used blocks until usage drops below GCTriggerPercent.
-// Returns the number of bytes freed.
 func (n *BlockNode) runGC(ctx context.Context) (int64, error) {
 	n.accessMu.Lock()
 	type entry struct {
@@ -512,7 +538,6 @@ func (n *BlockNode) runGC(ctx context.Context) (int64, error) {
 	}
 	n.accessMu.Unlock()
 
-	// Sort by last access time (oldest first = evict first)
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].lastAccess.Before(entries[j].lastAccess)
 	})
@@ -523,26 +548,19 @@ func (n *BlockNode) runGC(ctx context.Context) (int64, error) {
 		if float64(usedBytes)/float64(n.cfg.StorageBytes)*100 < GCTriggerPercent {
 			break
 		}
-
 		c, err := cid.Decode(e.cid)
 		if err != nil {
 			continue
 		}
-
 		if err := n.bstore.DeleteBlock(ctx, c); err != nil {
 			continue
 		}
-
 		freed += e.size
 		n.accessMu.Lock()
 		delete(n.accessTimes, e.cid)
 		delete(n.blockSizes, e.cid)
 		n.accessMu.Unlock()
-
-		// Withdraw provider record from DHT
-		// (provider record TTL naturally expires when we stop re-announcing)
 	}
-
 	return freed, nil
 }
 
@@ -553,7 +571,6 @@ func (n *BlockNode) runGC(ctx context.Context) (int64, error) {
 func (n *BlockNode) usedBytes(ctx context.Context) (int64, error) {
 	n.accessMu.Lock()
 	defer n.accessMu.Unlock()
-
 	var total int64
 	for _, size := range n.blockSizes {
 		total += size
@@ -579,13 +596,14 @@ func (n *BlockNode) blockCount(ctx context.Context) (int, error) {
 
 func (n *BlockNode) startHTTPServer(ctx context.Context) {
 	mux := http.NewServeMux()
-
 	mux.HandleFunc("/health", n.handleHealth)
 	mux.HandleFunc("/blocks/", n.handleBlock)
 	mux.HandleFunc("/blocks", n.handleBlocks)
 	mux.HandleFunc("/stats", n.handleStats)
 	mux.HandleFunc("/gc", n.handleGC)
 	mux.HandleFunc("/connect", n.handleConnect)
+	mux.HandleFunc("/manifests/", n.handleManifestByID)
+	mux.HandleFunc("/manifests", n.handleManifests)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", n.cfg.APIPort)
 	srv := &http.Server{
@@ -594,14 +612,12 @@ func (n *BlockNode) startHTTPServer(ctx context.Context) {
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 60 * time.Second,
 	}
-
 	go func() {
 		log.Printf("HTTP API listening on %s", addr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("HTTP server error: %v", err)
 		}
 	}()
-
 	go func() {
 		<-ctx.Done()
 		_ = srv.Shutdown(context.Background())
@@ -612,47 +628,47 @@ func (n *BlockNode) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	usedBytes, _ := n.usedBytes(ctx)
 	count, _ := n.blockCount(ctx)
-	usagePct := float64(usedBytes) / float64(n.cfg.StorageBytes) * 100
-
 	n.mu.RLock()
 	sent := n.bitswapSent
 	recv := n.bitswapReceived
 	n.mu.RUnlock()
 
 	peerID := n.host.ID().String()
-
-	// Read peer ID file (most reliable source)
 	if data, err := os.ReadFile(filepath.Join(StorageDir, PeerIDFile)); err == nil {
 		peerID = strings.TrimSpace(string(data))
 	}
 
+	n.manifestsMu.RLock()
+	manifestCount := len(n.manifests)
+	n.manifestsMu.RUnlock()
+
 	json.NewEncoder(w).Encode(map[string]any{
-		"status":           "ok",
-		"peerId":           peerID,
-		"connectedPeers":   len(n.host.Network().Peers()),
-		"capacityBytes":    n.cfg.StorageBytes,
-		"usedBytes":        usedBytes,
-		"usagePercent":     usagePct,
-		"blockCount":       count,
-		"bitswapSent":      sent,
-		"bitswapReceived":  recv,
+		"status":          "ok",
+		"peerId":          peerID,
+		"connectedPeers":  len(n.host.Network().Peers()),
+		"capacityBytes":   n.cfg.StorageBytes,
+		"usedBytes":       usedBytes,
+		"usagePercent":    float64(usedBytes) / float64(n.cfg.StorageBytes) * 100,
+		"blockCount":      count,
+		"manifestCount":   manifestCount,
+		"bitswapSent":     sent,
+		"bitswapReceived": recv,
+		"nodeId":          n.cfg.NodeID,
+		"vmId":            n.cfg.VMID,
 	})
 }
 
-// handleBlock routes GET /blocks/{cid} and DELETE /blocks/{cid}
 func (n *BlockNode) handleBlock(w http.ResponseWriter, r *http.Request) {
 	cidStr := strings.TrimPrefix(r.URL.Path, "/blocks/")
 	if cidStr == "" {
 		http.Error(w, "missing CID", http.StatusBadRequest)
 		return
 	}
-
 	c, err := cid.Decode(cidStr)
 	if err != nil {
 		http.Error(w, "invalid CID", http.StatusBadRequest)
 		return
 	}
-
 	switch r.Method {
 	case http.MethodGet:
 		n.getBlock(w, r, c)
@@ -665,21 +681,15 @@ func (n *BlockNode) handleBlock(w http.ResponseWriter, r *http.Request) {
 
 func (n *BlockNode) getBlock(w http.ResponseWriter, r *http.Request, c cid.Cid) {
 	ctx := r.Context()
-
-	// Check local store first
 	blk, err := n.bstore.Get(ctx, c)
 	if err != nil {
-		// Try to fetch from network via bitswap
 		fetchCtx, cancel := context.WithTimeout(ctx, BitswapTimeout)
 		defer cancel()
-
 		blk, err = n.bsExch.GetBlock(fetchCtx, c)
 		if err != nil {
 			http.Error(w, "block not found", http.StatusNotFound)
 			return
 		}
-
-		// Store locally after fetch
 		_ = n.bstore.Put(ctx, blk)
 		n.touchBlock(c.String(), int64(len(blk.RawData())))
 		n.mu.Lock()
@@ -688,7 +698,6 @@ func (n *BlockNode) getBlock(w http.ResponseWriter, r *http.Request, c cid.Cid) 
 	} else {
 		n.touchBlock(c.String(), int64(len(blk.RawData())))
 	}
-
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Block-CID", c.String())
 	w.Write(blk.RawData())
@@ -707,57 +716,44 @@ func (n *BlockNode) deleteBlock(w http.ResponseWriter, r *http.Request, c cid.Ci
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleBlocks routes POST /blocks (store raw bytes, return CID)
 func (n *BlockNode) handleBlocks(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
 	ctx := r.Context()
-
-	// Check capacity hard limit
 	usedBytes, _ := n.usedBytes(ctx)
 	if float64(usedBytes)/float64(n.cfg.StorageBytes)*100 >= GCHardLimit {
 		http.Error(w, "storage full", http.StatusInsufficientStorage)
 		return
 	}
-
-	data, err := io.ReadAll(io.LimitReader(r.Body, 64*1024*1024)) // 64 MB max
+	data, err := io.ReadAll(io.LimitReader(r.Body, 64*1024*1024))
 	if err != nil {
 		http.Error(w, "read error", http.StatusBadRequest)
 		return
 	}
-
-	// CIDv1 with raw codec and SHA2-256
 	mhash, err := multihash.Sum(data, multihash.SHA2_256, -1)
 	if err != nil {
 		http.Error(w, "hash error", http.StatusInternalServerError)
 		return
 	}
 	c := cid.NewCidV1(cid.Raw, mhash)
-
 	blk, err := blocks.NewBlockWithCid(data, c)
 	if err != nil {
 		http.Error(w, "block error", http.StatusInternalServerError)
 		return
 	}
-
 	if err := n.bstore.Put(ctx, blk); err != nil {
 		http.Error(w, "store error", http.StatusInternalServerError)
 		return
 	}
-
 	n.touchBlock(c.String(), int64(len(data)))
 
-	// Announce to DHT that we hold this block
 	go func() {
 		announceCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = n.dht.Provide(announceCtx, c, true)
 	}()
-
-	// Publish to GossipSub so nearby nodes can pull
 	go n.publishNewBlock(c, int64(len(data)))
 
 	json.NewEncoder(w).Encode(map[string]string{"cid": c.String()})
@@ -771,7 +767,6 @@ func (n *BlockNode) handleStats(w http.ResponseWriter, r *http.Request) {
 	sent := n.bitswapSent
 	recv := n.bitswapReceived
 	n.mu.RUnlock()
-
 	json.NewEncoder(w).Encode(map[string]any{
 		"capacityBytes":   n.cfg.StorageBytes,
 		"usedBytes":       usedBytes,
@@ -805,7 +800,6 @@ func (n *BlockNode) handleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
 	var req struct {
 		Peers []string `json:"peers"`
 	}
@@ -813,10 +807,8 @@ func (n *BlockNode) handleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-
 	results := make([]map[string]any, 0, len(req.Peers))
 	connected := 0
-
 	for _, addrStr := range req.Peers {
 		maddr, err := multiaddr.NewMultiaddr(addrStr)
 		if err != nil {
@@ -838,12 +830,95 @@ func (n *BlockNode) handleConnect(w http.ResponseWriter, r *http.Request) {
 			connected++
 		}
 	}
-
 	json.NewEncoder(w).Encode(map[string]any{
 		"results":   results,
 		"connected": connected,
 		"total":     len(req.Peers),
 	})
+}
+
+// ── Manifest endpoints ────────────────────────────────────────────
+
+// handleManifests: GET returns all manifests, POST registers a new one.
+func (n *BlockNode) handleManifests(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		n.manifestsMu.RLock()
+		list := make([]*ResourceManifest, 0, len(n.manifests))
+		for _, m := range n.manifests {
+			list = append(list, m)
+		}
+		n.manifestsMu.RUnlock()
+
+		// Sort by UpdatedAt descending (most recent first)
+		sort.Slice(list, func(i, j int) bool {
+			return list[i].UpdatedAt.After(list[j].UpdatedAt)
+		})
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"manifests": list,
+			"count":     len(list),
+		})
+
+	case http.MethodPost:
+		var m ResourceManifest
+		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if m.RootCid == "" {
+			http.Error(w, "rootCid required", http.StatusBadRequest)
+			return
+		}
+		if m.ResourceType == "" {
+			m.ResourceType = ResourceTypeUnknown
+		}
+		now := time.Now().UTC()
+		n.manifestsMu.Lock()
+		if existing, ok := n.manifests[m.RootCid]; ok {
+			// Update existing — preserve RegisteredAt
+			m.RegisteredAt = existing.RegisteredAt
+		} else {
+			m.RegisteredAt = now
+		}
+		m.UpdatedAt = now
+		n.manifests[m.RootCid] = &m
+		n.manifestsMu.Unlock()
+
+		if err := n.saveManifest(&m); err != nil {
+			log.Printf("Warning: failed to persist manifest %s: %v", m.RootCid[:12], err)
+		}
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"rootCid": m.RootCid,
+			"version": m.Version,
+		})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleManifestByID: GET /manifests/{rootCid}
+func (n *BlockNode) handleManifestByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rootCid := strings.TrimPrefix(r.URL.Path, "/manifests/")
+	if rootCid == "" {
+		http.Error(w, "rootCid required", http.StatusBadRequest)
+		return
+	}
+	n.manifestsMu.RLock()
+	m, ok := n.manifests[rootCid]
+	n.manifestsMu.RUnlock()
+	if !ok {
+		http.Error(w, "manifest not found", http.StatusNotFound)
+		return
+	}
+	json.NewEncoder(w).Encode(m)
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -855,36 +930,18 @@ func (n *BlockNode) publishNewBlock(c cid.Cid, size int64) {
 	if err != nil {
 		return
 	}
-
-	ann := NewBlockAnnouncement{
-		CID:          c.String(),
-		Size:         size,
-		SourceNodeID: n.cfg.NodeID,
-	}
+	ann := NewBlockAnnouncement{CID: c.String(), Size: size, SourceNodeID: n.cfg.NodeID}
 	data, err := json.Marshal(ann)
 	if err != nil {
 		return
 	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = topic.Publish(ctx, data)
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Helper: size hint from CID (approximate, for LRU bootstrap)
-// ═══════════════════════════════════════════════════════════════════
-
-func cidSizeHint(c cid.Cid) int64 {
-	// Encode CID length as a simple size hint for LRU bookkeeping
-	// when actual size isn't known. Replaced by real size on first access.
-	buf := new(bytes.Buffer)
-	_ = binary.Write(buf, binary.BigEndian, int64(len(c.Bytes())))
-	return 1024 // 1 KB default hint
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// Bootstrap LRU tracking from existing blocks
+// Bootstrap LRU from existing blocks
 // ═══════════════════════════════════════════════════════════════════
 
 func (n *BlockNode) loadExistingAccessTimes(ctx context.Context) {
@@ -897,8 +954,10 @@ func (n *BlockNode) loadExistingAccessTimes(ctx context.Context) {
 	for c := range ch {
 		cidStr := c.String()
 		if _, exists := n.accessTimes[cidStr]; !exists {
-			n.accessTimes[cidStr] = time.Now() // Default: treat as recently accessed
-			n.blockSizes[cidStr] = cidSizeHint(c)
+			n.accessTimes[cidStr] = time.Now()
+			buf := new(bytes.Buffer)
+			_ = binary.Write(buf, binary.BigEndian, int64(len(c.Bytes())))
+			n.blockSizes[cidStr] = 1024
 		}
 	}
 }
@@ -912,49 +971,39 @@ func main() {
 	log.Println("DeCloud Block Store Node starting...")
 
 	cfg := parseConfig()
-	log.Printf("Config: listenPort=%d apiPort=%d storageBytes=%d advertiseIP=%s nodeID=%s vmID=%s",
-		cfg.ListenPort, cfg.APIPort, cfg.StorageBytes, cfg.AdvertiseIP, cfg.NodeID, cfg.VMID)
+	log.Printf("Config: listenPort=%d apiPort=%d storageBytes=%d nodeID=%s vmID=%s",
+		cfg.ListenPort, cfg.APIPort, cfg.StorageBytes, cfg.NodeID, cfg.VMID)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Setup
 	node, err := setup(ctx, cfg)
 	if err != nil {
 		log.Fatalf("Setup failed: %v", err)
 	}
 	defer node.host.Close()
 
-	// Load existing block access times (for LRU on restart)
 	node.loadExistingAccessTimes(ctx)
-
-	// Connect bootstrap peers
+	node.loadExistingManifests(ctx)
 	node.connectBootstrapPeers(ctx)
 
-	// Start GossipSub subscription
 	if err := node.startGossipSubSubscription(ctx); err != nil {
 		log.Printf("Warning: GossipSub subscription failed: %v", err)
 	}
 
-	// Start HTTP API
 	node.startHTTPServer(ctx)
-
-	// Start GC loop
 	go node.startGCLoop(ctx)
 
-	// Log node addresses
 	for _, addr := range node.host.Addrs() {
 		log.Printf("Listening: %s/p2p/%s", addr, node.host.ID())
 	}
-
 	log.Printf("Block store node ready — peer ID: %s", node.host.ID())
 
-	// Wait for shutdown signal
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
 	log.Println("Shutting down block store node...")
 	cancel()
-	time.Sleep(500 * time.Millisecond) // Allow graceful close
+	time.Sleep(500 * time.Millisecond)
 }
