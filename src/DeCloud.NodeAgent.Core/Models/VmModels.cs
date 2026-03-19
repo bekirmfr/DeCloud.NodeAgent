@@ -158,7 +158,8 @@ public enum VmType
     Gpu,
     Relay,
     Dht,
-    Inference
+    Inference,
+    BlockStore  // Distributed block storage duty (5% of node storage)
 }
 
 /// <summary>
