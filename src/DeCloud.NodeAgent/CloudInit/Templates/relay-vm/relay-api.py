@@ -821,7 +821,12 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                             continue
                         existing_key = fields[0]
                         existing_ips = fields[3] if fields[3] != '(none)' else ''
-                        if tunnel_ip in existing_ips and existing_key != public_key:
+                        # Use exact IP comparison, NOT substring match.
+                        # "10.20.1.2" in "10.20.1.200/32" is True in Python —
+                        # that would falsely evict DHT/BlockStore peers and other
+                        # CGNAT nodes whose IPs share a common prefix.
+                        existing_ip_only = existing_ips.split('/')[0].strip()
+                        if existing_ip_only == tunnel_ip and existing_key != public_key:
                             evict = subprocess.run(
                                 ['wg', 'set', WIREGUARD_INTERFACE, 'peer', existing_key, 'remove'],
                                 capture_output=True, text=True, timeout=5
