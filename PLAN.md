@@ -1,7 +1,17 @@
 # Block Store System VM — Design & Implementation Plan
 
-**Date:** 2026-02-16 (Updated: 2026-03-19)
-**Status:** Design Phase
+**Date:** 2026-02-16 (Updated: 2026-03-20)
+**Status:** Phase A–C complete (production-verified 2026-03-20). Phase D next.
+
+## Implementation Status
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| A — Orchestrator core | ✅ Complete | BlockStoreService, BlockStoreController, labels, eligibility |
+| B — NodeAgent + Go binary | ✅ Complete | cloud-init, blockstore-node, scripts, callback controller |
+| C — Integration | ✅ Production-verified 2026-03-20 | Dashboard live, binary build pipeline stable |
+| D — Lazysync & Migration | 🔲 Next | Items 25–33 below |
+| E — Split-Brain Prevention | 🔲 Follows D | Items 34–41 below |
 **Depends on:** DHT system VMs (production-verified 2026-02-15)
 **Follows patterns from:** Relay VMs, DHT VMs
 
@@ -678,6 +688,102 @@ No min/max caps needed — the 100 GB eligibility threshold ensures the smallest
 | 5001 | TCP (libp2p) | Bitswap block exchange |
 | 5090 | TCP (HTTP) | Localhost API (internal only) |
 | 8080 | TCP (HTTP) | Dashboard (proxied via Nginx port 80) |
+
+---
+
+## 5.5 Replication Factor
+
+### Default: All Tenant VMs at N=3
+
+Every non-system VM is created with `replicationFactor=3` by default. System
+VMs (Relay, DHT, BlockStore) use `replicationFactor=0` — they are ephemeral by
+design, reconstructed from their cloud-init template on redeploy, not from disk
+state.
+
+On Phase D launch, every tenant VM is automatically enrolled in lazysync with no
+user configuration required. The platform's resilience guarantee is uniform and
+unconditional by default. Users shouldn't have to opt into data protection.
+
+### Phase D+1: User-Configurable Replication Factor
+
+When exposed as a VM creation parameter, the supported tiers are:
+
+| Factor | Meaning | Durability | Use case |
+|--------|---------|-----------|---------|
+| 0 | Ephemeral | None — data lost on node failure | Stateless workloads, batch jobs, CI runners. User explicitly accepts data loss. |
+| 1 | Single replica | Survives if ≥1 provider holds the blocks | Dev environments, cost-sensitive non-critical workloads |
+| 3 | Standard (default) | Survives loss of 2 provider nodes simultaneously | All production workloads |
+| 5 | High availability | Survives loss of 4 provider nodes simultaneously | Databases, ML training checkpoints, critical stateful services |
+
+Factor 2 is valid but not exposed — the meaningful resilience jump is from 1 to 3
+(tolerates 2 simultaneous failures). Exposing 2 creates confusion without adding
+real value.
+
+`replicationFactor` is **immutable after VM creation**. Changing it mid-life would
+require seeding or withdrawing blocks across the network (a Phase D+2 feature). For
+now: set at creation, honored by lazysync, used in billing.
+
+### Model fields
+```csharp
+// VirtualMachine or VmSpec:
+public int ReplicationFactor { get; set; } = 3;   // 0=ephemeral, 1/3/5=replicated
+
+// Updated each lazysync cycle (for accurate billing):
+public long LastKnownOverlayBytes { get; set; }
+public DateTime? LastLazysyncAt { get; set; }
+```
+
+### Pricing Impact
+
+Replication factor drives two cost components:
+
+**1. Storage replication cost** — N=3 means 3× the overlay bytes consumed across the
+block store network. The VM owner pays for the storage duty they impose on the
+network. In practice, overlay is sparse: a 100 GB virtual disk typically has 2–8 GB
+of allocated overlay after a few hours of use, so N=3 costs ~6–24 GB of distributed
+storage, not 300 GB.
+
+**2. Compute cost modifier** — lazysync I/O (dirty bitmap export + chunk push) on the
+source node is small enough to fold into the storage cost rather than price separately.
+
+**Formula:**
+VM hourly cost = compute_cost + storage_replication_cost
+compute_cost            = vCPUs × cpu_rate + memory_gb × memory_rate
+storage_replication_cost = overlay_gb × replication_factor × storage_rate
+Where:
+storage_rate  = platform floor (e.g. $0.002/GB/hour)
+overlay_gb    = LastKnownOverlayBytes (updated each lazysync cycle),
+or a conservative estimate at creation time before
+the first lazysync cycle completes
+`replicationFactor=0` is priced noticeably lower — enough to make it a genuine
+option for stateless workloads, but not so cheap that users accidentally choose it
+for stateful workloads without understanding the tradeoff.
+
+### Scheduler Impact
+
+When `replicationFactor > 0`, the scheduler adds one filter condition:
+candidate node must have BlockStoreInfo.Status == Active
+A node without an Active BlockStore VM cannot participate in lazysync for tenant VMs
+running on it — there is nowhere to push dirty blocks locally before they scatter
+across the network.
+
+This means the scheduler naturally steers replicated workloads toward nodes with
+≥100 GB storage (the BlockStore eligibility threshold). Nodes below this threshold
+can only host ephemeral (`replicationFactor=0`) VMs.
+
+### Implementation touchpoints (Phase D)
+
+| Component | Change |
+|-----------|--------|
+| `VmService.CreateVmAsync` | Set `ReplicationFactor = 3` as default for all non-system VMs |
+| `CreateVmRequest` | Add optional `ReplicationFactor` field (defaults to 3, validated: 0/1/3/5) |
+| `VmSpec` / `VirtualMachine` | Add `ReplicationFactor`, `LastKnownOverlayBytes`, `LastLazysyncAt` |
+| `VmSchedulingService` | Add BlockStore Active filter when `ReplicationFactor > 0` |
+| `LazysyncDaemon` (NodeAgent) | Skip VM entirely if `replicationFactor == 0`; use factor as provider count threshold |
+| `LazysyncManager` (Orchestrator) | Use `replicationFactor` as N in `confirmedVersion` audit loop |
+| `CalculateHourlyRate` | Add `storage_replication_cost` component |
+| Source-offline alerting | `replicationFactor=0` → LOST (by design, no alert); `>0` → UNRECOVERABLE / RECOVERING / MIGRATING |
+| Dashboard | Show replication factor + "Ephemeral" badge when factor=0 |
 
 ---
 
@@ -1491,15 +1597,39 @@ private List<string> GetInvalidVmsForNode(string nodeId, List<string> reportedRu
 
 ### Phase D: Lazysync & Migration
 
-25. **LazysyncManager** in orchestrator — manifest version tracking, confirmed vs current, provider count audit loop, per-VM replication factor N
-26. **Lazysync daemon** on node agent — QEMU QMP integration (dirty bitmaps, incremental backup), overlay chunking via `qemu-img map` for sparse cluster discovery, block push, manifest update cycle. Skip VMs with replicationFactor=0 (ephemeral)
-27. **Initial overlay seeding** — push allocated overlay clusters on first enrollment, progress tracking, rate limiting
-28. **GossipSub scatter propagation** — block store publishes new CIDs to `decloud/blockstore/new-blocks` topic; receiving nodes evaluate XOR distance with adaptive threshold; pull via bitswap if close enough
-29. **DHT proximity endpoint** — `GET /proximity/{cid}` on DHT VM for neighborhood scan and diagnostics
-30. **Migration planner** — PlanMigrationAsync with scheduling fit + resource headroom (no block locality scoring — target fetches via bitswap)
-31. **Source-offline alerting** — detect under-replicated VMs on node failure (confirmedVersion=0 → UNRECOVERABLE, confirmedVersion < current → partial data loss, replicationFactor=0 → LOST ephemeral)
-32. **Disk reconstruction** — ensure base image available (cache or download) + fetch overlay from scattered providers via bitswap + regenerate cloud-init ISO from labels
-33. **End-to-end migration test** — simulate node failure, verify VM rescheduling from confirmed manifest (base image + overlay from bitswap + cloud-init)
+### Phase D: Lazysync & Migration
+
+25. **ReplicationFactor on VmSpec/VirtualMachine** — add field (default 3), add to
+    `CreateVmRequest` (optional, validated: 0/1/3/5), set in `VmService.CreateVmAsync`
+    for non-system VMs, add `LastKnownOverlayBytes` + `LastLazysyncAt` fields
+26. **Scheduler BlockStore filter** — `VmSchedulingService` rejects nodes without Active
+    BlockStore when `replicationFactor > 0`; ephemeral VMs (factor=0) bypass filter
+27. **Pricing: storage replication cost** — add `storage_replication_cost` component to
+    `CalculateHourlyRate`; `replicationFactor=0` tier priced lower
+28. **LazysyncManager** in orchestrator — manifest version tracking, confirmed vs current,
+    provider count audit loop using `replicationFactor` as N; MongoDB persistence for
+    ManifestRecord (replacing in-memory stub from Phase A)
+29. **Lazysync daemon** on node agent — QEMU QMP integration (dirty bitmaps, incremental
+    backup), overlay chunking via `qemu-img map` for sparse cluster discovery, block push,
+    manifest update cycle. Skip VMs with `replicationFactor=0` entirely
+30. **Initial overlay seeding** — push allocated overlay clusters on first enrollment,
+    progress tracking, rate limiting
+31. **GossipSub scatter propagation** — block store publishes new CIDs to
+    `decloud/blockstore/new-blocks`; receiving nodes evaluate XOR distance + adaptive
+    threshold; pull via bitswap if close enough
+32. **DHT proximity endpoint** — `GET /proximity/{cid}` on DHT VM for neighborhood scan
+    and diagnostics
+33. **Migration planner** — PlanMigrationAsync with scheduling fit + resource headroom;
+    requires candidate node to have Active BlockStore when migrating replicated VMs
+34. **Source-offline alerting** — detect under-replicated VMs on node failure:
+    `replicationFactor=0` → LOST (ephemeral, no alert);
+    `confirmedVersion=0` → UNRECOVERABLE;
+    `confirmedVersion < currentVersion` → RECOVERING (partial data loss);
+    `confirmedVersion == currentVersion` → MIGRATING (no data loss)
+35. **Disk reconstruction** — fetch overlay chunks from block store via bitswap + write to
+    new qcow2 at correct offsets + regenerate cloud-init ISO from VM labels
+36. **End-to-end migration test** — simulate node failure, verify VM rescheduling from
+    confirmed manifest (base image + overlay from bitswap + cloud-init)
 
 ### Phase E: Split-Brain / Zombie VM Prevention
 
@@ -1687,8 +1817,17 @@ LevelDB is only used for metadata (access times, block index, stats).
 - Recovery point objective: ≤10 minutes of data loss under normal conditions
 - Overlay-only replication keeps per-VM storage cost at 1-10% of virtual disk size
 - Self-healing: provider count recovers autonomously when nodes leave/rejoin the network
-- Per-VM replication factor (N) correctly enforced: N=0 skips lazysync, N=3+ requires provider count confirmation
-- Source-offline alerting correctly classifies VMs as UNRECOVERABLE / RECOVERING / MIGRATING / LOST based on confirmedVersion and replicationFactor
+- Per-VM replication factor correctly enforced:
+    N=0 → lazysync skipped entirely, VM flagged Ephemeral on dashboard
+    N=1 → lazysync runs, confirmedVersion advances when ≥1 provider confirmed
+    N=3 → default; confirmedVersion advances when all chunks have ≥3 providers
+    N=5 → high availability; confirmedVersion advances when all chunks have ≥5 providers
+- Scheduler rejects nodes without Active BlockStore for VMs with replicationFactor > 0
+- Storage replication cost billed correctly: overlay_gb × replication_factor × storage_rate
+- Source-offline alerting correctly classifies VMs as UNRECOVERABLE / RECOVERING /
+  MIGRATING / LOST based on confirmedVersion, currentVersion, and replicationFactor
+- `replicationFactor=0` VMs correctly classified as LOST on node failure with no alert
+  (user opted in to ephemeral semantics at creation time)
 
 ### Phase E (Split-Brain Prevention)
 - Zombie VMs destroyed within 60 seconds of node reconnection
