@@ -2613,6 +2613,15 @@ print_summary() {
 # Main
 # ============================================================
 main() {
+    # Reset CWD to / immediately.
+    # If invoked from a directory that no longer exists (e.g. the previous
+    # /opt/decloud/DeCloud.NodeAgent clone that was just wiped by 'decloud update'),
+    # every subshell bash spawns will try to getcwd() on the deleted inode and
+    # print "getcwd: cannot access parent directories: No such file or directory"
+    # for every single command.  Changing to / before anything else ensures all
+    # subsequent cd commands and subprocess CWDs resolve cleanly.
+    cd / 2>/dev/null || true
+
     echo ""
     echo "╔══════════════════════════════════════════════════════════════╗"
     echo "║       DeCloud Node Agent Installer v${VERSION}               ║"

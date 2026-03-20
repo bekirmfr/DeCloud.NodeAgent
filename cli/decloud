@@ -454,6 +454,13 @@ cmd_install() {
     # Save parameters before running (so 'update' works even if install fails)
     save_install_params "$@"
 
+    # Change to a safe CWD before launching install.sh.
+    # The caller may be sitting in /opt/decloud/DeCloud.NodeAgent which install.sh
+    # is about to delete and re-clone.  Every subshell bash spawns inherits CWD;
+    # if that directory is gone, getcwd() fails and floods output with:
+    #   "job-working-directory: error retrieving current directory: ..."
+    cd / 2>/dev/null || true
+
     # Execute install
     bash "$install_script" "$@"
     local exit_code=$?
@@ -495,6 +502,10 @@ cmd_update() {
 
     log_info "Using install script: $install_script"
     echo ""
+
+    # Change to / before launching install.sh — same reason as cmd_install:
+    # the current directory may be the repo clone that install.sh is about to wipe.
+    cd / 2>/dev/null || true
 
     bash "$install_script" "${SAVED_PARAMS[@]}"
     local exit_code=$?
