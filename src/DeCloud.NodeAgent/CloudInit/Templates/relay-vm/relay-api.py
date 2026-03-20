@@ -291,10 +291,18 @@ def is_relay_peer(public_key):
 # ==================== Helper Functions ====================
 
 def record_peer_registration(public_key):
-    """Record timestamp when peer is registered"""
+    """Record timestamp when peer is first registered.
+    Intentionally non-destructive: if the peer is already tracked, the
+    existing timestamp is preserved. This prevents EnsurePeerRegistered
+    heartbeat calls from resetting the grace period timer on re-adds.
+    The timestamp is only reset when the peer is explicitly removed first.
+    """
     with peer_registration_lock:
-        peer_registration_times[public_key] = time.time()
-        logger.debug(f"📝 Recorded registration time for peer {public_key[:16]}...")
+        if public_key not in peer_registration_times:
+            peer_registration_times[public_key] = time.time()
+            logger.debug(f"📝 Recorded registration time for peer {public_key[:16]}...")
+        else:
+            logger.debug(f"⏭️  Peer {public_key[:16]}... already tracked — skipping grace period reset")
 
 def get_peer_age(public_key, current_time):
     """Get age of peer in seconds since registration"""
@@ -834,6 +842,28 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 logger.warning(f"Stale peer eviction check failed (non-fatal): {e}")
             # ── End stale peer eviction ──────────────────────────────────────────
+
+            # ── Idempotency guard ─────────────────────────────────────────────────────
+            # If this peer is already tracked in memory, it is live and connected.
+            # Return 200 immediately — do NOT reset its grace period timer.
+            # This fast-path handles the common case of EnsurePeerRegistered heartbeat
+            # calls arriving while the peer is already active.
+            with peer_registration_lock:
+                already_tracked = public_key in peer_registration_times
+
+            if already_tracked:
+                logger.debug(
+                    f"⏭️  Idempotent re-add for already-tracked peer {public_key[:16]}... — skipping"
+                )
+                self.send_json_response({
+                    'success': True,
+                    'peer_public_key': public_key[:16] + '...',
+                    'allowed_ips': data.get('allowed_ips', ''),
+                    'description': data.get('description', 'CGNAT Node'),
+                    'idempotent': True
+                })
+                return
+            # ─────────────────────────────────────────────────────────────────────────
 
             # Build wg set command
             cmd = [

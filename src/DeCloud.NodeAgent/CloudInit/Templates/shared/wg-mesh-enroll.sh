@@ -61,11 +61,14 @@ log "  Relay API:      $WG_RELAY_API"
 log "  Interface:      $WG_INTERFACE"
 
 # ==================== Idempotency Guard ====================
-# If the WG interface is already up and has a peer with a handshake,
-# skip re-enrollment to prevent duplicate peer registration on the relay.
-if wg show "$WG_INTERFACE" 2>/dev/null | grep -q "latest handshake"; then
-    log "WireGuard interface ${WG_INTERFACE} already active with handshake — skipping enrollment"
-    exit 0
+# Check if our specific public key is already registered on the relay,
+# regardless of handshake state
+if [ -f "/etc/wireguard/${WG_INTERFACE}.conf" ] && wg show "$WG_INTERFACE" &>/dev/null; then
+    EXISTING_PUBKEY=$(wg show "$WG_INTERFACE" public-key 2>/dev/null)
+    if [ -n "$EXISTING_PUBKEY" ]; then
+        log "WireGuard interface ${WG_INTERFACE} already up with public key ${EXISTING_PUBKEY:0:16}... — skipping enrollment"
+        exit 0
+    fi
 fi
 
 # ==================== Generate Keypair ====================
