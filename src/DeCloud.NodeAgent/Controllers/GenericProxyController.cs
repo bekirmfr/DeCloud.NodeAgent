@@ -147,7 +147,24 @@ public class GenericProxyController : ControllerBase
         }
         catch (HttpRequestException ex)
         {
-            _logger.LogError(ex, "HTTP proxy failed for VM {VmId} port {Port}", vmId, port);
+            // Connection refused means nothing is listening on that port in the VM.
+            // This is expected for optional services (attestation agent, app not yet started).
+            // The caller (e.g. AttestationService) already handles 502 gracefully — no need
+            // to fill logs with stack traces for a routine "service not installed" case.
+            var isConnectionRefused = ex.InnerException is System.Net.Sockets.SocketException se
+                && se.SocketErrorCode == System.Net.Sockets.SocketError.ConnectionRefused;
+
+            if (isConnectionRefused)
+            {
+                _logger.LogDebug(
+                    "HTTP proxy: connection refused for VM {VmId} port {Port} — service not listening",
+                    vmId, port);
+            }
+            else
+            {
+                _logger.LogWarning(ex, "HTTP proxy failed for VM {VmId} port {Port}", vmId, port);
+            }
+
             return StatusCode(502, new { error = "Failed to reach VM service", details = ex.Message });
         }
         catch (Exception ex)
