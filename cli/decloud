@@ -1503,6 +1503,99 @@ cmd_test_api() {
 }
 
 # ============================================================================
+# RELAY NAT COMMANDS
+# ============================================================================
+
+cmd_relay() {
+    local subcmd="${1:-}"
+    shift || true
+
+    local relay_bin="/usr/local/bin/decloud-relay-nat"
+    if [[ ! -x "$relay_bin" ]]; then
+        log_error "Relay NAT manager not found at $relay_bin"
+        log_info "Run 'sudo $SCRIPT_NAME update' to reinstall"
+        exit $EXIT_ERROR
+    fi
+
+    case "$subcmd" in
+        add|clean|show|status)
+            exec "$relay_bin" "$subcmd" "$@"
+            ;;
+        "")
+            log_error "Relay subcommand required"
+            echo "Usage: $SCRIPT_NAME relay <add|clean|show>"
+            exit $EXIT_USAGE
+            ;;
+        *)
+            log_error "Unknown relay command: $subcmd"
+            echo "Valid: add, clean, show"
+            exit $EXIT_USAGE
+            ;;
+    esac
+}
+
+# ============================================================================
+# WIREGUARD COMMANDS
+# ============================================================================
+
+cmd_wg() {
+    local subcmd="${1:-}"
+    shift || true
+
+    if ! command -v wg &>/dev/null; then
+        log_error "WireGuard not installed"
+        exit $EXIT_ERROR
+    fi
+
+    case "$subcmd" in
+        status)
+            local interfaces
+            interfaces=$(wg show interfaces 2>/dev/null)
+            if [[ -z "$interfaces" ]]; then
+                log_warn "No WireGuard interfaces active"
+                echo ""
+                echo "This is normal if the node agent hasn't assigned an interface yet."
+                echo "Check: $SCRIPT_NAME logs -f | grep -i wireguard"
+            else
+                wg show
+                echo ""
+                log_success "Active interfaces: $interfaces"
+            fi
+            ;;
+        interfaces)
+            wg show interfaces 2>/dev/null || echo "No interfaces active"
+            ;;
+        show)
+            local iface="${1:-}"
+            if [[ -z "$iface" ]]; then
+                log_error "Interface name required"
+                echo "Usage: $SCRIPT_NAME wg show <interface>"
+                echo ""
+                echo "Available interfaces:"
+                wg show interfaces 2>/dev/null || echo "  (none)"
+                exit $EXIT_USAGE
+            fi
+            if ! wg show "$iface" &>/dev/null; then
+                log_error "Interface '$iface' not found"
+                echo "Available interfaces:"
+                wg show interfaces 2>/dev/null || echo "  (none)"
+                exit $EXIT_ERROR
+            fi
+            wg show "$iface"
+            ;;
+        "")
+            # Default: show status
+            cmd_wg status
+            ;;
+        *)
+            log_error "Unknown wg command: $subcmd"
+            echo "Valid: status, interfaces, show <interface>"
+            exit $EXIT_USAGE
+            ;;
+    esac
+}
+
+# ============================================================================
 # VERSION & HELP
 # ============================================================================
 
@@ -1572,6 +1665,17 @@ ${BOLD}DIAGNOSTICS:${NC}
     diagnose                Run comprehensive system diagnostics
     test-api                Test all node agent API endpoints
 
+${BOLD}RELAY NAT:${NC}
+    relay add               Add NAT rules for a relay VM
+    relay clean             Remove all relay NAT rules
+    relay show              Show current relay NAT rules
+
+${BOLD}WIREGUARD:${NC}
+    wg                      Show WireGuard status (default)
+    wg status               Show all active WireGuard interfaces
+    wg interfaces           List active interface names
+    wg show <interface>     Show details for a specific interface
+
 ${BOLD}OTHER:${NC}
     version                 Show CLI version
     -h, --help              Show this help
@@ -1601,7 +1705,6 @@ ${BOLD}EXAMPLES:${NC}
     # Pull latest code (replaces: sudo git -C /opt/decloud/DeCloud.NodeAgent pull origin main)
     sudo $SCRIPT_NAME pull
 
-
     # Authenticate
     sudo $SCRIPT_NAME login
 
@@ -1625,6 +1728,15 @@ ${BOLD}EXAMPLES:${NC}
 
     # Reset to factory state
     sudo $SCRIPT_NAME reset
+
+    # Relay NAT management
+    sudo $SCRIPT_NAME relay show
+    sudo $SCRIPT_NAME relay add
+    sudo $SCRIPT_NAME relay clean
+
+    # WireGuard status
+    $SCRIPT_NAME wg
+    $SCRIPT_NAME wg show wg-relay
 
 For more information: https://docs.decloud.io
 EOF
@@ -1696,6 +1808,8 @@ main() {
         logs)         cmd_logs       "$@" ;;
         diagnose|diag) cmd_diagnose  "$@" ;;
         test-api)     cmd_test_api   "$@" ;;
+        relay)        cmd_relay      "$@" ;;
+        wg)           cmd_wg         "$@" ;;
         version)      cmd_version ;;
         *)
             log_error "Unknown command: $command"
