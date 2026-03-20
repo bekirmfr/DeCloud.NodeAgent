@@ -20,7 +20,12 @@ set -euo pipefail
 
 readonly VERSION="2.0.0"
 readonly SCRIPT_NAME="$(basename "$0")"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Use readlink -f to resolve the script's real directory without relying on
+# the calling shell's CWD via getcwd().  The cd+pwd idiom breaks when the
+# shell's CWD has been deleted (e.g. /opt/decloud/DeCloud.NodeAgent wiped by
+# 'decloud update'), producing:
+#   "getcwd: cannot access parent directories: No such file or directory"
+readonly SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 
 # Configuration paths
 readonly CONFIG_DIR="/etc/decloud"
