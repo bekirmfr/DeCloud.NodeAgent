@@ -1880,14 +1880,17 @@ install_decloud_cli() {
         log_success "DeCloud CLI installed"
     fi
     
-    # Copy supporting scripts if they exist
-    local vm_cleanup_source="$INSTALL_DIR/DeCloud.NodeAgent/scripts/vm-cleanup.sh"
+    # Copy supporting scripts if they exist (vm-cleanup.sh lives at repo root)
+    local vm_cleanup_source="$INSTALL_DIR/DeCloud.NodeAgent/vm-cleanup.sh"
     local vm_cleanup_dest="/usr/local/bin/vm-cleanup.sh"
     
     if [ -f "$vm_cleanup_source" ]; then
         cp "$vm_cleanup_source" "$vm_cleanup_dest"
         chmod +x "$vm_cleanup_dest"
         log_info "→ VM cleanup script installed"
+    else
+        log_warn "vm-cleanup.sh not found at $vm_cleanup_source — skipping"
+        log_info "  (decloud vm cleanup works without it — virsh logic is built in)"
     fi
     
     log_success "✓ DeCloud unified CLI ready"
@@ -2617,7 +2620,26 @@ main() {
     echo ""
     
     parse_args "$@"
-    
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Persist install parameters immediately after parsing.
+    # 'decloud update' reads /etc/decloud/install-params to re-run this
+    # script with the exact same arguments — no manual bookkeeping needed.
+    # Write before init_logging so the file exists even if logging setup fails.
+    # ─────────────────────────────────────────────────────────────────────
+    mkdir -p /etc/decloud
+    {
+        echo "# DeCloud node install parameters"
+        echo "# Written by install.sh on $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "# Used by: decloud update"
+        # Print each original argument on its own line.
+        # Handles values that contain spaces because mapfile + printf preserves quoting.
+        for arg in "$@"; do
+            printf '%s\n' "$arg"
+        done
+    } > /etc/decloud/install-params
+    chmod 600 /etc/decloud/install-params
+
     # Initialize logging
     init_logging
 
