@@ -602,10 +602,11 @@ The manifest is a single evolving document where chunk CIDs are replaced in-plac
   "baseImageHash": "sha256:a1b2c3...",
   "overlayVirtualSizeBytes": 107374182400,
   "blockSizeBytes": 1048576,
+  "blockCount": 3,
   "chunks": [
     { "offset": 0,       "cid": "bafk...aaa" },
-    { "offset": 3145728, "cid": "bafk...ggg" },
-    { "offset": 8388608, "cid": "bafk...ccc" }
+    { "offset": 1048576, "cid": "bafk...bbb" },
+    { "offset": 2097152, "cid": "bafk...ccc" }
   ]
 }
 ```
@@ -615,6 +616,15 @@ The manifest is a single evolving document where chunk CIDs are replaced in-plac
 - **`baseImageId` + `baseImageHash`** — identifies the backing image. The target node downloads this from the image registry (or from block store peers that have it cached). The orchestrator knows the URL.
 - **Sparse chunks** — only offsets with allocated clusters appear. A 100 GB virtual disk with 3 GB of overlay writes has ~3,000 chunks, not 100,000. Offsets not in the manifest read through to the base image.
 - Cloud-init ISO is not in the manifest — the orchestrator regenerates it from the VM's labels during migration.
+- **`blockCount`** — number of chunks in this manifest version. The billing unit:
+  `storage_cost = blockCount × replicationFactor × costPerMbPerHour × (blockSizeBytes / 1_048_576)`.
+  Updated each lazysync cycle. The orchestrator passes `blockCount` and
+  `blockSizeKb` to `settleCycle()` — the contract applies the rate formula
+  on-chain so billing math is fully trustless.
+- **Tail block** — the final chunk of an overlay is almost never exactly
+  `blockSizeBytes`. It is stored at its real size and billed as one full block.
+  Maximum over-billing per VM: one block worth of storage. This avoids
+  zero-padding waste while keeping block count as a clean billing integer.
 
 The `version` field is a monotonically increasing integer, incremented on each lazysync cycle that produces changes. When the lazysync daemon detects dirty blocks, it:
 1. Reads the dirty chunks (crash-consistent via QEMU incremental backup)
@@ -631,6 +641,52 @@ The orchestrator tracks two versions per VM:
 Blocks referenced by a current manifest naturally maintain high provider counts (nodes keep re-announcing them, and they get recent bitswap access which protects them from LRU eviction). Blocks no longer in any current manifest stop being re-announced, their provider records expire, and they naturally disappear via LRU GC. This eliminates delta chains, delta consolidation, and the full/delta manifest type distinction entirely.
 
 Content addressing provides automatic deduplication: if two VMs use the same base image and write the same packages, those overlay chunks share the same CID and are stored once. Unchanged overlay chunks across lazysync cycles share the same CID and are never re-stored or re-transferred.
+
+#### Chunk Sizes by Manifest Type
+
+`blockSizeBytes` is a **per-manifest-type constant** declared in the manifest and
+enforced by the block store binary at write time. Different content types have
+different optimal chunk sizes based on their access patterns, update frequency,
+and scale. The billing unit is always **one block**, with cost normalized to
+`costPerMbPerHour × (blockSizeBytes / 1_048_576)` — so all manifest types pay
+the same rate per MB of replicated data.
+
+| Manifest Type | `blockSizeBytes` | Rationale |
+|---|---|---|
+| `vm-overlay` | **1 MB** (1,048,576) | Aligns with QEMU dirty bitmap granularity. A VM with 5 GB overlay → ~5,120 blocks. Manageable manifest size. Unchanged regions produce identical CIDs — never re-transferred. |
+| `model-shard` | **64 MB** (67,108,864) | Aligns with transformer layer boundaries for pipeline-parallel inference. Llama-3 70B Q4 (~40 GB) → 640 blocks. Bitswap transfers of 64 MB amortize connection overhead efficiently. |
+| `lora-adapter` | **256 KB** (262,144) | Fine-grained deduplication across fine-tuned variants of the same base model — many adapters share base layer weights. |
+| `image-template` | **4 MB** (4,194,304) | Base OS images (2–4 GB) → 500–1,000 blocks. Good deduplication across Ubuntu/Debian versions that share many 4 MB regions. |
+
+**Chunk count reference for model-shard type:**
+
+| Model | Precision | Size | 64 MB Chunks |
+|---|---|---|---|
+| Llama-3 8B | FP16 | ~16 GB | 256 |
+| Llama-3 70B | Q4_K_M | ~40 GB | 640 |
+| Llama-3 70B | FP16 | ~140 GB | 2,240 |
+| Mistral 7B | Q4 | ~4 GB | 64 |
+| GPT-4 scale | Q4 (est.) | ~1.8 TB | ~28,800 |
+
+For the distributed AI inference vision: an inference VM needing layers 16–31
+of a 70B model requests the ~7–8 specific 64 MB chunk CIDs covering those
+layers. The block store network fetches them via bitswap from the nearest
+providers. No full model download required before inference can begin.
+
+**Block store enforcement:**
+```go
+// Enforced in blockstore-node main.go
+// Each manifest type declares its block size; the binary validates on write
+var ManifestTypeBlockSize = map[ResourceType]int64{
+    ResourceTypeVMOverlay:     1 * 1024 * 1024,    // 1 MB
+    ResourceTypeModelShard:    64 * 1024 * 1024,   // 64 MB
+    ResourceTypeLoRAAdapter:   256 * 1024,          // 256 KB
+    ResourceTypeImageTemplate: 4 * 1024 * 1024,    // 4 MB
+}
+
+// Tail block exception: final chunk may be smaller than blockSizeBytes.
+// Billed as one full block. All other chunks must be exactly blockSizeBytes.
+```
 
 #### Bitswap Integration
 
@@ -748,13 +804,43 @@ source node is small enough to fold into the storage cost rather than price sepa
 
 **Formula:**
 VM hourly cost = compute_cost + storage_replication_cost
-compute_cost            = vCPUs × cpu_rate + memory_gb × memory_rate
-storage_replication_cost = overlay_gb × replication_factor × storage_rate
+compute_cost =
+vCPUs × cpu_rate + memory_gb × memory_rate + disk_gb × storage_rate
+storage_replication_cost =
+blockCount × replicationFactor × costPerMbPerHour × (blockSizeKb / 1024)
 Where:
-storage_rate  = platform floor (e.g. $0.002/GB/hour)
-overlay_gb    = LastKnownOverlayBytes (updated each lazysync cycle),
-or a conservative estimate at creation time before
-the first lazysync cycle completes
+costPerMbPerHour = platform constant (e.g. $0.000001/MB/hour)
+blockCount       = number of chunks in the current confirmed manifest
+(updated by LazysyncManager each audit cycle)
+blockSizeKb      = chunk size for this manifest type (1024 for vm-overlay,
+65536 for model-shard, 256 for lora-adapter, 4096 for image-template)
+replicationFactor = 0 / 1 / 3 / 5 (immutable after VM creation)
+
+**Why block-based pricing is better than GB-based:**
+
+- **Deterministic** — `blockCount` is exact, not estimated. The manifest records
+  exactly how many chunks exist at the current version.
+- **Trustless on-chain** — `settleCycle()` receives `blockCounts[]`,
+  `blockSizeKb[]`, and `replicationFactors[]` as raw inputs. The contract
+  applies `costPerMbPerHour` itself. The orchestrator cannot inflate the
+  storage amount — only the block count, which is verifiable from the manifest.
+- **User-legible** — "Your VM has 3,847 blocks at 1 MB each, N=3 replicas,
+  $0.000001/MB/hour = $0.01155/hour for replication" is actionable.
+  "Your overlay is 3.7 GB" is not.
+- **Scales correctly to AI workloads** — A 70B model shard at 640 × 64 MB
+  blocks bills at the same rate-per-MB as a 5,120 × 1 MB VM overlay.
+  No special-casing needed.
+
+**Example costs at $0.000001/MB/hour:**
+
+| Workload | Blocks | Block Size | N | Storage cost/hr |
+|---|---|---|---|---|
+| Typical VM, light use | 512 | 1 MB | 3 | $0.001536 |
+| Typical VM, active | 4,096 | 1 MB | 3 | $0.012288 |
+| Llama-3 70B Q4 | 640 | 64 MB | 3 | $0.122880 |
+| Llama-3 70B FP16 | 2,240 | 64 MB | 5 | $0.716800 |
+| Fine-tune adapter | 200 | 256 KB | 3 | $0.000015 |
+
 `replicationFactor=0` is priced noticeably lower — enough to make it a genuine
 option for stateless workloads, but not so cheap that users accidentally choose it
 for stateful workloads without understanding the tradeoff.
@@ -1146,6 +1232,101 @@ For the **normal fast path** (GossipSub announce → pull decision), the block s
 - Dashboard visualization of block distribution
 
 This endpoint is added to the DHT VM's existing localhost HTTP API (port 5080), alongside `/health`, `/peers`, `/connect`, and `/publish`.
+
+---
+
+## 6.8 Storage Revenue Distribution
+
+### Economic Model
+
+Every replicated VM contributes a `storage_replication_cost` component to its
+hourly bill. This cost is owed to the block store operators who are bearing the
+actual storage duty — disk space, I/O, and bitswap bandwidth. Without this
+distribution, storage contribution is an uncompensated obligation. With it,
+node operators earn from two separate streams:
+
+- **Compute earnings** — for VMs hosted on their node
+- **Storage earnings** — for blocks held by their BlockStore VM
+
+The two streams are economically independent: a small node with a large disk
+earns storage revenue even when it cannot host large compute workloads.
+
+### Settlement: `settleCycle()` (Atomic, One Transaction Per Cycle)
+
+Every billing cycle (hourly), the orchestrator calls `settleCycle()` on the
+`DeCloudEscrow` contract. This single transaction atomically:
+
+1. **Bills all VMs** — deducts `computeAmount + storageAmount` from each user.
+   Compute portion (85%) credits the hosting node. Storage portion (85%) flows
+   into the in-contract `storagePool`.
+
+2. **Distributes the storage pool** — in the same transaction, proportional
+   rewards are calculated on-chain and credited to block store node operators:
+```
+reward_i = storagePool × (node_i.UsedBytes / Σ allNodes.UsedBytes)
+```
+
+`storageAmount` is calculated by the orchestrator from the manifest:
+```
+storageAmount = blockCount × blockSizeKb / 1024 × replicationFactor × costPerMbPerHour
+```
+
+`storagePool` distribution uses raw `UsedBytes` reported by each BlockStore VM
+via health checks — the orchestrator passes byte counts, the contract does the
+division. This is fully verifiable on-chain from transaction inputs.
+
+### Why Atomic Settlement Matters
+
+Separate collection and distribution calls create a window where storage fees
+are collected but not yet distributed. `settleCycle()` closes this window: it
+is structurally impossible to collect storage fees without distributing them in
+the same transaction. The `storagePool` balance visible on-chain represents only
+unprocessed dust from integer division — it rolls over to the next cycle.
+
+### Contract State (DeCloudEscrow.sol)
+```
+storagePool              — current cycle's undistributed dust (rolls over)
+totalStorageCollected    — lifetime storage fees collected
+totalStorageDistributed  — lifetime storage rewards distributed
+costPerMbPerHour         — platform rate (owner-settable, e.g. 1 = 0.000001 USDC)
+
+Events:
+  StorageCollected(user, vmId, storageAmount, platformFee, poolContribution)
+  StorageRewarded(storageNode, rewardAmount, contributedBytes, totalNetworkBytes, cycleId)
+```
+
+### `settleCycle()` Input Arrays
+```solidity
+function settleCycle(
+    // Per-VM billing (one entry per VM this cycle)
+    address[] users,              // VM owner wallets
+    address[] computeNodes,       // Hosting node wallets
+    uint256[] computeAmounts,     // Compute cost in USDC
+    uint256[] blockCounts,        // Manifest block count (from LazysyncManager)
+    uint256[] blockSizeKbs,       // Chunk size in KB (1024/65536/256/4096)
+    uint256[] replicationFactors, // VM replication factor (0/1/3/5)
+    string[]  vmIds,              // For event tracking
+
+    // Per-storage-node (one entry per active BlockStore node)
+    address[] storageNodes,       // BlockStore operator wallets
+    uint256[] storageBytes,       // node.BlockStoreInfo.UsedBytes
+
+    string    cycleId             // ISO timestamp for auditability
+)
+```
+
+The contract applies `costPerMbPerHour` to
+`blockCounts × blockSizeKbs / 1024 × replicationFactors` on-chain. The
+orchestrator cannot inflate storage amounts — it only reports integers that
+are verifiable from manifest state.
+
+### Voluntary Storage Excess (Phase D+1)
+
+The 5% storage duty is the minimum obligation. Node operators may optionally
+contribute more (up to a configurable maximum, e.g. 20%) for proportionally
+higher storage earnings. This grows the network's total storage capacity and
+increases distribution granularity without changing the billing formula.
+Implementation: add `voluntaryStoragePercent` to node configuration.
 
 ---
 
@@ -1604,11 +1785,17 @@ private List<string> GetInvalidVmsForNode(string nodeId, List<string> reportedRu
     for non-system VMs, add `LastKnownOverlayBytes` + `LastLazysyncAt` fields
 26. **Scheduler BlockStore filter** — `VmSchedulingService` rejects nodes without Active
     BlockStore when `replicationFactor > 0`; ephemeral VMs (factor=0) bypass filter
-27. **Pricing: storage replication cost** — add `storage_replication_cost` component to
-    `CalculateHourlyRate`; `replicationFactor=0` tier priced lower
+27. **Block-based storage pricing** — replace overlay_gb estimate with exact
+    block-count billing: `blockCount × blockSizeKb / 1024 × replicationFactor × costPerMbPerHour`.
+    Add `StoragePerMbPerHour` to `PricingConfig`. Add `BlockCount` + `BlockSizeKb` to
+    `ManifestRecord`. Update `CalculateHourlyRate` to use block count once available
+    (falls back to `DiskBytes × 5% / blockSizeBytes` estimate before first lazysync cycle).
+    `replicationFactor=0` VMs pay zero storage cost.
 28. **LazysyncManager** in orchestrator — manifest version tracking, confirmed vs current,
     provider count audit loop using `replicationFactor` as N; MongoDB persistence for
-    ManifestRecord (replacing in-memory stub from Phase A)
+    ManifestRecord (replacing in-memory stub from Phase A); updates `BlockCount` on
+    `ManifestRecord` and `CurrentManifestBlockCount` on `VirtualMachine` each cycle
+    for accurate billing
 29. **Lazysync daemon** on node agent — QEMU QMP integration (dirty bitmaps, incremental
     backup), overlay chunking via `qemu-img map` for sparse cluster discovery, block push,
     manifest update cycle. Skip VMs with `replicationFactor=0` entirely
@@ -1617,6 +1804,13 @@ private List<string> GetInvalidVmsForNode(string nodeId, List<string> reportedRu
 31. **GossipSub scatter propagation** — block store publishes new CIDs to
     `decloud/blockstore/new-blocks`; receiving nodes evaluate XOR distance + adaptive
     threshold; pull via bitswap if close enough
+31a. **settleCycle() integration** — upgrade `BlockchainService.ExecuteSettlementAsync`
+     to call `settleCycle()` instead of `batchReportUsage()`. Pass per-VM
+     `blockCounts`, `blockSizeKbs`, `replicationFactors` arrays alongside compute
+     amounts. Pass per-node `storageBytes` array from `node.BlockStoreInfo.UsedBytes`.
+     Update `BlockchainService` ABI to include `settleCycle` signature.
+     Update `SettlementService.RecordUsageAsync` to record compute and storage
+     components separately for cycle aggregation.
 32. **DHT proximity endpoint** — `GET /proximity/{cid}` on DHT VM for neighborhood scan
     and diagnostics
 33. **Migration planner** — PlanMigrationAsync with scheduling fit + resource headroom;
@@ -1828,6 +2022,17 @@ LevelDB is only used for metadata (access times, block index, stats).
   MIGRATING / LOST based on confirmedVersion, currentVersion, and replicationFactor
 - `replicationFactor=0` VMs correctly classified as LOST on node failure with no alert
   (user opted in to ephemeral semantics at creation time)
+- Block-based billing is exact: `blockCount × blockSizeKb / 1024 × replicationFactor × costPerMbPerHour`
+  matches the actual manifest chunk count — no estimation
+- `settleCycle()` atomically collects storage fees and distributes storage pool in one
+  on-chain transaction per billing cycle
+- Storage pool distribution is proportional: `reward = pool × (node.UsedBytes / Σ UsedBytes)`
+  calculated on-chain from raw byte inputs — trustless
+- `StorageRewarded` events emitted per-node per-cycle, fully auditable from chain
+- Block size enforcement: `blockSizeBytes` matches manifest type constant at write time;
+  non-conforming writes rejected by block store binary
+- Model shard chunk counts are manageable: Llama-3 70B Q4 = 640 × 64 MB blocks;
+  manifest fits in memory; DHT provider records scale linearly
 
 ### Phase E (Split-Brain Prevention)
 - Zombie VMs destroyed within 60 seconds of node reconnection
