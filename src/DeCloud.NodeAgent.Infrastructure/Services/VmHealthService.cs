@@ -55,13 +55,14 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                                     "VM {VmId} has not sent heartbeat for {ElapsedMinutes} minutes. Restarting VM.",
                                     vm.VmId, timeSinceLastHeartbeat.TotalMinutes);
                                 var restarted = await _vmManager.RestartVmAsync(vm.VmId, force: true, ct);
-                                if (!restarted)
+                                if (!restarted.Success)
                                 {
                                     _logger.LogError(
                                         "VM {VmId} failed to restart — marking as Failed to stop retry loop. " +
                                         "Orchestrator reconciliation will redeploy.",
                                         vm.VmId);
-                                    await _vmManager.UpdateVmStateAsync(vm.VmId, VmState.Failed, ct);
+                                    // Mark Failed in-memory so the loop skips it next cycle
+                                    vm.State = VmState.Failed;
                                 }
                             }
                         }
