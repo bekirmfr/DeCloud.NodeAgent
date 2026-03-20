@@ -37,6 +37,10 @@ readonly BACKUP_PATH="/var/backups/decloud"
 readonly LOG_DIR="/var/log/decloud"
 readonly LOG_FILE="$LOG_DIR/nodeagent.log"
 
+# Node agent source and publish paths (must match install.sh)
+readonly REPO_DIR="/opt/decloud/DeCloud.NodeAgent"
+readonly PUBLISH_DIR="/opt/decloud/publish"
+
 # Service name
 readonly SERVICE_NAME="decloud-node-agent"
 
@@ -519,6 +523,30 @@ cmd_update() {
     fi
 }
 
+# ============================================================================
+# PULL COMMAND  —  git pull with auto branch detection
+#            cd /opt/decloud/DeCloud.NodeAgent && dotnet publish ... && systemctl restart
+# ============================================================================
+cmd_pull() {
+    check_root
+    check_dependencies git
+
+    if [[ ! -d "$REPO_DIR/.git" ]]; then
+        log_error "Repository not found at $REPO_DIR"
+        exit $EXIT_ERROR
+    fi
+
+    # Detect current branch — no hardcoded "main"
+    local branch
+    branch=$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+
+    log_info "Pulling $REPO_DIR ($branch)..."
+
+    # cd to / so getcwd never fails if caller is inside the repo dir
+    cd / 2>/dev/null || true
+
+    git -C "$REPO_DIR" pull origin "$branch"
+}
 # ============================================================================
 # STATUS & INFO COMMANDS
 # ============================================================================
@@ -1496,7 +1524,8 @@ ${BOLD}SETUP COMMANDS:${NC}
       --region <region>       Node region (e.g. us-east-1)
       --zone <zone>           Availability zone (e.g. us-east-1-nyc-1a)
       --name <name>           Node display name
-    update                  Re-run install with previously saved parameters
+    pull                    git pull with auto branch detection
+    update                  Full reinstall with saved parameters  (~10 min)
 
 ${BOLD}AUTHENTICATION COMMANDS:${NC}
     login                   Authenticate node with the orchestrator
@@ -1569,6 +1598,10 @@ ${BOLD}EXAMPLES:${NC}
     # Update (re-run install with saved params)
     sudo $SCRIPT_NAME update
 
+    # Pull latest code (replaces: sudo git -C /opt/decloud/DeCloud.NodeAgent pull origin main)
+    sudo $SCRIPT_NAME pull
+
+
     # Authenticate
     sudo $SCRIPT_NAME login
 
@@ -1626,6 +1659,7 @@ main() {
     case "$command" in
         install)      cmd_install    "$@" ;;
         update)       cmd_update     "$@" ;;
+        pull)         cmd_pull       "$@" ;;
         login)        cmd_login      "$@" ;;
         logout)       cmd_logout     "$@" ;;
         status)       cmd_status     "$@" ;;
