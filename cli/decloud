@@ -290,19 +290,19 @@ find_install_script() {
 cmd_login() {
     check_root
 
-    echo ""
-    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
-    echo -e "${BOLD}  DeCloud Node Authentication${NC}"
-    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
-    echo ""
-
-    # Ensure service is installed and running
-    if ! systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
-        log_error "Node agent service not installed"
-        log_info "Install it first: sudo $SCRIPT_NAME install --orchestrator <url> --wallet <address> ..."
+    # cli-decloud-node handles the full auth flow:
+    #   wallet address prompt → signing message → QR code → sign.html URL
+    #   → signature input → local verification → writes /etc/decloud/pending-auth as JSON
+    # AuthenticationManager then reads that JSON and registers with the orchestrator,
+    # writing /etc/decloud/credentials on success.
+    local wallet_cli="/usr/local/bin/cli-decloud-node"
+    if [[ ! -x "$wallet_cli" ]]; then
+        log_error "Authentication CLI not found at $wallet_cli"
+        log_info "Run 'sudo $SCRIPT_NAME update' to reinstall"
         exit $EXIT_ERROR
     fi
 
+    # Ensure service is running so AuthenticationManager can pick up pending-auth
     if ! check_service_running; then
         log_warn "Node agent service is not running — starting it..."
         systemctl start "$SERVICE_NAME" || {
@@ -324,22 +324,31 @@ cmd_login() {
         rm -f "$CREDENTIALS_FILE"
     fi
 
-    # Remove stale pending-auth if present
+    # Remove any stale pending-auth before starting
     rm -f "$PENDING_AUTH_FILE"
 
-    log_info "Writing pending authentication signal..."
-    mkdir -p "$CONFIG_DIR"
+    # ── Step 1: run cli-decloud-node login ──────────────────────────────────
+    # This prompts for wallet, shows QR code, waits for signature,
+    # verifies it locally, and writes the JSON pending-auth file.
+    "$wallet_cli" login
+    local cli_exit=$?
 
-    # The pending-auth file signals AuthenticationManager to trigger registration.
-    # The agent reads orchestrator URL and wallet from appsettings.json (set during install).
-    touch "$PENDING_AUTH_FILE"
-    chmod 600 "$PENDING_AUTH_FILE"
+    if (( cli_exit != 0 )); then
+        log_error "Authentication cancelled or failed"
+        exit $EXIT_ERROR
+    fi
 
-    log_success "Pending authentication created"
+    # Confirm the JSON pending-auth file was actually written
+    if [[ ! -f "$PENDING_AUTH_FILE" ]]; then
+        log_error "Pending auth file not written — authentication may have failed"
+        exit $EXIT_ERROR
+    fi
+
+    # ── Step 2: wait for AuthenticationManager to complete registration ─────
+    echo ""
     log_info "Waiting for node agent to complete registration..."
     echo ""
 
-    # Poll for credentials file — AuthenticationManager writes it on success
     local timeout=120
     local elapsed=0
     local interval=3
@@ -349,7 +358,7 @@ cmd_login() {
             local node_id; node_id=$(get_node_id)
             echo ""
             echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
-            echo -e "${BOLD}  ✓ Authentication Successful!${NC}"
+            echo -e "${BOLD}  ✓ Registration Complete!${NC}"
             echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
             echo ""
             echo "  Node ID: $node_id"
@@ -359,22 +368,15 @@ cmd_login() {
             return 0
         fi
 
-        # Check for failure via service logs
-        local recent_err
-        recent_err=$(journalctl -u "$SERVICE_NAME" --since "${interval}s ago" -p err --no-pager -q 2>/dev/null | tail -1 || true)
-        if [[ -n "$recent_err" ]]; then
-            log_warn "Recent error: $recent_err"
-        fi
-
-        printf "  Waiting... (%ds/%ds)\r" "$elapsed" "$timeout"
+        printf "  Waiting for agent registration... (%ds/%ds)\r" "$elapsed" "$timeout"
         sleep $interval
         (( elapsed += interval ))
     done
 
     echo ""
-    log_error "Authentication timed out after ${timeout}s"
-    log_info "Check service logs: $SCRIPT_NAME logs --journal -n 50"
-    rm -f "$PENDING_AUTH_FILE"
+    log_error "Registration timed out after ${timeout}s"
+    log_info "The signature was saved. Check agent logs to see why registration failed:"
+    log_info "  $SCRIPT_NAME logs --journal -n 50"
     exit $EXIT_ERROR
 }
 
