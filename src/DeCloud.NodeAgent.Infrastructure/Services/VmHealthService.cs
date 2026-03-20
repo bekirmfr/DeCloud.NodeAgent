@@ -46,7 +46,7 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                         if (vm.Spec.VmType == VmType.Relay)
                             await CheckRelayVmNatRulesAsync();
 
-                        if (vm.State != VmState.Running)
+                        if (vm.State != VmState.Running && vm.State != VmState.Failed)
                         {
                             var timeSinceLastHeartbeat = DateTime.UtcNow - vm.LastHeartbeat;
                             if (timeSinceLastHeartbeat > TimeSpan.FromMinutes(5))
@@ -54,7 +54,15 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                                 _logger.LogWarning(
                                     "VM {VmId} has not sent heartbeat for {ElapsedMinutes} minutes. Restarting VM.",
                                     vm.VmId, timeSinceLastHeartbeat.TotalMinutes);
-                                await _vmManager.RestartVmAsync(vm.VmId, true, ct);
+                                var restarted = await _vmManager.RestartVmAsync(vm.VmId, force: true, ct);
+                                if (!restarted)
+                                {
+                                    _logger.LogError(
+                                        "VM {VmId} failed to restart — marking as Failed to stop retry loop. " +
+                                        "Orchestrator reconciliation will redeploy.",
+                                        vm.VmId);
+                                    await _vmManager.UpdateVmStateAsync(vm.VmId, VmState.Failed, ct);
+                                }
                             }
                         }
                     }
