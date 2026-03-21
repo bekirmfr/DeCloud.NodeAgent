@@ -107,8 +107,8 @@ public class HeartbeatService : BackgroundService
             // Get all active VMs with detailed information
             var allVms = await _vmManager.GetAllVmsAsync(ct);
             var activeVms = allVms
-                .Where(vm => vm.State != VmState.Deleted && vm.State != VmState.Failed)
-                .ToList();
+                .Where(vm => vm.State != VmState.Deleted)
+                .ToList(); ;
 
             // =====================================================
             // Apply quota to Burstable non-relay type VMs after boot
