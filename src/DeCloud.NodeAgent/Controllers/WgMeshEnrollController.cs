@@ -50,6 +50,30 @@ public class WgMeshEnrollController : ControllerBase
             request.PublicKey[..Math.Min(16, request.PublicKey.Length)] + "...",
             request.AllowedIps);
 
+        // Guard: on CGNAT nodes, system VMs (DHT, BlockStore) use the host's
+        // tunnel IP as their advertise address and attempt mesh enrollment with
+        // allowed_ips matching the host's own WireGuard peer slot on the relay.
+        // Proxying this would trigger the relay's stale-peer eviction (duplicate
+        // IP, different key) — evicting the CGNAT host registration. The
+        // orchestrator then re-adds the host peer, which evicts the system VM.
+        // They thrash every ~30s. These VMs already route through the host tunnel
+        // and need no separate peer slot on the relay.
+        var hostTunnelIp = await GetHostTunnelIpAsync(ct);
+        if (!string.IsNullOrEmpty(hostTunnelIp))
+        {
+            var requestedIp = request.AllowedIps.Split('/')[0].Trim();
+            if (hostTunnelIp == requestedIp)
+            {
+                _logger.LogDebug(
+                    "WG mesh enrollment skipped for peer {PubKey}: allowed_ips={AllowedIps} " +
+                    "matches host CGNAT tunnel IP {TunnelIp} — VM routes via host tunnel",
+                    request.PublicKey[..Math.Min(16, request.PublicKey.Length)] + "...",
+                    request.AllowedIps, hostTunnelIp);
+
+                return Ok(new { success = true, skipped = true, reason = "routes-via-host-tunnel" });
+            }
+        }
+
         // Strategy 1: Local relay VM (co-located on same host)
         var relayIp = await _portForwardingManager.GetRelayVmIpAsync(ct);
         if (!string.IsNullOrEmpty(relayIp))
@@ -133,6 +157,53 @@ public class WgMeshEnrollController : ControllerBase
             _logger.LogWarning(ex,
                 "Failed to proxy enrollment to relay at {RelayIp}",
                 relayIp);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Returns the host's own WireGuard tunnel IP (e.g. "10.20.1.2") if a
+    /// 10.20.x.x address is present on any interface, or null otherwise.
+    /// Used to skip enrollment requests from system VMs that already route
+    /// through the host tunnel and must not claim the same peer slot.
+    /// </summary>
+    private async Task<string?> GetHostTunnelIpAsync(CancellationToken ct)
+    {
+        try
+        {
+            var process = new System.Diagnostics.Process
+            {
+                StartInfo = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "ip",
+                    Arguments = "-4 -o addr show",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                }
+            };
+
+            process.Start();
+            var output = await process.StandardOutput.ReadToEndAsync(ct);
+            await process.WaitForExitAsync(ct);
+
+            foreach (var line in output.Split('\n'))
+            {
+                if (!line.Contains("10.20.")) continue;
+
+                var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                for (int i = 0; i < parts.Length - 1; i++)
+                {
+                    if (parts[i] == "inet" && parts[i + 1].StartsWith("10.20."))
+                        return parts[i + 1].Split('/')[0]; // return bare IP, no CIDR
+                }
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Error reading host tunnel IP");
             return null;
         }
     }
