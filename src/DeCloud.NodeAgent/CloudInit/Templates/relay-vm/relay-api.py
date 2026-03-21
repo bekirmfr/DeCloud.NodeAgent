@@ -1678,6 +1678,8 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             lines = result.stdout.strip().split('\n')
             peers = []
 
+            current_time = time.time()
+
             for line in lines[1:]:
                 if not line.strip():
                     continue
@@ -1688,6 +1690,7 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                     allowed_ips = fields[3] if fields[3] != '(none)' else None
                     peer_type, parent_node_id = classify_peer(public_key, allowed_ips)
                     meta = get_peer_metadata(public_key)
+                    reg_age = get_peer_age(public_key, current_time)
 
                     peers.append({
                         'public_key': public_key,
@@ -1698,7 +1701,9 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                         'tx_bytes': int(fields[6]) if fields[6] else 0,
                         'peer_type': peer_type,
                         'parent_node_id': parent_node_id,
-                        'description': meta.get('description', '') if meta else ''
+                        'description': meta.get('description', '') if meta else '',
+                        'registration_age_seconds': int(reg_age) if reg_age != float('inf') else None,
+                        # None means peer predates tracking (registered before last service start)
                     })
 
             # Count by type — only cgnat-node counts toward capacity

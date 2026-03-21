@@ -518,14 +518,18 @@ function renderCgnatNodeCard(peer, index, now) {
     let statusText = 'Active';
 
     if (handshakeAge === Infinity) {
-        statusClass = 'warning';
-        statusText = 'No Handshake';
+        // No handshake yet — check if peer is genuinely new or just broken
+        const regAge = peer.registration_age_seconds;  // null = predates tracking
+        if (regAge !== null && regAge !== undefined && regAge < CONFIG.thresholds.handshakeGracePeriod) {
+            statusClass = 'checking';
+            statusText = 'New (Grace Period)';
+        } else {
+            statusClass = 'warning';
+            statusText = 'No Handshake';
+        }
     } else if (handshakeAge > CONFIG.thresholds.handshakeStale) {
         statusClass = 'warning';
         statusText = 'Stale';
-    } else if (handshakeAge < CONFIG.thresholds.handshakeGracePeriod) {
-        statusClass = 'checking';
-        statusText = 'New (Grace Period)';
     }
 
     return `
@@ -572,7 +576,7 @@ function renderSystemVmCard(peer, now) {
     const statusText = isActive ? 'Active' : (handshakeAge === Infinity ? 'Connecting' : 'Stale');
     const desc = peer.description || 'System VM';
     const vmType = desc.toLowerCase().includes('dht') ? 'DHT' :
-                   desc.toLowerCase().includes('block') ? 'BlockStore' : 'System';
+        desc.toLowerCase().includes('block') ? 'BlockStore' : 'System';
 
     return `
         <div class="node-card ${statusClass} system-vm-card">
