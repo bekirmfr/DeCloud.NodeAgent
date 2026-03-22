@@ -61,3 +61,17 @@
 #*.PDF   diff=astextplain
 #*.rtf   diff=astextplain
 #*.RTF   diff=astextplain
+
+###############################################################################
+# Normalize line endings. 
+# 
+# Git will normalize endings on commit regardless of the editor. 
+###############################################################################
+# Default to CRLF on Windows checkout
+* text=auto
+
+# Shell scripts: always LF, no conversion
+*.sh text eol=lf
+
+# Go source: always LF
+*.go text eol=lf

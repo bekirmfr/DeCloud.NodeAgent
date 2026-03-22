@@ -1,0 +1,11 @@
+# All files default
+[*]
+end_of_line = crlf
+
+# Shell scripts always LF — they run on Linux
+[*.sh]
+end_of_line = lf
+
+# Go files LF
+[*.go]
+end_of_line = lf

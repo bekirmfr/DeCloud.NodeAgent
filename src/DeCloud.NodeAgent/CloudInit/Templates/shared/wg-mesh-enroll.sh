@@ -61,13 +61,23 @@ log "  Relay API:      $WG_RELAY_API"
 log "  Interface:      $WG_INTERFACE"
 
 # ==================== Idempotency Guard ====================
-# Check if our specific public key is already registered on the relay,
-# regardless of handshake state
+# Only skip re-enrollment if the existing interface has an active handshake
+# with the relay in the last 3 minutes. A stale interface (no handshake or
+# handshake > 3 min ago) means the peer is not registered on the current
+# relay — tear it down and re-enroll with a fresh keypair.
 if [ -f "/etc/wireguard/${WG_INTERFACE}.conf" ] && wg show "$WG_INTERFACE" &>/dev/null; then
     EXISTING_PUBKEY=$(wg show "$WG_INTERFACE" public-key 2>/dev/null)
-    if [ -n "$EXISTING_PUBKEY" ]; then
-        log "WireGuard interface ${WG_INTERFACE} already up with public key ${EXISTING_PUBKEY:0:16}... — skipping enrollment"
+    LAST_HANDSHAKE=$(wg show "$WG_INTERFACE" latest-handshakes 2>/dev/null | awk '{print $2}')
+    NOW=$(date +%s)
+    HANDSHAKE_AGE=$(( NOW - ${LAST_HANDSHAKE:-0} ))
+
+    if [ -n "$EXISTING_PUBKEY" ] && [ "$HANDSHAKE_AGE" -lt 180 ]; then
+        log "WireGuard interface ${WG_INTERFACE} already up with recent handshake (${HANDSHAKE_AGE}s ago) — skipping enrollment"
         exit 0
+    else
+        log "WireGuard interface ${WG_INTERFACE} exists but handshake is stale or absent (${HANDSHAKE_AGE}s ago) — re-enrolling with fresh keypair"
+        wg-quick down "$WG_INTERFACE" 2>/dev/null || true
+        rm -f "/etc/wireguard/${WG_INTERFACE}.conf"
     fi
 fi
 

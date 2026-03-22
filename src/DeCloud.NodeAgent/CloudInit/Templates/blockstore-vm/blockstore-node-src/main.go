@@ -33,6 +33,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"net"
 
 	bsnetwork "github.com/ipfs/boxo/bitswap/network"
 	"github.com/ipfs/boxo/bitswap"
@@ -181,6 +182,33 @@ func splitPeers(s string) []string {
 	return out
 }
 
+// isIPOnAnyInterface checks if ip is assigned to any local network interface.
+func isIPOnAnyInterface(ip string) bool {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ifIP net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ifIP = v.IP
+			case *net.IPAddr:
+				ifIP = v.IP
+			}
+			if ifIP != nil && ifIP.String() == ip {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Identity
 // ═══════════════════════════════════════════════════════════════════
@@ -265,11 +293,45 @@ func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
 	}
 	bs := blockstore.NewIdStore(blockstore.NewBlockstore(datastore.Batching(fds)))
 
+	// Wait up to 30s for the WG mesh interface to be assigned the advertise IP.
+	// The binary starts concurrently with wg-quick; without this wait the
+	// libp2p host logs only the libvirt bridge IP and the AddrsFactory below
+	// advertises an IP that isn't yet on any interface.
+	if cfg.AdvertiseIP != "" {
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			if isIPOnAnyInterface(cfg.AdvertiseIP) {
+				log.Printf("WG mesh interface ready — advertise IP %s is up", cfg.AdvertiseIP)
+				break
+			}
+			log.Printf("Waiting for WG mesh interface (%s)...", cfg.AdvertiseIP)
+			time.Sleep(2 * time.Second)
+		}
+		if !isIPOnAnyInterface(cfg.AdvertiseIP) {
+			log.Printf("Warning: advertise IP %s not found on any interface after 30s — "+
+				"peering via WG mesh will not work", cfg.AdvertiseIP)
+		}
+	}
+
 	listenAddr := fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", cfg.ListenPort)
-	h, err := libp2p.New(
+	opts := []libp2p.Option{
 		libp2p.ListenAddrStrings(listenAddr),
 		libp2p.Identity(priv),
-	)
+	}
+
+	// Only advertise the WG tunnel IP — don't expose unreachable
+	// libvirt bridge or localhost addresses to other peers.
+	if cfg.AdvertiseIP != "" {
+		extAddr := fmt.Sprintf("/ip4/%s/tcp/%d", cfg.AdvertiseIP, cfg.ListenPort)
+		extMA, maErr := multiaddr.NewMultiaddr(extAddr)
+		if maErr == nil {
+			opts = append(opts, libp2p.AddrsFactory(func(_ []multiaddr.Multiaddr) []multiaddr.Multiaddr {
+				return []multiaddr.Multiaddr{extMA}
+			}))
+		}
+	}
+
+	h, err := libp2p.New(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("create libp2p host: %w", err)
 	}
