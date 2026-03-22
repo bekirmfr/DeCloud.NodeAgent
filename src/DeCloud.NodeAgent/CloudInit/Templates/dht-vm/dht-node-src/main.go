@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ipfs/go-cid"
 	leveldb "github.com/ipfs/go-ds-leveldb"
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
@@ -519,6 +520,55 @@ func startAPIServer(port string, state *NodeState) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "published"})
+	})
+
+	// GET /providers/{cid}
+	// Query the DHT for provider records for a given CID.
+	// Used by LazysyncManager (orchestrator) to audit chunk replication.
+	// Returns provider count + peer IDs. Timeout: 30s.
+	mux.HandleFunc("/providers/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Extract CID from path: /providers/{cid}
+		cidStr := strings.TrimPrefix(r.URL.Path, "/providers/")
+		cidStr = strings.TrimSpace(cidStr)
+		if cidStr == "" {
+			http.Error(w, "missing CID", http.StatusBadRequest)
+			return
+		}
+
+		c, err := cid.Decode(cidStr)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("invalid CID: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		// FindProvidersAsync returns a channel of peer.AddrInfo.
+		// Cap at 20 providers — enough to verify replication factor.
+		// 30s timeout guards against slow DHT walks.
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+
+		state.mu.RLock()
+		kadDHT := state.dht
+		state.mu.RUnlock()
+
+		providerCh := kadDHT.FindProvidersAsync(ctx, c, 20)
+
+		var providers []string
+		for p := range providerCh {
+			providers = append(providers, p.ID.String())
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"cid":       cidStr,
+			"count":     len(providers),
+			"providers": providers,
+		})
 	})
 
 	addr := fmt.Sprintf("127.0.0.1:%s", port)
