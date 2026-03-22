@@ -682,6 +682,30 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 _logger.LogInformation("Clearing previous CGNAT info - node no longer behind NAT");
                 _lastHeartbeat.Heartbeat.CgnatInfo = null;
             }
+            // Process InvalidVmIds — destroy VMs the orchestrator says
+            // this node should not be running
+            if (data.TryGetProperty("invalidVmIds", out var invalidVmIdsEl) &&
+                invalidVmIdsEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var idEl in invalidVmIdsEl.EnumerateArray())
+                {
+                    var vmId = idEl.GetString();
+                    if (!string.IsNullOrEmpty(vmId))
+                    {
+                        _logger.LogWarning(
+                            "Orchestrator flagged VM {VmId} as invalid — queuing for destruction",
+                            vmId);
+                        _pendingCommands.Enqueue(new PendingCommand
+                        {
+                            CommandId = Guid.NewGuid().ToString(),
+                            Type = CommandType.DeleteVm,
+                            Payload = $"{{\"vmId\":\"{vmId}\"}}",
+                            RequiresAck = false,
+                            IssuedAt = DateTime.UtcNow
+                        });
+                    }
+                }
+            }
         }
         catch (Exception ex)
         {
