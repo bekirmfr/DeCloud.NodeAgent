@@ -81,6 +81,12 @@ compute_token() {
 
 TOKEN=$(compute_token)
 
+# Read advertise IP from blockstore env once — written by cloud-init runcmd
+# after WireGuard tunnel IP override, so this reflects the WG mesh IP.
+ADVERTISE_IP=$(grep -oP 'BLOCKSTORE_ADVERTISE_IP=\K\S+' \
+    /etc/decloud-blockstore/blockstore.env 2>/dev/null || true)
+log "Advertise IP: ${ADVERTISE_IP:-<not set>}"
+
 # ═══════════════════════════════════════════════════════════════════
 # Main polling loop
 # ═══════════════════════════════════════════════════════════════════
@@ -108,9 +114,10 @@ while true; do
         -H "Content-Type: application/json" \
         -H "X-BlockStore-Token: $TOKEN" \
         -d "{
-            \"nodeId\": \"$NODE_ID\",
-            \"vmId\":   \"$VM_ID\",
-            \"peerId\": \"$PEER_ID\"
+            \"nodeId\":     \"$NODE_ID\",
+            \"vmId\":       \"$VM_ID\",
+            \"peerId\":     \"$PEER_ID\",
+            \"advertiseIp\": \"$ADVERTISE_IP\"
         }" \
         --max-time 10 \
         -s \

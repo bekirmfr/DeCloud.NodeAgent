@@ -204,11 +204,17 @@ log "Starting WireGuard interface ${WG_INTERFACE}..."
 
 # Enable and start via wg-quick
 systemctl enable "wg-quick@${WG_INTERFACE}.service" 2>/dev/null || true
-wg-quick up "$WG_INTERFACE" 2>/dev/null || {
-    log "wg-quick up failed (might already be running), trying restart..."
+
+log "Running wg-quick up ${WG_INTERFACE}..."
+if ! wg-quick up "$WG_INTERFACE" 2>/dev/null; then
+    log "wg-quick up failed on first attempt — trying down+up..."
     wg-quick down "$WG_INTERFACE" 2>/dev/null || true
-    wg-quick up "$WG_INTERFACE"
-}
+    sleep 1
+    if ! wg-quick up "$WG_INTERFACE"; then
+        log_err "wg-quick up ${WG_INTERFACE} failed on retry — enrollment incomplete"
+        exit 1
+    fi
+fi
 
 # ==================== Verify Connectivity ====================
 sleep 2

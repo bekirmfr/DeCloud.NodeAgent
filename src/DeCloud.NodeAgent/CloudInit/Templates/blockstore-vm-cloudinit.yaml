@@ -105,6 +105,17 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
+  # systemd drop-in: make wg-quick@wg-mesh idempotent
+  # Prevents "already exists" failure if the interface was brought up
+  # outside of systemd (e.g., during cloud-init enrollment).
+  - path: /etc/systemd/system/wg-quick@wg-mesh.service.d/override.conf
+    permissions: '0644'
+    content: |
+      [Service]
+      ExecStart=
+      ExecStart=/bin/bash -c 'wg show wg-mesh > /dev/null 2>&1 || /usr/bin/wg-quick up wg-mesh'
+      RemainAfterExit=yes
+
   # Dashboard server (Python — serves UI and proxies API to Go binary)
   - path: /etc/systemd/system/decloud-blockstore-dashboard.service
     permissions: '0644'
@@ -249,6 +260,9 @@ runcmd:
 
   # WireGuard mesh enrollment — must happen before block store starts
   - bash -c 'set -a && source /etc/decloud/wg-mesh.env && set +a && if [ -n "$WG_RELAY_ENDPOINT" ] && [ -n "$WG_RELAY_PUBKEY" ]; then /usr/local/bin/wg-mesh-enroll.sh; else echo "[wg-mesh] Skipping enrollment — no relay configured"; fi'
+  # Tell systemd the interface is up (idempotent — fails safely if already active)
+  - systemctl daemon-reload
+  - systemctl start wg-quick@wg-mesh || true
 
   # Override advertise IP with WireGuard tunnel IP if available
   - |
