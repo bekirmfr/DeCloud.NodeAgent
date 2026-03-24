@@ -2322,6 +2322,7 @@ Restart=always
 RestartSec=10
 Environment=ASPNETCORE_ENVIRONMENT=Production
 Environment=DOTNET_ENVIRONMENT=Production
+Environment=PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 StandardOutput=append:${LOG_DIR}/nodeagent.log
 StandardError=append:${LOG_DIR}/nodeagent.log
 
