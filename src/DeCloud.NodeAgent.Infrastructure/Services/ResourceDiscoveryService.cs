@@ -72,13 +72,13 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         await _discoverySemaphore.WaitAsync(ct);
         try
         {
-        _logger.LogInformation("Starting full resource discovery (Platform: {Platform})",
-            _isWindows ? "Windows" : "Linux");
+            _logger.LogInformation("Starting full resource discovery (Platform: {Platform})",
+                _isWindows ? "Windows" : "Linux");
 
-        var cpu = await GetCpuInfoAsync(ct);
-        var memory = await GetMemoryInfoAsync(ct);
-        var storage = await GetStorageInfoAsync(ct);
-        var gpus = await GetGpuInfoAsync(ct, forceRecheck: true); // Force GPU recheck during full discovery
+            var cpu = await GetCpuInfoAsync(ct);
+            var memory = await GetMemoryInfoAsync(ct);
+            var storage = await GetStorageInfoAsync(ct);
+            var gpus = await GetGpuInfoAsync(ct, forceRecheck: true); // Force GPU recheck during full discovery
             var supportsGpu = gpus.Any();
             var network = await GetNetworkInfoAsync(ct);
 
@@ -127,6 +127,10 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
             var isWsl2 = await IsWslEnvironmentAsync(ct);
 
+            // KVM availability — /dev/kvm exists only when kernel module is loaded
+            // and hypervisor exposes hardware virtualization to this guest.
+            var isKvmAvailable = File.Exists("/dev/kvm");
+
             var inventory = new HardwareInventory
             {
                 Cpu = cpu,
@@ -139,7 +143,8 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                 SupportsGpuContainers = supportsGpuContainers,
                 SupportsGpuProxy = supportsGpuProxy,
                 IsWsl2 = isWsl2,
-                CollectedAt = DateTime.UtcNow
+                CollectedAt = DateTime.UtcNow,
+                KvmAvailable = isKvmAvailable
             };
 
             // Update cache

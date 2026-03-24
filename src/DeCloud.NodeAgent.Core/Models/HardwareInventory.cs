@@ -35,6 +35,14 @@ public class HardwareInventory
     /// vsock unavailable, TCP fallback required.
     /// </summary>
     public bool IsWsl2 { get; set; }
+
+    /// <summary>
+    /// True if /dev/kvm exists on the node host (KVM kernel module loaded,
+    /// hardware virtualization available). False on VPS hosts without nested
+    /// virt — QEMU TCG fallback is used, which is too slow for user workloads.
+    /// System VMs (Relay, DHT, BlockStore) can run on either.
+    /// </summary>
+    public bool KvmAvailable { get; set; } = true; // default true for backward compat
 }
 
 public class CpuInfo
