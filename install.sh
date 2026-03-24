@@ -73,7 +73,7 @@ ENABLE_LOGGING=true  # Can be overridden by --no-log
 
 # Ports (configurable - work with your existing infrastructure)
 AGENT_PORT=5100
-WIREGUARD_PORT=51820
+WIREGUARD_PORT=51821
 
 # WireGuard
 WIREGUARD_HUB_IP="10.10.0.1"
