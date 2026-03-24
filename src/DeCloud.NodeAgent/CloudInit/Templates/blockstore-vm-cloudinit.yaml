@@ -70,6 +70,8 @@ write_files:
       WG_RELAY_PUBKEY=__WG_RELAY_PUBKEY__
       WG_TUNNEL_IP=__WG_TUNNEL_IP__
       WG_RELAY_API=__WG_RELAY_API__
+      WG_PARENT_NODE_ID=__NODE_ID__
+      WG_DESCRIPTION=BlockStore-__VM_ID__
 
   # VM identity files
   - path: /etc/decloud/vm-id
@@ -113,7 +115,7 @@ write_files:
     content: |
       [Service]
       ExecStart=
-      ExecStart=/bin/bash -c 'wg show wg-mesh > /dev/null 2>&1 || /usr/bin/wg-quick up wg-mesh'
+      ExecStart=/bin/bash -c '/usr/local/bin/wg-mesh-enroll.sh || true'
       RemainAfterExit=yes
 
   # Dashboard server (Python — serves UI and proxies API to Go binary)

@@ -188,6 +188,17 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
+  # systemd drop-in: make wg-quick@wg-mesh idempotent
+  # Prevents "already exists" failure if the interface was brought up
+  # outside of systemd (e.g., during cloud-init enrollment).
+  - path: /etc/systemd/system/wg-quick@wg-mesh.service.d/override.conf
+    permissions: '0644'
+    content: |
+      [Service]
+      ExecStart=
+      ExecStart=/bin/bash -c '/usr/local/bin/wg-mesh-enroll.sh || true'
+      RemainAfterExit=yes
+
   # Dashboard server (Python — serves UI and proxies API to Go binary)
   - path: /opt/decloud-dht/dht-dashboard.py
     permissions: '0755'
@@ -309,6 +320,8 @@ runcmd:
   # The enrollment script sources /etc/decloud/wg-mesh.env itself.
   # Skip gracefully if relay config is missing (no relay found at deploy time).
   - bash -c 'set -a && source /etc/decloud/wg-mesh.env && set +a && if [ -n "$WG_RELAY_ENDPOINT" ] && [ -n "$WG_RELAY_PUBKEY" ]; then /usr/local/bin/wg-mesh-enroll.sh; else echo "[wg-mesh] Skipping enrollment — no relay configured"; fi'
+  - systemctl daemon-reload
+  - systemctl start wg-quick@wg-mesh || true
 
   # Configure and start Nginx
   - ln -sf /etc/nginx/sites-available/dht-proxy /etc/nginx/sites-enabled/
