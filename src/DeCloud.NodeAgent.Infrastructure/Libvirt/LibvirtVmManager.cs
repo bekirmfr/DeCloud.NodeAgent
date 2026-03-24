@@ -36,6 +36,12 @@ public class LibvirtVmManager : IVmManager
     private readonly GpuProxyService _gpuProxy;
     private readonly bool _isWindows;
     private readonly bool _isWsl2;
+    /// <summary>
+    /// True if /dev/kvm exists and the kernel module is loaded.
+    /// Detected once at startup. Controls domain type and CPU mode in libvirt XML.
+    /// On VPS/cloud hosts without nested virt, falls back to QEMU TCG (type='qemu').
+    /// </summary>
+    private bool _kvmAvailable;
 
     // Track our VMs in memory
     private readonly Dictionary<string, VmInstance> _vms = new();
@@ -2756,8 +2762,11 @@ public class LibvirtVmManager : IVmManager
         // ========================================
         // COMPLETE LIBVIRT XML
         // ========================================
+        var domainType = _kvmAvailable ? "kvm" : "qemu";
+        var cpuMode = _kvmAvailable ? "host-passthrough" : "host-model";
+
         return $@"
-            <domain type='kvm'>
+            <domain type='{domainType}'>
               <name>{spec.Id}</name>
               <uuid>{spec.Id}</uuid>
               <memory unit='bytes'>{spec.MemoryBytes}</memory>
@@ -2771,7 +2780,7 @@ public class LibvirtVmManager : IVmManager
                 <acpi/>
                 <apic/>{iommuFeature}
               </features>
-              <cpu mode='host-passthrough' check='none'{(hasGpuPassthrough ? " migratable='off'" : "")}/>
+              <cpu mode='{cpuMode}' check='none'{(hasGpuPassthrough ? " migratable='off'" : "")}/>
               <clock offset='utc'>
                 <timer name='rtc' tickpolicy='catchup'/>
                 <timer name='pit' tickpolicy='delay'/>
@@ -2877,7 +2886,6 @@ public class LibvirtVmManager : IVmManager
     {
         try
         {
-            // Get architecture from node metadata
             var inventory = _nodeMetadata.Inventory;
             if (inventory?.Cpu != null && !string.IsNullOrEmpty(inventory.Cpu.Architecture))
             {
@@ -2893,6 +2901,15 @@ public class LibvirtVmManager : IVmManager
         {
             _logger.LogWarning(ex, "Failed to detect architecture, using default: x86_64");
         }
+
+        // Detect KVM availability — /dev/kvm exists only when the kernel module is loaded
+        // and the hypervisor exposes hardware virtualization to this guest.
+        _kvmAvailable = File.Exists("/dev/kvm");
+        _logger.LogInformation(
+            "KVM available: {KvmAvailable} — domain type will be '{DomainType}', cpu mode '{CpuMode}'",
+            _kvmAvailable,
+            _kvmAvailable ? "kvm" : "qemu",
+            _kvmAvailable ? "host-passthrough" : "host-model");
     }
 
     /// <summary>
@@ -3062,8 +3079,11 @@ public class LibvirtVmManager : IVmManager
         // ========================================
         // COMPLETE LIBVIRT XML
         // ========================================
+        var domainType = _kvmAvailable ? "kvm" : "qemu";
+        var cpuMode = _kvmAvailable ? "host-passthrough" : "host-model";
+
         return $@"
-            <domain type='kvm'>
+            <domain type='{domainType}'>
               <name>{spec.Id}</name>
               <uuid>{spec.Id}</uuid>
               <memory unit='bytes'>{spec.MemoryBytes}</memory>
@@ -3074,7 +3094,7 @@ public class LibvirtVmManager : IVmManager
                 <acpi/>
                 <apic/>{iommuFeature}
               </features>
-              <cpu mode='host-passthrough' check='none'{(hasGpuPassthrough ? " migratable='off'" : "")}/>
+              <cpu mode='{cpuMode}' check='none'{(hasGpuPassthrough ? " migratable='off'" : "")}/>
               <clock offset='utc'>
                 <timer name='rtc' tickpolicy='catchup'/>
                 <timer name='pit' tickpolicy='delay'/>
