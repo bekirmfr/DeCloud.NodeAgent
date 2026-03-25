@@ -1631,16 +1631,33 @@ public class LibvirtVmManager : IVmManager
 
                 // Relay VM metadata placeholders
 
-                // Use the node's own public IP as the WireGuard endpoint for the relay VM peer.
-                // orchestratorUrl may be "http://localhost:5050" when orchestrator and node agent
-                // are co-located — localhost resolves to ::1 inside the relay VM and the
-                // WireGuard handshake can never complete.
-                var orchestratorWgIp = !string.IsNullOrEmpty(_nodeMetadata.PublicIp)
-                    ? _nodeMetadata.PublicIp
-                    : new Uri(orchestratorUrl).Host;
+                // Use orchestrator URL host directly — it's the correct WireGuard endpoint.
+                // Exception: when co-located (localhost/127.0.0.1), substitute the node's
+                // public IP because localhost is unreachable from inside the relay VM.
+                // __ORCHESTRATOR_IP__: must be the orchestrator's host, not this node's IP.
+                // Exception: if orchestratorUrl is localhost/127.0.0.1 (co-located deployment),
+                // fall back to this node's public IP since that's where the orchestrator lives.
+                var orchestratorHost = new Uri(orchestratorUrl).Host;
+                var orchestratorWgIp = orchestratorHost is "localhost" or "127.0.0.1" or "::1"
+                    ? (_nodeMetadata.PublicIp ?? orchestratorHost)
+                    : orchestratorHost;
 
                 variables["__ORCHESTRATOR_IP__"] = orchestratorWgIp;
                 variables["__ORCHESTRATOR_PORT__"] = "51821";
+
+                // __ORCHESTRATOR_URL__: used by notify-orchestrator.sh for the HTTP register-callback.
+                // Same localhost substitution logic — use the public IP when co-located.
+                var orchestratorPort = new Uri(orchestratorUrl).Port > 0
+                    ? new Uri(orchestratorUrl).Port : 5050;
+                var orchestratorCallbackUrl = orchestratorHost is "localhost" or "127.0.0.1" or "::1"
+                    ? $"http://{_nodeMetadata.PublicIp}:{orchestratorPort}"
+                    : orchestratorUrl;
+
+                variables["__ORCHESTRATOR_URL__"] = orchestratorCallbackUrl;
+
+                _logger.LogInformation(
+                    "VM {VmId}: Relay endpoints — WG={WgIp}:51821, Callback={CallbackUrl}",
+                    spec.Id, orchestratorWgIp, orchestratorCallbackUrl);
 
                 _logger.LogInformation(
                     "VM {VmId}: Relay WireGuard endpoint set to {Ip}:51821 (PublicIp={PublicIp}, OrchestratorUrl={Url})",
