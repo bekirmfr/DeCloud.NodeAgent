@@ -1,7 +1,7 @@
 #cloud-config
 # DeCloud Relay VM Cloud-Init Configuration
 # This VM serves as a WireGuard relay for CGNAT nodes
-# Version: 4.1 (FIXED - All issues resolved)
+# Version: 4.2 (OPTIMIZED - Minimal packages, proper fail2ban jails)
 
 hostname: __VM_NAME__
 manage_etc_hosts: true
@@ -9,19 +9,35 @@ manage_etc_hosts: true
 # =====================================================
 # SYSTEM PACKAGES
 # =====================================================
+# Kept:
+#   wireguard/wireguard-tools  — core relay functionality
+#   nginx-core                 — port 80 host-based routing (dashboard vs CGNAT proxy)
+#                                nginx-core omits unused media codec modules
+#                                (libx265, libwebp, libtiff, libde265, libavif...)
+#                                that the full nginx package pulls in
+#   fail2ban                   — SSH brute-force + nginx flood protection
+#   qemu-guest-agent           — VM readiness reporting to orchestrator
+#   python3                    — relay-api.py + http-proxy.py runtime
+#   curl                       — notify-orchestrator.sh callback
+#   jq                         — JSON parsing in shell scripts
+#   openssl                    — HMAC token computation in notify-orchestrator.sh
+#   iptables-persistent        — persists WireGuard PostUp NAT rules across reboots
+#
+# Removed vs previous version:
+#   nginx          → nginx-core  (same functionality, no media codecs)
+#   python3-pip    → removed     (no pip installs at runtime)
+#   htop           → removed     (interactive tool, unused in headless VM)
+#   iftop          → removed     (interactive tool, unused in headless VM)
+#   net-tools      → removed     (ifconfig/netstat, unused — iproute2 is default)
 packages:
   - wireguard
   - wireguard-tools
-  - nginx
+  - nginx-core
   - fail2ban
   - qemu-guest-agent
   - python3
-  - python3-pip
   - curl
   - jq
-  - htop
-  - iftop
-  - net-tools
   - openssl
   - iptables-persistent
 
@@ -82,6 +98,9 @@ write_files:
       __RELAY_SUBNET__
 
   # Nginx reverse proxy configuration
+  # Port 80 multiplexes two services based on Host header:
+  #   relay-* hostname or bare IP  → relay-api:8080 (dashboard)
+  #   any other hostname           → http-proxy:8081 (CGNAT VM traffic)
   - path: /etc/nginx/sites-available/relay-proxy
     permissions: '0644'
     content: |
@@ -171,7 +190,38 @@ write_files:
           }
       }
 
-  # FIXED: Relay management API with Wants instead of Requires
+  # fail2ban jails for relay VM threat surface:
+  #   [sshd]            — SSH brute-force on public interface
+  #                       (daemon still runs even though keys/passwords disabled;
+  #                        connection floods consume resources)
+  #   [nginx-botsearch] — scanner/bot flood on port 80
+  #   [nginx-limit-req] — HTTP request rate limiting
+  - path: /etc/fail2ban/jail.d/relay.conf
+    permissions: '0644'
+    content: |
+      [sshd]
+      enabled = true
+      port = 22
+      maxretry = 3
+      bantime = 3600
+      findtime = 600
+
+      [nginx-botsearch]
+      enabled = true
+      port = 80
+      maxretry = 2
+      bantime = 86400
+      findtime = 60
+
+      [nginx-limit-req]
+      enabled = true
+      port = 80
+      maxretry = 20
+      bantime = 600
+      findtime = 60
+      logpath = /var/log/nginx/error.log
+
+  # Relay management API systemd service
   - path: /etc/systemd/system/decloud-relay-api.service
     permissions: '0644'
     content: |
@@ -192,7 +242,7 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
-  # FIXED: HTTP Proxy with Wants instead of Requires
+  # HTTP Proxy systemd service
   - path: /etc/systemd/system/decloud-relay-http-proxy.service
     permissions: '0644'
     content: |
@@ -213,7 +263,7 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
-  # Systemd service for NAT callback
+  # NAT callback systemd service
   - path: /etc/systemd/system/decloud-relay-nat-callback.service
     permissions: '0644'
     content: |
@@ -272,7 +322,7 @@ write_files:
     content: |
       __RELAY_HTTP_PROXY__
 
-  # FIXED: Relay metadata JSON (removed embedded shell command)
+  # Relay metadata JSON
   - path: /etc/decloud/relay-metadata.json
     permissions: '0644'
     content: |
@@ -289,7 +339,7 @@ write_files:
         "wireguard_public_key": "__WIREGUARD_PUBLIC_KEY__",
         "orchestrator_public_key": "__ORCHESTRATOR_PUBLIC_KEY__",
         "created_at": "__TIMESTAMP__",
-        "version": "4.1"
+        "version": "4.2"
       }
 
 # =====================================================
@@ -301,16 +351,17 @@ runcmd:
   - echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
   - sysctl -p
   
-  # Configure firewall (UFW)
+  # Disable UFW — iptables rules are managed directly via WireGuard PostUp/PreDown
+  # and iptables-persistent. UFW would interfere with WireGuard NAT rules.
   - ufw disable || true
   - systemctl stop ufw || true
   - systemctl disable ufw || true
   
-  # Enable and start QEMU guest agent (static unit - systemctl enable fails silently)
+  # Enable QEMU guest agent (static symlink — systemctl enable fails on Debian cloud images)
   - ln -sf /lib/systemd/system/qemu-guest-agent.service /etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service
   - systemctl start qemu-guest-agent
   
-  # Start WireGuard manually first, then enable for boot
+  # Start WireGuard
   - wg-quick up wg-relay-server
   - systemctl enable wg-quick@wg-relay-server
 
@@ -401,7 +452,7 @@ runcmd:
   - systemctl enable nginx
   - systemctl restart nginx
 
-  # Create directories
+  # Create required directories
   - mkdir -p /opt/decloud-relay/static
   - mkdir -p /etc/decloud
 
@@ -416,7 +467,7 @@ runcmd:
   - systemctl start decloud-relay-api
   - systemctl is-active decloud-relay-api || echo "WARNING - Relay API failed to start"
 
-  # Configure fail2ban
+  # Start fail2ban (jails configured in write_files above)
   - systemctl enable fail2ban
   - systemctl start fail2ban
   
