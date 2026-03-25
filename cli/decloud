@@ -1814,7 +1814,7 @@ main() {
         install)      cmd_install    "$@" ;;
         update)       cmd_update     "$@" ;;
         pull)         cmd_pull       "$@" ;;
-        uninstall) shift cmd_remove "$@" ;;
+        uninstall)    cmd_remove     "$@" ;;
         login)        cmd_login      "$@" ;;
         logout)       cmd_logout     "$@" ;;
         status)       cmd_status     "$@" ;;
