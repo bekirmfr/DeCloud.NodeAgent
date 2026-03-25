@@ -1630,10 +1630,21 @@ public class LibvirtVmManager : IVmManager
                 }
 
                 // Relay VM metadata placeholders
-                variables["__ORCHESTRATOR_URL__"] = orchestratorUrl;
-                var orchestratorUri = new Uri(orchestratorUrl);
-                variables["__ORCHESTRATOR_IP__"] = orchestratorUri.Host;
+
+                // Use the node's own public IP as the WireGuard endpoint for the relay VM peer.
+                // orchestratorUrl may be "http://localhost:5050" when orchestrator and node agent
+                // are co-located — localhost resolves to ::1 inside the relay VM and the
+                // WireGuard handshake can never complete.
+                var orchestratorWgIp = !string.IsNullOrEmpty(_nodeMetadata.PublicIp)
+                    ? _nodeMetadata.PublicIp
+                    : new Uri(orchestratorUrl).Host;
+
+                variables["__ORCHESTRATOR_IP__"] = orchestratorWgIp;
                 variables["__ORCHESTRATOR_PORT__"] = "51821";
+
+                _logger.LogInformation(
+                    "VM {VmId}: Relay WireGuard endpoint set to {Ip}:51821 (PublicIp={PublicIp}, OrchestratorUrl={Url})",
+                    spec.Id, orchestratorWgIp, _nodeMetadata.PublicIp, orchestratorUrl);
                 variables["__NODE_ID__"] = _nodeMetadata.NodeId;
                 variables["__HOST_MACHINE_ID__"] = _nodeMetadata.MachineId;
                 variables["__PUBLIC_IP__"] = publicIp;
