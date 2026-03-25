@@ -323,17 +323,33 @@ public class WireGuardConfigManager : BackgroundService
     }
 
     /// <summary>
-    /// Clean up all WireGuard interfaces (when none are needed)
+    /// The complete set of WireGuard interface names this service can create.
+    /// Derived directly from DetermineDesiredConfigAsync return values.
+    /// Only these interfaces are eligible for cleanup — any other interface
+    /// on the host (e.g., orchestrator's wg-relay-client) is not our concern.
     /// </summary>
+    private static readonly HashSet<string> ManagedInterfaceNames =
+    [
+        "wg-relay",         // WireGuardRole.CgnatClient
+        "wg-relay-server",  // WireGuardRole.RelayServer
+        "wg-hub",           // WireGuardRole.HubNode
+    ];
+
     private async Task CleanupAllInterfacesAsync(CancellationToken ct)
     {
-        var interfaces = await GetActiveInterfacesAsync(ct);
+        var activeInterfaces = await GetActiveInterfacesAsync(ct);
 
-        foreach (var iface in interfaces)
+        foreach (var iface in activeInterfaces)
         {
+            if (!ManagedInterfaceNames.Contains(iface))
+            {
+                _logger.LogDebug(
+                    "Skipping non-managed WireGuard interface: {Interface}", iface);
+                continue;
+            }
+
             _logger.LogInformation(
-                "No WireGuard needed - removing interface: {Interface}",
-                iface);
+                "No WireGuard needed - removing managed interface: {Interface}", iface);
             await RemoveInterfaceAsync(iface, ct);
         }
     }
