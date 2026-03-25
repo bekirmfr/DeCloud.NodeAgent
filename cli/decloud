@@ -549,6 +549,40 @@ cmd_pull() {
 
     git -C "$REPO_DIR" pull origin "$branch"
 }
+
+cmd_remove() {
+    check_root
+
+    local -a passthrough_args=()
+    while [[ $# -gt 0 ]]; do
+        passthrough_args+=("$1")
+        shift
+    done
+
+    echo ""
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}  DeCloud Node Agent — Uninstall${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+
+    local uninstall_script
+    uninstall_script=$(dirname "$(find_install_script 2>/dev/null || echo "")")/uninstall.sh
+
+    if [[ ! -f "$uninstall_script" ]]; then
+        # Fall back to repo location
+        uninstall_script="/opt/decloud/DeCloud.NodeAgent/uninstall.sh"
+    fi
+
+    if [[ ! -f "$uninstall_script" ]]; then
+        log_error "uninstall.sh not found"
+        log_info "Download from: https://github.com/bekirmfr/DeCloud.NodeAgent/raw/main/uninstall.sh"
+        exit $EXIT_ERROR
+    fi
+
+    cd / 2>/dev/null || true
+    bash "$uninstall_script" "${passthrough_args[@]}"
+}
+
 # ============================================================================
 # STATUS & INFO COMMANDS
 # ============================================================================
@@ -1621,7 +1655,13 @@ ${BOLD}SETUP COMMANDS:${NC}
       --name <name>           Node display name
     pull                    git pull with auto branch detection
     update                  Full reinstall with saved parameters  (~10 min)
-
+    uninstall [options]     Uninstall node agent and optionally remove VMs   
+      --force                 Skip confirmation prompts
+      --keep-vms              Do not destroy running VMs (useful for migration)
+      --keep-data             Preserve /var/lib/decloud (VM disk images, databases)
+      --keep-wg               Preserve WireGuard keys and config in /etc/wireguard
+      --help                  Show this help
+                          
 ${BOLD}AUTHENTICATION COMMANDS:${NC}
     login                   Authenticate node with the orchestrator
     logout                  Remove node authentication
@@ -1774,6 +1814,7 @@ main() {
         install)      cmd_install    "$@" ;;
         update)       cmd_update     "$@" ;;
         pull)         cmd_pull       "$@" ;;
+        uninstall) shift cmd_remove "$@" ;;
         login)        cmd_login      "$@" ;;
         logout)       cmd_logout     "$@" ;;
         status)       cmd_status     "$@" ;;
