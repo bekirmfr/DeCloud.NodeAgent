@@ -2790,8 +2790,12 @@ public class LibvirtVmManager : IVmManager
         // ========================================
         // COMPLETE LIBVIRT XML
         // ========================================
-        var domainType = _kvmAvailable ? "kvm" : "qemu";
-        var cpuMode = _kvmAvailable ? "host-passthrough" : "host-model";
+        var kvmAvailable = File.Exists("/dev/kvm");
+        var domainType = kvmAvailable ? "kvm" : "qemu";
+        var cpuMode = kvmAvailable ? "host-passthrough" : "host-model";
+        _logger.LogInformation(
+            "VM {VmId}: KVM={KvmAvailable}, domain type='{DomainType}', cpu mode='{CpuMode}'",
+            spec.Id, kvmAvailable, domainType, cpuMode);
 
         return $@"
             <domain type='{domainType}'>
@@ -3107,8 +3111,12 @@ public class LibvirtVmManager : IVmManager
         // ========================================
         // COMPLETE LIBVIRT XML
         // ========================================
-        var domainType = _kvmAvailable ? "kvm" : "qemu";
-        var cpuMode = _kvmAvailable ? "host-passthrough" : "host-model";
+        var kvmAvailable = File.Exists("/dev/kvm");
+        var domainType = kvmAvailable ? "kvm" : "qemu";
+        var cpuMode = kvmAvailable ? "host-passthrough" : "host-model";
+        _logger.LogInformation(
+            "VM {VmId}: KVM={KvmAvailable}, domain type='{DomainType}', cpu mode='{CpuMode}'",
+            spec.Id, kvmAvailable, domainType, cpuMode);
 
         return $@"
             <domain type='{domainType}'>

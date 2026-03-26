@@ -33,7 +33,7 @@ manage_etc_hosts: true
 packages:
   - wireguard
   - wireguard-tools
-  - nginx-core
+  - nginx-light
   - fail2ban
   - qemu-guest-agent
   - python3
