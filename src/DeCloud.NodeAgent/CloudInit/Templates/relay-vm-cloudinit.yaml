@@ -29,6 +29,7 @@ manage_etc_hosts: true
 #   htop           → removed     (interactive tool, unused in headless VM)
 #   iftop          → removed     (interactive tool, unused in headless VM)
 #   net-tools      → removed     (ifconfig/netstat, unused — iproute2 is default)
+#   iptables-persistent → removed     (triggers an interactive **debconf prompt** during installation)
 packages:
   - wireguard
   - wireguard-tools
@@ -39,7 +40,6 @@ packages:
   - curl
   - jq
   - openssl
-  - iptables-persistent
 
 # =====================================================
 # SYSTEM CONFIGURATION
