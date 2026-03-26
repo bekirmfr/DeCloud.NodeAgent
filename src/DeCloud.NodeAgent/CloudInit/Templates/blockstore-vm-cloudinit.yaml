@@ -1,8 +1,7 @@
 #cloud-config
 # DeCloud Block Store VM Cloud-Init Configuration
-# Runs a libp2p block store node for VM disk overlay replication (lazysync)
-# and AI model shard distribution.
-# Version: 1.1 (dashboard)
+# Runs a libp2p BitSwap block store node for content-addressed storage.
+# Version: 2.0 (optimized — nginx-light, root user, single daemon-reload)
 
 hostname: __HOSTNAME__
 manage_etc_hosts: true
@@ -11,14 +10,7 @@ bootcmd:
   - rm -f /etc/machine-id /var/lib/dbus/machine-id
   - systemd-machine-id-setup
 
-disable_root: true
-
-users:
-  - name: blockstore
-    groups: [sudo]
-    sudo: ['ALL=(ALL) NOPASSWD:ALL']
-    shell: /bin/bash
-    lock_passwd: true
+disable_root: false
 
 __SSH_AUTHORIZED_KEYS_BLOCK__
 
@@ -31,9 +23,8 @@ packages:
   - qemu-guest-agent
   - curl
   - jq
-  - net-tools
   - openssl
-  - nginx
+  - nginx-light
   - wireguard
   - wireguard-tools
   - python3
@@ -62,16 +53,18 @@ write_files:
       ORCHESTRATOR_URL=__ORCHESTRATOR_URL__
       BLOCKSTORE_BOOTSTRAP_PEERS=__BLOCKSTORE_BOOTSTRAP_PEERS__
 
-  # WireGuard mesh enrollment env file
+  # WireGuard mesh environment (consumed by enrollment script)
   - path: /etc/decloud/wg-mesh.env
-    permissions: '0644'
+    permissions: '0600'
     content: |
       WG_RELAY_ENDPOINT=__WG_RELAY_ENDPOINT__
       WG_RELAY_PUBKEY=__WG_RELAY_PUBKEY__
       WG_TUNNEL_IP=__WG_TUNNEL_IP__
       WG_RELAY_API=__WG_RELAY_API__
+      WG_INTERFACE=wg-mesh
       WG_PARENT_NODE_ID=__NODE_ID__
       WG_DESCRIPTION=BlockStore-__VM_ID__
+      WG_PEER_TYPE=system-vm
 
   # VM identity files
   - path: /etc/decloud/vm-id
@@ -82,6 +75,12 @@ write_files:
     permissions: '0644'
     content: __ORCHESTRATOR_URL__
 
+  # WireGuard mesh enrollment script
+  - path: /usr/local/bin/wg-mesh-enroll.sh
+    permissions: '0755'
+    content: |
+      __WG_MESH_ENROLL__
+
   # ── Systemd services ─────────────────────────────────────────────
 
   # Main block store service
@@ -90,12 +89,11 @@ write_files:
     content: |
       [Unit]
       Description=DeCloud Block Store Node
-      After=network-online.target
-      Wants=network-online.target
+      After=network-online.target wg-quick@wg-mesh.service
+      Wants=network-online.target wg-quick@wg-mesh.service
 
       [Service]
-      User=blockstore
-      Group=blockstore
+      User=root
       EnvironmentFile=/etc/decloud-blockstore/blockstore.env
       ExecStart=/usr/local/bin/blockstore-node
       Restart=always
@@ -103,6 +101,11 @@ write_files:
       StandardOutput=journal
       StandardError=journal
       LimitNOFILE=65536
+
+      # Hardening
+      ProtectSystem=strict
+      ReadWritePaths=/var/lib/decloud-blockstore
+      NoNewPrivileges=true
 
       [Install]
       WantedBy=multi-user.target
@@ -139,30 +142,7 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
-  # Ready callback service — notifies NodeAgent of peer ID
-  - path: /etc/systemd/system/decloud-blockstore-callback.service
-    permissions: '0644'
-    content: |
-      [Unit]
-      Description=DeCloud Block Store Ready Callback
-      After=decloud-blockstore.service network-online.target
-      Wants=decloud-blockstore.service network-online.target
-
-      [Service]
-      Type=oneshot
-      ExecStart=/usr/local/bin/blockstore-notify-ready.sh
-      RemainAfterExit=yes
-      StandardOutput=journal
-      StandardError=journal
-      Restart=on-failure
-      RestartSec=10s
-      StartLimitBurst=5
-      TimeoutStartSec=180s
-
-      [Install]
-      WantedBy=multi-user.target
-
-  # Bootstrap poll service — polls orchestrator for peers
+  # Bootstrap poll service — polls orchestrator for peers (primary path)
   - path: /etc/systemd/system/decloud-blockstore-bootstrap-poll.service
     permissions: '0644'
     content: |
@@ -182,17 +162,7 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
-  # ── External scripts (injected by CloudInitTemplateService) ──────
-
-  - path: /usr/local/bin/blockstore-health-check.sh
-    permissions: '0755'
-    content: |
-      __BLOCKSTORE_HEALTH_CHECK__
-
-  - path: /usr/local/bin/blockstore-notify-ready.sh
-    permissions: '0755'
-    content: |
-      __BLOCKSTORE_NOTIFY_READY__
+  # ── External scripts ─────────────────────────────────────────────
 
   - path: /usr/local/bin/blockstore-bootstrap-poll.sh
     permissions: '0755'
@@ -204,29 +174,14 @@ write_files:
     content: |
       __WG_MESH_ENROLL__
 
-  # ── Dashboard (injected by CloudInitTemplateService) ─────────────
+  # ── Dashboard ────────────────────────────────────────────────────
 
   - path: /opt/decloud-blockstore/blockstore-dashboard.py
     permissions: '0755'
     content: |
       __BLOCKSTORE_DASHBOARD_PY__
 
-  - path: /opt/decloud-blockstore/static/dashboard.html
-    permissions: '0644'
-    content: |
-      __BLOCKSTORE_DASHBOARD_HTML__
-
-  - path: /opt/decloud-blockstore/static/dashboard.css
-    permissions: '0644'
-    content: |
-      __BLOCKSTORE_DASHBOARD_CSS__
-
-  - path: /opt/decloud-blockstore/static/dashboard.js
-    permissions: '0644'
-    content: |
-      __BLOCKSTORE_DASHBOARD_JS__
-
-  # ── Nginx — full proxy through Python dashboard ───────────────────
+  # ── Nginx reverse proxy ──────────────────────────────────────────
 
   - path: /etc/nginx/sites-available/blockstore-proxy
     permissions: '0644'
@@ -235,7 +190,15 @@ write_files:
           listen 80 default_server;
           listen [::]:80 default_server;
 
-          # Dashboard root → Python server (serves HTML + proxies /health /stats /manifests)
+          server_name _;
+
+          # Nginx health check (fast, no proxy)
+          location = /nginx-health {
+              return 200 "OK\n";
+              add_header Content-Type text/plain;
+          }
+
+          # Dashboard root → Python server
           location / {
               proxy_pass http://127.0.0.1:8080;
               proxy_set_header Host $host;
@@ -256,15 +219,13 @@ write_files:
 # RUNTIME COMMANDS
 # =====================================================
 runcmd:
-  # QEMU guest agent (required for readiness monitoring)
+  # QEMU guest agent (static unit — systemctl enable fails silently on Debian)
   - ln -sf /lib/systemd/system/qemu-guest-agent.service /etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service
   - systemctl start qemu-guest-agent
 
   # WireGuard mesh enrollment — must happen before block store starts
-  - bash -c 'set -a && source /etc/decloud/wg-mesh.env && set +a && if [ -n "$WG_RELAY_ENDPOINT" ] && [ -n "$WG_RELAY_PUBKEY" ]; then /usr/local/bin/wg-mesh-enroll.sh; else echo "[wg-mesh] Skipping enrollment — no relay configured"; fi'
-  # Tell systemd the interface is up (idempotent — fails safely if already active)
-  - systemctl daemon-reload
-  - systemctl start wg-quick@wg-mesh || true
+  # Skip gracefully if no relay was configured at deploy time
+  - bash -c 'set -a && source /etc/decloud/wg-mesh.env && set +a && if [ -n "$WG_RELAY_ENDPOINT" ] && [ -n "$WG_RELAY_PUBKEY" ]; then /usr/local/bin/wg-mesh-enroll.sh; else echo "[wg-mesh] Skipping — no relay configured"; fi'
 
   # Override advertise IP with WireGuard tunnel IP if available
   - |
@@ -274,40 +235,28 @@ runcmd:
       echo "[blockstore] Set advertise IP to WG tunnel: $WG_TUNNEL_IP"
     fi
 
-  # Create directories
-  - mkdir -p /etc/decloud-blockstore
+  # Runtime data directory (not created by write_files)
   - mkdir -p /var/lib/decloud-blockstore
-  - mkdir -p /opt/decloud-blockstore/static
-  - chown -R blockstore:blockstore /etc/decloud-blockstore
-  - chown -R blockstore:blockstore /var/lib/decloud-blockstore
-  - chown -R blockstore:blockstore /opt/decloud-blockstore
 
-  # Configure Nginx
+  # Single daemon-reload after all write_files are complete
+  - systemctl daemon-reload
+
+  # Nginx
   - ln -sf /etc/nginx/sites-available/blockstore-proxy /etc/nginx/sites-enabled/
   - rm -f /etc/nginx/sites-enabled/default
   - nginx -t
-  - systemctl enable nginx
-  - systemctl restart nginx
+  - systemctl enable nginx && systemctl restart nginx
 
-  # Start block store node
-  - systemctl daemon-reload
-  - systemctl enable decloud-blockstore
-  - systemctl start decloud-blockstore
+  # Block store node
+  - systemctl enable decloud-blockstore && systemctl start decloud-blockstore
 
-  # Start dashboard server (serves UI on port 8080 → Nginx on 80)
-  - systemctl enable decloud-blockstore-dashboard
-  - systemctl start decloud-blockstore-dashboard
+  # Dashboard
+  - systemctl enable decloud-blockstore-dashboard && systemctl start decloud-blockstore-dashboard
 
-  # Start ready callback (notifies NodeAgent)
-  - systemctl enable decloud-blockstore-callback
-  - systemctl start decloud-blockstore-callback
+  # Bootstrap poll (primary orchestrator communication)
+  - systemctl enable decloud-blockstore-bootstrap-poll && systemctl start decloud-blockstore-bootstrap-poll
 
-  # Start bootstrap poll (talks to orchestrator)
-  - systemctl enable decloud-blockstore-bootstrap-poll
-  - systemctl start decloud-blockstore-bootstrap-poll
-
-  - 'echo "DeCloud Block Store __VM_ID__ bootstrap complete at $(date)" >> /var/log/blockstore-bootstrap.log'
-  - 'echo "Region: __NODE_REGION__" >> /var/log/blockstore-bootstrap.log'
-  - 'echo "Storage: __BLOCKSTORE_STORAGE_BYTES__ bytes" >> /var/log/blockstore-bootstrap.log'
+  # Log completion
+  - 'echo "BlockStore __VM_ID__ ready at $(date) — storage: __BLOCKSTORE_STORAGE_BYTES__ bytes, tunnel: __WG_TUNNEL_IP__" >> /var/log/blockstore-bootstrap.log'
 
 final_message: "DeCloud Block Store Node __VM_NAME__ is ready!"
