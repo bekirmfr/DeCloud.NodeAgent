@@ -216,7 +216,7 @@ api_call() {
             "$url" 2>/dev/null > "$code_file" || true
     fi
 
-    http_code=$(cat "$code_file" 2>/dev/null || echo "0")
+    http_code=$(cat "$code_file" 2>/dev/null | tr -d '[:space:]' | head -c 3 || echo "0")
     body=$(cat "$tmp" 2>/dev/null || echo "")
     rm -f "$tmp" "$code_file"
 
