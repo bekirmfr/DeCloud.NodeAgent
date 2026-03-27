@@ -224,7 +224,9 @@ public class CloudInitCleaner : ICloudInitCleaner
             "rm -rf /var/log/cloud-init*",
             "rm -f /etc/machine-id",
             "rm -f /var/lib/dbus/machine-id",
-            "truncate -s 0 /etc/machine-id 2>/dev/null || true"
+            "truncate -s 0 /etc/machine-id 2>/dev/null || true",
+            "rm -f /etc/cloud/cloud-init.disabled",
+            "mkdir -p /etc/cloud/cloud.cfg.d && echo 'datasource_list: [NoCloud, None]' > /etc/cloud/cloud.cfg.d/99_datasource.cfg",
         };
 
         var runCommands = string.Join(" ", commands.Select(c => $"--run-command \"{c}\""));
