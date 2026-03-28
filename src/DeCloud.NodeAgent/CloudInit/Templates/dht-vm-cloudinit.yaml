@@ -189,6 +189,22 @@ write_files:
     content: |
       __DHT_DASHBOARD_PY__
 
+  # Dashboard static files
+  - path: /opt/decloud-dht/static/dashboard.html
+    permissions: '0644'
+    content: |
+      __DHT_DASHBOARD_HTML__
+
+  - path: /opt/decloud-dht/static/dashboard.css
+    permissions: '0644'
+    content: |
+      __DHT_DASHBOARD_CSS__
+
+  - path: /opt/decloud-dht/static/dashboard.js
+    permissions: '0644'
+    content: |
+      __DHT_DASHBOARD_JS__
+
   # Dashboard systemd service
   - path: /etc/systemd/system/decloud-dht-dashboard.service
     permissions: '0644'
