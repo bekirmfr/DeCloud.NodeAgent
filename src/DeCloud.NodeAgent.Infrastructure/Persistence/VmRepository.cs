@@ -23,7 +23,7 @@ public class VmRepository : IDisposable
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly bool _encrypted;
 
-    private const int CURRENT_SCHEMA_VERSION = 3; // Incremented when schema changes
+    private const int CURRENT_SCHEMA_VERSION = 4; // Incremented when schema changes
 
     public VmRepository(string databasePath, ILogger logger, string? encryptionKey = null)
     {
@@ -160,6 +160,7 @@ public class VmRepository : IDisposable
                 ServicesJson TEXT DEFAULT '[]',
                 OwnerId TEXT,
                 QualityTier INTEGER NOT NULL DEFAULT 3,
+                ReplicationFactor INTEGER NOT NULL DEFAULT 0,
                 ComputePointCost INTEGER NOT NULL DEFAULT 4,
                 VirtualCpuCores INTEGER NOT NULL,
                 MemoryBytes INTEGER NOT NULL,
@@ -217,6 +218,14 @@ public class VmRepository : IDisposable
                 _logger.LogInformation("Applying migration: v{From} → v3 (ServicesJson column)", Math.Max(fromVersion, 2));
                 MigrateToV3();
                 SetSchemaVersion(3);
+            }
+
+            // Migration v3 → v4: Add ReplicationFactor column
+            if (fromVersion < 4)
+            {
+                _logger.LogInformation("Applying migration: v{From} → v4 (ReplicationFactor column)", Math.Max(fromVersion, 3));
+                MigrateToV4();
+                SetSchemaVersion(4);
             }
 
             transaction.Commit();
@@ -334,6 +343,20 @@ public class VmRepository : IDisposable
     }
 
     /// <summary>
+    /// Migrate to schema v4: Add ReplicationFactor column for lazysync block replication.
+    /// </summary>
+    private void MigrateToV4()
+    {
+        if (!ColumnExists("VmRecords", "ReplicationFactor"))
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "ALTER TABLE VmRecords ADD COLUMN ReplicationFactor INTEGER NOT NULL DEFAULT 0";
+            cmd.ExecuteNonQuery();
+            _logger.LogInformation("Added ReplicationFactor column to VmRecords");
+        }
+    }
+
+    /// <summary>
     /// Save or update a VM record
     /// </summary>
     public async Task SaveVmAsync(VmInstance vm)
@@ -343,13 +366,13 @@ public class VmRepository : IDisposable
         {
             var sql = @"
                 INSERT OR REPLACE INTO VmRecords
-                (VmId, Name, ServicesJson, OwnerId, QualityTier, ComputePointCost,
+                (VmId, Name, ServicesJson, OwnerId, QualityTier, ReplicationFactor, ComputePointCost,
                  VirtualCpuCores, MemoryBytes, DiskBytes,
                  State, IpAddress, MacAddress, VncPort, Pid,
                  CreatedAt, StartedAt, StoppedAt, LastUpdated, DiskPath, ConfigPath,
                  BaseImageUrl, BaseImageHash, SshPublicKey, EncryptedPassword)
                 VALUES
-                (@VmId, @Name, @ServicesJson, @OwnerId, @QualityTier, @ComputePointCost,
+                (@VmId, @Name, @ServicesJson, @OwnerId, @QualityTier, @ReplicationFactor, @ComputePointCost,
                  @VirtualCpuCores, @MemoryBytes, @DiskBytes,
                  @State, @IpAddress, @MacAddress, @VncPort, @Pid,
                  @CreatedAt, @StartedAt, @StoppedAt, @LastUpdated, @DiskPath, @ConfigPath,
@@ -383,7 +406,7 @@ public class VmRepository : IDisposable
             cmd.Parameters.AddWithValue("@BaseImageUrl", vm.Spec.BaseImageUrl ?? (object)DBNull.Value);
             cmd.Parameters.AddWithValue("@BaseImageHash", vm.Spec.BaseImageHash ?? (object)DBNull.Value);
             cmd.Parameters.AddWithValue("@SshPublicKey", vm.Spec.SshPublicKey ?? (object)DBNull.Value);
-
+            cmd.Parameters.AddWithValue("@ReplicationFactor", vm.Spec.ReplicationFactor);
             // SECURITY: Only store encrypted password, NEVER plaintext
             cmd.Parameters.AddWithValue("@EncryptedPassword", vm.Spec.WalletEncryptedPassword ?? (object)DBNull.Value);
 
@@ -655,7 +678,8 @@ public class VmRepository : IDisposable
                     MacAddress = GetNullableString(reader, "MacAddress"),
                     BaseImageUrl = GetNullableString(reader, "BaseImageUrl"),
                     BaseImageHash = GetNullableString(reader, "BaseImageHash"),
-                    SshPublicKey = GetNullableString(reader, "SshPublicKey")
+                    SshPublicKey = GetNullableString(reader, "SshPublicKey"),
+                    ReplicationFactor = reader.GetInt32(reader.GetOrdinal("ReplicationFactor")),
                 },
                 State = Enum.Parse<VmState>(reader.GetString(reader.GetOrdinal("State"))),
                 VncPort = GetNullableInt(reader, "VncPort"),

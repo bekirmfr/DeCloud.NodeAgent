@@ -290,6 +290,7 @@ public class CommandProcessorService : BackgroundService
         string ownerId = GetStringProperty(root, "ownerId", "OwnerId") ?? "unknown";
         string? password = GetStringProperty(root, "password", "Password");
         int vmType = GetIntProperty(root, "vmType", "VmType") ?? 0;
+        int replicationFactor = GetIntProperty(root, "replicationFactor", "ReplicationFactor") ?? 0;
         int qualityTier = GetIntProperty(root, "qualityTier", "QualityTier") ?? 3;
         int virtualCpuCores = GetIntProperty(root, "virtualCpuCores", "VirtualCpuCores") ?? 1;
         int computePointCost = GetIntProperty(root, "computePointCost", "ComputePointCost") ?? 0;
@@ -345,7 +346,8 @@ public class CommandProcessorService : BackgroundService
             DeploymentMode = deploymentMode,
             ContainerImage = containerImage,
             EnvironmentVariables = environmentVariables,
-            Labels = labels
+            Labels = labels,
+            ReplicationFactor = replicationFactor
         };
 
         // Defense-in-depth: reject duplicate system VMs (DHT/Relay/BlockStore) with the same name.
