@@ -667,7 +667,10 @@ func (n *BlockNode) startHTTPServer(ctx context.Context) {
 	mux.HandleFunc("/manifests/", n.handleManifestByID)
 	mux.HandleFunc("/manifests", n.handleManifests)
 
-	addr := fmt.Sprintf("127.0.0.1:%d", n.cfg.APIPort)
+	// Bind to all interfaces so the NodeAgent host can reach the API
+	// via the virbr0 bridge (192.168.122.x). The API port is not
+	// exposed via nginx and is not publicly reachable.
+	addr := fmt.Sprintf("0.0.0.0:%d", n.cfg.APIPort)
 	srv := &http.Server{
 		Addr:         addr,
 		Handler:      mux,
