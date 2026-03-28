@@ -280,6 +280,7 @@ public interface IOrchestratorClient
         int blockCount,
         int blockSizeKb,
         long totalBytes,
+        bool isSeeding = false,
         CancellationToken ct = default);
 }
 
