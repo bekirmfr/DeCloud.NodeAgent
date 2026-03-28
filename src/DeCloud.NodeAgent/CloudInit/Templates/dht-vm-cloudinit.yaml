@@ -73,6 +73,61 @@ write_files:
     content: |
       __WG_MESH_ENROLL__
 
+  # WireGuard mesh watchdog — re-enrolls if handshake goes stale
+  - path: /usr/local/bin/wg-mesh-watchdog.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Re-enroll if WireGuard handshake has been stale for > 3 minutes.
+      # Called by systemd timer every 2 minutes.
+      WG_INTERFACE="wg-mesh"
+      STALE_THRESHOLD=180
+
+      if ! wg show "$WG_INTERFACE" &>/dev/null; then
+          echo "[wg-watchdog] Interface not up — re-enrolling"
+          /usr/local/bin/wg-mesh-enroll.sh
+          exit 0
+      fi
+
+      LAST_HANDSHAKE=$(wg show "$WG_INTERFACE" latest-handshakes 2>/dev/null | awk '{print $2}' | head -1)
+      NOW=$(date +%s)
+      AGE=$(( NOW - ${LAST_HANDSHAKE:-0} ))
+
+      if [ "${LAST_HANDSHAKE:-0}" -eq 0 ] || [ "$AGE" -gt "$STALE_THRESHOLD" ]; then
+          echo "[wg-watchdog] Handshake stale (${AGE}s) — re-enrolling"
+          /usr/local/bin/wg-mesh-enroll.sh
+      else
+          echo "[wg-watchdog] Handshake OK (${AGE}s ago)"
+      fi
+
+  - path: /etc/systemd/system/wg-mesh-watchdog.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=WireGuard Mesh Connectivity Watchdog
+      After=wg-quick@wg-mesh.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/wg-mesh-watchdog.sh
+      StandardOutput=journal
+      StandardError=journal
+
+  - path: /etc/systemd/system/wg-mesh-watchdog.timer
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=WireGuard Mesh Watchdog Timer
+      After=wg-quick@wg-mesh.service
+
+      [Timer]
+      OnBootSec=2min
+      OnUnitActiveSec=2min
+      AccuracySec=30s
+
+      [Install]
+      WantedBy=timers.target
+
   # DHT metadata
   - path: /etc/decloud/dht-metadata.json
     permissions: '0644'
@@ -284,6 +339,10 @@ runcmd:
 
   # Bootstrap poll (primary orchestrator communication)
   - systemctl enable decloud-dht-bootstrap-poll && systemctl start decloud-dht-bootstrap-poll
+
+  # Enable WireGuard watchdog timer
+  - systemctl enable wg-mesh-watchdog.timer
+  - systemctl start wg-mesh-watchdog.timer
 
   # Log completion
   - 'echo "DHT node __VM_ID__ ready at $(date) — region: __DHT_REGION__, tunnel: __WG_TUNNEL_IP__" >> /var/log/dht-bootstrap.log'

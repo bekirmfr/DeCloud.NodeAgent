@@ -66,6 +66,61 @@ write_files:
       WG_DESCRIPTION=BlockStore-__VM_ID__
       WG_PEER_TYPE=system-vm
 
+  # WireGuard mesh watchdog — re-enrolls if handshake goes stale
+  - path: /usr/local/bin/wg-mesh-watchdog.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Re-enroll if WireGuard handshake has been stale for > 3 minutes.
+      # Called by systemd timer every 2 minutes.
+      WG_INTERFACE="wg-mesh"
+      STALE_THRESHOLD=180
+
+      if ! wg show "$WG_INTERFACE" &>/dev/null; then
+          echo "[wg-watchdog] Interface not up — re-enrolling"
+          /usr/local/bin/wg-mesh-enroll.sh
+          exit 0
+      fi
+
+      LAST_HANDSHAKE=$(wg show "$WG_INTERFACE" latest-handshakes 2>/dev/null | awk '{print $2}' | head -1)
+      NOW=$(date +%s)
+      AGE=$(( NOW - ${LAST_HANDSHAKE:-0} ))
+
+      if [ "${LAST_HANDSHAKE:-0}" -eq 0 ] || [ "$AGE" -gt "$STALE_THRESHOLD" ]; then
+          echo "[wg-watchdog] Handshake stale (${AGE}s) — re-enrolling"
+          /usr/local/bin/wg-mesh-enroll.sh
+      else
+          echo "[wg-watchdog] Handshake OK (${AGE}s ago)"
+      fi
+
+  - path: /etc/systemd/system/wg-mesh-watchdog.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=WireGuard Mesh Connectivity Watchdog
+      After=wg-quick@wg-mesh.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/wg-mesh-watchdog.sh
+      StandardOutput=journal
+      StandardError=journal
+
+  - path: /etc/systemd/system/wg-mesh-watchdog.timer
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=WireGuard Mesh Watchdog Timer
+      After=wg-quick@wg-mesh.service
+
+      [Timer]
+      OnBootSec=2min
+      OnUnitActiveSec=2min
+      AccuracySec=30s
+
+      [Install]
+      WantedBy=timers.target
+
   # VM identity files
   - path: /etc/decloud/vm-id
     permissions: '0644'
@@ -74,12 +129,6 @@ write_files:
   - path: /etc/decloud/orchestrator-url
     permissions: '0644'
     content: __ORCHESTRATOR_URL__
-
-  # WireGuard mesh enrollment script
-  - path: /usr/local/bin/wg-mesh-enroll.sh
-    permissions: '0755'
-    content: |
-      __WG_MESH_ENROLL__
 
   # ── Systemd services ─────────────────────────────────────────────
 
@@ -271,6 +320,10 @@ runcmd:
 
   # Bootstrap poll (primary orchestrator communication)
   - systemctl enable decloud-blockstore-bootstrap-poll && systemctl start decloud-blockstore-bootstrap-poll
+
+  # Enable WireGuard watchdog timer
+  - systemctl enable wg-mesh-watchdog.timer
+  - systemctl start wg-mesh-watchdog.timer
 
   # Log completion
   - 'echo "BlockStore __VM_ID__ ready at $(date) — storage: __BLOCKSTORE_STORAGE_BYTES__ bytes, tunnel: __WG_TUNNEL_IP__" >> /var/log/blockstore-bootstrap.log'
