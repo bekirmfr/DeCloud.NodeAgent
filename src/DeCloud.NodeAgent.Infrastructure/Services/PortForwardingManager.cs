@@ -629,7 +629,7 @@ public class PortForwardingManager : IPortForwardingManager
     {
         try
         {
-            var vms = await _vmManager.GetAllVmsAsync(ct);
+            var vms = _vmManager.GetAllVms();
             var relayVm = vms.FirstOrDefault(vm => vm.Spec.VmType == VmType.Relay);
             
             if (relayVm != null && !string.IsNullOrEmpty(relayVm.Spec.IpAddress))

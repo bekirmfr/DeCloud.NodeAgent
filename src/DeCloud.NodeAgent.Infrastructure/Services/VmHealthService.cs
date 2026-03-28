@@ -39,7 +39,7 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                 {
                     await _vmManager.ReconcileAllWithLibvirtAsync(ct);
 
-                    vms = await _vmManager.GetAllVmsAsync(ct);
+                    vms = _vmManager.GetAllVms().ToList();
 
                     foreach (var vm in vms)
                     {
@@ -85,7 +85,7 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
 
         public async Task CheckRelayVmNatRulesAsync(CancellationToken ct = default)
         {
-            var relayVms = await _vmManager.GetAllVmsAsync();
+            var relayVms = _vmManager.GetAllVms();
 
             foreach (var vm in relayVms.Where(v => v.Spec.VmType == VmType.Relay))
             {

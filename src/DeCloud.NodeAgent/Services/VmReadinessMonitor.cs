@@ -57,7 +57,7 @@ public class VmReadinessMonitor : BackgroundService
 
     private async Task CheckAllVmsAsync(CancellationToken ct)
     {
-        var allVms = await _vmManager.GetAllVmsAsync(ct);
+        var allVms = _vmManager.GetAllVms();
         var runningVms = allVms
             .Where(vm => vm.State == VmState.Running && vm.Services.Count > 0 && !vm.IsFullyReady)
             .ToList();

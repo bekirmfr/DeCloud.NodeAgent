@@ -899,6 +899,57 @@ REGISTERED_AT={DateTime.UtcNow:O}";
     }
 
     /// <summary>
+    /// Register an updated VM overlay manifest from a lazysync cycle.
+    /// POST /api/blockstore/manifest
+    /// </summary>
+    public async Task<bool> RegisterManifestAsync(
+        string vmId,
+        string rootCid,
+        int version,
+        List<string> changedBlockCids,
+        int blockCount,
+        int blockSizeKb,
+        long totalBytes,
+        CancellationToken ct = default)
+    {
+        if (!_nodeState.IsAuthenticated) return false;
+
+        try
+        {
+            var payload = new
+            {
+                vmId,
+                nodeId = _nodeId,
+                rootCid,
+                version,
+                changedBlockCids,
+                blockCount,
+                blockSizeKb,
+                manifestType = 0, // ManifestType.VmOverlay
+                totalBytes
+            };
+
+            var response = await _httpClient.PostAsJsonAsync(
+                "/api/blockstore/manifest", payload, ct);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "RegisterManifest failed for VM {VmId}: HTTP {Status}",
+                    vmId, response.StatusCode);
+                return false;
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "RegisterManifest error for VM {VmId}", vmId);
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Get supported VM images
     /// </summary>
     private List<string> GetSupportedImages()

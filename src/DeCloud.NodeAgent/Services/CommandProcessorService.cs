@@ -353,7 +353,7 @@ public class CommandProcessorService : BackgroundService
         // for the same role before the first one is acknowledged.
         if (vmSpec.VmType is VmType.Dht or VmType.Relay or VmType.BlockStore)
         {
-            var existingVms = await _vmManager.GetAllVmsAsync(ct);
+            var existingVms = _vmManager.GetAllVms();
             var duplicate = existingVms.FirstOrDefault(v =>
                 v.Name == name && v.VmId != vmId &&
                 v.State is not (VmState.Deleted or VmState.Failed));
@@ -460,7 +460,7 @@ public class CommandProcessorService : BackgroundService
         // Parse service definitions from orchestrator payload
         if (result.Success)
         {
-            var vm = (await manager.GetAllVmsAsync(ct)).FirstOrDefault(v => v.VmId == vmId);
+            var vm = (manager.GetAllVms()).FirstOrDefault(v => v.VmId == vmId);
             if (vm != null)
             {
                 vm.Services = ParseServiceDefinitions(root);

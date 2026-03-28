@@ -57,7 +57,8 @@ public interface IVmManager
     Task<VmOperationResult> ResumeVmAsync(string vmId, CancellationToken ct = default);
     
     Task<VmInstance?> GetVmAsync(string vmId, CancellationToken ct = default);
-    Task<List<VmInstance>> GetAllVmsAsync(CancellationToken ct = default);
+    IReadOnlyCollection<VmInstance> GetAllVms();
+    IReadOnlyCollection<VmInstance> GetRunningVms();
     Task<VmResourceUsage> GetVmUsageAsync(string vmId, CancellationToken ct = default);
     Task ReconcileAllWithLibvirtAsync(CancellationToken ct = default);
     Task<bool> VmExistsAsync(string vmId, CancellationToken ct = default);
@@ -270,6 +271,16 @@ public interface IOrchestratorClient
     Task<NodeSyncResult> SyncWithOrchestratorAsync(CancellationToken ct = default);
 
     Task<bool> IsOrchestratorReachableAsync(CancellationToken ct = default);
+
+    Task<bool> RegisterManifestAsync(
+        string vmId,
+        string rootCid,
+        int version,
+        List<string> changedBlockCids,
+        int blockCount,
+        int blockSizeKb,
+        long totalBytes,
+        CancellationToken ct = default);
 }
 
 /// <summary>

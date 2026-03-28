@@ -24,7 +24,7 @@ public class VmsController : ControllerBase
     [HttpGet]
     public async Task<ActionResult<List<VmInstance>>> GetAll(CancellationToken ct)
     {
-        var vms = await _vmManager.GetAllVmsAsync(ct);
+        var vms = _vmManager.GetAllVms();
         return Ok(vms);
     }
 

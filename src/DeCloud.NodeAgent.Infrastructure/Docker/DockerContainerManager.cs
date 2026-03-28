@@ -227,9 +227,13 @@ public class DockerContainerManager : IVmManager
         return Task.FromResult(instance);
     }
 
-    public Task<List<VmInstance>> GetAllVmsAsync(CancellationToken ct = default)
+    public IReadOnlyCollection<VmInstance> GetAllVms()
     {
-        return Task.FromResult(_containers.Values.ToList());
+        return _containers.Values.ToList();
+    }
+    public IReadOnlyCollection<VmInstance> GetRunningVms()
+    {
+        return _containers.Values.Where(c => c.State == VmState.Running).ToList();
     }
 
     public async Task<VmResourceUsage> GetVmUsageAsync(string vmId, CancellationToken ct = default)

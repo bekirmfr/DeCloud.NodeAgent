@@ -105,7 +105,7 @@ public class HeartbeatService : BackgroundService
             var snapshot = await _resourceDiscovery.GetCurrentSnapshotAsync(ct);
 
             // Get all active VMs with detailed information
-            var allVms = await _vmManager.GetAllVmsAsync(ct);
+            var allVms = _vmManager.GetAllVms();
             var activeVms = allVms
                 .Where(vm => vm.State != VmState.Deleted)
                 .ToList(); ;

@@ -1,4 +1,5 @@
 using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.Qmp;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Interfaces.UserNetwork;
 using DeCloud.NodeAgent.Core.Settings;
@@ -9,6 +10,7 @@ using DeCloud.NodeAgent.Infrastructure.Network.UserNetwork;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.NodeAgent.Infrastructure.Services.Auth;
+using DeCloud.NodeAgent.Infrastructure.Services.Resilience;
 using DeCloud.NodeAgent.Services;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
@@ -229,6 +231,12 @@ builder.Services.AddHostedService<GpuProxyStartupService>();
 
 // Build missing Go binaries (DHT node, Block Store node) proactively on startup
 builder.Services.AddHostedService<GoBinaryBuildStartupService>();
+
+// Lazysync daemon — continuous overlay disk replication to local BlockStore VM
+builder.Services.AddSingleton<IQmpClient, QmpClient>();
+builder.Services.AddHttpClient<LazysyncDaemon>()
+    .ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(30));
+builder.Services.AddHostedService<LazysyncDaemon>();
 
 // =====================================================
 // Security services for port validation and auditing

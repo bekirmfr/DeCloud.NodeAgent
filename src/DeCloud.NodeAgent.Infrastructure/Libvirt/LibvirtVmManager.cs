@@ -1205,9 +1205,22 @@ public class LibvirtVmManager : IVmManager
         return Task.FromResult(vm);
     }
 
-    public Task<List<VmInstance>> GetAllVmsAsync(CancellationToken ct = default)
+    public IReadOnlyCollection<VmInstance> GetAllVms()
     {
-        return Task.FromResult(_vms.Values.ToList());
+        lock (_vms)
+        {
+            return _vms.Values.ToList();
+        }
+    }
+
+    public IReadOnlyCollection<VmInstance> GetRunningVms()
+    {
+        lock (_vms)
+        {
+            return _vms.Values
+                .Where(v => v.State == VmState.Running)
+                .ToList();
+        }
     }
 
     public async Task<VmResourceUsage> GetVmUsageAsync(string vmId, CancellationToken ct = default)

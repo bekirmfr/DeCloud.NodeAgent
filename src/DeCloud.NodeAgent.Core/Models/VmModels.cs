@@ -88,6 +88,27 @@ public class VmSpec
     // Billing and ownership
     public string? OwnerId { get; set; } = string.Empty;      // Tenant/user ID
     public Dictionary<string, string>? Labels { get; set; }
+    // =========================================================================
+    // REPLICATION
+    // =========================================================================
+
+    /// <summary>
+    /// Number of block store providers that must hold the VM's overlay chunks
+    /// before a lazysync version is considered confirmed.
+    ///
+    /// Supported values:
+    ///   0 — Ephemeral. Lazysync skipped entirely. VM data is lost on node failure.
+    ///       Use for stateless workloads, batch jobs, CI runners.
+    ///   1 — Single replica. Survives if ≥1 block store provider holds the blocks.
+    ///   3 — Standard (default). Survives loss of 2 provider nodes simultaneously.
+    ///   5 — High availability. Survives loss of 4 provider nodes simultaneously.
+    ///       Use for databases, ML checkpoints, critical stateful services.
+    ///
+    /// Immutable after VM creation. Default: 3 for tenant VMs, 0 for system VMs.
+    /// Affects scheduling: replicationFactor > 0 requires an Active BlockStore
+    /// on the target node.
+    /// </summary>
+    public int ReplicationFactor { get; set; } = 0;
 }
 
 public class VmNetworkConfig

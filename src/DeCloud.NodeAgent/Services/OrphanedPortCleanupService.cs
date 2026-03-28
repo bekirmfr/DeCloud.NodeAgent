@@ -68,7 +68,7 @@ public class OrphanedPortCleanupService : BackgroundService
             }
 
             // Get all active VM IDs from libvirt
-            var activeVms = await _vmManager.GetAllVmsAsync(ct);
+            var activeVms = _vmManager.GetAllVms();
             var activeVmIds = activeVms.Select(vm => vm.VmId).ToHashSet();
 
             _logger.LogDebug(
