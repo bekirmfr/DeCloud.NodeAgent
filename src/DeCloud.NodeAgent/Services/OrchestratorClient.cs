@@ -910,6 +910,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         int blockCount,
         int blockSizeKb,
         long totalBytes,
+        bool isSeeding = false,
         CancellationToken ct = default)
     {
         if (!_nodeState.IsAuthenticated) return false;
@@ -926,7 +927,8 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 blockCount,
                 blockSizeKb,
                 manifestType = 0, // ManifestType.VmOverlay
-                totalBytes
+                totalBytes,
+                isSeeding
             };
 
             var response = await _httpClient.PostAsJsonAsync(

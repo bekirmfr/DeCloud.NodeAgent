@@ -43,6 +43,12 @@ public class LazysyncDaemon : BackgroundService
     private const int BlockSizeKb = 1024;
     private const long SparseScanThreshold = 65536; // -S value for qemu-img
 
+    // Initial seeding cap: max blocks pushed per cycle when state.Version == 0.
+    // At 1 MB/block: 100 blocks = 100 MB per 5-minute cycle.
+    // A 500 MB overlay (typical after first boot) seeds in ~1 cycle.
+    // A 5 GB overlay seeds in ~5 cycles (~25 minutes). Prevents network saturation.
+    private const int SeedingMaxBlocksPerCycle = 100;
+
     private readonly LibvirtVmManager _vmManager;
     private readonly ICommandExecutor _executor;
     private readonly IOrchestratorClient _orchestratorClient;
@@ -149,6 +155,18 @@ public class LazysyncDaemon : BackgroundService
                 return;
             }
 
+            // Rate-limit initial seeding: cap blocks per cycle when manifest is empty.
+            // Subsequent cycles pick up remaining chunks automatically via CID diff.
+            var isSeeding = state.Version == 0;
+            var totalQueued = changedChunks.Count;
+            if (isSeeding && changedChunks.Count > SeedingMaxBlocksPerCycle)
+            {
+                changedChunks = changedChunks.Take(SeedingMaxBlocksPerCycle).ToList();
+                _logger.LogInformation(
+                    "VM {VmId}: initial seeding — pushing {Pushed}/{Total} blocks this cycle",
+                    vm.VmId, changedChunks.Count, totalQueued);
+            }
+
             // Step 5: Push new blocks to BlockStore
             await PushBlocksAsync(vm.VmId, tmpPath, changedChunks, blockstoreAddr, ct);
 
@@ -169,6 +187,7 @@ public class LazysyncDaemon : BackgroundService
                 state.Chunks.Count,
                 BlockSizeKb,
                 totalBytes,
+                isSeeding,
                 ct);
 
             // Step 8: Persist state
