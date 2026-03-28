@@ -237,8 +237,8 @@ public class VmReadinessMonitor : BackgroundService
         switch (service.CheckType)
         {
             case CheckType.CloudInitDone:
-                path = "/usr/bin/cloud-init";
-                args = new[] { "status", "--format", "json" };
+                path = "/bin/bash";
+                args = new[] { "-c", "test -f /var/lib/cloud/instance/boot-finished" };
                 break;
 
             case CheckType.TcpPort:
@@ -299,28 +299,6 @@ public class VmReadinessMonitor : BackgroundService
             }
 
             var exitCode = ret.GetProperty("exitcode").GetInt32();
-
-            // Special handling for cloud-init: parse JSON output to detect "error" status
-            if (service.CheckType == CheckType.CloudInitDone && exitCode == 0 &&
-                ret.TryGetProperty("out-data", out var outData))
-            {
-                var stdout = Encoding.UTF8.GetString(Convert.FromBase64String(outData.GetString() ?? ""));
-                try
-                {
-                    var cloudInitJson = JsonDocument.Parse(stdout);
-                    var status = cloudInitJson.RootElement.GetProperty("status").GetString();
-                    return status switch
-                    {
-                        "done" => (true, false),
-                        "error" => (false, true),
-                        _ => (false, false) // "running" or other
-                    };
-                }
-                catch
-                {
-                    return (false, false);
-                }
-            }
 
             return (exitCode == 0, false);
         }
