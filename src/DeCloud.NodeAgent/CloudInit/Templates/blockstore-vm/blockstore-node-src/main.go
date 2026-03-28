@@ -809,7 +809,8 @@ func (n *BlockNode) handleBlocks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := n.bstore.Put(ctx, blk); err != nil {
-		http.Error(w, "store error", http.StatusInternalServerError)
+		log.Printf("bstore.Put error: %v", err)
+		http.Error(w, fmt.Sprintf("store error: %v", err), http.StatusInternalServerError)
 		return
 	}
 	n.touchBlock(c.String(), int64(len(data)))
