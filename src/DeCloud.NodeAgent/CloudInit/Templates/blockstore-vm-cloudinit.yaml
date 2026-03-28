@@ -181,6 +181,22 @@ write_files:
     content: |
       __BLOCKSTORE_DASHBOARD_PY__
 
+  # Dashboard static files
+  - path: /opt/decloud-blockstore/static/dashboard.html
+    permissions: '0644'
+    content: |
+      __BLOCKSTORE_DASHBOARD_HTML__
+
+  - path: /opt/decloud-blockstore/static/dashboard.css
+    permissions: '0644'
+    content: |
+      __BLOCKSTORE_DASHBOARD_CSS__
+
+  - path: /opt/decloud-blockstore/static/dashboard.js
+    permissions: '0644'
+    content: |
+      __BLOCKSTORE_DASHBOARD_JS__
+
   # ── Nginx reverse proxy ──────────────────────────────────────────
 
   - path: /etc/nginx/sites-available/blockstore-proxy
