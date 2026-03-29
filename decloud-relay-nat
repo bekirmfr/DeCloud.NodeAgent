@@ -11,11 +11,22 @@ set -e
 
 LOG_FILE="/var/log/decloud-nat.log"
 mkdir -p "$(dirname "$LOG_FILE")"
+MARKER_FILE="/var/lib/decloud/nat-callback-complete"
 
 # Logging function
 log() { 
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
 }
+
+# =====================================================
+# Check if callback already completed successfully
+# =====================================================
+if [ -f "$MARKER_FILE" ]; then
+    log "NAT callback already completed successfully - skipping"
+    log "Marker file exists: $MARKER_FILE"
+    log "Delete this file to force re-run: rm $MARKER_FILE"
+    exit 0
+fi
 
 # =====================================================
 # Function: Clean Old Relay NAT Rules
@@ -371,11 +382,8 @@ case "${1:-}" in
             echo "  $0 add 192.168.122.164 eth0"
             exit 1
         fi
-        # Add new rules FIRST (idempotent — skipped if already exist).
-        # This ensures traffic is never interrupted during rule updates.
-        # clean_old_rules runs AFTER to remove stale duplicates.
-        add_rules "$2" "${3:-eth0}"
         clean_old_rules
+        add_rules "$2" "${3:-eth0}"
         save_rules
         show_rules
         ;;

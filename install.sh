@@ -2407,11 +2407,11 @@ install_relay_nat_support() {
     
     mkdir -p /var/log
     
-    # NOTE: Do NOT pre-clean rules here. The 'decloud-relay-nat add' command
-    # atomically adds new rules before removing stale ones, ensuring zero
-    # downtime for CGNAT system VMs during node agent updates.
-    # Explicit clean would flush FORWARD rules and kill active WG sessions.
-    echo "✓ Relay NAT support installed (rules preserved during update)"
+    # Clean any existing old rules from previous installs
+    echo "→ Cleaning old relay rules..."
+    /usr/local/bin/decloud-relay-nat clean 2>/dev/null || true
+    
+    echo "✓ Relay NAT support installed"
 }
 
 create_helper_scripts() {
