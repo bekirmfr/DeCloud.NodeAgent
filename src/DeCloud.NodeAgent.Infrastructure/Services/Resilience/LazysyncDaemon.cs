@@ -188,6 +188,7 @@ public class LazysyncDaemon : BackgroundService
                 BlockSizeKb,
                 totalBytes,
                 isSeeding,
+                vm.Spec.ReplicationFactor,
                 ct);
 
             // Step 8: Persist state

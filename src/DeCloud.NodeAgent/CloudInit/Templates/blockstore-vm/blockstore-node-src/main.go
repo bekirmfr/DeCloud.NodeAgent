@@ -291,7 +291,17 @@ func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open flatfs: %w", err)
 	}
-	bs := blockstore.NewIdStore(blockstore.NewBlockstore(datastore.Batching(fds)))
+	// blockstore.NewBlockstore prepends "/blocks/" to all CID keys.
+	// FlatFS only supports single-segment keys and rejects path-style keys.
+	// Mount flatfs at "/blocks" so the prefix is stripped before reaching flatfs,
+	// giving it single-segment keys like "/CIQB23..." it can handle.
+	mds := mount.New([]mount.Mount{
+		{
+			Prefix:    datastore.NewKey("/blocks"),
+			Datastore: fds,
+		},
+	})
+	bs := blockstore.NewIdStore(blockstore.NewBlockstore(mds))
 
 	// Wait up to 30s for the WG mesh interface to be assigned the advertise IP.
 	// The binary starts concurrently with wg-quick; without this wait the

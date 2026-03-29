@@ -911,6 +911,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         int blockSizeKb,
         long totalBytes,
         bool isSeeding = false,
+        int replicationFactor = 3,
         CancellationToken ct = default)
     {
         if (!_nodeState.IsAuthenticated) return false;
@@ -926,9 +927,10 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 changedBlockCids,
                 blockCount,
                 blockSizeKb,
-                manifestType = 0, // ManifestType.VmOverlay
+                manifestType = 0,
                 totalBytes,
-                isSeeding
+                isSeeding,
+                replicationFactor  // ← pass through from LazysyncDaemon
             };
 
             var response = await _httpClient.PostAsJsonAsync(

@@ -281,6 +281,7 @@ public interface IOrchestratorClient
         int blockSizeKb,
         long totalBytes,
         bool isSeeding = false,
+        int replicationFactor = 3,
         CancellationToken ct = default);
 }
 
