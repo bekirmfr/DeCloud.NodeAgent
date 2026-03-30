@@ -319,8 +319,12 @@ public class NodeDashboardController : ControllerBase
 
     // ==========================================================================
     // GET /api/dashboard/logs?lines=100
-    // Recent NodeAgent log lines via journald
+    // Returns the last N lines from /var/log/decloud/nodeagent.log.
+    // Falls back to journald if the file does not exist (e.g. first boot
+    // before the logger has written anything, or non-systemd deployments).
     // ==========================================================================
+
+    private const string LogFilePath = "/var/log/decloud/nodeagent.log";
 
     [HttpGet("/api/dashboard/logs")]
     public async Task<IActionResult> GetLogs(
@@ -329,16 +333,96 @@ public class NodeDashboardController : ControllerBase
     {
         lines = Math.Clamp(lines, 10, 500);
 
+        // --- Primary: dedicated log file ---
+        if (System.IO.File.Exists(LogFilePath))
+        {
+            try
+            {
+                var logLines = await ReadLastLinesAsync(LogFilePath, lines, ct);
+                return Ok(new
+                {
+                    source   = "file",
+                    logFile  = LogFilePath,
+                    logLines,
+                    count    = logLines.Count,
+                    collectedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to read log file {Path}, falling back to journald", LogFilePath);
+            }
+        }
+
+        // --- Fallback: systemd journal ---
         var result = await _executor.ExecuteAsync(
             "journalctl",
             $"-u decloud-node-agent -n {lines} --no-pager --output=short-iso",
             TimeSpan.FromSeconds(10), ct);
 
-        var logLines = result.Success
+        var journalLines = result.Success
             ? result.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries).ToList()
-            : [$"[error] journalctl failed: {result.StandardError}"];
+            : [$"[error] log file not found at {LogFilePath} and journalctl failed: {result.StandardError}"];
 
-        return Ok(new { logLines, count = logLines.Count, collectedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() });
+        return Ok(new
+        {
+            source   = "journal",
+            logFile  = (string?)null,
+            logLines = journalLines,
+            count    = journalLines.Count,
+            collectedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+        });
+    }
+
+    /// <summary>
+    /// Efficiently reads the last N lines of a file without loading the entire
+    /// file into memory — seeks backwards from the end in 8 KB chunks.
+    /// </summary>
+    private static async Task<List<string>> ReadLastLinesAsync(
+        string path, int lineCount, CancellationToken ct)
+    {
+        const int bufferSize = 8192;
+        var lines = new List<string>(lineCount + 1);
+
+        await using var fs = new FileStream(
+            path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
+            bufferSize: bufferSize, useAsync: true);
+
+        if (fs.Length == 0) return lines;
+
+        var buffer    = new byte[bufferSize];
+        var remainder = "";
+        var position  = fs.Length;
+
+        while (position > 0 && lines.Count < lineCount)
+        {
+            var readSize = (int)Math.Min(bufferSize, position);
+            position -= readSize;
+            fs.Seek(position, SeekOrigin.Begin);
+
+            var bytesRead = await fs.ReadAsync(buffer.AsMemory(0, readSize), ct);
+            var chunk     = System.Text.Encoding.UTF8.GetString(buffer, 0, bytesRead) + remainder;
+            var parts     = chunk.Split('\n');
+
+            // parts[0] is a partial line — carry it forward as the remainder
+            remainder = parts[0];
+
+            // parts[1..] are complete lines, in reverse order
+            for (var i = parts.Length - 1; i >= 1; i--)
+            {
+                var line = parts[i].TrimEnd('\r');
+                if (!string.IsNullOrEmpty(line))
+                    lines.Add(line);
+                if (lines.Count >= lineCount) break;
+            }
+        }
+
+        // Don't forget the remainder (the very first line of the file)
+        if (!string.IsNullOrEmpty(remainder) && lines.Count < lineCount)
+            lines.Add(remainder.TrimEnd('\r'));
+
+        lines.Reverse(); // restore chronological order
+        return lines;
     }
 
     // ==========================================================================
@@ -664,7 +748,7 @@ public class NodeDashboardController : ControllerBase
 
             // Line-numbered output: num pkts bytes target prot opt in out src dst [extras]
             int offset = 0;
-            var lineNum = 0;
+            int lineNum = 0;
             if (parts.Length > 0 && int.TryParse(parts[0], out lineNum))
                 offset = 1;
             else if (parts.Length > 0 && !long.TryParse(parts[0], out _))

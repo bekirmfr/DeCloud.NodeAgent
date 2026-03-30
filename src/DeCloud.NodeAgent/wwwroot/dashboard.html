@@ -1,1274 +1,3178 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>DeCloud Node Dashboard</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<style>
-:root {
-  --primary:        #00d4aa;
-  --primary-dim:    rgba(0,212,170,0.12);
-  --primary-border: rgba(0,212,170,0.3);
-  --danger:         #ef4444;
-  --danger-dim:     rgba(239,68,68,0.12);
-  --warning:        #f59e0b;
-  --warning-dim:    rgba(245,158,11,0.12);
-  --info:           #38bdf8;
-  --info-dim:       rgba(56,189,248,0.10);
-  --bg:             #0a0b0f;
-  --bg-card:        #12141a;
-  --bg-elevated:    #1a1d26;
-  --bg-hover:       #22262f;
-  --text:           #f0f2f5;
-  --text-secondary: #9ca3af;
-  --text-muted:     #6b7280;
-  --border:         rgba(255,255,255,0.08);
-  --border-accent:  rgba(0,212,170,0.2);
-  --radius:         10px;
-  --radius-sm:      6px;
-  --sans: 'Outfit', -apple-system, sans-serif;
-  --mono: 'JetBrains Mono', 'SF Mono', 'Consolas', monospace;
-}
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html { font-size: 15px; -webkit-font-smoothing: antialiased; }
-body { font-family: var(--sans); background: var(--bg); color: var(--text); line-height: 1.6; min-height: 100vh; }
-a { color: var(--primary); text-decoration: none; }
-button { font-family: var(--sans); cursor: pointer; }
-pre, code { font-family: var(--mono); }
-.wrap { max-width: 1480px; margin: 0 auto; padding: 0 1.5rem 4rem; }
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeCloud Node Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #00d4aa;
+            --primary-dim: rgba(0,212,170,0.12);
+            --primary-border: rgba(0,212,170,0.3);
+            --danger: #ef4444;
+            --danger-dim: rgba(239,68,68,0.12);
+            --warning: #f59e0b;
+            --warning-dim: rgba(245,158,11,0.12);
+            --info: #38bdf8;
+            --info-dim: rgba(56,189,248,0.10);
+            --bg: #0a0b0f;
+            --bg-card: #12141a;
+            --bg-elevated: #1a1d26;
+            --bg-hover: #22262f;
+            --text: #f0f2f5;
+            --text-secondary: #9ca3af;
+            --text-muted: #6b7280;
+            --border: rgba(255,255,255,0.08);
+            --border-accent: rgba(0,212,170,0.2);
+            --radius: 10px;
+            --radius-sm: 6px;
+            --sans: 'Outfit', -apple-system, sans-serif;
+            --mono: 'JetBrains Mono', 'SF Mono', 'Consolas', monospace;
+        }
 
-/* Header */
-.site-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 1.1rem 1.5rem; border-bottom: 1px solid var(--border);
-  background: rgba(10,11,15,0.96); backdrop-filter: blur(8px);
-  position: sticky; top: 0; z-index: 100;
-}
-.logo-mark { font-size: 1.25rem; font-weight: 700; color: var(--primary); letter-spacing: -0.5px; }
-.logo-sub  { font-size: 0.7rem; color: var(--text-muted); letter-spacing: 1.2px; text-transform: uppercase; }
-.header-right { display: flex; align-items: center; gap: 1rem; }
-.health-pill {
-  display: flex; align-items: center; gap: 0.45rem;
-  padding: 0.3rem 0.85rem; border-radius: 20px; font-size: 0.78rem; font-weight: 600;
-  border: 1px solid; transition: all 0.3s;
-}
-.health-pill.healthy  { background: var(--primary-dim);  border-color: var(--primary-border); color: var(--primary); }
-.health-pill.degraded { background: var(--warning-dim);  border-color: rgba(245,158,11,0.3);  color: var(--warning); }
-.health-pill.critical { background: var(--danger-dim);   border-color: rgba(239,68,68,0.3);   color: var(--danger);  }
-.health-pill.checking { background: rgba(107,114,128,0.1); border-color: rgba(107,114,128,0.3); color: var(--text-muted); }
-.dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; display: inline-block; }
-.dot.pulse { animation: pulse 2s infinite; }
-.last-refresh { font-size: 0.7rem; color: var(--text-muted); font-family: var(--mono); }
-@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
+        *, *::before, *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
 
-/* Node Banner */
-.node-banner {
-  display: grid; grid-template-columns: 1fr auto; gap: 1.5rem; align-items: center;
-  padding: 1.4rem 0; border-bottom: 1px solid var(--border); margin-bottom: 0;
-}
-.node-id-text { font-family: var(--mono); font-size: 1.05rem; font-weight: 600; color: var(--text); }
-.node-meta  { display: flex; gap: 1.75rem; flex-wrap: wrap; margin-top: 0.4rem; }
-.meta-item  { display: flex; gap: 0.4rem; align-items: baseline; font-size: 0.8rem; }
-.meta-label { color: var(--text-muted); }
-.meta-value { color: var(--text-secondary); font-family: var(--mono); font-weight: 500; }
-.orch-status {
-  display: flex; align-items: center; gap: 0.6rem; flex-direction: column; text-align: right;
-  padding: 0.65rem 1.1rem; border-radius: var(--radius); border: 1px solid var(--border);
-  background: var(--bg-card);
-}
-.orch-status .orch-label { font-size: 0.68rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.7px; }
-.orch-status .orch-val   { font-size: 0.82rem; font-weight: 600; }
-.orch-status.connected   { border-color: var(--primary-border); }
-.orch-status.connected   .orch-val { color: var(--primary); }
-.orch-status.disconnected .orch-val { color: var(--danger); }
+        html {
+            font-size: 15px;
+            -webkit-font-smoothing: antialiased;
+        }
 
-/* Quick Stats */
-.quick-stats {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 1px; background: var(--border); border: 1px solid var(--border);
-  border-radius: var(--radius); overflow: hidden; margin: 1.25rem 0 0;
-}
-.stat-cell { background: var(--bg-card); padding: 0.9rem 1.1rem; }
-.stat-label { font-size: 0.67rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 0.25rem; }
-.stat-value { font-family: var(--mono); font-size: 1.35rem; font-weight: 700; color: var(--text); line-height: 1; }
-.stat-bar   { height: 3px; background: var(--bg); border-radius: 2px; margin-top: 0.45rem; overflow: hidden; }
-.stat-bar-fill { height: 100%; background: var(--primary); border-radius: 2px; transition: width 0.5s ease, background 0.3s; }
-.stat-bar-fill.warn { background: var(--warning); }
-.stat-bar-fill.crit { background: var(--danger); }
+        body {
+            font-family: var(--sans);
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            min-height: 100vh;
+        }
 
-/* Section Nav */
-.section-nav {
-  display: flex; gap: 0; border-bottom: 1px solid var(--border); margin: 1.5rem 0 2rem;
-  position: sticky; top: 54px; z-index: 90; background: var(--bg); overflow-x: auto;
-}
-.nav-tab {
-  padding: 0.6rem 1.1rem; font-size: 0.8rem; font-weight: 500; color: var(--text-muted);
-  border: none; background: none; border-bottom: 2px solid transparent;
-  transition: color 0.2s, border-color 0.2s; white-space: nowrap; cursor: pointer;
-}
-.nav-tab:hover { color: var(--text); }
-.nav-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+        a {
+            color: var(--primary);
+            text-decoration: none;
+        }
 
-/* Sections */
-.section { padding-top: 0.25rem; margin-bottom: 3rem; scroll-margin-top: 110px; }
-.section-title {
-  font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
-  letter-spacing: 1.2px; color: var(--text-muted); margin-bottom: 1.1rem;
-  padding-bottom: 0.55rem; border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; gap: 0.6rem;
-}
-.count-badge {
-  background: var(--bg-elevated); color: var(--text-secondary);
-  border: 1px solid var(--border); border-radius: 20px;
-  padding: 0 0.5rem; font-size: 0.62rem; font-family: var(--mono);
-}
-.sub-section-label {
-  font-size: 0.63rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.9px;
-  color: var(--text-muted); margin-bottom: 0.7rem; margin-top: 1.25rem;
-  display: flex; align-items: center; gap: 0.5rem;
-}
+        button {
+            font-family: var(--sans);
+            cursor: pointer;
+        }
 
-/* Hardware */
-.hw-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 1rem; }
-.hw-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.2rem; }
-.hw-label { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-muted); margin-bottom: 0.25rem; }
-.hw-value { font-family: var(--mono); font-size: 1.45rem; font-weight: 700; color: var(--text); }
-.hw-sub   { font-size: 0.76rem; color: var(--text-secondary); margin-top: 0.15rem; }
-.hw-bar   { height: 4px; background: var(--bg); border-radius: 2px; margin-top: 0.65rem; overflow: hidden; }
-.hw-fill  { height: 100%; background: var(--primary); border-radius: 2px; transition: width 0.5s; }
-.hw-fill.warn { background: var(--warning); }
-.hw-fill.crit { background: var(--danger); }
+        pre, code {
+            font-family: var(--mono);
+        }
 
-/* System VM Row */
-.sysvm-row { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
-.sysvm-card {
-  flex: 1; min-width: 190px; background: var(--bg-card); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 1rem 1.15rem; transition: border-color 0.2s;
-}
-.sysvm-card.running { border-color: var(--primary-border); }
-.sysvm-card.stopped { border-color: rgba(239,68,68,0.2); }
-.sysvm-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem; }
-.sysvm-name { font-weight: 600; font-size: 0.88rem; }
-.sysvm-badge {
-  font-size: 0.65rem; font-weight: 600; font-family: var(--mono);
-  padding: 0.15rem 0.5rem; border-radius: 4px;
-}
-.sysvm-badge.running { background: var(--primary-dim); color: var(--primary); border: 1px solid var(--primary-border); }
-.sysvm-badge.stopped { background: var(--danger-dim);  color: var(--danger);  border: 1px solid rgba(239,68,68,0.2); }
-.sysvm-badge.other   { background: var(--warning-dim); color: var(--warning); border: 1px solid rgba(245,158,11,0.2); }
-.sysvm-detail { font-family: var(--mono); font-size: 0.75rem; color: var(--text-muted); }
+        .wrap {
+            max-width: 1480px;
+            margin: 0 auto;
+            padding: 0 1.5rem 4rem;
+        }
 
-/* VM Table */
-.vm-table-wrap { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; overflow-x: auto; }
-.vm-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; min-width: 800px; }
-.vm-table th {
-  text-align: left; padding: 0.55rem 0.75rem; font-size: 0.63rem; text-transform: uppercase;
-  letter-spacing: 0.7px; color: var(--text-muted); border-bottom: 1px solid var(--border); font-weight: 600;
-  white-space: nowrap; background: var(--bg-elevated);
-}
-.vm-table td { padding: 0.65rem 0.75rem; border-bottom: 1px solid var(--border); color: var(--text-secondary); white-space: nowrap; }
-.vm-table tr:last-child td { border-bottom: none; }
-.vm-table tr:hover td { background: var(--bg-hover); }
-.vm-name-cell { color: var(--text); font-weight: 500; }
-.vm-id-cell   { font-family: var(--mono); font-size: 0.7rem; color: var(--text-muted); }
-.vm-ip-cell   { font-family: var(--mono); font-size: 0.76rem; }
-.state-badge  {
-  font-size: 0.65rem; font-weight: 600; font-family: var(--mono);
-  padding: 0.15rem 0.45rem; border-radius: 4px;
-}
-.state-running { background: var(--primary-dim); color: var(--primary); border: 1px solid var(--primary-border); }
-.state-stopped { background: rgba(107,114,128,0.1); color: var(--text-muted); border: 1px solid rgba(107,114,128,0.2); }
-.state-error   { background: var(--danger-dim); color: var(--danger); border: 1px solid rgba(239,68,68,0.2); }
-.state-other   { background: var(--warning-dim); color: var(--warning); border: 1px solid rgba(245,158,11,0.2); }
+        /* Header */
+        .site-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 1.1rem 1.5rem;
+            border-bottom: 1px solid var(--border);
+            background: rgba(10,11,15,0.96);
+            backdrop-filter: blur(8px);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
 
-/* ============================================================ */
-/* Connection Map                                               */
-/* ============================================================ */
-.cmap-wrap { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
-.cmap-header {
-  display: flex; align-items: stretch; justify-content: space-between;
-  border-bottom: 1px solid var(--border); background: var(--bg-elevated);
-}
-.cmap-title { padding: 0 1.25rem; display: flex; align-items: center; font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 1.1px; color: var(--primary); white-space: nowrap; }
-.cmap-tabs  { display: flex; }
-.cmap-tab {
-  padding: 0.75rem 1.1rem; font-size: 0.78rem; font-weight: 500; color: var(--text-muted);
-  border: none; background: none; cursor: pointer; border-bottom: 2px solid transparent;
-  transition: color 0.2s, border-color 0.2s; white-space: nowrap;
-}
-.cmap-tab:hover  { color: var(--text); }
-.cmap-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
-.cmap-body { padding: 1.5rem; }
-.net-tab { display: none; }
-.net-tab.active { display: block; }
+        .logo-mark {
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: var(--primary);
+            letter-spacing: -0.5px;
+        }
 
-/* Interfaces List */
-.iface-list { display: flex; flex-direction: column; gap: 0.4rem; }
-.iface-row {
-  display: grid; grid-template-columns: 130px 95px 1fr 130px 7px;
-  align-items: center; gap: 1rem;
-  padding: 0.7rem 0.9rem; background: var(--bg-elevated); border-radius: var(--radius-sm);
-  border: 1px solid var(--border); font-size: 0.8rem; transition: border-color 0.2s;
-}
-.iface-row:hover { border-color: var(--border-accent); }
-.iface-row.down  { opacity: 0.45; }
-.iface-name-cell { font-family: var(--mono); font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; }
-.iface-mac  { font-size: 0.65rem; color: var(--text-muted); font-family: var(--mono); margin-top: 1px; }
-.type-badge { font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; padding: 0.15rem 0.5rem; border-radius: 4px; width: fit-content; }
-.type-badge.wireguard { background: var(--primary-dim);  color: var(--primary);  border: 1px solid var(--primary-border); }
-.type-badge.bridge    { background: var(--info-dim);     color: var(--info);     border: 1px solid rgba(56,189,248,0.25); }
-.type-badge.physical  { background: rgba(139,92,246,0.1); color: #a78bfa;        border: 1px solid rgba(139,92,246,0.25); }
-.type-badge.tap       { background: var(--warning-dim);  color: var(--warning);  border: 1px solid rgba(245,158,11,0.25); }
-.type-badge.loopback  { background: rgba(107,114,128,0.1); color: var(--text-muted); border: 1px solid rgba(107,114,128,0.2); }
-.iface-addrs { display: flex; flex-wrap: wrap; gap: 0.35rem; }
-.iface-ip-tag { font-family: var(--mono); font-size: 0.73rem; color: var(--text-secondary); background: var(--bg); padding: 0.1rem 0.4rem; border-radius: 3px; border: 1px solid var(--border); }
-.iface-xfer { font-family: var(--mono); font-size: 0.7rem; color: var(--text-muted); text-align: right; white-space: nowrap; }
-.iface-xfer .rx { color: var(--info); }
-.iface-xfer .tx { color: var(--primary); }
-.up-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.up-dot.up   { background: var(--primary); }
-.up-dot.down { background: var(--danger); }
+        .logo-sub {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            letter-spacing: 1.2px;
+            text-transform: uppercase;
+        }
 
-/* WireGuard Peers */
-.wg-iface-block { margin-bottom: 1.5rem; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
-.wg-iface-head {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 0.75rem 1.25rem;
-  padding: 0.85rem 1.1rem; background: var(--bg-elevated); border-bottom: 1px solid var(--border);
-}
-.wg-iface-name { font-family: var(--mono); font-size: 1rem; font-weight: 700; color: var(--text); }
-.wg-port  { font-family: var(--mono); font-size: 0.78rem; background: var(--bg-card); border: 1px solid var(--border); padding: 0.15rem 0.5rem; border-radius: 4px; color: var(--text-secondary); }
-.wg-pubkey { font-family: var(--mono); font-size: 0.72rem; color: var(--text-muted); display: flex; align-items: center; gap: 0.4rem; }
-.wg-peer-count { margin-left: auto; font-size: 0.73rem; color: var(--text-muted); }
-.wg-table-scroll { overflow-x: auto; }
-.wg-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; min-width: 750px; }
-.wg-table th {
-  padding: 0.5rem 0.85rem; text-align: left; font-size: 0.62rem; text-transform: uppercase;
-  letter-spacing: 0.7px; color: var(--text-muted); background: var(--bg-card);
-  border-bottom: 1px solid var(--border); font-weight: 600; white-space: nowrap;
-}
-.wg-table td { padding: 0.65rem 0.85rem; border-bottom: 1px solid var(--border); font-family: var(--mono); color: var(--text-secondary); white-space: nowrap; vertical-align: middle; }
-.wg-table tr:last-child td { border-bottom: none; }
-.wg-table tr:hover td { background: var(--bg-hover); }
-.hs-badge { display: flex; align-items: center; gap: 0.45rem; }
-.hs-dot   { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.hs-dot.ok    { background: var(--primary); box-shadow: 0 0 5px rgba(0,212,170,0.5); animation: pulse 2.5s infinite; }
-.hs-dot.stale { background: var(--warning); }
-.hs-dot.dead  { background: var(--danger); }
-.hs-dot.never { background: var(--text-muted); }
-.hs-txt.ok    { color: var(--primary); font-size: 0.75rem; font-weight: 600; }
-.hs-txt.stale { color: var(--warning); font-size: 0.75rem; font-weight: 600; }
-.hs-txt.dead  { color: var(--danger);  font-size: 0.75rem; font-weight: 600; }
-.hs-txt.never { color: var(--text-muted); font-size: 0.75rem; }
-.xfer-cell .rx { color: var(--info); }
-.xfer-cell .tx { color: var(--primary); }
-.copy-btn {
-  background: none; border: 1px solid var(--border); border-radius: 3px;
-  color: var(--text-muted); font-size: 0.6rem; padding: 0.08rem 0.3rem; cursor: pointer;
-  transition: all 0.15s; font-family: var(--mono);
-}
-.copy-btn:hover { border-color: var(--primary); color: var(--primary); }
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
 
-/* Bridges */
-.bridge-list { display: flex; flex-direction: column; gap: 1rem; }
-.bridge-card { border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
-.bridge-head {
-  display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;
-  padding: 0.7rem 1rem; background: var(--bg-elevated); border-bottom: 1px solid var(--border);
-}
-.bridge-name { font-family: var(--mono); font-weight: 700; color: var(--info); font-size: 0.95rem; }
-.bridge-ips  { font-family: var(--mono); font-size: 0.72rem; color: var(--text-muted); }
-.bridge-portcount { margin-left: auto; font-size: 0.7rem; color: var(--text-muted); }
-.bridge-ports-body { padding: 0.5rem; display: flex; flex-direction: column; gap: 0.3rem; }
-.bridge-port-item {
-  display: flex; align-items: center; gap: 0.75rem;
-  padding: 0.5rem 0.75rem; background: var(--bg); border-radius: 5px;
-  border: 1px solid var(--border); font-size: 0.77rem;
-}
-.bridge-port-item:hover { border-color: var(--border-accent); }
-.bp-iface { font-family: var(--mono); color: var(--warning); font-weight: 600; min-width: 75px; }
-.bp-arrow { color: var(--text-muted); font-size: 0.68rem; }
-.bp-vmname{ font-weight: 500; color: var(--text); }
-.bp-vmid  { font-family: var(--mono); font-size: 0.67rem; color: var(--text-muted); margin-left: 0.4rem; }
-.bp-none  { color: var(--text-muted); font-style: italic; }
-.bridge-empty { padding: 1rem; text-align: center; font-size: 0.78rem; color: var(--text-muted); }
+        .health-pill {
+            display: flex;
+            align-items: center;
+            gap: 0.45rem;
+            padding: 0.3rem 0.85rem;
+            border-radius: 20px;
+            font-size: 0.78rem;
+            font-weight: 600;
+            border: 1px solid;
+            transition: all 0.3s;
+        }
 
-/* Ports */
-.ports-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
-.ports-table-wrap { border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
-.ports-proto-head { padding: 0.55rem 0.85rem; background: var(--bg-elevated); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 0.5rem; font-size: 0.67rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-muted); }
-.proto-pill { font-size: 0.6rem; font-weight: 700; padding: 0.1rem 0.4rem; border-radius: 3px; text-transform: uppercase; }
-.proto-pill.tcp { background: rgba(56,189,248,0.1);  color: var(--info);   border: 1px solid rgba(56,189,248,0.2); }
-.proto-pill.udp { background: rgba(139,92,246,0.1); color: #a78bfa;       border: 1px solid rgba(139,92,246,0.2); }
-.ports-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
-.ports-table th { padding: 0.45rem 0.75rem; text-align: left; font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-muted); border-bottom: 1px solid var(--border); font-weight: 600; }
-.ports-table td { padding: 0.55rem 0.75rem; border-bottom: 1px solid var(--border); font-family: var(--mono); color: var(--text-secondary); }
-.ports-table tr:last-child td { border-bottom: none; }
-.ports-table tr:hover td { background: var(--bg-hover); }
-.port-num-cell { color: var(--primary); font-weight: 600; }
-.port-addr-cell { font-size: 0.7rem; color: var(--text-muted); }
-.port-proc-cell { color: var(--text); }
+            .health-pill.healthy {
+                background: var(--primary-dim);
+                border-color: var(--primary-border);
+                color: var(--primary);
+            }
 
-/* Routes */
-.routes-wrap { border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; overflow-x: auto; }
-.routes-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; min-width: 600px; }
-.routes-table th { padding: 0.45rem 0.85rem; text-align: left; font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-muted); border-bottom: 1px solid var(--border); font-weight: 600; }
-.routes-table td { padding: 0.55rem 0.85rem; border-bottom: 1px solid var(--border); font-family: var(--mono); color: var(--text-secondary); white-space: nowrap; }
-.routes-table tr:last-child td { border-bottom: none; }
-.routes-table tr:hover td { background: var(--bg-hover); }
-.routes-table .default-row td { color: var(--text); }
-.route-dst { color: var(--text); font-weight: 500; }
-.route-gw  { color: var(--warning); }
-.route-dev { color: var(--info); }
+            .health-pill.degraded {
+                background: var(--warning-dim);
+                border-color: rgba(245,158,11,0.3);
+                color: var(--warning);
+            }
 
-/* Firewall */
-.ufw-banner {
-  display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
-  padding: 0.9rem 1.15rem; border-radius: var(--radius); margin-bottom: 1.15rem; border: 1px solid;
-}
-.ufw-banner.active   { background: var(--primary-dim); border-color: var(--primary-border); }
-.ufw-banner.inactive { background: var(--danger-dim);  border-color: rgba(239,68,68,0.25); }
-.ufw-banner.unknown  { background: var(--warning-dim); border-color: rgba(245,158,11,0.25); }
-.ufw-status-word { font-size: 0.95rem; font-weight: 700; }
-.ufw-banner.active   .ufw-status-word { color: var(--primary); }
-.ufw-banner.inactive .ufw-status-word { color: var(--danger);  }
-.ufw-banner.unknown  .ufw-status-word { color: var(--warning); }
-.ufw-policies { display: flex; gap: 1.5rem; flex-wrap: wrap; margin-left: auto; }
-.pol-item  { font-size: 0.76rem; display: flex; gap: 0.35rem; }
-.pol-label { color: var(--text-muted); }
-.pol-val   { font-family: var(--mono); font-weight: 600; }
-.pol-val.deny   { color: var(--danger); }
-.pol-val.allow  { color: var(--primary); }
-.pol-val.reject { color: var(--danger); }
+            .health-pill.critical {
+                background: var(--danger-dim);
+                border-color: rgba(239,68,68,0.3);
+                color: var(--danger);
+            }
 
-.fw-block { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-bottom: 1.1rem; }
-.fw-block-head {
-  padding: 0.6rem 1rem; background: var(--bg-elevated); border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; justify-content: space-between;
-  font-size: 0.67rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.9px; color: var(--text-muted);
-}
-.fw-policy-pill { font-size: 0.63rem; padding: 0.12rem 0.45rem; border-radius: 4px; font-weight: 700; }
-.fw-policy-pill.ACCEPT { background: var(--primary-dim); color: var(--primary); border: 1px solid var(--primary-border); }
-.fw-policy-pill.DROP   { background: var(--danger-dim);  color: var(--danger);  border: 1px solid rgba(239,68,68,0.2); }
-.fw-table-scroll { overflow-x: auto; }
-.fw-table { width: 100%; border-collapse: collapse; font-size: 0.76rem; min-width: 680px; }
-.fw-table th { padding: 0.45rem 0.85rem; text-align: left; font-size: 0.61rem; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-muted); font-weight: 600; border-bottom: 1px solid var(--border); white-space: nowrap; }
-.fw-table td { padding: 0.55rem 0.85rem; border-bottom: 1px solid var(--border); font-family: var(--mono); color: var(--text-secondary); white-space: nowrap; }
-.fw-table tr:last-child td { border-bottom: none; }
-.fw-table tr:hover td { background: var(--bg-hover); }
-.fw-table .num-col { color: var(--text-muted); font-size: 0.7rem; text-align: right; }
-.fw-table .pkts-col { color: var(--text-muted); font-size: 0.7rem; text-align: right; }
-.target-chip { font-size: 0.7rem; font-weight: 600; padding: 0.12rem 0.4rem; border-radius: 3px; }
-.target-chip.ACCEPT     { background: var(--primary-dim); color: var(--primary); }
-.target-chip.DROP,
-.target-chip.REJECT     { background: var(--danger-dim);  color: var(--danger); }
-.target-chip.MASQUERADE,
-.target-chip.SNAT,
-.target-chip.DNAT       { background: var(--info-dim);    color: var(--info); }
-.target-chip.RETURN,
-.target-chip.LOG        { background: var(--warning-dim); color: var(--warning); }
+            .health-pill.checking {
+                background: rgba(107,114,128,0.1);
+                border-color: rgba(107,114,128,0.3);
+                color: var(--text-muted);
+            }
 
-/* UFW rules */
-.ufw-action-chip { font-size: 0.7rem; font-weight: 600; padding: 0.12rem 0.4rem; border-radius: 3px; }
-.ufw-action-chip.ALLOW  { background: var(--primary-dim); color: var(--primary); }
-.ufw-action-chip.DENY,
-.ufw-action-chip.REJECT { background: var(--danger-dim);  color: var(--danger); }
-.ufw-action-chip.LIMIT  { background: var(--warning-dim); color: var(--warning); }
+        .dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: currentColor;
+            display: inline-block;
+        }
 
-/* Services */
-.services-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 0.65rem; }
-.svc-card {
-  display: flex; align-items: center; gap: 0.8rem;
-  padding: 0.8rem 0.9rem; background: var(--bg-card); border: 1px solid var(--border);
-  border-radius: var(--radius-sm); border-left: 3px solid; transition: border-color 0.2s;
-}
-.svc-card.active    { border-left-color: var(--primary); }
-.svc-card.inactive  { border-left-color: var(--text-muted); opacity: 0.6; }
-.svc-card.failed    { border-left-color: var(--danger); }
-.svc-card.not-found { border-left-color: var(--border); opacity: 0.4; }
-.svc-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.svc-dot.active    { background: var(--primary); animation: pulse 2.5s infinite; }
-.svc-dot.inactive  { background: var(--text-muted); }
-.svc-dot.failed    { background: var(--danger); }
-.svc-dot.not-found { background: var(--border); }
-.svc-info { flex: 1; min-width: 0; }
-.svc-name { font-family: var(--mono); font-size: 0.78rem; font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.svc-sub  { font-size: 0.68rem; color: var(--text-muted); }
+            .dot.pulse {
+                animation: pulse 2s infinite;
+            }
 
-/* Logs */
-.log-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem; }
-.log-controls { display: flex; gap: 0.5rem; align-items: center; }
-.log-filter {
-  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm);
-  color: var(--text); font-family: var(--mono); font-size: 0.76rem;
-  padding: 0.3rem 0.65rem; width: 200px; outline: none;
-}
-.log-filter:focus { border-color: var(--primary-border); }
-.log-toggle-btn {
-  background: none; border: 1px solid var(--border); border-radius: var(--radius-sm);
-  color: var(--text-muted); font-size: 0.76rem; padding: 0.3rem 0.8rem; cursor: pointer; transition: all 0.15s;
-}
-.log-toggle-btn:hover { border-color: var(--primary); color: var(--primary); }
-.log-box {
-  background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
-  padding: 0.9rem 1rem; height: 420px; overflow-y: auto; font-family: var(--mono);
-  font-size: 0.7rem; line-height: 1.65;
-}
-.log-line { white-space: pre-wrap; word-break: break-all; padding: 0.02rem 0; }
-.log-line:hover { background: var(--bg-hover); }
-.log-line.err  { color: #fca5a5; }
-.log-line.warn { color: #fcd34d; }
-.log-line.info { color: var(--text-secondary); }
-.log-line.dbg  { color: var(--text-muted); }
+        .last-refresh {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            font-family: var(--mono);
+        }
 
-/* Utilities */
-.empty { color: var(--text-muted); font-size: 0.8rem; text-align: center; padding: 2rem 1rem; }
-::-webkit-scrollbar { width: 5px; height: 5px; }
-::-webkit-scrollbar-track { background: var(--bg); }
-::-webkit-scrollbar-thumb { background: var(--bg-elevated); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--bg-hover); }
-@media (max-width: 860px) {
-  .ports-grid { grid-template-columns: 1fr; }
-  .node-banner { grid-template-columns: 1fr; }
-  .iface-row { grid-template-columns: 1fr 1fr; }
-}
-</style>
+        @keyframes pulse {
+            0%,100% {
+                opacity: 1
+            }
+
+            50% {
+                opacity: 0.35
+            }
+        }
+
+        /* Node Banner */
+        .node-banner {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 1.5rem;
+            align-items: center;
+            padding: 1.4rem 0;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 0;
+        }
+
+        .node-id-text {
+            font-family: var(--mono);
+            font-size: 1.05rem;
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .node-meta {
+            display: flex;
+            gap: 1.75rem;
+            flex-wrap: wrap;
+            margin-top: 0.4rem;
+        }
+
+        .meta-item {
+            display: flex;
+            gap: 0.4rem;
+            align-items: baseline;
+            font-size: 0.8rem;
+        }
+
+        .meta-label {
+            color: var(--text-muted);
+        }
+
+        .meta-value {
+            color: var(--text-secondary);
+            font-family: var(--mono);
+            font-weight: 500;
+        }
+
+        .orch-status {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            flex-direction: column;
+            text-align: right;
+            padding: 0.65rem 1.1rem;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+        }
+
+            .orch-status .orch-label {
+                font-size: 0.68rem;
+                color: var(--text-muted);
+                text-transform: uppercase;
+                letter-spacing: 0.7px;
+            }
+
+            .orch-status .orch-val {
+                font-size: 0.82rem;
+                font-weight: 600;
+            }
+
+            .orch-status.connected {
+                border-color: var(--primary-border);
+            }
+
+                .orch-status.connected .orch-val {
+                    color: var(--primary);
+                }
+
+            .orch-status.disconnected .orch-val {
+                color: var(--danger);
+            }
+
+        /* Quick Stats */
+        .quick-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 1px;
+            background: var(--border);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+            margin: 1.25rem 0 0;
+        }
+
+        .stat-cell {
+            background: var(--bg-card);
+            padding: 0.9rem 1.1rem;
+        }
+
+        .stat-label {
+            font-size: 0.67rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            margin-bottom: 0.25rem;
+        }
+
+        .stat-value {
+            font-family: var(--mono);
+            font-size: 1.35rem;
+            font-weight: 700;
+            color: var(--text);
+            line-height: 1;
+        }
+
+        .stat-bar {
+            height: 3px;
+            background: var(--bg);
+            border-radius: 2px;
+            margin-top: 0.45rem;
+            overflow: hidden;
+        }
+
+        .stat-bar-fill {
+            height: 100%;
+            background: var(--primary);
+            border-radius: 2px;
+            transition: width 0.5s ease, background 0.3s;
+        }
+
+            .stat-bar-fill.warn {
+                background: var(--warning);
+            }
+
+            .stat-bar-fill.crit {
+                background: var(--danger);
+            }
+
+        /* Section Nav */
+        .section-nav {
+            display: flex;
+            gap: 0;
+            border-bottom: 1px solid var(--border);
+            margin: 1.5rem 0 2rem;
+            position: sticky;
+            top: 54px;
+            z-index: 90;
+            background: var(--bg);
+            overflow-x: auto;
+        }
+
+        .nav-tab {
+            padding: 0.6rem 1.1rem;
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            border: none;
+            background: none;
+            border-bottom: 2px solid transparent;
+            transition: color 0.2s, border-color 0.2s;
+            white-space: nowrap;
+            cursor: pointer;
+        }
+
+            .nav-tab:hover {
+                color: var(--text);
+            }
+
+            .nav-tab.active {
+                color: var(--primary);
+                border-bottom-color: var(--primary);
+            }
+
+        /* Sections */
+        .section {
+            padding-top: 0.25rem;
+            margin-bottom: 3rem;
+            scroll-margin-top: 110px;
+        }
+
+        .section-title {
+            font-size: 0.68rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1.2px;
+            color: var(--text-muted);
+            margin-bottom: 1.1rem;
+            padding-bottom: 0.55rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+        }
+
+        .count-badge {
+            background: var(--bg-elevated);
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 0 0.5rem;
+            font-size: 0.62rem;
+            font-family: var(--mono);
+        }
+
+        .sub-section-label {
+            font-size: 0.63rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.9px;
+            color: var(--text-muted);
+            margin-bottom: 0.7rem;
+            margin-top: 1.25rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        /* Hardware */
+        .hw-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+            gap: 1rem;
+        }
+
+        .hw-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1rem 1.2rem;
+        }
+
+        .hw-label {
+            font-size: 0.66rem;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: var(--text-muted);
+            margin-bottom: 0.25rem;
+        }
+
+        .hw-value {
+            font-family: var(--mono);
+            font-size: 1.45rem;
+            font-weight: 700;
+            color: var(--text);
+        }
+
+        .hw-sub {
+            font-size: 0.76rem;
+            color: var(--text-secondary);
+            margin-top: 0.15rem;
+        }
+
+        .hw-bar {
+            height: 4px;
+            background: var(--bg);
+            border-radius: 2px;
+            margin-top: 0.65rem;
+            overflow: hidden;
+        }
+
+        .hw-fill {
+            height: 100%;
+            background: var(--primary);
+            border-radius: 2px;
+            transition: width 0.5s;
+        }
+
+            .hw-fill.warn {
+                background: var(--warning);
+            }
+
+            .hw-fill.crit {
+                background: var(--danger);
+            }
+
+        /* System VM Row */
+        .sysvm-row {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            margin-bottom: 1.5rem;
+        }
+
+        .sysvm-card {
+            flex: 1;
+            min-width: 190px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1rem 1.15rem;
+            transition: border-color 0.2s;
+        }
+
+            .sysvm-card.running {
+                border-color: var(--primary-border);
+            }
+
+            .sysvm-card.stopped {
+                border-color: rgba(239,68,68,0.2);
+            }
+
+        .sysvm-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 0.4rem;
+        }
+
+        .sysvm-name {
+            font-weight: 600;
+            font-size: 0.88rem;
+        }
+
+        .sysvm-badge {
+            font-size: 0.65rem;
+            font-weight: 600;
+            font-family: var(--mono);
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+        }
+
+            .sysvm-badge.running {
+                background: var(--primary-dim);
+                color: var(--primary);
+                border: 1px solid var(--primary-border);
+            }
+
+            .sysvm-badge.stopped {
+                background: var(--danger-dim);
+                color: var(--danger);
+                border: 1px solid rgba(239,68,68,0.2);
+            }
+
+            .sysvm-badge.other {
+                background: var(--warning-dim);
+                color: var(--warning);
+                border: 1px solid rgba(245,158,11,0.2);
+            }
+
+        .sysvm-detail {
+            font-family: var(--mono);
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        /* VM Table */
+        .vm-table-wrap {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+            overflow-x: auto;
+        }
+
+        .vm-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8rem;
+            min-width: 800px;
+        }
+
+            .vm-table th {
+                text-align: left;
+                padding: 0.55rem 0.75rem;
+                font-size: 0.63rem;
+                text-transform: uppercase;
+                letter-spacing: 0.7px;
+                color: var(--text-muted);
+                border-bottom: 1px solid var(--border);
+                font-weight: 600;
+                white-space: nowrap;
+                background: var(--bg-elevated);
+            }
+
+            .vm-table td {
+                padding: 0.65rem 0.75rem;
+                border-bottom: 1px solid var(--border);
+                color: var(--text-secondary);
+                white-space: nowrap;
+            }
+
+            .vm-table tr:last-child td {
+                border-bottom: none;
+            }
+
+            .vm-table tr:hover td {
+                background: var(--bg-hover);
+            }
+
+        .vm-name-cell {
+            color: var(--text);
+            font-weight: 500;
+        }
+
+        .vm-id-cell {
+            font-family: var(--mono);
+            font-size: 0.7rem;
+            color: var(--text-muted);
+        }
+
+        .vm-ip-cell {
+            font-family: var(--mono);
+            font-size: 0.76rem;
+        }
+
+        .state-badge {
+            font-size: 0.65rem;
+            font-weight: 600;
+            font-family: var(--mono);
+            padding: 0.15rem 0.45rem;
+            border-radius: 4px;
+        }
+
+        .state-running {
+            background: var(--primary-dim);
+            color: var(--primary);
+            border: 1px solid var(--primary-border);
+        }
+
+        .state-stopped {
+            background: rgba(107,114,128,0.1);
+            color: var(--text-muted);
+            border: 1px solid rgba(107,114,128,0.2);
+        }
+
+        .state-error {
+            background: var(--danger-dim);
+            color: var(--danger);
+            border: 1px solid rgba(239,68,68,0.2);
+        }
+
+        .state-other {
+            background: var(--warning-dim);
+            color: var(--warning);
+            border: 1px solid rgba(245,158,11,0.2);
+        }
+
+        /* ============================================================ */
+        /* Connection Map                                               */
+        /* ============================================================ */
+        .cmap-wrap {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+        }
+
+        .cmap-header {
+            display: flex;
+            align-items: stretch;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-elevated);
+        }
+
+        .cmap-title {
+            padding: 0 1.25rem;
+            display: flex;
+            align-items: center;
+            font-size: 0.68rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1.1px;
+            color: var(--primary);
+            white-space: nowrap;
+        }
+
+        .cmap-tabs {
+            display: flex;
+        }
+
+        .cmap-tab {
+            padding: 0.75rem 1.1rem;
+            font-size: 0.78rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            border: none;
+            background: none;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: color 0.2s, border-color 0.2s;
+            white-space: nowrap;
+        }
+
+            .cmap-tab:hover {
+                color: var(--text);
+            }
+
+            .cmap-tab.active {
+                color: var(--primary);
+                border-bottom-color: var(--primary);
+            }
+
+        .cmap-body {
+            padding: 1.5rem;
+        }
+
+        .net-tab {
+            display: none;
+        }
+
+            .net-tab.active {
+                display: block;
+            }
+
+        /* Interfaces List */
+        .iface-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+        }
+
+        .iface-row {
+            display: grid;
+            grid-template-columns: 130px 95px 1fr 130px 7px;
+            align-items: center;
+            gap: 1rem;
+            padding: 0.7rem 0.9rem;
+            background: var(--bg-elevated);
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border);
+            font-size: 0.8rem;
+            transition: border-color 0.2s;
+        }
+
+            .iface-row:hover {
+                border-color: var(--border-accent);
+            }
+
+            .iface-row.down {
+                opacity: 0.45;
+            }
+
+        .iface-name-cell {
+            font-family: var(--mono);
+            font-weight: 600;
+            color: var(--text);
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .iface-mac {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            font-family: var(--mono);
+            margin-top: 1px;
+        }
+
+        .type-badge {
+            font-size: 0.62rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            width: fit-content;
+        }
+
+            .type-badge.wireguard {
+                background: var(--primary-dim);
+                color: var(--primary);
+                border: 1px solid var(--primary-border);
+            }
+
+            .type-badge.bridge {
+                background: var(--info-dim);
+                color: var(--info);
+                border: 1px solid rgba(56,189,248,0.25);
+            }
+
+            .type-badge.physical {
+                background: rgba(139,92,246,0.1);
+                color: #a78bfa;
+                border: 1px solid rgba(139,92,246,0.25);
+            }
+
+            .type-badge.tap {
+                background: var(--warning-dim);
+                color: var(--warning);
+                border: 1px solid rgba(245,158,11,0.25);
+            }
+
+            .type-badge.loopback {
+                background: rgba(107,114,128,0.1);
+                color: var(--text-muted);
+                border: 1px solid rgba(107,114,128,0.2);
+            }
+
+        .iface-addrs {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.35rem;
+        }
+
+        .iface-ip-tag {
+            font-family: var(--mono);
+            font-size: 0.73rem;
+            color: var(--text-secondary);
+            background: var(--bg);
+            padding: 0.1rem 0.4rem;
+            border-radius: 3px;
+            border: 1px solid var(--border);
+        }
+
+        .iface-xfer {
+            font-family: var(--mono);
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            text-align: right;
+            white-space: nowrap;
+        }
+
+            .iface-xfer .rx {
+                color: var(--info);
+            }
+
+            .iface-xfer .tx {
+                color: var(--primary);
+            }
+
+        .up-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+            .up-dot.up {
+                background: var(--primary);
+            }
+
+            .up-dot.down {
+                background: var(--danger);
+            }
+
+        /* WireGuard Peers */
+        .wg-iface-block {
+            margin-bottom: 1.5rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            overflow: hidden;
+        }
+
+        .wg-iface-head {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.75rem 1.25rem;
+            padding: 0.85rem 1.1rem;
+            background: var(--bg-elevated);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .wg-iface-name {
+            font-family: var(--mono);
+            font-size: 1rem;
+            font-weight: 700;
+            color: var(--text);
+        }
+
+        .wg-port {
+            font-family: var(--mono);
+            font-size: 0.78rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            color: var(--text-secondary);
+        }
+
+        .wg-pubkey {
+            font-family: var(--mono);
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
+        .wg-peer-count {
+            margin-left: auto;
+            font-size: 0.73rem;
+            color: var(--text-muted);
+        }
+
+        .wg-table-scroll {
+            overflow-x: auto;
+        }
+
+        .wg-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.78rem;
+            min-width: 750px;
+        }
+
+            .wg-table th {
+                padding: 0.5rem 0.85rem;
+                text-align: left;
+                font-size: 0.62rem;
+                text-transform: uppercase;
+                letter-spacing: 0.7px;
+                color: var(--text-muted);
+                background: var(--bg-card);
+                border-bottom: 1px solid var(--border);
+                font-weight: 600;
+                white-space: nowrap;
+            }
+
+            .wg-table td {
+                padding: 0.65rem 0.85rem;
+                border-bottom: 1px solid var(--border);
+                font-family: var(--mono);
+                color: var(--text-secondary);
+                white-space: nowrap;
+                vertical-align: middle;
+            }
+
+            .wg-table tr:last-child td {
+                border-bottom: none;
+            }
+
+            .wg-table tr:hover td {
+                background: var(--bg-hover);
+            }
+
+        .hs-badge {
+            display: flex;
+            align-items: center;
+            gap: 0.45rem;
+        }
+
+        .hs-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+            .hs-dot.ok {
+                background: var(--primary);
+                box-shadow: 0 0 5px rgba(0,212,170,0.5);
+                animation: pulse 2.5s infinite;
+            }
+
+            .hs-dot.stale {
+                background: var(--warning);
+            }
+
+            .hs-dot.dead {
+                background: var(--danger);
+            }
+
+            .hs-dot.never {
+                background: var(--text-muted);
+            }
+
+        .hs-txt.ok {
+            color: var(--primary);
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .hs-txt.stale {
+            color: var(--warning);
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .hs-txt.dead {
+            color: var(--danger);
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .hs-txt.never {
+            color: var(--text-muted);
+            font-size: 0.75rem;
+        }
+
+        .xfer-cell .rx {
+            color: var(--info);
+        }
+
+        .xfer-cell .tx {
+            color: var(--primary);
+        }
+
+        .copy-btn {
+            background: none;
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            color: var(--text-muted);
+            font-size: 0.6rem;
+            padding: 0.08rem 0.3rem;
+            cursor: pointer;
+            transition: all 0.15s;
+            font-family: var(--mono);
+        }
+
+            .copy-btn:hover {
+                border-color: var(--primary);
+                color: var(--primary);
+            }
+
+        /* Bridges */
+        .bridge-list {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .bridge-card {
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            overflow: hidden;
+        }
+
+        .bridge-head {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            padding: 0.7rem 1rem;
+            background: var(--bg-elevated);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .bridge-name {
+            font-family: var(--mono);
+            font-weight: 700;
+            color: var(--info);
+            font-size: 0.95rem;
+        }
+
+        .bridge-ips {
+            font-family: var(--mono);
+            font-size: 0.72rem;
+            color: var(--text-muted);
+        }
+
+        .bridge-portcount {
+            margin-left: auto;
+            font-size: 0.7rem;
+            color: var(--text-muted);
+        }
+
+        .bridge-ports-body {
+            padding: 0.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+        }
+
+        .bridge-port-item {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.5rem 0.75rem;
+            background: var(--bg);
+            border-radius: 5px;
+            border: 1px solid var(--border);
+            font-size: 0.77rem;
+        }
+
+            .bridge-port-item:hover {
+                border-color: var(--border-accent);
+            }
+
+        .bp-iface {
+            font-family: var(--mono);
+            color: var(--warning);
+            font-weight: 600;
+            min-width: 75px;
+        }
+
+        .bp-arrow {
+            color: var(--text-muted);
+            font-size: 0.68rem;
+        }
+
+        .bp-vmname {
+            font-weight: 500;
+            color: var(--text);
+        }
+
+        .bp-vmid {
+            font-family: var(--mono);
+            font-size: 0.67rem;
+            color: var(--text-muted);
+            margin-left: 0.4rem;
+        }
+
+        .bp-none {
+            color: var(--text-muted);
+            font-style: italic;
+        }
+
+        .bridge-empty {
+            padding: 1rem;
+            text-align: center;
+            font-size: 0.78rem;
+            color: var(--text-muted);
+        }
+
+        /* Ports */
+        .ports-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+        }
+
+        .ports-table-wrap {
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            overflow: hidden;
+        }
+
+        .ports-proto-head {
+            padding: 0.55rem 0.85rem;
+            background: var(--bg-elevated);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.67rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: var(--text-muted);
+        }
+
+        .proto-pill {
+            font-size: 0.6rem;
+            font-weight: 700;
+            padding: 0.1rem 0.4rem;
+            border-radius: 3px;
+            text-transform: uppercase;
+        }
+
+            .proto-pill.tcp {
+                background: rgba(56,189,248,0.1);
+                color: var(--info);
+                border: 1px solid rgba(56,189,248,0.2);
+            }
+
+            .proto-pill.udp {
+                background: rgba(139,92,246,0.1);
+                color: #a78bfa;
+                border: 1px solid rgba(139,92,246,0.2);
+            }
+
+        .ports-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.78rem;
+        }
+
+            .ports-table th {
+                padding: 0.45rem 0.75rem;
+                text-align: left;
+                font-size: 0.62rem;
+                text-transform: uppercase;
+                letter-spacing: 0.6px;
+                color: var(--text-muted);
+                border-bottom: 1px solid var(--border);
+                font-weight: 600;
+            }
+
+            .ports-table td {
+                padding: 0.55rem 0.75rem;
+                border-bottom: 1px solid var(--border);
+                font-family: var(--mono);
+                color: var(--text-secondary);
+            }
+
+            .ports-table tr:last-child td {
+                border-bottom: none;
+            }
+
+            .ports-table tr:hover td {
+                background: var(--bg-hover);
+            }
+
+        .port-num-cell {
+            color: var(--primary);
+            font-weight: 600;
+        }
+
+        .port-addr-cell {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+        }
+
+        .port-proc-cell {
+            color: var(--text);
+        }
+
+        /* Routes */
+        .routes-wrap {
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            overflow: hidden;
+            overflow-x: auto;
+        }
+
+        .routes-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.78rem;
+            min-width: 600px;
+        }
+
+            .routes-table th {
+                padding: 0.45rem 0.85rem;
+                text-align: left;
+                font-size: 0.62rem;
+                text-transform: uppercase;
+                letter-spacing: 0.6px;
+                color: var(--text-muted);
+                border-bottom: 1px solid var(--border);
+                font-weight: 600;
+            }
+
+            .routes-table td {
+                padding: 0.55rem 0.85rem;
+                border-bottom: 1px solid var(--border);
+                font-family: var(--mono);
+                color: var(--text-secondary);
+                white-space: nowrap;
+            }
+
+            .routes-table tr:last-child td {
+                border-bottom: none;
+            }
+
+            .routes-table tr:hover td {
+                background: var(--bg-hover);
+            }
+
+            .routes-table .default-row td {
+                color: var(--text);
+            }
+
+        .route-dst {
+            color: var(--text);
+            font-weight: 500;
+        }
+
+        .route-gw {
+            color: var(--warning);
+        }
+
+        .route-dev {
+            color: var(--info);
+        }
+
+        /* Firewall */
+        .ufw-banner {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            flex-wrap: wrap;
+            padding: 0.9rem 1.15rem;
+            border-radius: var(--radius);
+            margin-bottom: 1.15rem;
+            border: 1px solid;
+        }
+
+            .ufw-banner.active {
+                background: var(--primary-dim);
+                border-color: var(--primary-border);
+            }
+
+            .ufw-banner.inactive {
+                background: var(--danger-dim);
+                border-color: rgba(239,68,68,0.25);
+            }
+
+            .ufw-banner.unknown {
+                background: var(--warning-dim);
+                border-color: rgba(245,158,11,0.25);
+            }
+
+        .ufw-status-word {
+            font-size: 0.95rem;
+            font-weight: 700;
+        }
+
+        .ufw-banner.active .ufw-status-word {
+            color: var(--primary);
+        }
+
+        .ufw-banner.inactive .ufw-status-word {
+            color: var(--danger);
+        }
+
+        .ufw-banner.unknown .ufw-status-word {
+            color: var(--warning);
+        }
+
+        .ufw-policies {
+            display: flex;
+            gap: 1.5rem;
+            flex-wrap: wrap;
+            margin-left: auto;
+        }
+
+        .pol-item {
+            font-size: 0.76rem;
+            display: flex;
+            gap: 0.35rem;
+        }
+
+        .pol-label {
+            color: var(--text-muted);
+        }
+
+        .pol-val {
+            font-family: var(--mono);
+            font-weight: 600;
+        }
+
+            .pol-val.deny {
+                color: var(--danger);
+            }
+
+            .pol-val.allow {
+                color: var(--primary);
+            }
+
+            .pol-val.reject {
+                color: var(--danger);
+            }
+
+        .fw-block {
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+            margin-bottom: 1.1rem;
+        }
+
+        .fw-block-head {
+            padding: 0.6rem 1rem;
+            background: var(--bg-elevated);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 0.67rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.9px;
+            color: var(--text-muted);
+        }
+
+        .fw-policy-pill {
+            font-size: 0.63rem;
+            padding: 0.12rem 0.45rem;
+            border-radius: 4px;
+            font-weight: 700;
+        }
+
+            .fw-policy-pill.ACCEPT {
+                background: var(--primary-dim);
+                color: var(--primary);
+                border: 1px solid var(--primary-border);
+            }
+
+            .fw-policy-pill.DROP {
+                background: var(--danger-dim);
+                color: var(--danger);
+                border: 1px solid rgba(239,68,68,0.2);
+            }
+
+        .fw-table-scroll {
+            overflow-x: auto;
+        }
+
+        .fw-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.76rem;
+            min-width: 680px;
+        }
+
+            .fw-table th {
+                padding: 0.45rem 0.85rem;
+                text-align: left;
+                font-size: 0.61rem;
+                text-transform: uppercase;
+                letter-spacing: 0.6px;
+                color: var(--text-muted);
+                font-weight: 600;
+                border-bottom: 1px solid var(--border);
+                white-space: nowrap;
+            }
+
+            .fw-table td {
+                padding: 0.55rem 0.85rem;
+                border-bottom: 1px solid var(--border);
+                font-family: var(--mono);
+                color: var(--text-secondary);
+                white-space: nowrap;
+            }
+
+            .fw-table tr:last-child td {
+                border-bottom: none;
+            }
+
+            .fw-table tr:hover td {
+                background: var(--bg-hover);
+            }
+
+            .fw-table .num-col {
+                color: var(--text-muted);
+                font-size: 0.7rem;
+                text-align: right;
+            }
+
+            .fw-table .pkts-col {
+                color: var(--text-muted);
+                font-size: 0.7rem;
+                text-align: right;
+            }
+
+        .target-chip {
+            font-size: 0.7rem;
+            font-weight: 600;
+            padding: 0.12rem 0.4rem;
+            border-radius: 3px;
+        }
+
+            .target-chip.ACCEPT {
+                background: var(--primary-dim);
+                color: var(--primary);
+            }
+
+            .target-chip.DROP,
+            .target-chip.REJECT {
+                background: var(--danger-dim);
+                color: var(--danger);
+            }
+
+            .target-chip.MASQUERADE,
+            .target-chip.SNAT,
+            .target-chip.DNAT {
+                background: var(--info-dim);
+                color: var(--info);
+            }
+
+            .target-chip.RETURN,
+            .target-chip.LOG {
+                background: var(--warning-dim);
+                color: var(--warning);
+            }
+
+        /* UFW rules */
+        .ufw-action-chip {
+            font-size: 0.7rem;
+            font-weight: 600;
+            padding: 0.12rem 0.4rem;
+            border-radius: 3px;
+        }
+
+            .ufw-action-chip.ALLOW {
+                background: var(--primary-dim);
+                color: var(--primary);
+            }
+
+            .ufw-action-chip.DENY,
+            .ufw-action-chip.REJECT {
+                background: var(--danger-dim);
+                color: var(--danger);
+            }
+
+            .ufw-action-chip.LIMIT {
+                background: var(--warning-dim);
+                color: var(--warning);
+            }
+
+        /* Services */
+        .services-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+            gap: 0.65rem;
+        }
+
+        .svc-card {
+            display: flex;
+            align-items: center;
+            gap: 0.8rem;
+            padding: 0.8rem 0.9rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            border-left: 3px solid;
+            transition: border-color 0.2s;
+        }
+
+            .svc-card.active {
+                border-left-color: var(--primary);
+            }
+
+            .svc-card.inactive {
+                border-left-color: var(--text-muted);
+                opacity: 0.6;
+            }
+
+            .svc-card.failed {
+                border-left-color: var(--danger);
+            }
+
+            .svc-card.not-found {
+                border-left-color: var(--border);
+                opacity: 0.4;
+            }
+
+        .svc-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+            .svc-dot.active {
+                background: var(--primary);
+                animation: pulse 2.5s infinite;
+            }
+
+            .svc-dot.inactive {
+                background: var(--text-muted);
+            }
+
+            .svc-dot.failed {
+                background: var(--danger);
+            }
+
+            .svc-dot.not-found {
+                background: var(--border);
+            }
+
+        .svc-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .svc-name {
+            font-family: var(--mono);
+            font-size: 0.78rem;
+            font-weight: 500;
+            color: var(--text);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .svc-sub {
+            font-size: 0.68rem;
+            color: var(--text-muted);
+        }
+
+        /* Logs */
+        .log-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 0.75rem;
+        }
+
+        .log-controls {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+        }
+
+        .log-filter {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text);
+            font-family: var(--mono);
+            font-size: 0.76rem;
+            padding: 0.3rem 0.65rem;
+            width: 200px;
+            outline: none;
+        }
+
+            .log-filter:focus {
+                border-color: var(--primary-border);
+            }
+
+        .log-toggle-btn {
+            background: none;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text-muted);
+            font-size: 0.76rem;
+            padding: 0.3rem 0.8rem;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+            .log-toggle-btn:hover {
+                border-color: var(--primary);
+                color: var(--primary);
+            }
+
+        .log-box {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 0.9rem 1rem;
+            height: 420px;
+            overflow-y: auto;
+            font-family: var(--mono);
+            font-size: 0.7rem;
+            line-height: 1.65;
+        }
+
+        .log-line {
+            white-space: pre-wrap;
+            word-break: break-all;
+            padding: 0.02rem 0;
+        }
+
+            .log-line:hover {
+                background: var(--bg-hover);
+            }
+
+            .log-line.err {
+                color: #fca5a5;
+            }
+
+            .log-line.warn {
+                color: #fcd34d;
+            }
+
+            .log-line.info {
+                color: var(--text-secondary);
+            }
+
+            .log-line.dbg {
+                color: var(--text-muted);
+            }
+
+        /* Utilities */
+        .empty {
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            text-align: center;
+            padding: 2rem 1rem;
+        }
+
+        ::-webkit-scrollbar {
+            width: 5px;
+            height: 5px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--bg);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--bg-elevated);
+            border-radius: 3px;
+        }
+
+            ::-webkit-scrollbar-thumb:hover {
+                background: var(--bg-hover);
+            }
+
+        @media (max-width: 860px) {
+            .ports-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .node-banner {
+                grid-template-columns: 1fr;
+            }
+
+            .iface-row {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+
+        /* Export button */
+        .export-btn {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.3rem 0.85rem;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+            color: var(--text-secondary);
+            font-size: 0.78rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+            .export-btn:hover {
+                border-color: var(--primary-border);
+                color: var(--primary);
+            }
+
+        /* Export modal overlay */
+        .export-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            z-index: 1000;
+            background: rgba(0,0,0,0.75);
+            backdrop-filter: blur(4px);
+            align-items: center;
+            justify-content: center;
+            padding: 1.5rem;
+        }
+
+            .export-overlay.open {
+                display: flex;
+            }
+
+        /* Modal container */
+        .export-modal {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            width: 100%;
+            max-width: 1100px;
+            max-height: 88vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 24px 64px rgba(0,0,0,0.6);
+        }
+
+        /* Modal header */
+        .export-modal-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 1rem 1.25rem;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-elevated);
+            border-radius: var(--radius) var(--radius) 0 0;
+            flex-shrink: 0;
+        }
+
+        .export-modal-title {
+            font-size: 0.82rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--primary);
+        }
+
+        .export-head-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .export-action-btn {
+            padding: 0.3rem 0.85rem;
+            border-radius: var(--radius-sm);
+            font-size: 0.78rem;
+            font-weight: 600;
+            border: 1px solid var(--primary-border);
+            background: var(--primary-dim);
+            color: var(--primary);
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+            .export-action-btn:hover {
+                background: var(--primary);
+                color: var(--bg);
+            }
+
+            .export-action-btn:disabled {
+                opacity: 0.4;
+                cursor: not-allowed;
+            }
+
+            .export-action-btn.secondary {
+                background: none;
+                border-color: var(--border);
+                color: var(--text-muted);
+            }
+
+                .export-action-btn.secondary:hover {
+                    border-color: var(--border-accent);
+                    color: var(--text);
+                    background: none;
+                }
+
+            .export-action-btn.success {
+                background: var(--primary);
+                color: var(--bg);
+                border-color: var(--primary);
+            }
+
+        .export-close-btn {
+            width: 28px;
+            height: 28px;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border);
+            background: none;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.15s;
+        }
+
+            .export-close-btn:hover {
+                border-color: var(--danger);
+                color: var(--danger);
+            }
+
+        /* Status bar */
+        .export-status-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.6rem 1.25rem;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg);
+            flex-shrink: 0;
+            gap: 1rem;
+        }
+
+            .export-status-bar #export-status-text {
+                font-size: 0.78rem;
+                color: var(--text-muted);
+                font-family: var(--mono);
+            }
+
+        .export-collect-btn {
+            padding: 0.3rem 1rem;
+            border-radius: var(--radius-sm);
+            font-size: 0.78rem;
+            font-weight: 600;
+            border: 1px solid var(--border-accent);
+            background: var(--bg-elevated);
+            color: var(--primary);
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all 0.15s;
+        }
+
+            .export-collect-btn:hover {
+                background: var(--primary-dim);
+            }
+
+            .export-collect-btn:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+            }
+
+        /* Modal body — two-column layout */
+        .export-body {
+            display: grid;
+            grid-template-columns: 280px 1fr;
+            flex: 1;
+            overflow: hidden;
+            min-height: 0;
+        }
+
+        /* Left: section checklist */
+        .export-sections {
+            border-right: 1px solid var(--border);
+            overflow-y: auto;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+        }
+
+        .export-placeholder {
+            text-align: center;
+            padding: 2rem 1rem;
+            color: var(--text-muted);
+        }
+
+        .export-section-item {
+            display: flex;
+            align-items: center;
+            gap: 0.65rem;
+            padding: 0.55rem 0.75rem;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border);
+            font-size: 0.78rem;
+            background: var(--bg-elevated);
+        }
+
+            .export-section-item.loading {
+                border-color: var(--warning-dim);
+            }
+
+            .export-section-item.done {
+                border-color: var(--primary-border);
+            }
+
+            .export-section-item.error {
+                border-color: rgba(239,68,68,0.25);
+            }
+
+        .export-sec-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+            .export-sec-dot.pending {
+                background: var(--text-muted);
+            }
+
+            .export-sec-dot.loading {
+                background: var(--warning);
+                animation: pulse 1s infinite;
+            }
+
+            .export-sec-dot.done {
+                background: var(--primary);
+            }
+
+            .export-sec-dot.error {
+                background: var(--danger);
+            }
+
+        .export-sec-name {
+            flex: 1;
+            font-family: var(--mono);
+            color: var(--text-secondary);
+        }
+
+        .export-sec-size {
+            font-family: var(--mono);
+            font-size: 0.68rem;
+            color: var(--text-muted);
+        }
+
+        /* Right: JSON preview */
+        .export-preview-wrap {
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .export-preview-label {
+            padding: 0.55rem 1rem;
+            font-size: 0.67rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-elevated);
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .export-preview {
+            flex: 1;
+            overflow: auto;
+            margin: 0;
+            padding: 1rem;
+            font-family: var(--mono);
+            font-size: 0.72rem;
+            line-height: 1.55;
+            color: var(--text-secondary);
+            white-space: pre;
+            background: var(--bg);
+            border-radius: 0 0 var(--radius) 0;
+        }
+    </style>
 </head>
 <body>
 
-<!-- ============================================================ -->
-<!-- Site Header                                                   -->
-<!-- ============================================================ -->
-<header class="site-header">
-  <div>
-    <div class="logo-mark">⬡ DeCloud</div>
-    <div class="logo-sub">Node Dashboard</div>
-  </div>
-  <div class="header-right">
-    <div id="health-pill" class="health-pill checking">
-      <span class="dot pulse"></span>
-      <span id="health-text">Checking…</span>
-    </div>
-    <span class="last-refresh" id="last-refresh">—</span>
-  </div>
-</header>
-
-<div class="wrap">
-
-<!-- Node Banner -->
-<div class="node-banner">
-  <div>
-    <div class="node-id-text" id="node-id">—</div>
-    <div class="node-meta">
-      <div class="meta-item"><span class="meta-label">Host</span><span class="meta-value" id="hostname">—</span></div>
-      <div class="meta-item"><span class="meta-label">OS</span><span class="meta-value" id="os-info">—</span></div>
-      <div class="meta-item"><span class="meta-label">Uptime</span><span class="meta-value" id="uptime">—</span></div>
-      <div class="meta-item"><span class="meta-label">Agent</span><span class="meta-value" id="agent-version">—</span></div>
-      <div class="meta-item"><span class="meta-label">Wallet</span><span class="meta-value" id="wallet">—</span></div>
-    </div>
-  </div>
-  <div id="orch-status" class="orch-status">
-    <div class="orch-label">Orchestrator</div>
-    <div class="orch-val" id="orch-val">—</div>
-  </div>
-</div>
-
-<!-- Quick Stats -->
-<div class="quick-stats">
-  <div class="stat-cell"><div class="stat-label">CPU Usage</div><div class="stat-value" id="qs-cpu">—</div><div class="stat-bar"><div class="stat-bar-fill" id="qs-cpu-bar" style="width:0%"></div></div></div>
-  <div class="stat-cell"><div class="stat-label">Memory</div><div class="stat-value" id="qs-ram">—</div><div class="stat-bar"><div class="stat-bar-fill" id="qs-ram-bar" style="width:0%"></div></div></div>
-  <div class="stat-cell"><div class="stat-label">Storage</div><div class="stat-value" id="qs-storage">—</div><div class="stat-bar"><div class="stat-bar-fill" id="qs-storage-bar" style="width:0%"></div></div></div>
-  <div class="stat-cell"><div class="stat-label">VMs Running</div><div class="stat-value" id="qs-vms">—</div></div>
-  <div class="stat-cell"><div class="stat-label">WG Interfaces</div><div class="stat-value" id="qs-wg">—</div></div>
-  <div class="stat-cell"><div class="stat-label">WG Peers</div><div class="stat-value" id="qs-peers">—</div></div>
-  <div class="stat-cell"><div class="stat-label">Listen Ports</div><div class="stat-value" id="qs-ports">—</div></div>
-</div>
-
-<!-- Section Nav -->
-<nav class="section-nav">
-  <button class="nav-tab active" onclick="scrollSec('hardware',this)">Hardware</button>
-  <button class="nav-tab" onclick="scrollSec('vms',this)">VMs</button>
-  <button class="nav-tab" onclick="scrollSec('network',this)">Connection Map</button>
-  <button class="nav-tab" onclick="scrollSec('firewall',this)">Firewall</button>
-  <button class="nav-tab" onclick="scrollSec('services',this)">Services</button>
-  <button class="nav-tab" onclick="scrollSec('logs',this)">Logs</button>
-</nav>
-
-<!-- ============================================================ -->
-<!-- Hardware                                                      -->
-<!-- ============================================================ -->
-<section class="section" id="hardware">
-  <div class="section-title">Hardware Resources</div>
-  <div class="hw-grid">
-    <div class="hw-card">
-      <div class="hw-label">CPU Usage</div>
-      <div class="hw-value" id="hw-cpu-pct">—</div>
-      <div class="hw-sub" id="hw-cpu-info">—</div>
-      <div class="hw-bar"><div class="hw-fill" id="hw-cpu-bar" style="width:0%"></div></div>
-    </div>
-    <div class="hw-card">
-      <div class="hw-label">Memory</div>
-      <div class="hw-value" id="hw-ram-pct">—</div>
-      <div class="hw-sub" id="hw-ram-detail">—</div>
-      <div class="hw-bar"><div class="hw-fill" id="hw-ram-bar" style="width:0%"></div></div>
-    </div>
-    <div class="hw-card">
-      <div class="hw-label">Storage</div>
-      <div class="hw-value" id="hw-stor-pct">—</div>
-      <div class="hw-sub" id="hw-stor-detail">—</div>
-      <div class="hw-bar"><div class="hw-fill" id="hw-stor-bar" style="width:0%"></div></div>
-    </div>
-    <div class="hw-card">
-      <div class="hw-label">Virtualisation</div>
-      <div class="hw-value" id="hw-kvm">—</div>
-      <div class="hw-sub" id="hw-virt-sub">—</div>
-    </div>
-  </div>
-</section>
-
-<!-- ============================================================ -->
-<!-- Virtual Machines                                              -->
-<!-- ============================================================ -->
-<section class="section" id="vms">
-  <div class="section-title">Virtual Machines <span class="count-badge" id="vm-count-badge">0</span></div>
-  <div class="sub-section-label">System VMs</div>
-  <div class="sysvm-row" id="sysvm-row">
-    <div class="sysvm-card" id="svc-relay"><div class="sysvm-head"><span class="sysvm-name">Relay</span><span class="sysvm-badge other" id="svc-relay-badge">—</span></div><div class="sysvm-detail" id="svc-relay-detail">—</div></div>
-    <div class="sysvm-card" id="svc-dht"><div class="sysvm-head"><span class="sysvm-name">DHT</span><span class="sysvm-badge other" id="svc-dht-badge">—</span></div><div class="sysvm-detail" id="svc-dht-detail">—</div></div>
-    <div class="sysvm-card" id="svc-bs"><div class="sysvm-head"><span class="sysvm-name">Block Store</span><span class="sysvm-badge other" id="svc-bs-badge">—</span></div><div class="sysvm-detail" id="svc-bs-detail">—</div></div>
-  </div>
-  <div class="sub-section-label">Tenant VMs</div>
-  <div class="vm-table-wrap">
-    <table class="vm-table">
-      <thead><tr><th>Name</th><th>VM ID</th><th>State</th><th>vCPU</th><th>RAM</th><th>IP</th><th>VNC Port</th><th>Uptime</th><th>Owner</th></tr></thead>
-      <tbody id="tenant-tbody"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
-    </table>
-  </div>
-</section>
-
-<!-- ============================================================ -->
-<!-- Connection Map                                                -->
-<!-- ============================================================ -->
-<section class="section" id="network">
-  <div class="section-title">Connection Map &amp; Network Topology</div>
-  <div class="cmap-wrap">
-    <div class="cmap-header">
-      <div class="cmap-title">Network Inspector</div>
-      <div class="cmap-tabs">
-        <button class="cmap-tab active" onclick="cmapTab('interfaces',this)">Interfaces</button>
-        <button class="cmap-tab" onclick="cmapTab('wireguard',this)">WireGuard Peers</button>
-        <button class="cmap-tab" onclick="cmapTab('bridges',this)">Bridges &amp; VMs</button>
-        <button class="cmap-tab" onclick="cmapTab('ports',this)">Listening Ports</button>
-        <button class="cmap-tab" onclick="cmapTab('routes',this)">Routes</button>
-      </div>
-    </div>
-    <div class="cmap-body">
-      <div id="tab-interfaces" class="net-tab active"><div class="iface-list" id="iface-list"><div class="empty">Loading…</div></div></div>
-      <div id="tab-wireguard" class="net-tab" style="display:none"><div id="wg-panels"><div class="empty">Loading…</div></div></div>
-      <div id="tab-bridges"   class="net-tab" style="display:none"><div class="bridge-list" id="bridge-list"><div class="empty">Loading…</div></div></div>
-      <div id="tab-ports"     class="net-tab" style="display:none">
-        <div class="ports-grid">
-          <div>
-            <div class="ports-proto-head"><span class="proto-pill tcp">TCP</span> Listening</div>
-            <div class="ports-table-wrap"><table class="ports-table"><thead><tr><th>Port</th><th>Address</th><th>Process</th></tr></thead><tbody id="tcp-body"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody></table></div>
-          </div>
-          <div>
-            <div class="ports-proto-head"><span class="proto-pill udp">UDP</span> Listening</div>
-            <div class="ports-table-wrap"><table class="ports-table"><thead><tr><th>Port</th><th>Address</th><th>Process</th></tr></thead><tbody id="udp-body"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody></table></div>
-          </div>
+    <!-- ============================================================ -->
+    <!-- Site Header                                                   -->
+    <!-- ============================================================ -->
+    <header class="site-header">
+        <div>
+            <div class="logo-mark">⬡ DeCloud</div>
+            <div class="logo-sub">Node Dashboard</div>
         </div>
-      </div>
-      <div id="tab-routes" class="net-tab" style="display:none">
-        <div class="routes-wrap"><table class="routes-table"><thead><tr><th>Destination</th><th>Gateway</th><th>Interface</th><th>Protocol</th><th>Scope</th><th>Metric</th></tr></thead><tbody id="routes-body"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody></table></div>
-      </div>
+        <div class="header-right">
+            <button class="export-btn" onclick="openExport()" title="Export full diagnostic snapshot">
+                <span>⬇</span> Export
+            </button>
+            <div id="health-pill" class="health-pill checking">
+                <span class="dot pulse"></span>
+                <span id="health-text">Checking…</span>
+            </div>
+            <span class="last-refresh" id="last-refresh">—</span>
+        </div>
+    </header>
+
+    <!-- Export Modal -->
+    <div id="export-overlay" class="export-overlay" onclick="closeExportOnBackdrop(event)">
+        <div class="export-modal">
+            <div class="export-modal-head">
+                <span class="export-modal-title">Diagnostic Snapshot</span>
+                <div class="export-head-actions">
+                    <button class="export-action-btn" id="export-copy-btn" onclick="exportCopy()">Copy JSON</button>
+                    <button class="export-action-btn" id="export-dl-btn" onclick="exportDownload()">Download JSON</button>
+                    <button class="export-action-btn secondary" onclick="exportDownloadText()">Download Text</button>
+                    <button class="export-close-btn" onclick="closeExport()">&#x2715;</button>
+                </div>
+            </div>
+            <div class="export-status-bar" id="export-status-bar">
+                <span id="export-status-text">Click Collect to fetch a fresh snapshot of all endpoints</span>
+                <button class="export-collect-btn" id="export-collect-btn" onclick="collectExport()">Collect All Data</button>
+            </div>
+            <div class="export-body">
+                <div class="export-sections" id="export-sections">
+                    <div class="export-placeholder">
+                        <div style="font-size:1.5rem;margin-bottom:0.75rem">&#x2B21;</div>
+                        <div style="font-size:0.85rem;color:var(--text-muted)">Click <strong style="color:var(--text)">Collect All Data</strong> to fetch a fresh snapshot of every endpoint, then copy or download the result.</div>
+                    </div>
+                </div>
+                <div class="export-preview-wrap">
+                    <div class="export-preview-label">JSON Preview <span id="export-preview-size"></span></div>
+                    <pre class="export-preview" id="export-preview">—</pre>
+                </div>
+            </div>
+        </div>
     </div>
-  </div>
-</section>
-
-<!-- ============================================================ -->
-<!-- Firewall                                                      -->
-<!-- ============================================================ -->
-<section class="section" id="firewall">
-  <div class="section-title">Firewall &amp; Packet Filtering</div>
-  <div id="ufw-banner" class="ufw-banner unknown">
-    <span class="ufw-status-word" id="ufw-status-word">Loading…</span>
-    <div class="ufw-policies" id="ufw-policies"></div>
-  </div>
-  <div class="fw-block" id="ufw-rules-block">
-    <div class="fw-block-head">UFW Rules <span class="fw-policy-pill" id="ufw-rule-count"></span></div>
-    <div class="fw-table-scroll"><table class="fw-table"><thead><tr><th class="num-col">#</th><th>To</th><th>Action</th><th>Dir</th><th>From</th></tr></thead><tbody id="ufw-rules-body"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody></table></div>
-  </div>
-  <div class="fw-block">
-    <div class="fw-block-head">iptables INPUT <span class="fw-policy-pill ACCEPT" id="ipt-input-policy">—</span></div>
-    <div class="fw-table-scroll"><table class="fw-table"><thead><tr><th class="num-col">#</th><th>Target</th><th>Proto</th><th>In</th><th>Out</th><th>Source</th><th>Destination</th><th>Options</th><th class="pkts-col">Pkts</th></tr></thead><tbody id="ipt-input-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody></table></div>
-  </div>
-  <div class="fw-block">
-    <div class="fw-block-head">iptables FORWARD <span class="fw-policy-pill ACCEPT" id="ipt-fwd-policy">—</span></div>
-    <div class="fw-table-scroll"><table class="fw-table"><thead><tr><th class="num-col">#</th><th>Target</th><th>Proto</th><th>In</th><th>Out</th><th>Source</th><th>Destination</th><th>Options</th><th class="pkts-col">Pkts</th></tr></thead><tbody id="ipt-fwd-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody></table></div>
-  </div>
-  <div class="fw-block">
-    <div class="fw-block-head">iptables NAT POSTROUTING <span class="fw-policy-pill ACCEPT" id="ipt-nat-policy">—</span></div>
-    <div class="fw-table-scroll"><table class="fw-table"><thead><tr><th class="num-col">#</th><th>Target</th><th>Proto</th><th>In</th><th>Out</th><th>Source</th><th>Destination</th><th>Options</th><th class="pkts-col">Pkts</th></tr></thead><tbody id="ipt-nat-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody></table></div>
-  </div>
-</section>
-
-<!-- ============================================================ -->
-<!-- Services                                                      -->
-<!-- ============================================================ -->
-<section class="section" id="services">
-  <div class="section-title">System Services</div>
-  <div class="services-grid" id="services-grid"><div class="empty">Loading…</div></div>
-</section>
-
-<!-- ============================================================ -->
-<!-- Logs                                                          -->
-<!-- ============================================================ -->
-<section class="section" id="logs">
-  <div class="log-header">
-    <div class="section-title" style="margin-bottom:0">Node Agent Logs</div>
-    <div class="log-controls">
-      <input class="log-filter" id="log-filter" type="text" placeholder="Filter…" oninput="filterLogs()">
-      <button class="log-toggle-btn" id="log-btn" onclick="toggleLogs()">Show Logs</button>
-    </div>
-  </div>
-  <div id="log-wrap" style="display:none">
-    <div class="log-box" id="log-box"></div>
-  </div>
-</section>
-
-</div><!-- /.wrap -->
-
-<script>
-'use strict';
-
-// ============================================================
-// State
-// ============================================================
-const S = {
-  summary: null, snapshot: null, vms: null,
-  network: null, ports: null, firewall: null, services: null,
-  logs: null, logsVisible: false, allLogs: [],
-  activeCmapTab: 'interfaces',
-};
-
-// ============================================================
-// Boot
-// ============================================================
-document.addEventListener('DOMContentLoaded', () => {
-  loadFast();
-  loadFirewall();
-  setInterval(loadFast,     10_000);
-  setInterval(loadFirewall, 60_000);
-});
-
-async function loadFast() {
-  const [sum, snap, vms, net, ports, svcs] = await Promise.all([
-    get('/api/dashboard/summary'),
-    get('/api/node/snapshot'),
-    get('/api/vms'),
-    get('/api/dashboard/network'),
-    get('/api/dashboard/ports'),
-    get('/api/dashboard/services'),
-  ]);
-  S.summary  = sum;
-  S.snapshot = snap;
-  S.vms      = vms;
-  S.network  = net;
-  S.ports    = ports;
-  S.services = svcs;
-  renderAll();
-  $('last-refresh').textContent = 'Updated ' + new Date().toLocaleTimeString();
-  if (S.logsVisible) loadLogs();
-}
-
-async function loadFirewall() {
-  S.firewall = await get('/api/dashboard/firewall');
-  renderFirewall();
-}
-
-async function loadLogs() {
-  S.logs = await get('/api/dashboard/logs?lines=150');
-  renderLogs();
-}
-
-async function get(url) {
-  try {
-    const r = await fetch(url);
-    if (!r.ok) return null;
-    return r.json();
-  } catch { return null; }
-}
-
-function $(id) { return document.getElementById(id); }
-function set(id, v) { const el = $(id); if (el) el.textContent = v ?? '—'; }
-function esc(s) { return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-
-// ============================================================
-// Render All
-// ============================================================
-function renderAll() {
-  renderBanner();
-  renderQuickStats();
-  renderHardware();
-  renderVMs();
-  renderNetwork();
-  renderServices();
-}
-
-// ============================================================
-// Banner
-// ============================================================
-function renderBanner() {
-  const d = S.summary;
-  if (!d) return;
-  set('node-id',       d.nodeId ?? 'unregistered');
-  set('hostname',      d.hostname);
-  set('os-info',       d.os);
-  set('uptime',        fmtUptime(d.uptimeSeconds ?? 0));
-  set('agent-version', d.agentVersion);
-  set('wallet',        d.walletAddress ? trunc(d.walletAddress, 10) : '—');
-
-  const orch = d.orchestrator ?? {};
-  const el   = $('orch-status');
-  const val  = $('orch-val');
-  if (orch.connected) {
-    el.className = 'orch-status connected';
-    const ago = orch.secondsAgo != null ? ` · ${fmtAgo(orch.secondsAgo)}` : '';
-    val.textContent = 'Connected' + ago;
-  } else {
-    el.className = 'orch-status disconnected';
-    val.textContent = 'Disconnected';
-  }
-
-  // Health pill
-  const issues = collectIssues();
-  const pill   = $('health-pill');
-  const htxt   = $('health-text');
-  if (issues.length === 0) {
-    pill.className = 'health-pill healthy';
-    htxt.textContent = 'Healthy';
-  } else if (issues.length <= 2) {
-    pill.className = 'health-pill degraded';
-    htxt.textContent = `Degraded (${issues.length})`;
-  } else {
-    pill.className = 'health-pill critical';
-    htxt.textContent = `Critical (${issues.length})`;
-  }
-  pill.title = issues.join('\n') || 'All systems operational';
-}
-
-function collectIssues() {
-  const issues = [];
-  if (S.summary && !S.summary.orchestrator?.connected) issues.push('Orchestrator disconnected');
-  for (const wg of S.network?.wireguard ?? []) {
-    const dead = wg.peers?.filter(p => p.handshakeStatus === 'dead') ?? [];
-    if (dead.length) issues.push(`${wg.name}: ${dead.length} dead WG peer(s)`);
-  }
-  for (const svc of S.services?.services ?? []) {
-    if (['libvirtd','decloud-node-agent'].includes(svc.name) && !svc.isActive)
-      issues.push(`Service down: ${svc.name}`);
-  }
-  return issues;
-}
-
-// ============================================================
-// Quick Stats
-// ============================================================
-function renderQuickStats() {
-  const snap = S.snapshot;
-  if (snap) {
-    const cpu  = snap.cpuUsagePercent ?? 0;
-    const ramP = snap.totalMemoryBytes > 0 ? snap.usedMemoryBytes / snap.totalMemoryBytes * 100 : 0;
-    const stP  = snap.totalStorageBytes > 0 ? snap.usedStorageBytes / snap.totalStorageBytes * 100 : 0;
-    set('qs-cpu',     cpu.toFixed(1) + '%');  setBar('qs-cpu-bar',     cpu);
-    set('qs-ram',     ramP.toFixed(1) + '%'); setBar('qs-ram-bar',     ramP);
-    set('qs-storage', stP.toFixed(1) + '%');  setBar('qs-storage-bar', stP);
-  }
-  if (S.vms) {
-    const all  = S.vms;
-    const run  = all.filter(v => isRunning(v)).length;
-    set('qs-vms', `${run}/${all.length}`);
-  }
-  if (S.network) {
-    const wgs  = S.network.wireguard ?? [];
-    const peers = wgs.reduce((s,w) => s + (w.peers?.length ?? 0), 0);
-    set('qs-wg',    wgs.length);
-    set('qs-peers', peers);
-  }
-  if (S.ports) {
-    set('qs-ports', (S.ports.tcp?.length ?? 0) + (S.ports.udp?.length ?? 0));
-  }
-}
-
-function setBar(id, pct) {
-  const el = $(id); if (!el) return;
-  el.style.width = Math.min(pct, 100).toFixed(1) + '%';
-  el.className = 'stat-bar-fill' + (pct >= 90 ? ' crit' : pct >= 75 ? ' warn' : '');
-}
-
-function setHwBar(id, pct) {
-  const el = $(id); if (!el) return;
-  el.style.width = Math.min(pct, 100).toFixed(1) + '%';
-  el.className = 'hw-fill' + (pct >= 90 ? ' crit' : pct >= 75 ? ' warn' : '');
-}
-
-// ============================================================
-// Hardware
-// ============================================================
-function renderHardware() {
-  const snap = S.snapshot; if (!snap) return;
-  const cpu  = snap.cpuUsagePercent ?? 0;
-  const ramP = snap.totalMemoryBytes > 0 ? snap.usedMemoryBytes / snap.totalMemoryBytes * 100 : 0;
-  const stP  = snap.totalStorageBytes > 0 ? snap.usedStorageBytes / snap.totalStorageBytes * 100 : 0;
-
-  set('hw-cpu-pct',    cpu.toFixed(1) + '%');
-  set('hw-cpu-info',   snap.cpuCores ? `${snap.cpuCores} cores` : '—');
-  setHwBar('hw-cpu-bar', cpu);
-
-  set('hw-ram-pct',    ramP.toFixed(1) + '%');
-  set('hw-ram-detail', `${fmtBytes(snap.usedMemoryBytes??0)} / ${fmtBytes(snap.totalMemoryBytes??0)}`);
-  setHwBar('hw-ram-bar', ramP);
-
-  set('hw-stor-pct',   stP.toFixed(1) + '%');
-  set('hw-stor-detail',`${fmtBytes(snap.usedStorageBytes??0)} / ${fmtBytes(snap.totalStorageBytes??0)}`);
-  setHwBar('hw-stor-bar', stP);
-
-  const kvm = snap.kvmAvailable !== false;
-  const kvmEl = $('hw-kvm');
-  if (kvmEl) { kvmEl.textContent = kvm ? 'KVM Available' : 'KVM Unavailable'; kvmEl.style.color = kvm ? 'var(--primary)' : 'var(--danger)'; }
-  set('hw-virt-sub', snap.cpuArchitecture ?? '—');
-}
-
-// ============================================================
-// VMs
-// ============================================================
-function renderVMs() {
-  if (!S.vms) return;
-  const all     = S.vms;
-  const relay   = all.find(v => v.labels?.role === 'relay'      || v.vmType === 'Relay');
-  const dht     = all.find(v => v.labels?.role === 'dht'        || v.vmType === 'Dht');
-  const bs      = all.find(v => v.labels?.role === 'blockstore'  || v.vmType === 'BlockStore');
-  const tenants = all.filter(v => !['relay','dht','blockstore'].includes(v.labels?.role)
-                                && !['Relay','Dht','BlockStore'].includes(v.vmType));
-
-  $('vm-count-badge').textContent = all.length;
-
-  paintSysVm('relay', relay);
-  paintSysVm('dht',   dht);
-  paintSysVm('bs',    bs);
-
-  // Tenant table
-  const tbody = $('tenant-tbody');
-  if (!tenants.length) {
-    tbody.innerHTML = '<tr><td colspan="9" class="empty">No tenant VMs</td></tr>';
-    return;
-  }
-  tbody.innerHTML = tenants.map(vm => {
-    const uptime = vm.startedAt ? fmtUptime(Math.floor((Date.now() - new Date(vm.startedAt).getTime()) / 1000)) : '—';
-    return `<tr>
-      <td class="vm-name-cell">${esc(vm.name ?? '—')}</td>
-      <td class="vm-id-cell">${trunc(vm.vmId ?? '—', 12)}</td>
-      <td>${stateBadge(vm.state)}</td>
-      <td>${vm.virtualCpuCores ?? '—'}</td>
-      <td>${vm.memoryBytes ? fmtBytes(vm.memoryBytes) : '—'}</td>
-      <td class="vm-ip-cell">${vm.ipAddress || '—'}</td>
-      <td>${vm.vncPort ?? '—'}</td>
-      <td>${uptime}</td>
-      <td class="vm-id-cell">${trunc(vm.ownerId ?? '—', 12)}</td>
-    </tr>`;
-  }).join('');
-}
-
-function paintSysVm(key, vm) {
-  const card   = $(`svc-${key}`);
-  const badge  = $(`svc-${key}-badge`);
-  const detail = $(`svc-${key}-detail`);
-  if (!card) return;
-  if (!vm) {
-    card.className = 'sysvm-card stopped';
-    badge.className = 'sysvm-badge other'; badge.textContent = 'Not deployed';
-    detail.textContent = '—';
-    return;
-  }
-  const running = isRunning(vm);
-  card.className = `sysvm-card ${running ? 'running' : 'stopped'}`;
-  badge.className = `sysvm-badge ${running ? 'running' : 'stopped'}`;
-  badge.textContent = vmStateName(vm.state);
-  const ip = vm.ipAddress || vm.labels?.['dht-advertise-ip'] || vm.labels?.['blockstore-advertise-ip'] || '—';
-  detail.innerHTML = ip + (running ? ` &nbsp;<a href="http://${ip}" target="_blank" style="font-size:0.7rem;color:var(--primary)">Open →</a>` : '');
-}
-
-// ============================================================
-// Network
-// ============================================================
-function renderNetwork() {
-  if (!S.network) return;
-  renderInterfaces();
-  renderWireGuard();
-  renderBridges();
-  renderRoutes();
-  if (S.ports) renderPorts();
-}
-
-/* -- Interfaces -- */
-function renderInterfaces() {
-  const el = $('iface-list');
-  const ifaces = S.network.interfaces ?? [];
-  if (!ifaces.length) { el.innerHTML = '<div class="empty">No interfaces found</div>'; return; }
-
-  el.innerHTML = ifaces.map(i => {
-    const rxTx = i.rxBytes > 0 || i.txBytes > 0
-      ? `<span class="rx">↓${fmtBytes(i.rxBytes)}</span> <span class="tx">↑${fmtBytes(i.txBytes)}</span>`
-      : '';
-    const ips = (i.ipAddresses ?? []).map(a => `<span class="iface-ip-tag">${esc(a)}</span>`).join('');
-    return `
-    <div class="iface-row ${i.isUp ? '' : 'down'}">
-      <div>
-        <div class="iface-name-cell">${esc(i.name)}</div>
-        ${i.macAddress ? `<div class="iface-mac">${esc(i.macAddress)}</div>` : ''}
-      </div>
-      <span class="type-badge ${i.type}">${i.type}</span>
-      <div class="iface-addrs">${ips || '<span style="color:var(--text-muted);font-size:0.73rem">no address</span>'}</div>
-      <div class="iface-xfer">${rxTx}<br><span style="color:var(--text-muted)">MTU ${i.mtu}</span></div>
-      <div class="up-dot ${i.isUp ? 'up' : 'down'}" title="${i.isUp ? 'UP' : 'DOWN'}"></div>
-    </div>`;
-  }).join('');
-}
-
-/* -- WireGuard -- */
-function renderWireGuard() {
-  const el  = $('wg-panels');
-  const wgs = S.network.wireguard ?? [];
-  if (!wgs.length) { el.innerHTML = '<div class="empty">No WireGuard interfaces</div>'; return; }
-
-  el.innerHTML = wgs.map(wg => {
-    const peersHtml = !wg.peers?.length
-      ? '<tr><td colspan="7" class="empty">No peers configured</td></tr>'
-      : wg.peers.map(p => {
-          const hs   = p.handshakeStatus ?? 'never';
-          const hsAge = p.handshakeSecondsAgo != null ? fmtAge(p.handshakeSecondsAgo) : 'Never';
-          const endpt = p.endpoint ?? '<span style="color:var(--text-muted)">no endpoint</span>';
-          const ka    = p.persistentKeepalive > 0 ? p.persistentKeepalive + 's' : '—';
-          return `<tr>
-            <td><div class="hs-badge"><span class="hs-dot ${hs}"></span><span class="hs-txt ${hs}">${hs.toUpperCase()}</span></div></td>
-            <td><div style="display:flex;align-items:center;gap:0.4rem">
-              <span style="font-size:0.72rem">${trunc(p.publicKey, 16)}</span>
-              <button class="copy-btn" onclick="copyKey('${esc(p.publicKey)}',this)">copy</button>
-            </div></td>
-            <td>${esc(endpt)}</td>
-            <td><span style="font-family:var(--mono);font-size:0.73rem">${esc(p.allowedIps)}</span></td>
-            <td><span class="hs-txt ${hs}">${hsAge}</span></td>
-            <td class="xfer-cell"><span class="rx">↓${fmtBytes(p.rxBytes)}</span></td>
-            <td class="xfer-cell"><span class="tx">↑${fmtBytes(p.txBytes)}</span></td>
-            <td>${ka}</td>
-          </tr>`;
-        }).join('');
-
-    return `
-    <div class="wg-iface-block">
-      <div class="wg-iface-head">
-        <span class="wg-iface-name">${esc(wg.name)}</span>
-        <span class="wg-port">:${wg.listenPort}</span>
-        <span class="wg-pubkey">
-          ${trunc(wg.publicKey, 16)}
-          <button class="copy-btn" onclick="copyKey('${esc(wg.publicKey)}',this)">copy</button>
-        </span>
-        <span class="wg-peer-count">${wg.peers?.length ?? 0} peer${wg.peers?.length === 1 ? '' : 's'}</span>
-      </div>
-      <div class="wg-table-scroll">
-        <table class="wg-table">
-          <thead><tr><th>Status</th><th>Public Key</th><th>Endpoint</th><th>Allowed IPs</th><th>Last Handshake</th><th>RX</th><th>TX</th><th>Keepalive</th></tr></thead>
-          <tbody>${peersHtml}</tbody>
-        </table>
-      </div>
-    </div>`;
-  }).join('');
-}
-
-/* -- Bridges -- */
-function renderBridges() {
-  const el      = $('bridge-list');
-  const bridges = S.network.bridges ?? [];
-  if (!bridges.length) { el.innerHTML = '<div class="empty">No bridge interfaces found</div>'; return; }
-
-  el.innerHTML = bridges.map(b => {
-    const ipStr = b.ipAddresses?.join(', ') || 'no address';
-    const portsHtml = !b.ports?.length
-      ? '<div class="bridge-empty">No ports attached</div>'
-      : b.ports.map(p => {
-          const vmPart = p.vmId
-            ? `<span class="bp-vmname">${esc(p.vmName ?? p.vmId)}</span><span class="bp-vmid">${trunc(p.vmId, 12)}</span>`
-            : `<span class="bp-none">host / unassigned</span>`;
-          return `<div class="bridge-port-item">
-            <span class="bp-iface">${esc(p.interface)}</span>
-            <span class="bp-arrow">→</span>
-            ${vmPart}
-          </div>`;
-        }).join('');
-
-    return `
-    <div class="bridge-card">
-      <div class="bridge-head">
-        <span class="bridge-name">${esc(b.name)}</span>
-        <span class="bridge-ips">${esc(ipStr)}</span>
-        <span class="bridge-portcount">${b.ports?.length ?? 0} port(s)</span>
-      </div>
-      <div class="bridge-ports-body">${portsHtml}</div>
-    </div>`;
-  }).join('');
-}
-
-/* -- Ports -- */
-function renderPorts() {
-  const p = S.ports; if (!p) return;
-  $('tcp-body').innerHTML = portRows(p.tcp ?? []);
-  $('udp-body').innerHTML = portRows(p.udp ?? []);
-}
-
-function portRows(list) {
-  if (!list.length) return '<tr><td colspan="3" class="empty">None</td></tr>';
-  return list.sort((a,b) => a.port - b.port).map(p => `
-    <tr>
-      <td class="port-num-cell">${p.port}</td>
-      <td class="port-addr-cell">${esc(p.localAddress || '*')}</td>
-      <td class="port-proc-cell">${esc(p.process || '—')}</td>
-    </tr>`).join('');
-}
-
-/* -- Routes -- */
-function renderRoutes() {
-  const tbody = $('routes-body');
-  const routes = S.network.routes ?? [];
-  if (!routes.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty">No routes</td></tr>'; return; }
-
-  tbody.innerHTML = routes.map(r => {
-    const isDefault = r.destination === 'default' || r.destination === '0.0.0.0/0';
-    return `<tr class="${isDefault ? 'default-row' : ''}">
-      <td class="route-dst">${esc(r.destination)}</td>
-      <td class="route-gw">${esc(r.gateway ?? '—')}</td>
-      <td class="route-dev">${esc(r.interface)}</td>
-      <td>${esc(r.protocol ?? '—')}</td>
-      <td>${esc(r.scope ?? '—')}</td>
-      <td>${r.metric}</td>
-    </tr>`;
-  }).join('');
-}
-
-// ============================================================
-// Firewall
-// ============================================================
-function renderFirewall() {
-  const fw = S.firewall; if (!fw) return;
-
-  // UFW Banner
-  const ufw = fw.ufw ?? {};
-  const banner = $('ufw-banner');
-  const statusWord = $('ufw-status-word');
-  if (ufw.active !== undefined) {
-    banner.className = `ufw-banner ${ufw.active ? 'active' : 'inactive'}`;
-    statusWord.textContent = ufw.active ? '✓ UFW Active' : '✗ UFW Inactive';
-  }
-  const polEl = $('ufw-policies');
-  if (polEl && ufw.active) {
-    polEl.innerHTML = [
-      { label: 'Incoming', val: ufw.defaultIncoming },
-      { label: 'Outgoing', val: ufw.defaultOutgoing },
-      { label: 'Forward',  val: ufw.defaultForward  },
-    ].map(p => `<div class="pol-item"><span class="pol-label">${p.label}</span><span class="pol-val ${(p.val||'').toLowerCase()}">${p.val || '—'}</span></div>`).join('');
-  }
-
-  // UFW Rules
-  const ufwBody = $('ufw-rules-body');
-  if (!ufw.rules?.length) {
-    ufwBody.innerHTML = '<tr><td colspan="5" class="empty">No UFW rules</td></tr>';
-  } else {
-    ufwBody.innerHTML = ufw.rules.map(r => `
-      <tr>
-        <td class="num-col">${r.number}</td>
-        <td>${esc(r.to)}</td>
-        <td><span class="ufw-action-chip ${r.action.toUpperCase()}">${r.action}</span></td>
-        <td>${esc(r.direction || '—')}</td>
-        <td>${esc(r.from || 'Anywhere')}</td>
-      </tr>`).join('');
-  }
-
-  // IPTables
-  renderIptChain('ipt-input-body',  'ipt-input-policy', fw.iptables?.input);
-  renderIptChain('ipt-fwd-body',    'ipt-fwd-policy',   fw.iptables?.forward);
-  renderIptChain('ipt-nat-body',    'ipt-nat-policy',   fw.iptables?.natPostrouting);
-}
-
-function renderIptChain(bodyId, polId, chain) {
-  const tbody = $(bodyId); if (!tbody) return;
-  const polEl = $(polId);
-  if (polEl && chain?.policy) {
-    polEl.textContent = chain.policy;
-    polEl.className = `fw-policy-pill ${chain.policy}`;
-  }
-  const rules = chain?.rules ?? [];
-  if (!rules.length) {
-    tbody.innerHTML = '<tr><td colspan="9" class="empty">No rules (chain empty)</td></tr>';
-    return;
-  }
-  tbody.innerHTML = rules.map(r => `
-    <tr>
-      <td class="num-col">${r.lineNumber || ''}</td>
-      <td><span class="target-chip ${r.target}">${esc(r.target)}</span></td>
-      <td>${esc(r.protocol)}</td>
-      <td>${esc(r.in)}</td>
-      <td>${esc(r.out)}</td>
-      <td>${esc(r.source)}</td>
-      <td>${esc(r.destination)}</td>
-      <td style="font-size:0.68rem;color:var(--text-muted)">${esc(r.options)}</td>
-      <td class="pkts-col">${fmtNum(r.packets)}</td>
-    </tr>`).join('');
-}
-
-// ============================================================
-// Services
-// ============================================================
-function renderServices() {
-  const el   = $('services-grid');
-  const svcs = S.services?.services ?? [];
-  if (!svcs.length) { el.innerHTML = '<div class="empty">No service data</div>'; return; }
-
-  el.innerHTML = svcs.map(s => {
-    const cls = s.loadState === 'not-found' ? 'not-found'
-              : !s.isLoaded ? 'not-found'
-              : s.subState === 'failed' ? 'failed'
-              : s.isActive ? 'active' : 'inactive';
-    const sub = s.activeState + (s.subState ? ` (${s.subState})` : '');
-    return `<div class="svc-card ${cls}">
-      <div class="svc-dot ${cls}"></div>
-      <div class="svc-info">
-        <div class="svc-name">${esc(s.name)}</div>
-        <div class="svc-sub">${esc(sub)}</div>
-      </div>
-    </div>`;
-  }).join('');
-}
-
-// ============================================================
-// Logs
-// ============================================================
-function toggleLogs() {
-  S.logsVisible = !S.logsVisible;
-  $('log-wrap').style.display = S.logsVisible ? '' : 'none';
-  $('log-btn').textContent = S.logsVisible ? 'Hide Logs' : 'Show Logs';
-  if (S.logsVisible) loadLogs();
-}
-
-function renderLogs() {
-  const lines = S.logs?.logLines ?? [];
-  S.allLogs = lines;
-  displayLogs(lines);
-}
-
-function filterLogs() {
-  const q = $('log-filter').value.toLowerCase();
-  displayLogs(q ? S.allLogs.filter(l => l.toLowerCase().includes(q)) : S.allLogs);
-}
-
-function displayLogs(lines) {
-  const box = $('log-box'); if (!box) return;
-  box.innerHTML = lines.map(l => {
-    const low = l.toLowerCase();
-    const cls = low.includes('error') || low.includes('crit') ? 'err'
-              : low.includes('warn')  ? 'warn'
-              : low.includes('debug') ? 'dbg'  : 'info';
-    return `<div class="log-line ${cls}">${esc(l)}</div>`;
-  }).join('');
-  box.scrollTop = box.scrollHeight;
-}
-
-// ============================================================
-// UI helpers
-// ============================================================
-function scrollSec(id, btn) {
-  const el = $(id); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
-  if (btn) btn.classList.add('active');
-}
-
-function cmapTab(name, btn) {
-  document.querySelectorAll('.net-tab').forEach(t => t.style.display = 'none');
-  document.querySelectorAll('.cmap-tab').forEach(t => t.classList.remove('active'));
-  const el = $(`tab-${name}`);
-  if (el) { el.style.display = ''; el.classList.add('active'); }
-  if (btn) btn.classList.add('active');
-  S.activeCmapTab = name;
-}
-
-function copyKey(key, btn) {
-  navigator.clipboard?.writeText(key).then(() => {
-    const orig = btn.textContent;
-    btn.textContent = 'copied!'; btn.classList.add('copied');
-    setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1500);
-  });
-}
-
-// ============================================================
-// Formatting
-// ============================================================
-function fmtUptime(secs) {
-  if (!secs || secs < 0) return '—';
-  const d = Math.floor(secs / 86400);
-  const h = Math.floor((secs % 86400) / 3600);
-  const m = Math.floor((secs % 3600)  / 60);
-  if (d > 0) return `${d}d ${h}h ${m}m`;
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m ${secs % 60}s`;
-}
-
-function fmtAgo(secs) {
-  return fmtUptime(secs) + ' ago';
-}
-
-function fmtAge(secs) {
-  if (secs < 0)    return 'Never';
-  if (secs < 60)   return `${secs}s ago`;
-  if (secs < 3600) return `${Math.floor(secs/60)}m ago`;
-  return `${Math.floor(secs/3600)}h ago`;
-}
-
-function fmtBytes(b) {
-  if (!b || b === 0) return '0 B';
-  const units = ['B','KB','MB','GB','TB'];
-  const i = Math.floor(Math.log(Math.abs(b)) / Math.log(1024));
-  return (b / Math.pow(1024, i)).toFixed(1) + ' ' + units[Math.min(i, 4)];
-}
-
-function fmtNum(n) {
-  if (!n) return '0';
-  if (n >= 1e9) return (n/1e9).toFixed(1)+'G';
-  if (n >= 1e6) return (n/1e6).toFixed(1)+'M';
-  if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
-  return n;
-}
-
-function trunc(s, n) {
-  if (!s || s === '—') return '—';
-  return s.length > n ? s.slice(0, n) + '…' : s;
-}
-
-function isRunning(vm) {
-  return vm.state === 1 || vm.state === 'Running';
-}
-
-function vmStateName(state) {
-  const map = { 0:'Stopped', 1:'Running', 2:'Paused', 3:'Error', 4:'Starting', 5:'Stopping', 'Running':'Running', 'Stopped':'Stopped', 'Error':'Error' };
-  return map[state] ?? String(state);
-}
-
-function stateBadge(state) {
-  const name = vmStateName(state);
-  const cls  = name === 'Running' ? 'state-running'
-             : name === 'Error'   ? 'state-error'
-             : name === 'Stopped' ? 'state-stopped'
-             : 'state-other';
-  return `<span class="state-badge ${cls}">${name}</span>`;
-}
-</script>
+
+    <div class="wrap">
+
+        <!-- Node Banner -->
+        <div class="node-banner">
+            <div>
+                <div class="node-id-text" id="node-id">—</div>
+                <div class="node-meta">
+                    <div class="meta-item"><span class="meta-label">Host</span><span class="meta-value" id="hostname">—</span></div>
+                    <div class="meta-item"><span class="meta-label">OS</span><span class="meta-value" id="os-info">—</span></div>
+                    <div class="meta-item"><span class="meta-label">Uptime</span><span class="meta-value" id="uptime">—</span></div>
+                    <div class="meta-item"><span class="meta-label">Agent</span><span class="meta-value" id="agent-version">—</span></div>
+                    <div class="meta-item"><span class="meta-label">Wallet</span><span class="meta-value" id="wallet">—</span></div>
+                </div>
+            </div>
+            <div id="orch-status" class="orch-status">
+                <div class="orch-label">Orchestrator</div>
+                <div class="orch-val" id="orch-val">—</div>
+            </div>
+        </div>
+
+        <!-- Quick Stats -->
+        <div class="quick-stats">
+            <div class="stat-cell"><div class="stat-label">CPU Usage</div><div class="stat-value" id="qs-cpu">—</div><div class="stat-bar"><div class="stat-bar-fill" id="qs-cpu-bar" style="width:0%"></div></div></div>
+            <div class="stat-cell"><div class="stat-label">Memory</div><div class="stat-value" id="qs-ram">—</div><div class="stat-bar"><div class="stat-bar-fill" id="qs-ram-bar" style="width:0%"></div></div></div>
+            <div class="stat-cell"><div class="stat-label">Storage</div><div class="stat-value" id="qs-storage">—</div><div class="stat-bar"><div class="stat-bar-fill" id="qs-storage-bar" style="width:0%"></div></div></div>
+            <div class="stat-cell"><div class="stat-label">VMs Running</div><div class="stat-value" id="qs-vms">—</div></div>
+            <div class="stat-cell"><div class="stat-label">WG Interfaces</div><div class="stat-value" id="qs-wg">—</div></div>
+            <div class="stat-cell"><div class="stat-label">WG Peers</div><div class="stat-value" id="qs-peers">—</div></div>
+            <div class="stat-cell"><div class="stat-label">Listen Ports</div><div class="stat-value" id="qs-ports">—</div></div>
+        </div>
+
+        <!-- Section Nav -->
+        <nav class="section-nav">
+            <button class="nav-tab active" onclick="scrollSec('hardware',this)">Hardware</button>
+            <button class="nav-tab" onclick="scrollSec('vms',this)">VMs</button>
+            <button class="nav-tab" onclick="scrollSec('network',this)">Connection Map</button>
+            <button class="nav-tab" onclick="scrollSec('firewall',this)">Firewall</button>
+            <button class="nav-tab" onclick="scrollSec('services',this)">Services</button>
+            <button class="nav-tab" onclick="scrollSec('logs',this)">Logs</button>
+        </nav>
+
+        <!-- ============================================================ -->
+        <!-- Hardware                                                      -->
+        <!-- ============================================================ -->
+        <section class="section" id="hardware">
+            <div class="section-title">Hardware Resources</div>
+            <div class="hw-grid">
+                <div class="hw-card">
+                    <div class="hw-label">CPU Usage</div>
+                    <div class="hw-value" id="hw-cpu-pct">—</div>
+                    <div class="hw-sub" id="hw-cpu-info">—</div>
+                    <div class="hw-bar"><div class="hw-fill" id="hw-cpu-bar" style="width:0%"></div></div>
+                </div>
+                <div class="hw-card">
+                    <div class="hw-label">Memory</div>
+                    <div class="hw-value" id="hw-ram-pct">—</div>
+                    <div class="hw-sub" id="hw-ram-detail">—</div>
+                    <div class="hw-bar"><div class="hw-fill" id="hw-ram-bar" style="width:0%"></div></div>
+                </div>
+                <div class="hw-card">
+                    <div class="hw-label">Storage</div>
+                    <div class="hw-value" id="hw-stor-pct">—</div>
+                    <div class="hw-sub" id="hw-stor-detail">—</div>
+                    <div class="hw-bar"><div class="hw-fill" id="hw-stor-bar" style="width:0%"></div></div>
+                </div>
+                <div class="hw-card">
+                    <div class="hw-label">Virtualisation</div>
+                    <div class="hw-value" id="hw-kvm">—</div>
+                    <div class="hw-sub" id="hw-virt-sub">—</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- Virtual Machines                                              -->
+        <!-- ============================================================ -->
+        <section class="section" id="vms">
+            <div class="section-title">Virtual Machines <span class="count-badge" id="vm-count-badge">0</span></div>
+            <div class="sub-section-label">System VMs</div>
+            <div class="sysvm-row" id="sysvm-row">
+                <div class="sysvm-card" id="svc-relay"><div class="sysvm-head"><span class="sysvm-name">Relay</span><span class="sysvm-badge other" id="svc-relay-badge">—</span></div><div class="sysvm-detail" id="svc-relay-detail">—</div></div>
+                <div class="sysvm-card" id="svc-dht"><div class="sysvm-head"><span class="sysvm-name">DHT</span><span class="sysvm-badge other" id="svc-dht-badge">—</span></div><div class="sysvm-detail" id="svc-dht-detail">—</div></div>
+                <div class="sysvm-card" id="svc-bs"><div class="sysvm-head"><span class="sysvm-name">Block Store</span><span class="sysvm-badge other" id="svc-bs-badge">—</span></div><div class="sysvm-detail" id="svc-bs-detail">—</div></div>
+            </div>
+            <div class="sub-section-label">Tenant VMs</div>
+            <div class="vm-table-wrap">
+                <table class="vm-table">
+                    <thead><tr><th>Name</th><th>VM ID</th><th>State</th><th>vCPU</th><th>RAM</th><th>IP</th><th>VNC Port</th><th>Uptime</th><th>Owner</th></tr></thead>
+                    <tbody id="tenant-tbody"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- Connection Map                                                -->
+        <!-- ============================================================ -->
+        <section class="section" id="network">
+            <div class="section-title">Connection Map &amp; Network Topology</div>
+            <div class="cmap-wrap">
+                <div class="cmap-header">
+                    <div class="cmap-title">Network Inspector</div>
+                    <div class="cmap-tabs">
+                        <button class="cmap-tab active" onclick="cmapTab('interfaces',this)">Interfaces</button>
+                        <button class="cmap-tab" onclick="cmapTab('wireguard',this)">WireGuard Peers</button>
+                        <button class="cmap-tab" onclick="cmapTab('bridges',this)">Bridges &amp; VMs</button>
+                        <button class="cmap-tab" onclick="cmapTab('ports',this)">Listening Ports</button>
+                        <button class="cmap-tab" onclick="cmapTab('routes',this)">Routes</button>
+                    </div>
+                </div>
+                <div class="cmap-body">
+                    <div id="tab-interfaces" class="net-tab active"><div class="iface-list" id="iface-list"><div class="empty">Loading…</div></div></div>
+                    <div id="tab-wireguard" class="net-tab" style="display:none"><div id="wg-panels"><div class="empty">Loading…</div></div></div>
+                    <div id="tab-bridges" class="net-tab" style="display:none"><div class="bridge-list" id="bridge-list"><div class="empty">Loading…</div></div></div>
+                    <div id="tab-ports" class="net-tab" style="display:none">
+                        <div class="ports-grid">
+                            <div>
+                                <div class="ports-proto-head"><span class="proto-pill tcp">TCP</span> Listening</div>
+                                <div class="ports-table-wrap"><table class="ports-table"><thead><tr><th>Port</th><th>Address</th><th>Process</th></tr></thead><tbody id="tcp-body"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody></table></div>
+                            </div>
+                            <div>
+                                <div class="ports-proto-head"><span class="proto-pill udp">UDP</span> Listening</div>
+                                <div class="ports-table-wrap"><table class="ports-table"><thead><tr><th>Port</th><th>Address</th><th>Process</th></tr></thead><tbody id="udp-body"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody></table></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="tab-routes" class="net-tab" style="display:none">
+                        <div class="routes-wrap"><table class="routes-table"><thead><tr><th>Destination</th><th>Gateway</th><th>Interface</th><th>Protocol</th><th>Scope</th><th>Metric</th></tr></thead><tbody id="routes-body"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody></table></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- Firewall                                                      -->
+        <!-- ============================================================ -->
+        <section class="section" id="firewall">
+            <div class="section-title">Firewall &amp; Packet Filtering</div>
+            <div id="ufw-banner" class="ufw-banner unknown">
+                <span class="ufw-status-word" id="ufw-status-word">Loading…</span>
+                <div class="ufw-policies" id="ufw-policies"></div>
+            </div>
+            <div class="fw-block" id="ufw-rules-block">
+                <div class="fw-block-head">UFW Rules <span class="fw-policy-pill" id="ufw-rule-count"></span></div>
+                <div class="fw-table-scroll"><table class="fw-table"><thead><tr><th class="num-col">#</th><th>To</th><th>Action</th><th>Dir</th><th>From</th></tr></thead><tbody id="ufw-rules-body"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody></table></div>
+            </div>
+            <div class="fw-block">
+                <div class="fw-block-head">iptables INPUT <span class="fw-policy-pill ACCEPT" id="ipt-input-policy">—</span></div>
+                <div class="fw-table-scroll"><table class="fw-table"><thead><tr><th class="num-col">#</th><th>Target</th><th>Proto</th><th>In</th><th>Out</th><th>Source</th><th>Destination</th><th>Options</th><th class="pkts-col">Pkts</th></tr></thead><tbody id="ipt-input-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody></table></div>
+            </div>
+            <div class="fw-block">
+                <div class="fw-block-head">iptables FORWARD <span class="fw-policy-pill ACCEPT" id="ipt-fwd-policy">—</span></div>
+                <div class="fw-table-scroll"><table class="fw-table"><thead><tr><th class="num-col">#</th><th>Target</th><th>Proto</th><th>In</th><th>Out</th><th>Source</th><th>Destination</th><th>Options</th><th class="pkts-col">Pkts</th></tr></thead><tbody id="ipt-fwd-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody></table></div>
+            </div>
+            <div class="fw-block">
+                <div class="fw-block-head">iptables NAT POSTROUTING <span class="fw-policy-pill ACCEPT" id="ipt-nat-policy">—</span></div>
+                <div class="fw-table-scroll"><table class="fw-table"><thead><tr><th class="num-col">#</th><th>Target</th><th>Proto</th><th>In</th><th>Out</th><th>Source</th><th>Destination</th><th>Options</th><th class="pkts-col">Pkts</th></tr></thead><tbody id="ipt-nat-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody></table></div>
+            </div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- Services                                                      -->
+        <!-- ============================================================ -->
+        <section class="section" id="services">
+            <div class="section-title">System Services</div>
+            <div class="services-grid" id="services-grid"><div class="empty">Loading…</div></div>
+        </section>
+
+        <!-- ============================================================ -->
+        <!-- Logs                                                          -->
+        <!-- ============================================================ -->
+        <section class="section" id="logs">
+            <div class="log-header">
+                <div class="section-title" style="margin-bottom:0">Node Agent Logs</div>
+                <div class="log-controls">
+                    <input class="log-filter" id="log-filter" type="text" placeholder="Filter…" oninput="filterLogs()">
+                    <button class="log-toggle-btn" id="log-btn" onclick="toggleLogs()">Show Logs</button>
+                </div>
+            </div>
+            <div id="log-wrap" style="display:none">
+                <div class="log-box" id="log-box"></div>
+            </div>
+        </section>
+
+    </div><!-- /.wrap -->
+
+    <script>
+        'use strict';
+
+        // ============================================================
+        // State
+        // ============================================================
+        const S = {
+            summary: null, snapshot: null, vms: null,
+            network: null, ports: null, firewall: null, services: null,
+            logs: null, logsVisible: false, allLogs: [],
+            activeCmapTab: 'interfaces',
+        };
+
+        // ============================================================
+        // Boot
+        // ============================================================
+        document.addEventListener('DOMContentLoaded', () => {
+            loadFast();
+            loadFirewall();
+            setInterval(loadFast, 10_000);
+            setInterval(loadFirewall, 60_000);
+        });
+
+        async function loadFast() {
+            const [sum, snap, vms, net, ports, svcs] = await Promise.all([
+                get('/api/dashboard/summary'),
+                get('/api/node/snapshot'),
+                get('/api/vms'),
+                get('/api/dashboard/network'),
+                get('/api/dashboard/ports'),
+                get('/api/dashboard/services'),
+            ]);
+            S.summary = sum;
+            S.snapshot = snap;
+            S.vms = vms;
+            S.network = net;
+            S.ports = ports;
+            S.services = svcs;
+            renderAll();
+            $('last-refresh').textContent = 'Updated ' + new Date().toLocaleTimeString();
+            if (S.logsVisible) loadLogs();
+        }
+
+        async function loadFirewall() {
+            S.firewall = await get('/api/dashboard/firewall');
+            renderFirewall();
+        }
+
+        async function loadLogs() {
+            S.logs = await get('/api/dashboard/logs?lines=150');
+            renderLogs();
+        }
+
+        async function get(url) {
+            try {
+                const r = await fetch(url);
+                if (!r.ok) return null;
+                return r.json();
+            } catch { return null; }
+        }
+
+        function $(id) { return document.getElementById(id); }
+        function set(id, v) { const el = $(id); if (el) el.textContent = v ?? '—'; }
+        function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+        // ============================================================
+        // Render All
+        // ============================================================
+        function renderAll() {
+            renderBanner();
+            renderQuickStats();
+            renderHardware();
+            renderVMs();
+            renderNetwork();
+            renderServices();
+        }
+
+        // ============================================================
+        // Banner
+        // ============================================================
+        function renderBanner() {
+            const d = S.summary;
+            if (!d) return;
+            set('node-id', d.nodeId ?? 'unregistered');
+            set('hostname', d.hostname);
+            set('os-info', d.os);
+            set('uptime', fmtUptime(d.uptimeSeconds ?? 0));
+            set('agent-version', d.agentVersion);
+            set('wallet', d.walletAddress ? trunc(d.walletAddress, 10) : '—');
+
+            const orch = d.orchestrator ?? {};
+            const el = $('orch-status');
+            const val = $('orch-val');
+            if (orch.connected) {
+                el.className = 'orch-status connected';
+                const ago = orch.secondsAgo != null ? ` · ${fmtAgo(orch.secondsAgo)}` : '';
+                val.textContent = 'Connected' + ago;
+            } else {
+                el.className = 'orch-status disconnected';
+                val.textContent = 'Disconnected';
+            }
+
+            // Health pill
+            const issues = collectIssues();
+            const pill = $('health-pill');
+            const htxt = $('health-text');
+            if (issues.length === 0) {
+                pill.className = 'health-pill healthy';
+                htxt.textContent = 'Healthy';
+            } else if (issues.length <= 2) {
+                pill.className = 'health-pill degraded';
+                htxt.textContent = `Degraded (${issues.length})`;
+            } else {
+                pill.className = 'health-pill critical';
+                htxt.textContent = `Critical (${issues.length})`;
+            }
+            pill.title = issues.join('\n') || 'All systems operational';
+        }
+
+        function collectIssues() {
+            const issues = [];
+            if (S.summary && !S.summary.orchestrator?.connected) issues.push('Orchestrator disconnected');
+            for (const wg of S.network?.wireguard ?? []) {
+                const dead = wg.peers?.filter(p => p.handshakeStatus === 'dead') ?? [];
+                if (dead.length) issues.push(`${wg.name}: ${dead.length} dead WG peer(s)`);
+            }
+            for (const svc of S.services?.services ?? []) {
+                if (['libvirtd', 'decloud-node-agent'].includes(svc.name) && !svc.isActive)
+                    issues.push(`Service down: ${svc.name}`);
+            }
+            return issues;
+        }
+
+        // ============================================================
+        // Quick Stats
+        // ============================================================
+        function renderQuickStats() {
+            const snap = S.snapshot;
+            if (snap) {
+                const cpu = snap.cpuUsagePercent ?? 0;
+                const ramP = snap.totalMemoryBytes > 0 ? snap.usedMemoryBytes / snap.totalMemoryBytes * 100 : 0;
+                const stP = snap.totalStorageBytes > 0 ? snap.usedStorageBytes / snap.totalStorageBytes * 100 : 0;
+                set('qs-cpu', cpu.toFixed(1) + '%'); setBar('qs-cpu-bar', cpu);
+                set('qs-ram', ramP.toFixed(1) + '%'); setBar('qs-ram-bar', ramP);
+                set('qs-storage', stP.toFixed(1) + '%'); setBar('qs-storage-bar', stP);
+            }
+            if (S.vms) {
+                const all = S.vms;
+                const run = all.filter(v => isRunning(v)).length;
+                set('qs-vms', `${run}/${all.length}`);
+            }
+            if (S.network) {
+                const wgs = S.network.wireguard ?? [];
+                const peers = wgs.reduce((s, w) => s + (w.peers?.length ?? 0), 0);
+                set('qs-wg', wgs.length);
+                set('qs-peers', peers);
+            }
+            if (S.ports) {
+                set('qs-ports', (S.ports.tcp?.length ?? 0) + (S.ports.udp?.length ?? 0));
+            }
+        }
+
+        function setBar(id, pct) {
+            const el = $(id); if (!el) return;
+            el.style.width = Math.min(pct, 100).toFixed(1) + '%';
+            el.className = 'stat-bar-fill' + (pct >= 90 ? ' crit' : pct >= 75 ? ' warn' : '');
+        }
+
+        function setHwBar(id, pct) {
+            const el = $(id); if (!el) return;
+            el.style.width = Math.min(pct, 100).toFixed(1) + '%';
+            el.className = 'hw-fill' + (pct >= 90 ? ' crit' : pct >= 75 ? ' warn' : '');
+        }
+
+        // ============================================================
+        // Hardware
+        // ============================================================
+        function renderHardware() {
+            const snap = S.snapshot; if (!snap) return;
+            const cpu = snap.cpuUsagePercent ?? 0;
+            const ramP = snap.totalMemoryBytes > 0 ? snap.usedMemoryBytes / snap.totalMemoryBytes * 100 : 0;
+            const stP = snap.totalStorageBytes > 0 ? snap.usedStorageBytes / snap.totalStorageBytes * 100 : 0;
+
+            set('hw-cpu-pct', cpu.toFixed(1) + '%');
+            set('hw-cpu-info', snap.cpuCores ? `${snap.cpuCores} cores` : '—');
+            setHwBar('hw-cpu-bar', cpu);
+
+            set('hw-ram-pct', ramP.toFixed(1) + '%');
+            set('hw-ram-detail', `${fmtBytes(snap.usedMemoryBytes ?? 0)} / ${fmtBytes(snap.totalMemoryBytes ?? 0)}`);
+            setHwBar('hw-ram-bar', ramP);
+
+            set('hw-stor-pct', stP.toFixed(1) + '%');
+            set('hw-stor-detail', `${fmtBytes(snap.usedStorageBytes ?? 0)} / ${fmtBytes(snap.totalStorageBytes ?? 0)}`);
+            setHwBar('hw-stor-bar', stP);
+
+            const kvm = snap.kvmAvailable !== false;
+            const kvmEl = $('hw-kvm');
+            if (kvmEl) { kvmEl.textContent = kvm ? 'KVM Available' : 'KVM Unavailable'; kvmEl.style.color = kvm ? 'var(--primary)' : 'var(--danger)'; }
+            set('hw-virt-sub', snap.cpuArchitecture ?? '—');
+        }
+
+        // ============================================================
+        // VMs
+        // ============================================================
+        function renderVMs() {
+            if (!S.vms) return;
+            const all = S.vms;
+
+            // VmType enum: General=0, Compute=1, Memory=2, Storage=3, Gpu=4,
+            //              Relay=5, Dht=6, Inference=7, BlockStore=8
+            // vmType lives in vm.spec.vmType (integer). Labels are the reliable
+            // fallback for any serialisation that flattens the spec.
+            const isRelay = v => v.spec?.vmType === 5 || v.labels?.role === 'relay';
+            const isDht = v => v.spec?.vmType === 6 || v.labels?.role === 'dht';
+            const isBs = v => v.spec?.vmType === 8 || v.labels?.role === 'blockstore';
+
+            const relay = all.find(isRelay);
+            const dht = all.find(isDht);
+            const bs = all.find(isBs);
+            const tenants = all.filter(v => !isRelay(v) && !isDht(v) && !isBs(v));
+
+            $('vm-count-badge').textContent = all.length;
+
+            paintSysVm('relay', relay);
+            paintSysVm('dht', dht);
+            paintSysVm('bs', bs);
+
+            // Tenant table
+            const tbody = $('tenant-tbody');
+            if (!tenants.length) {
+                tbody.innerHTML = '<tr><td colspan="9" class="empty">No tenant VMs</td></tr>';
+                return;
+            }
+            tbody.innerHTML = tenants.map(vm => {
+                const spec = vm.spec ?? {};
+                const uptime = vm.startedAt ? fmtUptime(Math.floor((Date.now() - new Date(vm.startedAt).getTime()) / 1000)) : '—';
+                return `<tr>
+          <td class="vm-name-cell">${esc(vm.name ?? spec.name ?? '—')}</td>
+          <td class="vm-id-cell">${trunc(vm.vmId ?? '—', 12)}</td>
+          <td>${stateBadge(vm.state)}</td>
+          <td>${spec.virtualCpuCores ?? '—'}</td>
+          <td>${spec.memoryBytes ? fmtBytes(spec.memoryBytes) : '—'}</td>
+          <td class="vm-ip-cell">${spec.ipAddress || '—'}</td>
+          <td>${vm.vncPort ?? '—'}</td>
+          <td>${uptime}</td>
+          <td class="vm-id-cell">${trunc(spec.ownerId ?? '—', 12)}</td>
+        </tr>`;
+            }).join('');
+        }
+
+        function paintSysVm(key, vm) {
+            const card = $(`svc-${key}`);
+            const badge = $(`svc-${key}-badge`);
+            const detail = $(`svc-${key}-detail`);
+            if (!card) return;
+            if (!vm) {
+                card.className = 'sysvm-card stopped';
+                badge.className = 'sysvm-badge other'; badge.textContent = 'Not deployed';
+                detail.textContent = '—';
+                return;
+            }
+            const running = isRunning(vm);
+            card.className = `sysvm-card ${running ? 'running' : 'stopped'}`;
+            badge.className = `sysvm-badge ${running ? 'running' : 'stopped'}`;
+            badge.textContent = vmStateName(vm.state);
+            // IP lives in spec.ipAddress; labels in spec.labels
+            const labels = vm.spec?.labels ?? vm.labels ?? {};
+            const ip = vm.spec?.ipAddress || vm.ipAddress
+                || labels['dht-advertise-ip']
+                || labels['blockstore-advertise-ip']
+                || '—';
+            detail.innerHTML = ip + (running ? ` &nbsp;<a href="http://${ip}" target="_blank" style="font-size:0.7rem;color:var(--primary)">Open →</a>` : '');
+        }
+
+        // ============================================================
+        // Network
+        // ============================================================
+        function renderNetwork() {
+            if (!S.network) return;
+            renderInterfaces();
+            renderWireGuard();
+            renderBridges();
+            renderRoutes();
+            if (S.ports) renderPorts();
+        }
+
+        /* -- Interfaces -- */
+        function renderInterfaces() {
+            const el = $('iface-list');
+            const ifaces = S.network.interfaces ?? [];
+            if (!ifaces.length) { el.innerHTML = '<div class="empty">No interfaces found</div>'; return; }
+
+            el.innerHTML = ifaces.map(i => {
+                const rxTx = i.rxBytes > 0 || i.txBytes > 0
+                    ? `<span class="rx">↓${fmtBytes(i.rxBytes)}</span> <span class="tx">↑${fmtBytes(i.txBytes)}</span>`
+                    : '';
+                const ips = (i.ipAddresses ?? []).map(a => `<span class="iface-ip-tag">${esc(a)}</span>`).join('');
+                return `
+        <div class="iface-row ${i.isUp ? '' : 'down'}">
+          <div>
+            <div class="iface-name-cell">${esc(i.name)}</div>
+            ${i.macAddress ? `<div class="iface-mac">${esc(i.macAddress)}</div>` : ''}
+          </div>
+          <span class="type-badge ${i.type}">${i.type}</span>
+          <div class="iface-addrs">${ips || '<span style="color:var(--text-muted);font-size:0.73rem">no address</span>'}</div>
+          <div class="iface-xfer">${rxTx}<br><span style="color:var(--text-muted)">MTU ${i.mtu}</span></div>
+          <div class="up-dot ${i.isUp ? 'up' : 'down'}" title="${i.isUp ? 'UP' : 'DOWN'}"></div>
+        </div>`;
+            }).join('');
+        }
+
+        /* -- WireGuard -- */
+        function renderWireGuard() {
+            const el = $('wg-panels');
+            const wgs = S.network.wireguard ?? [];
+            if (!wgs.length) { el.innerHTML = '<div class="empty">No WireGuard interfaces</div>'; return; }
+
+            el.innerHTML = wgs.map(wg => {
+                const peersHtml = !wg.peers?.length
+                    ? '<tr><td colspan="7" class="empty">No peers configured</td></tr>'
+                    : wg.peers.map(p => {
+                        const hs = p.handshakeStatus ?? 'never';
+                        const hsAge = p.handshakeSecondsAgo != null ? fmtAge(p.handshakeSecondsAgo) : 'Never';
+                        const endpt = p.endpoint ?? '<span style="color:var(--text-muted)">no endpoint</span>';
+                        const ka = p.persistentKeepalive > 0 ? p.persistentKeepalive + 's' : '—';
+                        return `<tr>
+                <td><div class="hs-badge"><span class="hs-dot ${hs}"></span><span class="hs-txt ${hs}">${hs.toUpperCase()}</span></div></td>
+                <td><div style="display:flex;align-items:center;gap:0.4rem">
+                  <span style="font-size:0.72rem">${trunc(p.publicKey, 16)}</span>
+                  <button class="copy-btn" onclick="copyKey('${esc(p.publicKey)}',this)">copy</button>
+                </div></td>
+                <td>${esc(endpt)}</td>
+                <td><span style="font-family:var(--mono);font-size:0.73rem">${esc(p.allowedIps)}</span></td>
+                <td><span class="hs-txt ${hs}">${hsAge}</span></td>
+                <td class="xfer-cell"><span class="rx">↓${fmtBytes(p.rxBytes)}</span></td>
+                <td class="xfer-cell"><span class="tx">↑${fmtBytes(p.txBytes)}</span></td>
+                <td>${ka}</td>
+              </tr>`;
+                    }).join('');
+
+                return `
+        <div class="wg-iface-block">
+          <div class="wg-iface-head">
+            <span class="wg-iface-name">${esc(wg.name)}</span>
+            <span class="wg-port">:${wg.listenPort}</span>
+            <span class="wg-pubkey">
+              ${trunc(wg.publicKey, 16)}
+              <button class="copy-btn" onclick="copyKey('${esc(wg.publicKey)}',this)">copy</button>
+            </span>
+            <span class="wg-peer-count">${wg.peers?.length ?? 0} peer${wg.peers?.length === 1 ? '' : 's'}</span>
+          </div>
+          <div class="wg-table-scroll">
+            <table class="wg-table">
+              <thead><tr><th>Status</th><th>Public Key</th><th>Endpoint</th><th>Allowed IPs</th><th>Last Handshake</th><th>RX</th><th>TX</th><th>Keepalive</th></tr></thead>
+              <tbody>${peersHtml}</tbody>
+            </table>
+          </div>
+        </div>`;
+            }).join('');
+        }
+
+        /* -- Bridges -- */
+        function renderBridges() {
+            const el = $('bridge-list');
+            const bridges = S.network.bridges ?? [];
+            if (!bridges.length) { el.innerHTML = '<div class="empty">No bridge interfaces found</div>'; return; }
+
+            el.innerHTML = bridges.map(b => {
+                const ipStr = b.ipAddresses?.join(', ') || 'no address';
+                const portsHtml = !b.ports?.length
+                    ? '<div class="bridge-empty">No ports attached</div>'
+                    : b.ports.map(p => {
+                        const vmPart = p.vmId
+                            ? `<span class="bp-vmname">${esc(p.vmName ?? p.vmId)}</span><span class="bp-vmid">${trunc(p.vmId, 12)}</span>`
+                            : `<span class="bp-none">host / unassigned</span>`;
+                        return `<div class="bridge-port-item">
+                <span class="bp-iface">${esc(p.interface)}</span>
+                <span class="bp-arrow">→</span>
+                ${vmPart}
+              </div>`;
+                    }).join('');
+
+                return `
+        <div class="bridge-card">
+          <div class="bridge-head">
+            <span class="bridge-name">${esc(b.name)}</span>
+            <span class="bridge-ips">${esc(ipStr)}</span>
+            <span class="bridge-portcount">${b.ports?.length ?? 0} port(s)</span>
+          </div>
+          <div class="bridge-ports-body">${portsHtml}</div>
+        </div>`;
+            }).join('');
+        }
+
+        /* -- Ports -- */
+        function renderPorts() {
+            const p = S.ports; if (!p) return;
+            $('tcp-body').innerHTML = portRows(p.tcp ?? []);
+            $('udp-body').innerHTML = portRows(p.udp ?? []);
+        }
+
+        function portRows(list) {
+            if (!list.length) return '<tr><td colspan="3" class="empty">None</td></tr>';
+            return list.sort((a, b) => a.port - b.port).map(p => `
+        <tr>
+          <td class="port-num-cell">${p.port}</td>
+          <td class="port-addr-cell">${esc(p.localAddress || '*')}</td>
+          <td class="port-proc-cell">${esc(p.process || '—')}</td>
+        </tr>`).join('');
+        }
+
+        /* -- Routes -- */
+        function renderRoutes() {
+            const tbody = $('routes-body');
+            const routes = S.network.routes ?? [];
+            if (!routes.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty">No routes</td></tr>'; return; }
+
+            tbody.innerHTML = routes.map(r => {
+                const isDefault = r.destination === 'default' || r.destination === '0.0.0.0/0';
+                return `<tr class="${isDefault ? 'default-row' : ''}">
+          <td class="route-dst">${esc(r.destination)}</td>
+          <td class="route-gw">${esc(r.gateway ?? '—')}</td>
+          <td class="route-dev">${esc(r.interface)}</td>
+          <td>${esc(r.protocol ?? '—')}</td>
+          <td>${esc(r.scope ?? '—')}</td>
+          <td>${r.metric}</td>
+        </tr>`;
+            }).join('');
+        }
+
+        // ============================================================
+        // Firewall
+        // ============================================================
+        function renderFirewall() {
+            const fw = S.firewall; if (!fw) return;
+
+            // UFW Banner
+            const ufw = fw.ufw ?? {};
+            const banner = $('ufw-banner');
+            const statusWord = $('ufw-status-word');
+            if (ufw.active !== undefined) {
+                banner.className = `ufw-banner ${ufw.active ? 'active' : 'inactive'}`;
+                statusWord.textContent = ufw.active ? '✓ UFW Active' : '✗ UFW Inactive';
+            }
+            const polEl = $('ufw-policies');
+            if (polEl && ufw.active) {
+                polEl.innerHTML = [
+                    { label: 'Incoming', val: ufw.defaultIncoming },
+                    { label: 'Outgoing', val: ufw.defaultOutgoing },
+                    { label: 'Forward', val: ufw.defaultForward },
+                ].map(p => `<div class="pol-item"><span class="pol-label">${p.label}</span><span class="pol-val ${(p.val || '').toLowerCase()}">${p.val || '—'}</span></div>`).join('');
+            }
+
+            // UFW Rules
+            const ufwBody = $('ufw-rules-body');
+            if (!ufw.rules?.length) {
+                ufwBody.innerHTML = '<tr><td colspan="5" class="empty">No UFW rules</td></tr>';
+            } else {
+                ufwBody.innerHTML = ufw.rules.map(r => `
+          <tr>
+            <td class="num-col">${r.number}</td>
+            <td>${esc(r.to)}</td>
+            <td><span class="ufw-action-chip ${r.action.toUpperCase()}">${r.action}</span></td>
+            <td>${esc(r.direction || '—')}</td>
+            <td>${esc(r.from || 'Anywhere')}</td>
+          </tr>`).join('');
+            }
+
+            // IPTables
+            renderIptChain('ipt-input-body', 'ipt-input-policy', fw.iptables?.input);
+            renderIptChain('ipt-fwd-body', 'ipt-fwd-policy', fw.iptables?.forward);
+            renderIptChain('ipt-nat-body', 'ipt-nat-policy', fw.iptables?.natPostrouting);
+        }
+
+        function renderIptChain(bodyId, polId, chain) {
+            const tbody = $(bodyId); if (!tbody) return;
+            const polEl = $(polId);
+            if (polEl && chain?.policy) {
+                polEl.textContent = chain.policy;
+                polEl.className = `fw-policy-pill ${chain.policy}`;
+            }
+            const rules = chain?.rules ?? [];
+            if (!rules.length) {
+                tbody.innerHTML = '<tr><td colspan="9" class="empty">No rules (chain empty)</td></tr>';
+                return;
+            }
+            tbody.innerHTML = rules.map(r => `
+        <tr>
+          <td class="num-col">${r.lineNumber || ''}</td>
+          <td><span class="target-chip ${r.target}">${esc(r.target)}</span></td>
+          <td>${esc(r.protocol)}</td>
+          <td>${esc(r.in)}</td>
+          <td>${esc(r.out)}</td>
+          <td>${esc(r.source)}</td>
+          <td>${esc(r.destination)}</td>
+          <td style="font-size:0.68rem;color:var(--text-muted)">${esc(r.options)}</td>
+          <td class="pkts-col">${fmtNum(r.packets)}</td>
+        </tr>`).join('');
+        }
+
+        // ============================================================
+        // Services
+        // ============================================================
+        function renderServices() {
+            const el = $('services-grid');
+            const svcs = S.services?.services ?? [];
+            if (!svcs.length) { el.innerHTML = '<div class="empty">No service data</div>'; return; }
+
+            el.innerHTML = svcs.map(s => {
+                const cls = s.loadState === 'not-found' ? 'not-found'
+                    : !s.isLoaded ? 'not-found'
+                        : s.subState === 'failed' ? 'failed'
+                            : s.isActive ? 'active' : 'inactive';
+                const sub = s.activeState + (s.subState ? ` (${s.subState})` : '');
+                return `<div class="svc-card ${cls}">
+          <div class="svc-dot ${cls}"></div>
+          <div class="svc-info">
+            <div class="svc-name">${esc(s.name)}</div>
+            <div class="svc-sub">${esc(sub)}</div>
+          </div>
+        </div>`;
+            }).join('');
+        }
+
+        // ============================================================
+        // Logs
+        // ============================================================
+        function toggleLogs() {
+            S.logsVisible = !S.logsVisible;
+            $('log-wrap').style.display = S.logsVisible ? '' : 'none';
+            $('log-btn').textContent = S.logsVisible ? 'Hide Logs' : 'Show Logs';
+            if (S.logsVisible) loadLogs();
+        }
+
+        function renderLogs() {
+            const data = S.logs;
+            const lines = data?.logLines ?? [];
+            S.allLogs = lines;
+
+            // Show source badge next to the toggle button
+            const btn = $('log-btn');
+            if (btn && data?.source) {
+                const srcLabel = data.source === 'file'
+                    ? `<span style="font-size:0.65rem;font-family:var(--mono);color:var(--primary);margin-left:0.5rem" title="${data.logFile ?? ''}">● file</span>`
+                    : `<span style="font-size:0.65rem;font-family:var(--mono);color:var(--text-muted);margin-left:0.5rem">● journal</span>`;
+                // Inject after button (as sibling, not inside)
+                const existing = document.getElementById('log-src-badge');
+                if (existing) existing.remove();
+                const span = document.createElement('span');
+                span.id = 'log-src-badge';
+                span.innerHTML = srcLabel;
+                btn.after(span);
+            }
+
+            displayLogs(lines);
+        }
+
+        function filterLogs() {
+            const q = $('log-filter').value.toLowerCase();
+            displayLogs(q ? S.allLogs.filter(l => l.toLowerCase().includes(q)) : S.allLogs);
+        }
+
+        function displayLogs(lines) {
+            const box = $('log-box'); if (!box) return;
+            box.innerHTML = lines.map(l => {
+                const low = l.toLowerCase();
+                const cls = low.includes('error') || low.includes('crit') ? 'err'
+                    : low.includes('warn') ? 'warn'
+                        : low.includes('debug') ? 'dbg' : 'info';
+                return `<div class="log-line ${cls}">${esc(l)}</div>`;
+            }).join('');
+            box.scrollTop = box.scrollHeight;
+        }
+
+        // ============================================================
+        // UI helpers
+        // ============================================================
+        function scrollSec(id, btn) {
+            const el = $(id); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+            if (btn) btn.classList.add('active');
+        }
+
+        function cmapTab(name, btn) {
+            document.querySelectorAll('.net-tab').forEach(t => t.style.display = 'none');
+            document.querySelectorAll('.cmap-tab').forEach(t => t.classList.remove('active'));
+            const el = $(`tab-${name}`);
+            if (el) { el.style.display = ''; el.classList.add('active'); }
+            if (btn) btn.classList.add('active');
+            S.activeCmapTab = name;
+        }
+
+        function copyKey(key, btn) {
+            navigator.clipboard?.writeText(key).then(() => {
+                const orig = btn.textContent;
+                btn.textContent = 'copied!'; btn.classList.add('copied');
+                setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1500);
+            });
+        }
+
+        // ============================================================
+        // Formatting
+        // ============================================================
+        function fmtUptime(secs) {
+            if (!secs || secs < 0) return '—';
+            const d = Math.floor(secs / 86400);
+            const h = Math.floor((secs % 86400) / 3600);
+            const m = Math.floor((secs % 3600) / 60);
+            if (d > 0) return `${d}d ${h}h ${m}m`;
+            if (h > 0) return `${h}h ${m}m`;
+            return `${m}m ${secs % 60}s`;
+        }
+
+        function fmtAgo(secs) {
+            return fmtUptime(secs) + ' ago';
+        }
+
+        function fmtAge(secs) {
+            if (secs < 0) return 'Never';
+            if (secs < 60) return `${secs}s ago`;
+            if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+            return `${Math.floor(secs / 3600)}h ago`;
+        }
+
+        function fmtBytes(b) {
+            if (!b || b === 0) return '0 B';
+            const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(Math.abs(b)) / Math.log(1024));
+            return (b / Math.pow(1024, i)).toFixed(1) + ' ' + units[Math.min(i, 4)];
+        }
+
+        function fmtNum(n) {
+            if (!n) return '0';
+            if (n >= 1e9) return (n / 1e9).toFixed(1) + 'G';
+            if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+            if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+            return n;
+        }
+
+        function trunc(s, n) {
+            if (!s || s === '—') return '—';
+            return s.length > n ? s.slice(0, n) + '…' : s;
+        }
+
+        function isRunning(vm) {
+            // VmState.Running = 3
+            return vm.state === 3;
+        }
+
+        function vmStateName(state) {
+            // Must match VmState enum exactly:
+            // 0=Pending, 1=Creating, 2=Starting, 3=Running, 4=Paused,
+            // 5=Stopping, 6=Stopped, 7=Failed, 8=NotFound, 9=Deleted, 10=Migrating
+            const map = {
+                0: 'Pending', 1: 'Creating', 2: 'Starting', 3: 'Running',
+                4: 'Paused', 5: 'Stopping', 6: 'Stopped', 7: 'Failed',
+                8: 'NotFound', 9: 'Deleted', 10: 'Migrating'
+            };
+            return map[state] ?? String(state);
+        }
+
+        function stateBadge(state) {
+            const name = vmStateName(state);
+            const cls = name === 'Running' ? 'state-running'
+                : name === 'Failed' || name === 'NotFound' ? 'state-error'
+                    : name === 'Stopped' || name === 'Deleted' ? 'state-stopped'
+                        : 'state-other';
+            return `<span class="state-badge ${cls}">${name}</span>`;
+        }
+
+        // ============================================================
+        // Export / Snapshot
+        // ============================================================
+
+        // All endpoints to collect, with human labels
+        const EXPORT_ENDPOINTS = [
+            { key: 'summary', label: 'Node Summary', url: '/api/dashboard/summary' },
+            { key: 'snapshot', label: 'Resource Snapshot', url: '/api/node/snapshot' },
+            { key: 'vms', label: 'Virtual Machines', url: '/api/vms' },
+            { key: 'network', label: 'Network Topology', url: '/api/dashboard/network' },
+            { key: 'ports', label: 'Listening Ports', url: '/api/dashboard/ports' },
+            { key: 'firewall', label: 'Firewall & IPTables', url: '/api/dashboard/firewall' },
+            { key: 'services', label: 'System Services', url: '/api/dashboard/services' },
+            { key: 'logs', label: 'Node Agent Logs', url: '/api/dashboard/logs?lines=500' },
+        ];
+
+        let exportPayload = null;  // holds the last collected snapshot
+
+        function openExport() {
+            $('export-overlay').classList.add('open');
+            // If we already have a payload from a previous collect, show it
+            if (exportPayload) renderExportPreview(exportPayload);
+        }
+
+        function closeExport() {
+            $('export-overlay').classList.remove('open');
+        }
+
+        function closeExportOnBackdrop(e) {
+            if (e.target === $('export-overlay')) closeExport();
+        }
+
+        async function collectExport() {
+            const collectBtn = $('export-collect-btn');
+            const statusText = $('export-status-text');
+            const sections = $('export-sections');
+            const copyBtn = $('export-copy-btn');
+            const dlBtn = $('export-dl-btn');
+
+            // Disable actions while collecting
+            collectBtn.disabled = true;
+            collectBtn.textContent = 'Collecting…';
+            if (copyBtn) copyBtn.disabled = true;
+            if (dlBtn) dlBtn.disabled = true;
+
+            // Build section list UI
+            sections.innerHTML = EXPORT_ENDPOINTS.map(ep => `
+        <div class="export-section-item loading" id="exp-item-${ep.key}">
+          <span class="export-sec-dot loading" id="exp-dot-${ep.key}"></span>
+          <span class="export-sec-name">${ep.label}</span>
+          <span class="export-sec-size" id="exp-size-${ep.key}">…</span>
+        </div>`).join('');
+
+            $('export-preview').textContent = 'Collecting…';
+            $('export-preview-size').textContent = '';
+
+            const snapshot = {
+                _meta: {
+                    collectedAt: new Date().toISOString(),
+                    collectedAtUnix: Math.floor(Date.now() / 1000),
+                    nodeUrl: window.location.origin,
+                    dashboardVersion: '1.0',
+                }
+            };
+
+            let completed = 0;
+            let errors = 0;
+
+            // Fetch all endpoints concurrently
+            const tasks = EXPORT_ENDPOINTS.map(async ep => {
+                try {
+                    const r = await fetch(ep.url);
+                    const data = r.ok ? await r.json() : null;
+
+                    snapshot[ep.key] = r.ok ? data : { _error: `HTTP ${r.status}` };
+
+                    const bytes = JSON.stringify(data ?? '').length;
+                    const item = $(`exp-item-${ep.key}`);
+                    const dot = $(`exp-dot-${ep.key}`);
+                    const size = $(`exp-size-${ep.key}`);
+
+                    if (r.ok) {
+                        if (item) item.className = 'export-section-item done';
+                        if (dot) dot.className = 'export-sec-dot done';
+                        if (size) size.textContent = fmtBytes(bytes);
+                        completed++;
+                    } else {
+                        if (item) item.className = 'export-section-item error';
+                        if (dot) dot.className = 'export-sec-dot error';
+                        if (size) size.textContent = 'error';
+                        errors++;
+                    }
+                } catch (e) {
+                    snapshot[ep.key] = { _error: e.message };
+                    const item = $(`exp-item-${ep.key}`);
+                    const dot = $(`exp-dot-${ep.key}`);
+                    const size = $(`exp-size-${ep.key}`);
+                    if (item) item.className = 'export-section-item error';
+                    if (dot) dot.className = 'export-sec-dot error';
+                    if (size) size.textContent = 'failed';
+                    errors++;
+                }
+            });
+
+            await Promise.all(tasks);
+
+            exportPayload = snapshot;
+            renderExportPreview(snapshot);
+
+            // Re-enable
+            collectBtn.disabled = false;
+            collectBtn.textContent = 'Re-collect';
+            if (copyBtn) copyBtn.disabled = false;
+            if (dlBtn) dlBtn.disabled = false;
+
+            const total = EXPORT_ENDPOINTS.length;
+            statusText.textContent = errors === 0
+                ? `Snapshot complete — ${total} endpoints collected`
+                : `Snapshot complete — ${completed}/${total} ok, ${errors} failed`;
+        }
+
+        function renderExportPreview(payload) {
+            const json = JSON.stringify(payload, null, 2);
+            const preview = $('export-preview');
+            const sizeEl = $('export-preview-size');
+
+            // Truncate preview to keep DOM fast — full data is in exportPayload
+            const MAX_PREVIEW = 80_000;
+            if (json.length > MAX_PREVIEW) {
+                preview.textContent = json.slice(0, MAX_PREVIEW) + '\n\n… (truncated in preview — full data available via Copy/Download)';
+            } else {
+                preview.textContent = json;
+            }
+
+            if (sizeEl) sizeEl.textContent = fmtBytes(json.length);
+        }
+
+        function exportCopy() {
+            if (!exportPayload) { alert('Click "Collect All Data" first.'); return; }
+            const json = JSON.stringify(exportPayload, null, 2);
+            navigator.clipboard?.writeText(json).then(() => {
+                const btn = $('export-copy-btn');
+                const orig = btn.textContent;
+                btn.textContent = 'Copied!';
+                btn.classList.add('success');
+                setTimeout(() => { btn.textContent = orig; btn.classList.remove('success'); }, 2000);
+            }).catch(() => alert('Clipboard write failed — use Download instead.'));
+        }
+
+        function exportDownload() {
+            if (!exportPayload) { alert('Click "Collect All Data" first.'); return; }
+            const json = JSON.stringify(exportPayload, null, 2);
+            const nodeId = exportPayload.summary?.nodeId ?? 'node';
+            const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+            const filename = `decloud-diag-${nodeId}-${ts}.json`;
+            triggerDownload(json, filename, 'application/json');
+        }
+
+        function exportDownloadText() {
+            if (!exportPayload) { alert('Click "Collect All Data" first.'); return; }
+            const text = buildTextReport(exportPayload);
+            const nodeId = exportPayload.summary?.nodeId ?? 'node';
+            const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+            const filename = `decloud-diag-${nodeId}-${ts}.txt`;
+            triggerDownload(text, filename, 'text/plain');
+        }
+
+        function triggerDownload(content, filename, mimeType) {
+            const blob = new Blob([content], { type: mimeType });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        /** Builds a human-readable plain-text diagnostic report */
+        function buildTextReport(p) {
+            const lines = [];
+            const hr = (char = '-') => lines.push(char.repeat(72));
+            const h1 = (t) => { hr('='); lines.push(t.toUpperCase()); hr('='); };
+            const h2 = (t) => { lines.push(''); lines.push('── ' + t + ' ──'); hr('-'); };
+            const kv = (k, v) => lines.push(`  ${(k + ':').padEnd(28)} ${v ?? '—'}`);
+
+            h1('DeCloud Node Diagnostic Report');
+            lines.push(`  Generated: ${new Date().toISOString()}`);
+            lines.push(`  Node URL:  ${window.location.origin}`);
+
+            // Summary
+            const s = p.summary;
+            if (s) {
+                h2('Node Identity');
+                kv('Node ID', s.nodeId);
+                kv('Hostname', s.hostname);
+                kv('OS', s.os);
+                kv('Uptime', fmtUptime(s.uptimeSeconds));
+                kv('Agent Version', s.agentVersion);
+                kv('Wallet', s.walletAddress);
+                kv('Orchestrator', s.orchestrator?.connected ? `Connected (${fmtAgo(s.orchestrator.secondsAgo)})` : 'DISCONNECTED');
+            }
+
+            // Snapshot
+            const snap = p.snapshot;
+            if (snap) {
+                h2('Hardware Resources');
+                kv('CPU Usage', (snap.cpuUsagePercent ?? 0).toFixed(1) + '%');
+                kv('Memory', `${fmtBytes(snap.usedMemoryBytes)} / ${fmtBytes(snap.totalMemoryBytes)}`);
+                kv('Storage', `${fmtBytes(snap.usedStorageBytes)} / ${fmtBytes(snap.totalStorageBytes)}`);
+                kv('KVM', snap.kvmAvailable !== false ? 'Available' : 'Unavailable');
+            }
+
+            // VMs
+            const vms = p.vms;
+            if (vms?.length) {
+                h2('Virtual Machines');
+                for (const vm of vms) {
+                    const spec = vm.spec ?? {};
+                    lines.push(`  [${vmStateName(vm.state)}] ${vm.name ?? spec.name ?? vm.vmId}`);
+                    lines.push(`    ID:    ${vm.vmId}`);
+                    lines.push(`    Type:  vmType=${spec.vmType}  role=${spec.labels?.role ?? '—'}`);
+                    lines.push(`    IP:    ${spec.ipAddress || '—'}   VNC: ${vm.vncPort ?? '—'}`);
+                    lines.push(`    CPU:   ${spec.virtualCpuCores ?? '—'} vCPU   RAM: ${fmtBytes(spec.memoryBytes ?? 0)}`);
+                }
+            }
+
+            // Network
+            const net = p.network;
+            if (net) {
+                h2('Network Interfaces');
+                for (const i of net.interfaces ?? []) {
+                    lines.push(`  ${i.isUp ? '[UP]  ' : '[DOWN]'} ${i.name.padEnd(18)} ${i.type.padEnd(12)} ${(i.ipAddresses ?? []).join(', ')}`);
+                }
+
+                h2('WireGuard Interfaces');
+                for (const wg of net.wireguard ?? []) {
+                    lines.push(`  ${wg.name}  port=${wg.listenPort}  pubkey=${wg.publicKey}`);
+                    for (const peer of wg.peers ?? []) {
+                        const hs = peer.handshakeSecondsAgo != null ? fmtAge(peer.handshakeSecondsAgo) : 'Never';
+                        lines.push(`    PEER  ${peer.publicKey}`);
+                        lines.push(`      endpoint=${peer.endpoint ?? 'none'}  allowed=${peer.allowedIps}`);
+                        lines.push(`      handshake=${hs} [${peer.handshakeStatus?.toUpperCase()}]  rx=${fmtBytes(peer.rxBytes)}  tx=${fmtBytes(peer.txBytes)}`);
+                    }
+                }
+
+                h2('Bridge Interfaces');
+                for (const b of net.bridges ?? []) {
+                    lines.push(`  ${b.name}  ${(b.ipAddresses ?? []).join(', ')}`);
+                    for (const port of b.ports ?? []) {
+                        const vm = port.vmName ? `${port.vmName} (${port.vmId})` : 'host/unassigned';
+                        lines.push(`    ${port.interface.padEnd(16)} → ${vm}`);
+                    }
+                }
+
+                h2('Routing Table');
+                for (const r of net.routes ?? []) {
+                    lines.push(`  ${(r.destination ?? '').padEnd(22)} via ${(r.gateway ?? 'direct').padEnd(18)} dev ${r.interface}`);
+                }
+            }
+
+            // Ports
+            const ports = p.ports;
+            if (ports) {
+                h2('Listening Ports — TCP');
+                for (const p of (ports.tcp ?? []).sort((a, b) => a.port - b.port))
+                    lines.push(`  ${String(p.port).padEnd(7)} ${(p.localAddress || '*').padEnd(20)} ${p.process || '—'}`);
+                h2('Listening Ports — UDP');
+                for (const p of (ports.udp ?? []).sort((a, b) => a.port - b.port))
+                    lines.push(`  ${String(p.port).padEnd(7)} ${(p.localAddress || '*').padEnd(20)} ${p.process || '—'}`);
+            }
+
+            // Firewall
+            const fw = p.firewall;
+            if (fw) {
+                h2('Firewall — UFW');
+                const ufw = fw.ufw ?? {};
+                lines.push(`  Status:   ${ufw.active ? 'ACTIVE' : 'INACTIVE'}`);
+                if (ufw.active) {
+                    lines.push(`  Incoming: ${ufw.defaultIncoming}  Outgoing: ${ufw.defaultOutgoing}  Forward: ${ufw.defaultForward}`);
+                    lines.push('');
+                    for (const r of ufw.rules ?? [])
+                        lines.push(`  [${r.number}] ${r.to.padEnd(20)} ${r.action.padEnd(7)} ${r.direction.padEnd(4)} from ${r.from}`);
+                }
+
+                const printChain = (title, chain) => {
+                    h2(title + `  [policy: ${chain?.policy ?? '?'}]`);
+                    for (const r of chain?.rules ?? [])
+                        lines.push(`  ${String(r.lineNumber).padEnd(4)} ${r.target.padEnd(12)} ${r.protocol.padEnd(6)} in=${r.in.padEnd(10)} out=${r.out.padEnd(10)} ${r.source.padEnd(20)} ${r.destination}  ${r.options}`);
+                };
+                printChain('iptables INPUT', fw.iptables?.input);
+                printChain('iptables FORWARD', fw.iptables?.forward);
+                printChain('iptables NAT POSTROUTING', fw.iptables?.natPostrouting);
+            }
+
+            // Services
+            const svcs = p.services?.services ?? [];
+            if (svcs.length) {
+                h2('System Services');
+                for (const s of svcs)
+                    lines.push(`  ${s.isActive ? '[ACTIVE  ]' : '[INACTIVE]'} ${s.name.padEnd(32)} ${s.activeState}/${s.subState}`);
+            }
+
+            // Logs
+            const logs = p.logs?.logLines ?? [];
+            if (logs.length) {
+                h2(`Node Agent Logs (${logs.length} lines, source: ${p.logs?.source ?? 'unknown'})`);
+                for (const l of logs) lines.push('  ' + l);
+            }
+
+            hr('=');
+            lines.push('END OF REPORT');
+            hr('=');
+            return lines.join('\n');
+        }
+    </script>
 </body>
 </html>
