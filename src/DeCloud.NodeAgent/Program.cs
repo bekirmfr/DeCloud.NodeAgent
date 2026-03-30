@@ -359,6 +359,9 @@ app.UseWebSockets(new WebSocketOptions
 app.UseSwagger();
 app.UseSwaggerUI();
 
+app.UseDefaultFiles();  // maps GET / → /wwwroot/index.html (but we override / in the controller)
+app.UseStaticFiles();   // serves /wwwroot/* at their URL paths (CSS, JS assets if any)
+
 app.MapControllers();
 
 app.Run();

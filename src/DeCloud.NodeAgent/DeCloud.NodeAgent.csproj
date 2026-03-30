@@ -13,6 +13,13 @@
   </ItemGroup>
 
 	<ItemGroup>
+		<!-- Dashboard HTML — deployed to wwwroot/ next to the binary -->
+		<Content Include="wwwroot\dashboard.html">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</Content>
+	</ItemGroup>
+
+	<ItemGroup>
 		<!-- Include all cloud-init templates in build output -->
 		<None Update="CloudInit\Templates\**\*">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -30,10 +37,7 @@
 	<!-- Build DHT node binary from Go source during publish (non-fatal: runtime fallback will build if needed) -->
 	<Target Name="BuildDhtNode" BeforeTargets="Publish" Condition="Exists('CloudInit/Templates/dht-vm/dht-node-src/main.go')">
 		<Message Importance="high" Text="Building DHT node binary from Go source..." />
-		<Exec Command="bash CloudInit/Templates/dht-vm/dht-node-src/build.sh"
-		      WorkingDirectory="$(MSBuildProjectDirectory)"
-		      ConsoleToMsBuild="true"
-		      IgnoreExitCode="true" />
+		<Exec Command="bash CloudInit/Templates/dht-vm/dht-node-src/build.sh" WorkingDirectory="$(MSBuildProjectDirectory)" ConsoleToMsBuild="true" IgnoreExitCode="true" />
 		<Message Importance="high" Text="DHT node binary build attempted. If Go is not installed, the binary will be built at runtime on first DHT VM creation." />
 	</Target>
 
@@ -51,6 +55,10 @@
 
 	<ItemGroup>
 		<Compile Include="../Shared/**/*.cs" Link="Shared/%(RecursiveDir)%(Filename)%(Extension)" />
+	</ItemGroup>
+
+	<ItemGroup>
+	  <Folder Include="wwwroot\" />
 	</ItemGroup>
 
 </Project>
