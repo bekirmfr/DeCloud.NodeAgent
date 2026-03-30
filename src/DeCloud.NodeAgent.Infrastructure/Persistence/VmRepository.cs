@@ -23,7 +23,7 @@ public class VmRepository : IDisposable
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly bool _encrypted;
 
-    private const int CURRENT_SCHEMA_VERSION = 4; // Incremented when schema changes
+    private const int CURRENT_SCHEMA_VERSION = 5; // Incremented when schema changes
 
     public VmRepository(string databasePath, ILogger logger, string? encryptionKey = null)
     {
@@ -179,7 +179,9 @@ public class VmRepository : IDisposable
                 BaseImageUrl TEXT,
                 BaseImageHash TEXT,
                 SshPublicKey TEXT,
-                EncryptedPassword TEXT
+                EncryptedPassword TEXT,
+                VmType TEXT NOT NULL DEFAULT 'General',
+                LabelsJson TEXT
             );
             
             CREATE INDEX IF NOT EXISTS idx_tenant ON VmRecords(OwnerId);
@@ -226,6 +228,14 @@ public class VmRepository : IDisposable
                 _logger.LogInformation("Applying migration: v{From} → v4 (ReplicationFactor column)", Math.Max(fromVersion, 3));
                 MigrateToV4();
                 SetSchemaVersion(4);
+            }
+
+            // Migration v4 → v5: Add VmType and LabelsJson columns
+            if (fromVersion < 5)
+            {
+                _logger.LogInformation("Applying migration: v{From} → v5 (VmType, LabelsJson columns)", Math.Max(fromVersion, 4));
+                MigrateToV5();
+                SetSchemaVersion(5);
             }
 
             transaction.Commit();
@@ -357,6 +367,31 @@ public class VmRepository : IDisposable
     }
 
     /// <summary>
+    /// Migrate to schema v5: Add VmType and LabelsJson columns so that system VM
+    /// classification (Relay/DHT/BlockStore) survives NodeAgent restarts.
+    /// Without these columns every VM loaded from SQLite gets VmType=General and
+    /// Labels=null, causing the dashboard to show all system VMs as "Not deployed".
+    /// </summary>
+    private void MigrateToV5()
+    {
+        if (!ColumnExists("VmRecords", "VmType"))
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "ALTER TABLE VmRecords ADD COLUMN VmType TEXT NOT NULL DEFAULT 'General'";
+            cmd.ExecuteNonQuery();
+            _logger.LogInformation("Added VmType column to VmRecords");
+        }
+
+        if (!ColumnExists("VmRecords", "LabelsJson"))
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "ALTER TABLE VmRecords ADD COLUMN LabelsJson TEXT";
+            cmd.ExecuteNonQuery();
+            _logger.LogInformation("Added LabelsJson column to VmRecords");
+        }
+    }
+
+    /// <summary>
     /// Save or update a VM record
     /// </summary>
     public async Task SaveVmAsync(VmInstance vm)
@@ -370,13 +405,15 @@ public class VmRepository : IDisposable
                  VirtualCpuCores, MemoryBytes, DiskBytes,
                  State, IpAddress, MacAddress, VncPort, Pid,
                  CreatedAt, StartedAt, StoppedAt, LastUpdated, DiskPath, ConfigPath,
-                 BaseImageUrl, BaseImageHash, SshPublicKey, EncryptedPassword)
+                 BaseImageUrl, BaseImageHash, SshPublicKey, EncryptedPassword,
+                 VmType, LabelsJson)
                 VALUES
                 (@VmId, @Name, @ServicesJson, @OwnerId, @QualityTier, @ReplicationFactor, @ComputePointCost,
                  @VirtualCpuCores, @MemoryBytes, @DiskBytes,
                  @State, @IpAddress, @MacAddress, @VncPort, @Pid,
                  @CreatedAt, @StartedAt, @StoppedAt, @LastUpdated, @DiskPath, @ConfigPath,
-                 @BaseImageUrl, @BaseImageHash, @SshPublicKey, @EncryptedPassword)
+                 @BaseImageUrl, @BaseImageHash, @SshPublicKey, @EncryptedPassword,
+                 @VmType, @LabelsJson)
             ";
 
             using var cmd = _connection.CreateCommand();
@@ -409,6 +446,11 @@ public class VmRepository : IDisposable
             cmd.Parameters.AddWithValue("@ReplicationFactor", vm.Spec.ReplicationFactor);
             // SECURITY: Only store encrypted password, NEVER plaintext
             cmd.Parameters.AddWithValue("@EncryptedPassword", vm.Spec.WalletEncryptedPassword ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@VmType", vm.Spec.VmType.ToString());
+            cmd.Parameters.AddWithValue("@LabelsJson",
+                vm.Spec.Labels is { Count: > 0 }
+                    ? JsonSerializer.Serialize(vm.Spec.Labels)
+                    : (object)DBNull.Value);
 
             await cmd.ExecuteNonQueryAsync();
 
@@ -691,6 +733,29 @@ public class VmRepository : IDisposable
                 DiskPath = GetNullableString(reader, "DiskPath") ?? string.Empty,
                 ConfigPath = GetNullableString(reader, "ConfigPath") ?? string.Empty
             };
+
+            // Restore VmType — critical for system VM classification (Relay/DHT/BlockStore)
+            // after restarts. Without this every VM loads as VmType.General.
+            var vmTypeStr = GetNullableString(reader, "VmType");
+            if (!string.IsNullOrEmpty(vmTypeStr) &&
+                Enum.TryParse<VmType>(vmTypeStr, ignoreCase: true, out var parsedVmType))
+            {
+                vm.Spec.VmType = parsedVmType;
+            }
+
+            // Restore Labels — role label is the dashboard fallback for type classification
+            var labelsJson = GetNullableString(reader, "LabelsJson");
+            if (!string.IsNullOrEmpty(labelsJson))
+            {
+                try
+                {
+                    vm.Spec.Labels = JsonSerializer.Deserialize<Dictionary<string, string>>(labelsJson);
+                }
+                catch
+                {
+                    // Leave Labels null — VmType alone is sufficient for classification
+                }
+            }
 
             return vm;
         }
