@@ -358,6 +358,22 @@ public class UserWireGuardManager : IUserWireGuardManager
                 $"Failed to create WireGuard interface: {createResult.StandardError}");
         }
 
+        // Interface already existed — it is already configured with the correct
+        // keys and address from a previous run. Skip setconf and addr add to
+        // avoid "Address already in use" errors on wg setconf and ip addr add.
+        bool interfaceAlreadyExisted = !createResult.Success &&
+            createResult.StandardError.Contains("exists");
+
+        if (interfaceAlreadyExisted)
+        {
+            _logger.LogInformation(
+                "WireGuard interface {Interface} already exists — skipping configuration",
+                config.InterfaceName);
+            // Ensure it is up
+            await _executor.ExecuteAsync("ip", $"link set {config.InterfaceName} up", ct);
+            return;
+        }
+
         // Write temporary config file for wg setconf
         var configContent = $@"[Interface]
 PrivateKey = {config.PrivateKey}
