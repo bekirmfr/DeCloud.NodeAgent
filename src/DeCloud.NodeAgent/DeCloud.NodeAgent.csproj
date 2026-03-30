@@ -13,13 +13,6 @@
   </ItemGroup>
 
 	<ItemGroup>
-		<!-- Dashboard HTML — deployed to wwwroot/ next to the binary -->
-		<Content Include="wwwroot\dashboard.html">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-		</Content>
-	</ItemGroup>
-
-	<ItemGroup>
 		<!-- Include all cloud-init templates in build output -->
 		<None Update="CloudInit\Templates\**\*">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
