@@ -4,6 +4,7 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Configuration;
 
 namespace DeCloud.NodeAgent.Controllers;
 
@@ -21,7 +22,14 @@ public class NodeDashboardController : ControllerBase
     private readonly IOrchestratorClient _orchestratorClient;
     private readonly INodeStateService _nodeStateService;
     private readonly IWebHostEnvironment _env;
+    private readonly IConfiguration _config;
+    private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<NodeDashboardController> _logger;
+
+    // Cached ingress base domain — fetched once from orchestrator, TTL 5 minutes
+    private static string? _cachedIngressBaseDomain;
+    private static DateTime _ingressCacheExpiry = DateTime.MinValue;
+    private static readonly SemaphoreSlim _ingressCacheLock = new(1, 1);
 
     /// <summary>
     /// System services always checked, plus any wg-quick@ units found dynamically.
@@ -43,6 +51,8 @@ public class NodeDashboardController : ControllerBase
         IOrchestratorClient orchestratorClient,
         INodeStateService nodeStateService,
         IWebHostEnvironment env,
+        IConfiguration config,
+        IHttpClientFactory httpClientFactory,
         ILogger<NodeDashboardController> logger)
     {
         _executor = executor;
@@ -50,6 +60,8 @@ public class NodeDashboardController : ControllerBase
         _orchestratorClient = orchestratorClient;
         _nodeStateService = nodeStateService;
         _env = env;
+        _config = config;
+        _httpClientFactory = httpClientFactory;
         _logger = logger;
     }
 
@@ -89,37 +101,111 @@ public class NodeDashboardController : ControllerBase
     public async Task<IActionResult> GetSummary(CancellationToken ct)
     {
         var uptimeTask = GetUptimeSecondsAsync(ct);
-        var osTask     = GetOsInfoAsync(ct);
+        var osTask = GetOsInfoAsync(ct);
+        var ingressTask = GetIngressBaseDomainAsync(ct);
 
-        await Task.WhenAll(uptimeTask, osTask);
+        await Task.WhenAll(uptimeTask, osTask, ingressTask);
 
         var lastHeartbeat = _orchestratorClient.GetLastHeartbeat();
-        var nodeId        = _orchestratorClient.NodeId;
+        var nodeId = _orchestratorClient.NodeId;
 
         long? heartbeatSecondsAgo = null;
         if (lastHeartbeat != null)
         {
-            // HeartbeatDto.Timestamp — adapt property name if it differs in your build
             try { heartbeatSecondsAgo = (long)(DateTime.UtcNow - lastHeartbeat.Heartbeat.Timestamp).TotalSeconds; }
             catch { /* leave null if property name differs */ }
         }
 
         return Ok(new
         {
-            nodeId        = nodeId ?? "unregistered",
-            hostname      = Environment.MachineName,
+            nodeId = nodeId ?? "unregistered",
+            hostname = Environment.MachineName,
             walletAddress = _orchestratorClient.WalletAddress,
-            agentVersion  = GetAgentVersion(),
+            agentVersion = GetAgentVersion(),
             uptimeSeconds = uptimeTask.Result,
-            os            = osTask.Result,
-            orchestrator  = new
+            os = osTask.Result,
+            ingressBaseDomain = ingressTask.Result,   // e.g. "vms.stackfi.tech" — null if not configured
+            orchestrator = new
             {
-                connected       = !string.IsNullOrEmpty(nodeId),
+                connected = !string.IsNullOrEmpty(nodeId),
                 lastHeartbeatAt = lastHeartbeat != null ? lastHeartbeat.Heartbeat.Timestamp : (DateTime?)null,
-                secondsAgo      = heartbeatSecondsAgo
+                secondsAgo = heartbeatSecondsAgo
             },
             collectedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
         });
+    }
+
+    // ==========================================================================
+    // GetIngressBaseDomainAsync
+    // Fetches the central ingress base domain from the orchestrator's public
+    // /api/central-ingress/status endpoint (AllowAnonymous — no auth needed).
+    // Result is cached for 5 minutes to avoid per-request overhead.
+    // Falls back to IConfiguration["CentralIngress:BaseDomain"] if set locally.
+    // ==========================================================================
+
+    private async Task<string?> GetIngressBaseDomainAsync(CancellationToken ct)
+    {
+        // 1. Fast path — valid cache
+        if (_cachedIngressBaseDomain != null && DateTime.UtcNow < _ingressCacheExpiry)
+            return _cachedIngressBaseDomain;
+
+        // 2. Local config override (optional, for offline/dev scenarios)
+        var localOverride = _config["CentralIngress:BaseDomain"];
+        if (!string.IsNullOrWhiteSpace(localOverride))
+        {
+            _cachedIngressBaseDomain = localOverride;
+            _ingressCacheExpiry = DateTime.UtcNow.AddMinutes(5);
+            return localOverride;
+        }
+
+        // 3. Fetch from orchestrator — serialize with a semaphore so concurrent
+        //    requests don't all race to fetch on a cold cache.
+        if (!await _ingressCacheLock.WaitAsync(TimeSpan.FromSeconds(2), ct))
+            return _cachedIngressBaseDomain; // return stale rather than block
+
+        try
+        {
+            // Re-check inside lock
+            if (_cachedIngressBaseDomain != null && DateTime.UtcNow < _ingressCacheExpiry)
+                return _cachedIngressBaseDomain;
+
+            var orchestratorUrl = _config["Orchestrator:Url"]
+                               ?? _config["OrchestratorUrl"]
+                               ?? _config["ORCHESTRATOR_URL"];
+
+            if (string.IsNullOrWhiteSpace(orchestratorUrl))
+                return null;
+
+            var client = _httpClientFactory.CreateClient();
+            client.Timeout = TimeSpan.FromSeconds(4);
+
+            var response = await client.GetAsync(
+                $"{orchestratorUrl.TrimEnd('/')}/api/central-ingress/status", ct);
+
+            if (!response.IsSuccessStatusCode)
+                return null;
+
+            var json = JsonNode.Parse(await response.Content.ReadAsStringAsync(ct));
+            var data = json?["data"];
+            var enabled = data?["isEnabled"]?.GetValue<bool>() ?? false;
+            var domain = data?["baseDomain"]?.GetValue<string>();
+
+            if (!enabled || string.IsNullOrWhiteSpace(domain))
+                return null;
+
+            _cachedIngressBaseDomain = domain;
+            _ingressCacheExpiry = DateTime.UtcNow.AddMinutes(5);
+            return domain;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not fetch ingress base domain from orchestrator");
+            return null;
+        }
+        finally
+        {
+            _ingressCacheLock.Release();
+        }
     }
 
     // ==========================================================================
@@ -134,22 +220,22 @@ public class NodeDashboardController : ControllerBase
     [HttpGet("/api/dashboard/network")]
     public async Task<IActionResult> GetNetwork(CancellationToken ct)
     {
-        var addrTask   = _executor.ExecuteAsync("ip",     "-j addr show",   TimeSpan.FromSeconds(5), ct);
-        var wgTask     = _executor.ExecuteAsync("wg",     "show all dump",  TimeSpan.FromSeconds(5), ct);
-        var brctlTask  = _executor.ExecuteAsync("brctl",  "show",           TimeSpan.FromSeconds(5), ct);
-        var routeTask  = _executor.ExecuteAsync("ip",     "-j route show",  TimeSpan.FromSeconds(5), ct);
-        var netdevTask = _executor.ExecuteAsync("cat",    "/proc/net/dev",  TimeSpan.FromSeconds(3), ct);
+        var addrTask = _executor.ExecuteAsync("ip", "-j addr show", TimeSpan.FromSeconds(5), ct);
+        var wgTask = _executor.ExecuteAsync("wg", "show all dump", TimeSpan.FromSeconds(5), ct);
+        var brctlTask = _executor.ExecuteAsync("brctl", "show", TimeSpan.FromSeconds(5), ct);
+        var routeTask = _executor.ExecuteAsync("ip", "-j route show", TimeSpan.FromSeconds(5), ct);
+        var netdevTask = _executor.ExecuteAsync("cat", "/proc/net/dev", TimeSpan.FromSeconds(3), ct);
 
         await Task.WhenAll(addrTask, wgTask, brctlTask, routeTask, netdevTask);
 
-        var interfaces   = ParseIpAddrJson(addrTask.Result.StandardOutput);
+        var interfaces = ParseIpAddrJson(addrTask.Result.StandardOutput);
         var wgInterfaces = ParseWgDump(wgTask.Result.StandardOutput);
-        var bridges      = await ParseBridgesAsync(brctlTask.Result.StandardOutput, ct);
-        var routes       = ParseIpRouteJson(routeTask.Result.StandardOutput);
-        var stats        = ParseProcNetDev(netdevTask.Result.StandardOutput);
+        var bridges = await ParseBridgesAsync(brctlTask.Result.StandardOutput, ct);
+        var routes = ParseIpRouteJson(routeTask.Result.StandardOutput);
+        var stats = ParseProcNetDev(netdevTask.Result.StandardOutput);
 
         // Classify and enrich each interface
-        var wgNames     = wgInterfaces.Select(w => w.Name).ToHashSet(StringComparer.Ordinal);
+        var wgNames = wgInterfaces.Select(w => w.Name).ToHashSet(StringComparer.Ordinal);
         var bridgeNames = bridges.Select(b => b.Name).ToHashSet(StringComparer.Ordinal);
 
         foreach (var iface in interfaces)
@@ -169,13 +255,13 @@ public class NodeDashboardController : ControllerBase
             // Classify interface type
             iface.Type = iface.Name switch
             {
-                "lo"                                                             => "loopback",
-                _ when wgNames.Contains(iface.Name)                             => "wireguard",
-                _ when bridgeNames.Contains(iface.Name)                         => "bridge",
-                _ when iface.Name.StartsWith("virbr")                           => "bridge",
+                "lo" => "loopback",
+                _ when wgNames.Contains(iface.Name) => "wireguard",
+                _ when bridgeNames.Contains(iface.Name) => "bridge",
+                _ when iface.Name.StartsWith("virbr") => "bridge",
                 _ when iface.Name.StartsWith("vnet") || iface.Name.StartsWith("tap") => "tap",
                 _ when iface.Name.StartsWith("docker") || iface.Name.StartsWith("br-") => "bridge",
-                _                                                                => "physical"
+                _ => "physical"
             };
         }
 
@@ -218,10 +304,10 @@ public class NodeDashboardController : ControllerBase
     [HttpGet("/api/dashboard/firewall")]
     public async Task<IActionResult> GetFirewall(CancellationToken ct)
     {
-        var ufwTask   = _executor.ExecuteAsync("ufw",      "status verbose",                              TimeSpan.FromSeconds(5), ct);
-        var inputTask = _executor.ExecuteAsync("iptables", "-L INPUT -v -n --line-numbers",               TimeSpan.FromSeconds(5), ct);
-        var fwdTask   = _executor.ExecuteAsync("iptables", "-L FORWARD -v -n --line-numbers",             TimeSpan.FromSeconds(5), ct);
-        var natTask   = _executor.ExecuteAsync("iptables", "-t nat -L POSTROUTING -v -n --line-numbers",  TimeSpan.FromSeconds(5), ct);
+        var ufwTask = _executor.ExecuteAsync("ufw", "status verbose", TimeSpan.FromSeconds(5), ct);
+        var inputTask = _executor.ExecuteAsync("iptables", "-L INPUT -v -n --line-numbers", TimeSpan.FromSeconds(5), ct);
+        var fwdTask = _executor.ExecuteAsync("iptables", "-L FORWARD -v -n --line-numbers", TimeSpan.FromSeconds(5), ct);
+        var natTask = _executor.ExecuteAsync("iptables", "-t nat -L POSTROUTING -v -n --line-numbers", TimeSpan.FromSeconds(5), ct);
 
         await Task.WhenAll(ufwTask, inputTask, fwdTask, natTask);
 
@@ -232,24 +318,24 @@ public class NodeDashboardController : ControllerBase
             {
                 input = new
                 {
-                    chain  = "INPUT",
+                    chain = "INPUT",
                     policy = ParseChainPolicy(inputTask.Result.StandardOutput),
-                    rules  = ParseIptablesRules(inputTask.Result.StandardOutput),
-                    raw    = inputTask.Result.StandardOutput
+                    rules = ParseIptablesRules(inputTask.Result.StandardOutput),
+                    raw = inputTask.Result.StandardOutput
                 },
                 forward = new
                 {
-                    chain  = "FORWARD",
+                    chain = "FORWARD",
                     policy = ParseChainPolicy(fwdTask.Result.StandardOutput),
-                    rules  = ParseIptablesRules(fwdTask.Result.StandardOutput),
-                    raw    = fwdTask.Result.StandardOutput
+                    rules = ParseIptablesRules(fwdTask.Result.StandardOutput),
+                    raw = fwdTask.Result.StandardOutput
                 },
                 natPostrouting = new
                 {
-                    chain  = "POSTROUTING (nat)",
+                    chain = "POSTROUTING (nat)",
                     policy = ParseChainPolicy(natTask.Result.StandardOutput),
-                    rules  = ParseIptablesRules(natTask.Result.StandardOutput),
-                    raw    = natTask.Result.StandardOutput
+                    rules = ParseIptablesRules(natTask.Result.StandardOutput),
+                    raw = natTask.Result.StandardOutput
                 }
             },
             collectedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
@@ -296,19 +382,19 @@ public class NodeDashboardController : ControllerBase
                 .Where(p => p.Length == 2)
                 .ToDictionary(p => p[0].Trim(), p => p[1].Trim());
 
-            var loadState   = props.GetValueOrDefault("LoadState",   "not-found");
+            var loadState = props.GetValueOrDefault("LoadState", "not-found");
             var activeState = props.GetValueOrDefault("ActiveState", "unknown");
-            var subState    = props.GetValueOrDefault("SubState",    "unknown");
+            var subState = props.GetValueOrDefault("SubState", "unknown");
 
             return new
             {
-                name        = svc,
+                name = svc,
                 loadState,
                 activeState,
                 subState,
                 description = props.GetValueOrDefault("Description", ""),
-                isActive    = activeState == "active",
-                isLoaded    = loadState   == "loaded"
+                isActive = activeState == "active",
+                isLoaded = loadState == "loaded"
             };
         });
 
@@ -341,10 +427,10 @@ public class NodeDashboardController : ControllerBase
                 var logLines = await ReadLastLinesAsync(LogFilePath, lines, ct);
                 return Ok(new
                 {
-                    source   = "file",
-                    logFile  = LogFilePath,
+                    source = "file",
+                    logFile = LogFilePath,
                     logLines,
-                    count    = logLines.Count,
+                    count = logLines.Count,
                     collectedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
                 });
             }
@@ -366,10 +452,10 @@ public class NodeDashboardController : ControllerBase
 
         return Ok(new
         {
-            source   = "journal",
-            logFile  = (string?)null,
+            source = "journal",
+            logFile = (string?)null,
             logLines = journalLines,
-            count    = journalLines.Count,
+            count = journalLines.Count,
             collectedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
         });
     }
@@ -390,9 +476,9 @@ public class NodeDashboardController : ControllerBase
 
         if (fs.Length == 0) return lines;
 
-        var buffer    = new byte[bufferSize];
+        var buffer = new byte[bufferSize];
         var remainder = "";
-        var position  = fs.Length;
+        var position = fs.Length;
 
         while (position > 0 && lines.Count < lineCount)
         {
@@ -401,8 +487,8 @@ public class NodeDashboardController : ControllerBase
             fs.Seek(position, SeekOrigin.Begin);
 
             var bytesRead = await fs.ReadAsync(buffer.AsMemory(0, readSize), ct);
-            var chunk     = System.Text.Encoding.UTF8.GetString(buffer, 0, bytesRead) + remainder;
-            var parts     = chunk.Split('\n');
+            var chunk = System.Text.Encoding.UTF8.GetString(buffer, 0, bytesRead) + remainder;
+            var parts = chunk.Split('\n');
 
             // parts[0] is a partial line — carry it forward as the remainder
             remainder = parts[0];
@@ -451,20 +537,20 @@ public class NodeDashboardController : ControllerBase
                 foreach (var a in item["addr_info"]?.AsArray() ?? [])
                 {
                     var local = a?["local"]?.GetValue<string>();
-                    var plen  = a?["prefixlen"]?.GetValue<int>() ?? 0;
+                    var plen = a?["prefixlen"]?.GetValue<int>() ?? 0;
                     if (!string.IsNullOrEmpty(local))
                         addresses.Add($"{local}/{plen}");
                 }
 
                 result.Add(new NetInterface
                 {
-                    Name        = item["ifname"]?.GetValue<string>() ?? "",
-                    MacAddress  = item["address"]?.GetValue<string>(),
-                    Mtu         = item["mtu"]?.GetValue<int>() ?? 0,
-                    Flags       = flags,
-                    IsUp        = flags.Contains("UP"),
+                    Name = item["ifname"]?.GetValue<string>() ?? "",
+                    MacAddress = item["address"]?.GetValue<string>(),
+                    Mtu = item["mtu"]?.GetValue<int>() ?? 0,
+                    Flags = flags,
+                    IsUp = flags.Contains("UP"),
                     IpAddresses = addresses,
-                    Type        = "physical"
+                    Type = "physical"
                 });
             }
         }
@@ -495,28 +581,28 @@ public class NodeDashboardController : ControllerBase
                 // Interface header line
                 map[p[0]] = new WgInterfaceInfo
                 {
-                    Name       = p[0],
-                    PublicKey  = p[2],
+                    Name = p[0],
+                    PublicKey = p[2],
                     ListenPort = int.TryParse(p[3], out var port) ? port : 0,
-                    Peers      = []
+                    Peers = []
                 };
             }
             else if (p.Length == 9 && map.TryGetValue(p[0], out var iface))
             {
-                var ts         = long.TryParse(p[5], out var hs) ? hs : 0L;
-                var secsAgo    = ts > 0 ? (int)(now - ts) : -1;
-                var keepalive  = int.TryParse(p[8], out var ka) && ka > 0 ? ka : 0;
+                var ts = long.TryParse(p[5], out var hs) ? hs : 0L;
+                var secsAgo = ts > 0 ? (int)(now - ts) : -1;
+                var keepalive = int.TryParse(p[8], out var ka) && ka > 0 ? ka : 0;
 
                 iface.Peers.Add(new WgPeerInfo
                 {
-                    PublicKey           = p[1],
-                    Endpoint            = p[3] == "(none)" ? null : p[3],
-                    AllowedIps          = p[4],
-                    LatestHandshake     = ts,
+                    PublicKey = p[1],
+                    Endpoint = p[3] == "(none)" ? null : p[3],
+                    AllowedIps = p[4],
+                    LatestHandshake = ts,
                     HandshakeSecondsAgo = secsAgo >= 0 ? secsAgo : null,
-                    HandshakeStatus     = ClassifyHandshake(ts, secsAgo),
-                    RxBytes             = long.TryParse(p[6], out var rx) ? rx : 0,
-                    TxBytes             = long.TryParse(p[7], out var tx) ? tx : 0,
+                    HandshakeStatus = ClassifyHandshake(ts, secsAgo),
+                    RxBytes = long.TryParse(p[6], out var rx) ? rx : 0,
+                    TxBytes = long.TryParse(p[7], out var tx) ? tx : 0,
                     PersistentKeepalive = keepalive
                 });
             }
@@ -528,9 +614,9 @@ public class NodeDashboardController : ControllerBase
     private static string ClassifyHandshake(long ts, int secsAgo)
     {
         if (ts == 0 || secsAgo < 0) return "never";
-        if (secsAgo < 180)          return "ok";      // < 3 min
-        if (secsAgo < 600)          return "stale";   // 3–10 min
-        return                             "dead";    // > 10 min
+        if (secsAgo < 180) return "ok";      // < 3 min
+        if (secsAgo < 600) return "stale";   // 3–10 min
+        return "dead";    // > 10 min
     }
 
     /// <summary>
@@ -610,11 +696,11 @@ public class NodeDashboardController : ControllerBase
                 routes.Add(new RouteEntry
                 {
                     Destination = item["dst"]?.GetValue<string>() ?? "",
-                    Gateway     = item["gateway"]?.GetValue<string>(),
-                    Interface   = item["dev"]?.GetValue<string>() ?? "",
-                    Protocol    = item["protocol"]?.GetValue<string>(),
-                    Scope       = item["scope"]?.GetValue<string>(),
-                    Metric      = item["metric"]?.GetValue<int>() ?? 0
+                    Gateway = item["gateway"]?.GetValue<string>(),
+                    Interface = item["dev"]?.GetValue<string>() ?? "",
+                    Protocol = item["protocol"]?.GetValue<string>(),
+                    Scope = item["scope"]?.GetValue<string>(),
+                    Metric = item["metric"]?.GetValue<int>() ?? 0
                 });
             }
         }
@@ -637,7 +723,7 @@ public class NodeDashboardController : ControllerBase
             var idx = line.IndexOf(':');
             if (idx < 0) continue;
 
-            var name   = line[..idx].Trim();
+            var name = line[..idx].Trim();
             var fields = line[(idx + 1)..].Split(' ', StringSplitOptions.RemoveEmptyEntries);
 
             if (fields.Length >= 9
@@ -681,9 +767,9 @@ public class NodeDashboardController : ControllerBase
             ports.Add(new PortEntry
             {
                 LocalAddress = localAddr[..lastColon],
-                Port         = int.TryParse(localAddr[(lastColon + 1)..], out var p) ? p : 0,
-                Process      = process,
-                State        = parts[0]
+                Port = int.TryParse(localAddr[(lastColon + 1)..], out var p) ? p : 0,
+                Process = process,
+                State = parts[0]
             });
         }
 
@@ -704,7 +790,7 @@ public class NodeDashboardController : ControllerBase
         {
             info.DefaultIncoming = def.Groups[1].Value;
             info.DefaultOutgoing = def.Groups[2].Value;
-            info.DefaultForward  = def.Groups[3].Value;
+            info.DefaultForward = def.Groups[3].Value;
         }
 
         foreach (var line in output.Split('\n'))
@@ -716,11 +802,11 @@ public class NodeDashboardController : ControllerBase
             {
                 info.Rules.Add(new UfwRule
                 {
-                    Number    = int.Parse(m.Groups[1].Value),
-                    To        = m.Groups[2].Value.Trim(),
-                    Action    = m.Groups[3].Value.Trim(),
+                    Number = int.Parse(m.Groups[1].Value),
+                    To = m.Groups[2].Value.Trim(),
+                    Action = m.Groups[3].Value.Trim(),
                     Direction = m.Groups[4].Value.Trim(),
-                    From      = m.Groups[5].Value.Trim()
+                    From = m.Groups[5].Value.Trim()
                 });
             }
         }
@@ -758,16 +844,16 @@ public class NodeDashboardController : ControllerBase
 
             rules.Add(new IptablesRule
             {
-                LineNumber  = lineNum,
-                Packets     = long.TryParse(parts[offset],     out var pk) ? pk : 0,
-                Bytes       = long.TryParse(parts[offset + 1], out var by) ? by : 0,
-                Target      = parts[offset + 2],
-                Protocol    = parts[offset + 3],
-                In          = parts[offset + 5] == "*" ? "any" : parts[offset + 5],
-                Out         = parts[offset + 6] == "*" ? "any" : parts[offset + 6],
-                Source      = parts.Length > offset + 7 ? parts[offset + 7] : "0.0.0.0/0",
+                LineNumber = lineNum,
+                Packets = long.TryParse(parts[offset], out var pk) ? pk : 0,
+                Bytes = long.TryParse(parts[offset + 1], out var by) ? by : 0,
+                Target = parts[offset + 2],
+                Protocol = parts[offset + 3],
+                In = parts[offset + 5] == "*" ? "any" : parts[offset + 5],
+                Out = parts[offset + 6] == "*" ? "any" : parts[offset + 6],
+                Source = parts.Length > offset + 7 ? parts[offset + 7] : "0.0.0.0/0",
                 Destination = parts.Length > offset + 8 ? parts[offset + 8] : "0.0.0.0/0",
-                Options     = parts.Length > offset + 9
+                Options = parts.Length > offset + 9
                               ? string.Join(" ", parts[(offset + 9)..])
                               : ""
             });
@@ -836,100 +922,100 @@ public class NodeDashboardController : ControllerBase
 
     public class NetInterface
     {
-        public string       Name        { get; set; } = "";
-        public string       Type        { get; set; } = "physical"; // wireguard|bridge|tap|loopback|physical
-        public string?      MacAddress  { get; set; }
-        public int          Mtu         { get; set; }
-        public bool         IsUp        { get; set; }
-        public List<string> Flags       { get; set; } = [];
+        public string Name { get; set; } = "";
+        public string Type { get; set; } = "physical"; // wireguard|bridge|tap|loopback|physical
+        public string? MacAddress { get; set; }
+        public int Mtu { get; set; }
+        public bool IsUp { get; set; }
+        public List<string> Flags { get; set; } = [];
         public List<string> IpAddresses { get; set; } = [];
-        public long         RxBytes     { get; set; }
-        public long         TxBytes     { get; set; }
+        public long RxBytes { get; set; }
+        public long TxBytes { get; set; }
     }
 
     public class WgInterfaceInfo
     {
-        public string            Name       { get; set; } = "";
-        public string            PublicKey  { get; set; } = "";
-        public int               ListenPort { get; set; }
-        public List<WgPeerInfo>  Peers      { get; set; } = [];
+        public string Name { get; set; } = "";
+        public string PublicKey { get; set; } = "";
+        public int ListenPort { get; set; }
+        public List<WgPeerInfo> Peers { get; set; } = [];
     }
 
     public class WgPeerInfo
     {
-        public string  PublicKey           { get; set; } = "";
-        public string? Endpoint            { get; set; }
-        public string  AllowedIps          { get; set; } = "";
-        public long    LatestHandshake     { get; set; }
-        public int?    HandshakeSecondsAgo { get; set; }
-        public string  HandshakeStatus     { get; set; } = "never";  // ok|stale|dead|never
-        public long    RxBytes             { get; set; }
-        public long    TxBytes             { get; set; }
-        public int     PersistentKeepalive { get; set; }
+        public string PublicKey { get; set; } = "";
+        public string? Endpoint { get; set; }
+        public string AllowedIps { get; set; } = "";
+        public long LatestHandshake { get; set; }
+        public int? HandshakeSecondsAgo { get; set; }
+        public string HandshakeStatus { get; set; } = "never";  // ok|stale|dead|never
+        public long RxBytes { get; set; }
+        public long TxBytes { get; set; }
+        public int PersistentKeepalive { get; set; }
     }
 
     public class BridgeInfo
     {
-        public string           Name        { get; set; } = "";
-        public List<string>     IpAddresses { get; set; } = [];
-        public List<BridgePort> Ports       { get; set; } = [];
+        public string Name { get; set; } = "";
+        public List<string> IpAddresses { get; set; } = [];
+        public List<BridgePort> Ports { get; set; } = [];
     }
 
     public class BridgePort
     {
-        public string  Interface { get; set; } = "";
-        public string? VmId     { get; set; }
-        public string? VmName   { get; set; }
+        public string Interface { get; set; } = "";
+        public string? VmId { get; set; }
+        public string? VmName { get; set; }
     }
 
     public class RouteEntry
     {
-        public string  Destination { get; set; } = "";
-        public string? Gateway     { get; set; }
-        public string  Interface   { get; set; } = "";
-        public string? Protocol    { get; set; }
-        public string? Scope       { get; set; }
-        public int     Metric      { get; set; }
+        public string Destination { get; set; } = "";
+        public string? Gateway { get; set; }
+        public string Interface { get; set; } = "";
+        public string? Protocol { get; set; }
+        public string? Scope { get; set; }
+        public int Metric { get; set; }
     }
 
     public class PortEntry
     {
         public string LocalAddress { get; set; } = "";
-        public int    Port         { get; set; }
-        public string Process      { get; set; } = "";
-        public string State        { get; set; } = "";
+        public int Port { get; set; }
+        public string Process { get; set; } = "";
+        public string State { get; set; } = "";
     }
 
     public class UfwStatusInfo
     {
-        public bool          Active          { get; set; }
-        public string        DefaultIncoming { get; set; } = "";
-        public string        DefaultOutgoing { get; set; } = "";
-        public string        DefaultForward  { get; set; } = "";
-        public List<UfwRule> Rules           { get; set; } = [];
-        public string        RawOutput       { get; set; } = "";
+        public bool Active { get; set; }
+        public string DefaultIncoming { get; set; } = "";
+        public string DefaultOutgoing { get; set; } = "";
+        public string DefaultForward { get; set; } = "";
+        public List<UfwRule> Rules { get; set; } = [];
+        public string RawOutput { get; set; } = "";
     }
 
     public class UfwRule
     {
-        public int    Number    { get; set; }
-        public string To        { get; set; } = "";
-        public string Action    { get; set; } = "";
+        public int Number { get; set; }
+        public string To { get; set; } = "";
+        public string Action { get; set; } = "";
         public string Direction { get; set; } = "";
-        public string From      { get; set; } = "";
+        public string From { get; set; } = "";
     }
 
     public class IptablesRule
     {
-        public int    LineNumber  { get; set; }
-        public long   Packets     { get; set; }
-        public long   Bytes       { get; set; }
-        public string Target      { get; set; } = "";
-        public string Protocol    { get; set; } = "";
-        public string In          { get; set; } = "";
-        public string Out         { get; set; } = "";
-        public string Source      { get; set; } = "";
+        public int LineNumber { get; set; }
+        public long Packets { get; set; }
+        public long Bytes { get; set; }
+        public string Target { get; set; } = "";
+        public string Protocol { get; set; } = "";
+        public string In { get; set; } = "";
+        public string Out { get; set; } = "";
+        public string Source { get; set; } = "";
         public string Destination { get; set; } = "";
-        public string Options     { get; set; } = "";
+        public string Options { get; set; } = "";
     }
 }

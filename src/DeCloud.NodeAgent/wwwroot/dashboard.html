@@ -1651,6 +1651,58 @@
             }
         }
 
+        /* Toggle switch */
+        .tog {
+            position: relative;
+            display: inline-block;
+            width: 32px;
+            height: 18px;
+            flex-shrink: 0;
+        }
+
+            .tog input {
+                opacity: 0;
+                width: 0;
+                height: 0;
+            }
+
+        .tog-slider {
+            position: absolute;
+            inset: 0;
+            cursor: pointer;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            transition: all 0.2s;
+        }
+
+            .tog-slider::before {
+                content: '';
+                position: absolute;
+                width: 12px;
+                height: 12px;
+                left: 2px;
+                top: 2px;
+                border-radius: 50%;
+                background: var(--text-muted);
+                transition: all 0.2s;
+            }
+
+        .tog input:checked + .tog-slider {
+            background: var(--primary-dim);
+            border-color: var(--primary-border);
+        }
+
+            .tog input:checked + .tog-slider::before {
+                transform: translateX(14px);
+                background: var(--primary);
+            }
+
+        .tog input:disabled + .tog-slider {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
         /* Export button */
         .export-btn {
             display: flex;
@@ -2198,6 +2250,7 @@
             network: null, ports: null, firewall: null, services: null,
             logs: null, logsVisible: false, allLogs: [],
             activeCmapTab: 'interfaces',
+            ingressBaseDomain: null,  // e.g. "vms.stackfi.tech" — set from summary
         };
 
         // ============================================================
@@ -2270,6 +2323,8 @@
         function renderBanner() {
             const d = S.summary;
             if (!d) return;
+            // Cache ingress base domain for use in VM link construction
+            if (d.ingressBaseDomain) S.ingressBaseDomain = d.ingressBaseDomain;
             set('node-id', d.nodeId ?? 'unregistered');
             set('hostname', d.hostname);
             set('os-info', d.os);
@@ -2452,13 +2507,30 @@
             card.className = `sysvm-card ${running ? 'running' : 'stopped'}`;
             badge.className = `sysvm-badge ${running ? 'running' : 'stopped'}`;
             badge.textContent = vmStateName(vm.state);
+
             // IP lives in spec.ipAddress; labels in spec.labels
             const labels = vm.spec?.labels ?? vm.labels ?? {};
             const ip = vm.spec?.ipAddress || vm.ipAddress
                 || labels['dht-advertise-ip']
                 || labels['blockstore-advertise-ip']
                 || '—';
-            detail.innerHTML = ip + (running ? ` &nbsp;<a href="http://${ip}" target="_blank" style="font-size:0.7rem;color:var(--primary)">Open →</a>` : '');
+
+            // Build the correct public URL for the dashboard link:
+            //   - If ingressBaseDomain is known → use the ingress subdomain URL
+            //     (works for CGNAT nodes: browser → Caddy → relay → node → VM)
+            //   - Otherwise fall back to direct IP (only works if node is public)
+            let dashLink = '';
+            if (running) {
+                const vmName = vm.name ?? vm.spec?.name;
+                if (S.ingressBaseDomain && vmName) {
+                    const ingressUrl = `https://${vmName}.${S.ingressBaseDomain}`;
+                    dashLink = ` &nbsp;<a href="${ingressUrl}" target="_blank" style="font-size:0.7rem;color:var(--primary)" title="${ingressUrl}">Open →</a>`;
+                } else if (ip && ip !== '—') {
+                    dashLink = ` &nbsp;<a href="http://${ip}" target="_blank" style="font-size:0.7rem;color:var(--text-muted)" title="Direct IP — may not be reachable from browser">Open (direct) →</a>`;
+                }
+            }
+
+            detail.innerHTML = `<span style="font-family:var(--mono);font-size:0.78rem">${ip}</span>${dashLink}`;
         }
 
         // ============================================================
@@ -2873,11 +2945,20 @@
             { key: 'logs', label: 'Node Agent Logs', url: '/api/dashboard/logs?lines=500' },
         ];
 
-        let exportPayload = null;  // holds the last collected snapshot
+        // Which sections are enabled — all on by default
+        const exportEnabled = new Set(EXPORT_ENDPOINTS.map(ep => ep.key));
 
+        // Raw fetched data per key — persists across re-collects so toggling
+        // an already-fetched section on/off updates the preview instantly
+        const exportData = {};
+
+        let exportPayload = null;  // the last assembled (filtered) snapshot
+
+        // ── open / close ─────────────────────────────────────────────
         function openExport() {
             $('export-overlay').classList.add('open');
-            // If we already have a payload from a previous collect, show it
+            // Build section list with toggles on first open
+            if (!$('exp-item-summary')) buildSectionList();
             if (exportPayload) renderExportPreview(exportPayload);
         }
 
@@ -2889,93 +2970,158 @@
             if (e.target === $('export-overlay')) closeExport();
         }
 
-        async function collectExport() {
-            const collectBtn = $('export-collect-btn');
-            const statusText = $('export-status-text');
-            const sections = $('export-sections');
-            const copyBtn = $('export-copy-btn');
-            const dlBtn = $('export-dl-btn');
-
-            // Disable actions while collecting
-            collectBtn.disabled = true;
-            collectBtn.textContent = 'Collecting…';
-            if (copyBtn) copyBtn.disabled = true;
-            if (dlBtn) dlBtn.disabled = true;
-
-            // Build section list UI
-            sections.innerHTML = EXPORT_ENDPOINTS.map(ep => `
-        <div class="export-section-item loading" id="exp-item-${ep.key}">
-          <span class="export-sec-dot loading" id="exp-dot-${ep.key}"></span>
-          <span class="export-sec-name">${ep.label}</span>
-          <span class="export-sec-size" id="exp-size-${ep.key}">…</span>
+        // ── build the section checklist (once, persists across collects) ──
+        function buildSectionList() {
+            const container = $('export-sections');
+            container.innerHTML = EXPORT_ENDPOINTS.map(ep => `
+        <div class="export-section-item" id="exp-item-${ep.key}" data-key="${ep.key}">
+          <label class="tog" title="Include in export">
+            <input type="checkbox" id="exp-tog-${ep.key}" checked
+                   onchange="onToggleSection('${ep.key}', this.checked)">
+            <span class="tog-slider"></span>
+          </label>
+          <span class="export-sec-dot pending" id="exp-dot-${ep.key}"></span>
+          <span class="export-sec-name" id="exp-lbl-${ep.key}">${ep.label}</span>
+          <span class="export-sec-size" id="exp-size-${ep.key}"></span>
         </div>`).join('');
+        }
 
-            $('export-preview').textContent = 'Collecting…';
-            $('export-preview-size').textContent = '';
+        // ── toggle handler — called when user flips a switch ─────────
+        function onToggleSection(key, enabled) {
+            if (enabled) {
+                exportEnabled.add(key);
+            } else {
+                exportEnabled.delete(key);
+            }
 
+            // Update item appearance immediately
+            const item = $(`exp-item-${key}`);
+            const lbl = $(`exp-lbl-${key}`);
+            const dot = $(`exp-dot-${key}`);
+            const size = $(`exp-size-${key}`);
+
+            if (item) item.style.opacity = enabled ? '1' : '0.4';
+            if (lbl) lbl.style.color = enabled ? '' : 'var(--text-muted)';
+
+            if (!enabled) {
+                if (dot) { dot.className = 'export-sec-dot pending'; }
+                if (size) { size.textContent = 'skipped'; size.style.color = 'var(--text-muted)'; }
+            } else if (exportData[key]) {
+                // Data was already fetched — restore done state
+                if (dot) { dot.className = 'export-sec-dot done'; }
+                if (size) { size.textContent = fmtBytes(JSON.stringify(exportData[key]).length); size.style.color = ''; }
+            }
+
+            // Rebuild payload from cached data and re-render preview
+            rebuildPayload();
+        }
+
+        // ── assemble payload from cached data respecting enabled set ──
+        function rebuildPayload() {
             const snapshot = {
                 _meta: {
                     collectedAt: new Date().toISOString(),
                     collectedAtUnix: Math.floor(Date.now() / 1000),
                     nodeUrl: window.location.origin,
-                    dashboardVersion: '1.0',
+                    sections: [...exportEnabled],
+                    dashboardVersion: '1.1',
                 }
             };
+            for (const ep of EXPORT_ENDPOINTS) {
+                if (exportEnabled.has(ep.key) && exportData[ep.key] !== undefined) {
+                    snapshot[ep.key] = exportData[ep.key];
+                }
+            }
+            exportPayload = snapshot;
+            if (Object.keys(snapshot).length > 1) renderExportPreview(snapshot);
+            return snapshot;
+        }
 
-            let completed = 0;
-            let errors = 0;
+        // ── collect (fetch) all enabled sections ─────────────────────
+        async function collectExport() {
+            // Build section list if it hasn't been built yet
+            if (!$('exp-item-summary')) buildSectionList();
 
-            // Fetch all endpoints concurrently
+            const collectBtn = $('export-collect-btn');
+            const statusText = $('export-status-text');
+            const copyBtn = $('export-copy-btn');
+            const dlBtn = $('export-dl-btn');
+
+            collectBtn.disabled = true;
+            collectBtn.textContent = 'Collecting…';
+            if (copyBtn) copyBtn.disabled = true;
+            if (dlBtn) dlBtn.disabled = true;
+
+            $('export-preview').textContent = 'Collecting…';
+            $('export-preview-size').textContent = '';
+
+            let completed = 0, skipped = 0, errors = 0;
+
+            // Fetch enabled sections concurrently; skip disabled ones
             const tasks = EXPORT_ENDPOINTS.map(async ep => {
+                const item = $(`exp-item-${ep.key}`);
+                const dot = $(`exp-dot-${ep.key}`);
+                const size = $(`exp-size-${ep.key}`);
+                const tog = $(`exp-tog-${ep.key}`);
+
+                if (!exportEnabled.has(ep.key)) {
+                    // Disabled — skip without touching stored data
+                    if (dot) dot.className = 'export-sec-dot pending';
+                    if (size) { size.textContent = 'skipped'; size.style.color = 'var(--text-muted)'; }
+                    if (item) item.style.opacity = '0.4';
+                    skipped++;
+                    return;
+                }
+
+                // Mark as loading
+                if (item) { item.className = 'export-section-item loading'; item.style.opacity = '1'; }
+                if (dot) dot.className = 'export-sec-dot loading';
+                if (size) { size.textContent = '…'; size.style.color = ''; }
+                if (tog) tog.disabled = true;
+
                 try {
                     const r = await fetch(ep.url);
                     const data = r.ok ? await r.json() : null;
 
-                    snapshot[ep.key] = r.ok ? data : { _error: `HTTP ${r.status}` };
+                    exportData[ep.key] = r.ok ? data : { _error: `HTTP ${r.status}` };
 
-                    const bytes = JSON.stringify(data ?? '').length;
-                    const item = $(`exp-item-${ep.key}`);
-                    const dot = $(`exp-dot-${ep.key}`);
-                    const size = $(`exp-size-${ep.key}`);
+                    const bytes = JSON.stringify(exportData[ep.key]).length;
 
                     if (r.ok) {
                         if (item) item.className = 'export-section-item done';
                         if (dot) dot.className = 'export-sec-dot done';
-                        if (size) size.textContent = fmtBytes(bytes);
+                        if (size) { size.textContent = fmtBytes(bytes); size.style.color = ''; }
                         completed++;
                     } else {
                         if (item) item.className = 'export-section-item error';
                         if (dot) dot.className = 'export-sec-dot error';
-                        if (size) size.textContent = 'error';
+                        if (size) { size.textContent = 'error'; size.style.color = 'var(--danger)'; }
                         errors++;
                     }
                 } catch (e) {
-                    snapshot[ep.key] = { _error: e.message };
-                    const item = $(`exp-item-${ep.key}`);
-                    const dot = $(`exp-dot-${ep.key}`);
-                    const size = $(`exp-size-${ep.key}`);
+                    exportData[ep.key] = { _error: e.message };
                     if (item) item.className = 'export-section-item error';
                     if (dot) dot.className = 'export-sec-dot error';
-                    if (size) size.textContent = 'failed';
+                    if (size) { size.textContent = 'failed'; size.style.color = 'var(--danger)'; }
                     errors++;
+                } finally {
+                    if (tog) tog.disabled = false;
                 }
             });
 
             await Promise.all(tasks);
 
-            exportPayload = snapshot;
-            renderExportPreview(snapshot);
+            rebuildPayload();
 
-            // Re-enable
             collectBtn.disabled = false;
             collectBtn.textContent = 'Re-collect';
             if (copyBtn) copyBtn.disabled = false;
             if (dlBtn) dlBtn.disabled = false;
 
-            const total = EXPORT_ENDPOINTS.length;
+            const enabled = EXPORT_ENDPOINTS.length - skipped;
             statusText.textContent = errors === 0
-                ? `Snapshot complete — ${total} endpoints collected`
-                : `Snapshot complete — ${completed}/${total} ok, ${errors} failed`;
+                ? `${completed}/${enabled} collected${skipped ? `, ${skipped} skipped` : ''}`
+                : `${completed}/${enabled} ok, ${errors} failed${skipped ? `, ${skipped} skipped` : ''}`;
         }
 
         function renderExportPreview(payload) {
@@ -2995,8 +3141,9 @@
         }
 
         function exportCopy() {
-            if (!exportPayload) { alert('Click "Collect All Data" first.'); return; }
-            const json = JSON.stringify(exportPayload, null, 2);
+            const payload = rebuildPayload();
+            if (Object.keys(payload).length <= 1) { alert('Click "Collect All Data" first.'); return; }
+            const json = JSON.stringify(payload, null, 2);
             navigator.clipboard?.writeText(json).then(() => {
                 const btn = $('export-copy-btn');
                 const orig = btn.textContent;
@@ -3007,18 +3154,20 @@
         }
 
         function exportDownload() {
-            if (!exportPayload) { alert('Click "Collect All Data" first.'); return; }
-            const json = JSON.stringify(exportPayload, null, 2);
-            const nodeId = exportPayload.summary?.nodeId ?? 'node';
+            const payload = rebuildPayload();
+            if (Object.keys(payload).length <= 1) { alert('Click "Collect All Data" first.'); return; }
+            const json = JSON.stringify(payload, null, 2);
+            const nodeId = payload.summary?.nodeId ?? 'node';
             const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
             const filename = `decloud-diag-${nodeId}-${ts}.json`;
             triggerDownload(json, filename, 'application/json');
         }
 
         function exportDownloadText() {
-            if (!exportPayload) { alert('Click "Collect All Data" first.'); return; }
-            const text = buildTextReport(exportPayload);
-            const nodeId = exportPayload.summary?.nodeId ?? 'node';
+            const payload = rebuildPayload();
+            if (Object.keys(payload).length <= 1) { alert('Click "Collect All Data" first.'); return; }
+            const text = buildTextReport(payload);
+            const nodeId = payload.summary?.nodeId ?? 'node';
             const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
             const filename = `decloud-diag-${nodeId}-${ts}.txt`;
             triggerDownload(text, filename, 'text/plain');
