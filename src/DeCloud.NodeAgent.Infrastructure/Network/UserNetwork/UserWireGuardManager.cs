@@ -384,11 +384,19 @@ ListenPort = {config.ListenPort}
                     $"Failed to configure WireGuard: {setResult.StandardError}");
             }
 
-            // Assign IP address
-            await _executor.ExecuteAsync(
+            // Assign IP address (idempotent — ignore if already assigned)
+            var addrResult = await _executor.ExecuteAsync(
                 "ip",
                 $"addr add {config.LocalIp}/24 dev {config.InterfaceName}",
                 ct);
+
+            if (!addrResult.Success &&
+                !addrResult.StandardError.Contains("Address already in use") &&
+                !addrResult.StandardError.Contains("File exists"))
+            {
+                throw new InvalidOperationException(
+                    $"Failed to assign IP address: {addrResult.StandardError}");
+            }
 
             // Bring interface up
             await _executor.ExecuteAsync(
