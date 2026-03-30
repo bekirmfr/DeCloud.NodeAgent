@@ -1446,6 +1446,171 @@
                 color: var(--warning);
             }
 
+        /* VM Service Health Chips */
+        .svc-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.3rem;
+            margin-top: 0.55rem;
+        }
+
+        .svc-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.2rem 0.55rem;
+            border-radius: 20px;
+            font-size: 0.68rem;
+            font-family: var(--mono);
+            font-weight: 500;
+            border: 1px solid;
+            cursor: default;
+            transition: opacity 0.15s;
+            position: relative;
+        }
+
+            .svc-chip.ready {
+                background: var(--primary-dim);
+                border-color: var(--primary-border);
+                color: var(--primary);
+            }
+
+            .svc-chip.pending {
+                background: rgba(107,114,128,0.1);
+                border-color: rgba(107,114,128,0.2);
+                color: var(--text-muted);
+            }
+
+            .svc-chip.checking {
+                background: var(--warning-dim);
+                border-color: rgba(245,158,11,0.25);
+                color: var(--warning);
+            }
+
+            .svc-chip.timedout {
+                background: var(--danger-dim);
+                border-color: rgba(239,68,68,0.2);
+                color: var(--danger);
+            }
+
+            .svc-chip.failed {
+                background: var(--danger-dim);
+                border-color: rgba(239,68,68,0.2);
+                color: var(--danger);
+            }
+
+        .svc-chip-dot {
+            width: 5px;
+            height: 5px;
+            border-radius: 50%;
+            background: currentColor;
+            flex-shrink: 0;
+        }
+
+        .svc-chip.ready .svc-chip-dot {
+            animation: pulse 2.5s infinite;
+        }
+
+        .svc-chip-tip {
+            display: none;
+            position: absolute;
+            bottom: calc(100% + 6px);
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 200;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 0.5rem 0.65rem;
+            font-size: 0.68rem;
+            white-space: nowrap;
+            font-family: var(--mono);
+            color: var(--text-secondary);
+            min-width: 180px;
+            pointer-events: none;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+        }
+
+        .svc-chip:hover .svc-chip-tip {
+            display: block;
+        }
+
+        /* Fully-ready indicator on sysvm cards */
+        .sysvm-ready-row {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            margin-top: 0.35rem;
+            font-size: 0.7rem;
+            color: var(--text-muted);
+        }
+
+        .sysvm-ready-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+            .sysvm-ready-dot.ready {
+                background: var(--primary);
+                animation: pulse 2.5s infinite;
+            }
+
+            .sysvm-ready-dot.partial {
+                background: var(--warning);
+            }
+
+            .sysvm-ready-dot.failed {
+                background: var(--danger);
+            }
+
+            .sysvm-ready-dot.pending {
+                background: var(--text-muted);
+            }
+
+        /* Health column in tenant VM table */
+        .health-cell {
+            white-space: nowrap;
+            vertical-align: middle;
+        }
+
+        .health-overall {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            font-size: 0.7rem;
+            font-weight: 600;
+            font-family: var(--mono);
+            padding: 0.15rem 0.5rem;
+            border-radius: 20px;
+            border: 1px solid;
+        }
+
+            .health-overall.ready {
+                background: var(--primary-dim);
+                border-color: var(--primary-border);
+                color: var(--primary);
+            }
+
+            .health-overall.partial {
+                background: var(--warning-dim);
+                border-color: rgba(245,158,11,0.25);
+                color: var(--warning);
+            }
+
+            .health-overall.failed {
+                background: var(--danger-dim);
+                border-color: rgba(239,68,68,0.2);
+                color: var(--danger);
+            }
+
+            .health-overall.pending {
+                background: rgba(107,114,128,0.1);
+                border-color: rgba(107,114,128,0.2);
+                color: var(--text-muted);
+            }
+
         /* Services */
         .services-grid {
             display: grid;
@@ -2141,8 +2306,8 @@
             <div class="sub-section-label">Tenant VMs</div>
             <div class="vm-table-wrap">
                 <table class="vm-table">
-                    <thead><tr><th>Name</th><th>VM ID</th><th>State</th><th>vCPU</th><th>RAM</th><th>IP</th><th>VNC Port</th><th>Uptime</th><th>Owner</th></tr></thead>
-                    <tbody id="tenant-tbody"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
+                    <thead><tr><th>Name</th><th>VM ID</th><th>State</th><th>Health</th><th>vCPU</th><th>RAM</th><th>IP</th><th>VNC Port</th><th>Uptime</th><th>Owner</th></tr></thead>
+                    <tbody id="tenant-tbody"><tr><td colspan="10" class="empty">Loading…</td></tr></tbody>
                 </table>
             </div>
         </section>
@@ -2251,6 +2416,7 @@
             logs: null, logsVisible: false, allLogs: [],
             activeCmapTab: 'interfaces',
             ingressBaseDomain: null,  // e.g. "vms.stackfi.tech" — set from summary
+            vmIngress: {},            // vmId → "https://..." from orchestrator DB
         };
 
         // ============================================================
@@ -2264,13 +2430,14 @@
         });
 
         async function loadFast() {
-            const [sum, snap, vms, net, ports, svcs] = await Promise.all([
+            const [sum, snap, vms, net, ports, svcs, vmIngress] = await Promise.all([
                 get('/api/dashboard/summary'),
                 get('/api/node/snapshot'),
                 get('/api/vms'),
                 get('/api/dashboard/network'),
                 get('/api/dashboard/ports'),
                 get('/api/dashboard/services'),
+                get('/api/dashboard/vm-ingress'),
             ]);
             S.summary = sum;
             S.snapshot = snap;
@@ -2278,6 +2445,7 @@
             S.network = net;
             S.ports = ports;
             S.services = svcs;
+            S.vmIngress = vmIngress ?? {};
             renderAll();
             $('last-refresh').textContent = 'Updated ' + new Date().toLocaleTimeString();
             if (S.logsVisible) loadLogs();
@@ -2472,22 +2640,30 @@
             // Tenant table
             const tbody = $('tenant-tbody');
             if (!tenants.length) {
-                tbody.innerHTML = '<tr><td colspan="9" class="empty">No tenant VMs</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="10" class="empty">No tenant VMs</td></tr>';
                 return;
             }
             tbody.innerHTML = tenants.map(vm => {
                 const spec = vm.spec ?? {};
                 const uptime = vm.startedAt ? fmtUptime(Math.floor((Date.now() - new Date(vm.startedAt).getTime()) / 1000)) : '—';
+                const resolved = isRunning(vm) ? resolveVmUrl(vm) : null;
+                const urlCell = resolved
+                    ? `<a href="${resolved.url}" target="_blank"
+               style="color:${resolved.source === 'direct' ? 'var(--text-muted)' : 'var(--primary)'};font-size:0.76rem"
+               title="${resolved.source === 'ingress' ? 'Ingress (DB)' : resolved.source === 'formula' ? 'Ingress (formula)' : 'Direct IP'}"
+             >${spec.ipAddress || '—'} ↗</a>`
+                    : `<span>${spec.ipAddress || '—'}</span>`;
                 return `<tr>
           <td class="vm-name-cell">${esc(vm.name ?? spec.name ?? '—')}</td>
-          <td class="vm-id-cell">${trunc(vm.vmId ?? '—', 12)}</td>
+          <td class="vm-id-cell">${truncId(vm.vmId ?? '—')}</td>
           <td>${stateBadge(vm.state)}</td>
+          <td class="health-cell">${renderHealthCell(vm)}</td>
           <td>${spec.virtualCpuCores ?? '—'}</td>
           <td>${spec.memoryBytes ? fmtBytes(spec.memoryBytes) : '—'}</td>
-          <td class="vm-ip-cell">${spec.ipAddress || '—'}</td>
+          <td class="vm-ip-cell">${urlCell}</td>
           <td>${vm.vncPort ?? '—'}</td>
           <td>${uptime}</td>
-          <td class="vm-id-cell">${trunc(spec.ownerId ?? '—', 12)}</td>
+          <td class="vm-id-cell">${truncId(spec.ownerId ?? '—')}</td>
         </tr>`;
             }).join('');
         }
@@ -2508,29 +2684,52 @@
             badge.className = `sysvm-badge ${running ? 'running' : 'stopped'}`;
             badge.textContent = vmStateName(vm.state);
 
-            // IP lives in spec.ipAddress; labels in spec.labels
             const labels = vm.spec?.labels ?? vm.labels ?? {};
             const ip = vm.spec?.ipAddress || vm.ipAddress
                 || labels['dht-advertise-ip']
                 || labels['blockstore-advertise-ip']
                 || '—';
 
-            // Build the correct public URL for the dashboard link:
-            //   - If ingressBaseDomain is known → use the ingress subdomain URL
-            //     (works for CGNAT nodes: browser → Caddy → relay → node → VM)
-            //   - Otherwise fall back to direct IP (only works if node is public)
             let dashLink = '';
             if (running) {
-                const vmName = vm.name ?? vm.spec?.name;
-                if (S.ingressBaseDomain && vmName) {
-                    const ingressUrl = `https://${vmName}.${S.ingressBaseDomain}`;
-                    dashLink = ` &nbsp;<a href="${ingressUrl}" target="_blank" style="font-size:0.7rem;color:var(--primary)" title="${ingressUrl}">Open →</a>`;
-                } else if (ip && ip !== '—') {
-                    dashLink = ` &nbsp;<a href="http://${ip}" target="_blank" style="font-size:0.7rem;color:var(--text-muted)" title="Direct IP — may not be reachable from browser">Open (direct) →</a>`;
+                const resolved = resolveVmUrl(vm);
+                if (resolved) {
+                    const title = resolved.source === 'direct'
+                        ? 'Direct IP — may not be reachable outside this host'
+                        : resolved.url;
+                    const color = resolved.source === 'direct' ? 'var(--text-muted)' : 'var(--primary)';
+                    const label = resolved.source === 'direct' ? 'Open (direct) →' : 'Open →';
+                    dashLink = ` &nbsp;<a href="${resolved.url}" target="_blank" style="font-size:0.7rem;color:${color}" title="${title}">${label}</a>`;
                 }
             }
 
             detail.innerHTML = `<span style="font-family:var(--mono);font-size:0.78rem">${ip}</span>${dashLink}`;
+
+            // Services health row
+            let servicesEl = card.querySelector('.svc-chips');
+            if (!servicesEl) {
+                servicesEl = document.createElement('div');
+                servicesEl.className = 'svc-chips';
+                card.appendChild(servicesEl);
+            }
+            const svcs = vm.services ?? [];
+            if (svcs.length) {
+                const readyAll = vm.isFullyReady;
+                const readyCount = svcs.filter(s => svcReadiness(s) === 'ready').length;
+
+                // Overall readiness indicator
+                const rdot = readyAll ? 'ready' : readyCount > 0 ? 'partial' : 'pending';
+                const rdotFailed = svcs.some(s => ['timedout', 'failed'].includes(svcReadiness(s)));
+
+                servicesEl.innerHTML =
+                    `<div class="sysvm-ready-row">
+            <span class="sysvm-ready-dot ${rdotFailed ? 'failed' : rdot}"></span>
+            <span>${readyAll ? 'All services ready' : readyCount + '/' + svcs.length + ' ready'}</span>
+          </div>` +
+                    svcs.map(s => svcChip(s)).join('');
+            } else {
+                servicesEl.innerHTML = '';
+            }
         }
 
         // ============================================================
@@ -2632,7 +2831,7 @@
                     ? '<div class="bridge-empty">No ports attached</div>'
                     : b.ports.map(p => {
                         const vmPart = p.vmId
-                            ? `<span class="bp-vmname">${esc(p.vmName ?? p.vmId)}</span><span class="bp-vmid">${trunc(p.vmId, 12)}</span>`
+                            ? `<span class="bp-vmname">${esc(p.vmName ?? p.vmId)}</span><span class="bp-vmid">${truncId(p.vmId ?? '—')}</span>`
                             : `<span class="bp-none">host / unassigned</span>`;
                         return `<div class="bridge-port-item">
                 <span class="bp-iface">${esc(p.interface)}</span>
@@ -2903,9 +3102,116 @@
             return s.length > n ? s.slice(0, n) + '…' : s;
         }
 
+        /** Shorten a UUID/hex ID to "e927…7880" style — shows both ends */
+        function truncId(id, head = 4, tail = 4) {
+            if (!id || id === '—') return '—';
+            const s = id.replace(/-/g, '');          // strip hyphens for UUID
+            if (s.length <= head + tail) return id;  // already short enough
+            return s.slice(0, head) + '…' + s.slice(-tail);
+        }
+
         function isRunning(vm) {
             // VmState.Running = 3
             return vm.state === 3;
+        }
+
+        // ── Service health helpers ────────────────────────────────────────────────
+
+        /** Normalise ServiceReadiness to a CSS class key */
+        function svcReadiness(svc) {
+            // Status can arrive as a string (serialised enum) or number
+            const s = typeof svc.status === 'string' ? svc.status.toLowerCase() : '';
+            if (s === 'ready') return 'ready';
+            if (s === 'checking') return 'checking';
+            if (s === 'timedout') return 'timedout';
+            if (s === 'failed') return 'failed';
+            return 'pending';
+        }
+
+        /** Build a single service chip with tooltip */
+        function svcChip(svc) {
+            const cls = svcReadiness(svc);
+            const label = svc.port ? `${svc.name}:${svc.port}` : svc.name;
+            const readyAt = svc.readyAt ? 'Ready ' + fmtAge(Math.floor((Date.now() - new Date(svc.readyAt).getTime()) / 1000)) : '';
+            const checkAt = svc.lastCheckAt ? 'Checked ' + fmtAge(Math.floor((Date.now() - new Date(svc.lastCheckAt).getTime()) / 1000)) : '';
+            const msg = svc.statusMessage ? esc(svc.statusMessage).slice(0, 120) : '';
+            const tipLines = [
+                `<strong>${esc(svc.name)}</strong>`,
+                svc.port ? `port: ${svc.port}${svc.protocol ? '/' + svc.protocol : ''}` : '',
+                `type: ${svc.checkType ?? ''}`,
+                readyAt,
+                checkAt,
+                msg,
+            ].filter(Boolean).join('<br>');
+
+            return `<span class="svc-chip ${cls}" title="">
+        <span class="svc-chip-dot"></span>${esc(label)}
+        <span class="svc-chip-tip">${tipLines}</span>
+      </span>`;
+        }
+
+        /** Compute overall health for a VM — returns 'ready'|'partial'|'failed'|'pending' */
+        function vmHealthClass(vm) {
+            if (!vm.services?.length) return 'pending';
+            if (vm.isFullyReady) return 'ready';
+            const states = vm.services.map(svcReadiness);
+            if (states.some(s => s === 'failed' || s === 'timedout')) return 'failed';
+            if (states.some(s => s === 'ready')) return 'partial';
+            return 'pending';
+        }
+
+        /** Render the compact health cell for the tenant VM table */
+        function renderHealthCell(vm) {
+            const svcs = vm.services ?? [];
+            if (!svcs.length) return '<span style="color:var(--text-muted);font-size:0.72rem">—</span>';
+
+            const cls = vmHealthClass(vm);
+            const label = vm.isFullyReady ? 'Ready'
+                : cls === 'failed' ? 'Failed'
+                    : cls === 'partial' ? `${svcs.filter(s => svcReadiness(s) === 'ready').length}/${svcs.length}`
+                        : 'Pending';
+
+            const chips = svcs.map(s => svcChip(s)).join('');
+            return `<div>
+        <span class="health-overall ${cls}">
+          <span class="svc-chip-dot" style="width:5px;height:5px;border-radius:50%;background:currentColor;display:inline-block"></span>
+          ${label}
+        </span>
+        <div class="svc-chips" style="margin-top:0.3rem">${chips}</div>
+      </div>`;
+        }
+
+        /**
+         * Resolve the best public URL for a VM.
+         * Priority:
+         *   1. Actual stored ingress URL from orchestrator DB (S.vmIngress)
+         *   2. Constructed from ingressBaseDomain + vm.name (same formula as server)
+         *   3. Direct internal IP with a warning (not publicly routable)
+         */
+        function resolveVmUrl(vm) {
+            const vmId = vm.vmId ?? vm.spec?.id;
+            const vmName = vm.name ?? vm.spec?.name;
+            const labels = vm.spec?.labels ?? vm.labels ?? {};
+            const ip = vm.spec?.ipAddress || vm.ipAddress
+                || labels['dht-advertise-ip']
+                || labels['blockstore-advertise-ip'];
+
+            // 1. Orchestrator DB
+            if (vmId && S.vmIngress[vmId]) {
+                return { url: S.vmIngress[vmId], source: 'ingress' };
+            }
+
+            // 2. Constructed formula
+            if (S.ingressBaseDomain && vmName) {
+                return { url: `https://${vmName}.${S.ingressBaseDomain}`, source: 'formula' };
+            }
+
+            // 3. Direct IP fallback
+            if (ip) {
+                return { url: `http://${ip}`, source: 'direct' };
+            }
+
+            return null;
         }
 
         function vmStateName(state) {
