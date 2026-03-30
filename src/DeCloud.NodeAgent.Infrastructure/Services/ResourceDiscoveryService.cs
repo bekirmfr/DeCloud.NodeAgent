@@ -23,6 +23,11 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     private static readonly TimeSpan DiscoveryCacheDuration = TimeSpan.FromHours(1);
     private int? _cachedBenchmarkScore = null;
 
+    // CPU usage measurement cache — avoids paying the 500ms delta cost on every call
+    private double _cachedCpuUsage;
+    private DateTime _cpuUsageCachedAt = DateTime.MinValue;
+    private static readonly TimeSpan CpuCacheTtl = TimeSpan.FromSeconds(4);
+
     public ResourceDiscoveryService(
         ICommandExecutor executor,
         INodeStateService nodeState,
@@ -342,6 +347,9 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         if (info.PhysicalCores == 0) info.PhysicalCores = info.LogicalCores;
         info.AvailableVCpus = info.LogicalCores;
 
+        // Measure actual CPU usage via /proc/stat delta (two 500ms samples)
+        info.UsagePercent = await MeasureCpuUsageAsync(ct);
+
         // Only run benchmark if requested (avoid repeated benchmarks)
         if (runBenchmark)
         {
@@ -372,6 +380,88 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         }
 
         return info;
+    }
+
+    // =========================================================================
+    // CPU Usage Measurement — /proc/stat delta
+    // =========================================================================
+
+    /// <summary>
+    /// Reads the aggregate "cpu" line from /proc/stat and returns (total, idle) jiffies.
+    /// Format: cpu  user nice system idle iowait irq softirq steal guest guest_nice
+    /// Reads the file directly without spawning a shell process.
+    /// </summary>
+    private static async Task<(long Total, long Idle)> ParseProcStatLineAsync(CancellationToken ct)
+    {
+        try
+        {
+            await using var fs = new FileStream("/proc/stat", FileMode.Open, FileAccess.Read,
+                                                FileShare.Read, bufferSize: 512, useAsync: true);
+            using var reader = new StreamReader(fs);
+
+            var line = await reader.ReadLineAsync(ct);
+            if (line == null || !line.StartsWith("cpu "))
+                return (0, 0);
+
+            var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            // parts[0]="cpu" [1]=user [2]=nice [3]=system [4]=idle [5]=iowait
+            // [6]=irq [7]=softirq [8]=steal
+            if (parts.Length < 5) return (0, 0);
+
+            long user = long.TryParse(parts[1], out var u) ? u : 0;
+            long nice = long.TryParse(parts[2], out var n) ? n : 0;
+            long system = long.TryParse(parts[3], out var s) ? s : 0;
+            long idle = long.TryParse(parts[4], out var id) ? id : 0;
+            long iowait = parts.Length > 5 && long.TryParse(parts[5], out var io) ? io : 0;
+            long irq = parts.Length > 6 && long.TryParse(parts[6], out var ir) ? ir : 0;
+            long softirq = parts.Length > 7 && long.TryParse(parts[7], out var si) ? si : 0;
+            long steal = parts.Length > 8 && long.TryParse(parts[8], out var st) ? st : 0;
+
+            long totalIdle = idle + iowait;
+            long total = user + nice + system + idle + iowait + irq + softirq + steal;
+
+            return (total, totalIdle);
+        }
+        catch
+        {
+            return (0, 0);
+        }
+    }
+
+    /// <summary>
+    /// Measures host CPU usage % by sampling /proc/stat twice 500ms apart
+    /// and computing the delta. This correctly reflects instantaneous CPU
+    /// activity rather than the since-boot average (which is always near 0%
+    /// on a stable server).
+    ///
+    /// Returns a cached value if the last measurement is within CpuCacheTtl
+    /// so that rapid back-to-back callers (heartbeat + dashboard snapshot)
+    /// don't each independently pay the 500ms delay.
+    /// </summary>
+    private async Task<double> MeasureCpuUsageAsync(CancellationToken ct)
+    {
+        if (DateTime.UtcNow - _cpuUsageCachedAt < CpuCacheTtl)
+            return _cachedCpuUsage;
+
+        var (total1, idle1) = await ParseProcStatLineAsync(ct);
+        if (total1 == 0) return 0;
+
+        await Task.Delay(500, ct);
+
+        var (total2, idle2) = await ParseProcStatLineAsync(ct);
+        if (total2 == 0) return 0;
+
+        var deltaTotal = total2 - total1;
+        var deltaIdle = idle2 - idle1;
+
+        if (deltaTotal <= 0) return 0;
+
+        var usage = Math.Round((1.0 - (double)deltaIdle / deltaTotal) * 100.0, 1);
+
+        _cachedCpuUsage = usage;
+        _cpuUsageCachedAt = DateTime.UtcNow;
+
+        return usage;
     }
 
     public async Task<MemoryInfo> GetMemoryInfoAsync(CancellationToken ct = default)
@@ -537,7 +627,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
             // Find nvidia-smi path first (important for WSL and systemd services)
             string nvidiaSmiPath = await FindNvidiaSmiPathAsync(ct);
-            
+
             if (string.IsNullOrEmpty(nvidiaSmiPath))
             {
                 // Cache the negative result
@@ -606,7 +696,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
                     gpus.Add(gpu);
                 }
-                
+
                 // Cache successful detection
                 if (gpus.Count > 0)
                 {
@@ -949,7 +1039,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         {
             var whichCommand = _isWindows ? "where" : "which";
             var result = await _executor.ExecuteAsync(whichCommand, "nvidia-smi", ct);
-            
+
             if (result.Success && !string.IsNullOrWhiteSpace(result.StandardOutput))
             {
                 var path = result.StandardOutput.Trim().Split('\n')[0].Trim();
