@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # DeCloud Relay NAT Manager
-# Version: 1.0.1
+# Version: 1.1.0
 # 
 # Manages iptables NAT and FORWARD rules for DeCloud relay VMs
 # Ensures proper traffic forwarding from CGNAT nodes to relay VMs
@@ -18,13 +18,14 @@ log() {
 }
 
 # =====================================================
-# Function: Clean Old Relay NAT Rules
+# Function: Clean Old Relay NAT Rules (ALL)
+# Used by the standalone 'clean' command only.
+# Do NOT call this from 'add' — use clean_stale_rules instead.
 # =====================================================
 clean_old_rules() {
     log "Cleaning old relay NAT rules..."
     
     # Remove NAT PREROUTING rules for relay ports (51820/udp + 8080/tcp)
-    # This works regardless of interface specification or destination
     local old_prerouting=$(iptables -t nat -L PREROUTING -n --line-numbers | grep -E "dpt:(51820|8080)" | grep "DNAT" | awk '{print $1}' | sort -rn)
     if [ -n "$old_prerouting" ]; then
         for line in $old_prerouting; do
@@ -65,6 +66,66 @@ clean_old_rules() {
     conntrack -D -p tcp --sport 8080 2>/dev/null || true
     
     log "✓ Cleanup complete"
+}
+
+# =====================================================
+# Function: Clean Stale Relay NAT Rules
+# Removes rules for IPs OTHER than the given current IP.
+# Called by 'add' after add_rules to remove stale entries
+# without touching the freshly-added rules for current_ip.
+# This gives zero-downtime updates when relay VM is redeployed
+# with a new virbr0 IP.
+# =====================================================
+clean_stale_rules() {
+    local current_ip="$1"
+
+    if [ -z "$current_ip" ]; then
+        log "ERROR: current_ip required for clean_stale_rules"
+        return 1
+    fi
+
+    log "Cleaning stale relay NAT rules (preserving $current_ip)..."
+
+    # Remove PREROUTING DNAT rules pointing to IPs OTHER than current
+    local old_prerouting=$(iptables -t nat -L PREROUTING -n --line-numbers \
+        | grep -E "dpt:(51820|8080)" | grep "DNAT" \
+        | grep -v "$current_ip" | awk '{print $1}' | sort -rn)
+    if [ -n "$old_prerouting" ]; then
+        for line in $old_prerouting; do
+            log "  Removing stale PREROUTING rule (line $line)"
+            iptables -t nat -D PREROUTING "$line" 2>/dev/null || true
+        done
+    else
+        log "  No stale PREROUTING rules found"
+    fi
+
+    # Remove POSTROUTING MASQUERADE rules for OTHER IPs
+    local old_postrouting=$(iptables -t nat -L POSTROUTING -n --line-numbers \
+        | grep -E "(51820|8080).*192\.168\.122" \
+        | grep -v "$current_ip" | awk '{print $1}' | sort -rn)
+    if [ -n "$old_postrouting" ]; then
+        for line in $old_postrouting; do
+            log "  Removing stale POSTROUTING rule (line $line)"
+            iptables -t nat -D POSTROUTING "$line" 2>/dev/null || true
+        done
+    else
+        log "  No stale POSTROUTING rules found"
+    fi
+
+    # Remove FORWARD rules for OTHER IPs
+    local old_forward=$(iptables -L FORWARD -n --line-numbers \
+        | grep -E "dpt:(51820|8080)" | grep "192\.168\.122" \
+        | grep -v "$current_ip" | awk '{print $1}' | sort -rn)
+    if [ -n "$old_forward" ]; then
+        for line in $old_forward; do
+            log "  Removing stale FORWARD rule (line $line)"
+            iptables -D FORWARD "$line" 2>/dev/null || true
+        done
+    else
+        log "  No stale FORWARD rules found"
+    fi
+
+    log "✓ Stale rules cleaned"
 }
 
 # =====================================================
@@ -371,11 +432,12 @@ case "${1:-}" in
             echo "  $0 add 192.168.122.164 eth0"
             exit 1
         fi
-        # Add new rules FIRST (idempotent — skipped if already exist).
-        # This ensures traffic is never interrupted during rule updates.
-        # clean_old_rules runs AFTER to remove stale duplicates.
+        # Add new rules FIRST (idempotent guards prevent duplicates).
+        # Then clean_stale_rules removes rules for OLD IPs only — never
+        # touches the rules we just added for the current IP.
+        # This gives zero-downtime updates when relay VM gets a new IP.
         add_rules "$2" "${3:-eth0}"
-        clean_old_rules
+        clean_stale_rules "$2"
         save_rules
         show_rules
         ;;
@@ -419,7 +481,7 @@ case "${1:-}" in
         ;;
     
     *)
-        echo "DeCloud Relay NAT Manager v1.0.1"
+        echo "DeCloud Relay NAT Manager v1.1.0"
         echo ""
         echo "Usage: $0 <command> [arguments]"
         echo ""
