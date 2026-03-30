@@ -100,7 +100,7 @@ public class NodeDashboardController : ControllerBase
         if (lastHeartbeat != null)
         {
             // HeartbeatDto.Timestamp — adapt property name if it differs in your build
-            try { heartbeatSecondsAgo = (long)(DateTime.UtcNow - lastHeartbeat.Timestamp).TotalSeconds; }
+            try { heartbeatSecondsAgo = (long)(DateTime.UtcNow - lastHeartbeat.Heartbeat.Timestamp).TotalSeconds; }
             catch { /* leave null if property name differs */ }
         }
 
@@ -115,7 +115,7 @@ public class NodeDashboardController : ControllerBase
             orchestrator  = new
             {
                 connected       = !string.IsNullOrEmpty(nodeId),
-                lastHeartbeatAt = lastHeartbeat != null ? lastHeartbeat.Timestamp : (DateTime?)null,
+                lastHeartbeatAt = lastHeartbeat != null ? lastHeartbeat.Heartbeat.Timestamp : (DateTime?)null,
                 secondsAgo      = heartbeatSecondsAgo
             },
             collectedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
@@ -664,7 +664,8 @@ public class NodeDashboardController : ControllerBase
 
             // Line-numbered output: num pkts bytes target prot opt in out src dst [extras]
             int offset = 0;
-            if (parts.Length > 0 && int.TryParse(parts[0], out var lineNum))
+            var lineNum = 0;
+            if (parts.Length > 0 && int.TryParse(parts[0], out lineNum))
                 offset = 1;
             else if (parts.Length > 0 && !long.TryParse(parts[0], out _))
                 continue; // not a rule line
