@@ -45,6 +45,15 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                     {
                         if (vm.Spec.VmType == VmType.Relay)
                             await CheckRelayVmNatRulesAsync();
+                    }
+
+                    // If this node has no relay VM, ensure no stale relay
+                    // NAT rules exist (e.g. from a previous deployment or
+                    // a saved /etc/iptables/rules.v4 from another node role).
+                    await CleanStaleRelayNatIfNotRelayNodeAsync(ct);
+
+                    foreach (var vm in vms)  // continue existing loop
+                    {
 
                         if (vm.State != VmState.Running && vm.State != VmState.Failed)
                         {
@@ -161,6 +170,24 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                     _natCheckLock.Release();
                     }
                 }
+            }
+        }
+
+        private async Task CleanStaleRelayNatIfNotRelayNodeAsync(CancellationToken ct)
+        {
+            var hasRelayVm = _vmManager.GetAllVms()
+                .Any(v => v.Spec.VmType == VmType.Relay &&
+                          v.State is VmState.Running or VmState.Starting or VmState.Creating);
+
+            if (hasRelayVm) return; // Relay node — rules are managed by CheckRelayVmNatRulesAsync
+
+            // No relay VM — check if any relay NAT rules exist and wipe them
+            var existingRules = await _natRuleManager.GetExistingRulesAsync(ct);
+            if (existingRules.Any(r => r.Contains("51820") || r.Contains("8080")))
+            {
+                _logger.LogWarning(
+                    "Node has relay NAT rules but no relay VM — cleaning stale rules");
+                await _natRuleManager.RemoveAllRelayNatRulesAsync(ct);
             }
         }
     }
