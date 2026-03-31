@@ -455,6 +455,36 @@ public partial class OrchestratorClient
         }
     }
 
+    /// <inheritdoc />
+    public async Task<List<SystemVmObligationDto>?> GetObligationsAsync(
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var response = await _httpClient.GetAsync("/api/nodes/me/obligations", ct);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogDebug("GetObligations returned {Status}", (int)response.StatusCode);
+                return null;
+            }
+
+            var content = await response.Content.ReadAsStringAsync(ct);
+            var json = JsonSerializer.Deserialize<JsonElement>(content, _jsonOptions);
+
+            if (!json.TryGetProperty("obligations", out var arr))
+                return null;
+
+            return JsonSerializer.Deserialize<List<SystemVmObligationDto>>(
+                arr.GetRawText(), _jsonOptions);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not fetch obligations from orchestrator");
+            return null;
+        }
+    }
+
     // =====================================================================
     // Retry Helpers
     // =====================================================================

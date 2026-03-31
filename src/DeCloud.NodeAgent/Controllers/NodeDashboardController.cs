@@ -182,6 +182,68 @@ public class NodeDashboardController : ControllerBase
     }
 
     // ==========================================================================
+    // GET /api/dashboard/obligations
+    // Fetches SystemVmObligations for this node from the orchestrator.
+    // Returns which system VM roles are obligated and their fulfilment status.
+    // Cached for 30 seconds.
+    // ==========================================================================
+
+    private static List<object> _cachedObligations = new();
+    private static DateTime _obligationsCacheExpiry = DateTime.MinValue;
+    private static readonly SemaphoreSlim _obligationsCacheLock = new(1, 1);
+
+    [HttpGet("/api/dashboard/obligations")]
+    public async Task<IActionResult> GetObligations(CancellationToken ct)
+    {
+        if (_obligationsCacheExpiry > DateTime.UtcNow)
+            return Ok(new { obligations = _cachedObligations });
+
+        if (!await _obligationsCacheLock.WaitAsync(TimeSpan.FromSeconds(2), ct))
+            return Ok(new { obligations = _cachedObligations });
+
+        try
+        {
+            if (_obligationsCacheExpiry > DateTime.UtcNow)
+                return Ok(new { obligations = _cachedObligations });
+
+            // Use the orchestrator client — its internal _httpClient already carries
+            // the node JWT in the default Authorization header, so no manual token
+            // threading is needed. This mirrors GetVmIngressUrlsAsync pattern.
+            var result = await _orchestratorClient.GetObligationsAsync(ct);
+
+            if (result != null)
+            {
+                _cachedObligations = result
+                    .Select(o => (object)new
+                    {
+                        role = o.Role,
+                        roleName = o.RoleName,
+                        vmId = o.VmId,
+                        status = o.Status,
+                        statusName = o.StatusName,
+                        failureCount = o.FailureCount,
+                        lastError = o.LastError,
+                        deployedAt = o.DeployedAt,
+                        activeAt = o.ActiveAt
+                    })
+                    .ToList();
+            }
+
+            _obligationsCacheExpiry = DateTime.UtcNow.AddSeconds(30);
+            return Ok(new { obligations = _cachedObligations });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to fetch obligations from orchestrator");
+            return Ok(new { obligations = _cachedObligations });
+        }
+        finally
+        {
+            _obligationsCacheLock.Release();
+        }
+    }
+
+    // ==========================================================================
     // GetIngressBaseDomainAsync
     // Fetches the central ingress base domain from the orchestrator's public
     // /api/central-ingress/status endpoint (AllowAnonymous — no auth needed).

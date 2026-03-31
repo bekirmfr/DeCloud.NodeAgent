@@ -1536,6 +1536,73 @@
             display: block;
         }
 
+        /* Obligation badges on sysvm cards */
+        .obl-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            font-size: 0.65rem;
+            font-weight: 700;
+            font-family: var(--mono);
+            padding: 0.15rem 0.55rem;
+            border-radius: 4px;
+            border: 1px solid;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+        }
+
+            .obl-badge.active {
+                background: var(--primary-dim);
+                border-color: var(--primary-border);
+                color: var(--primary);
+            }
+
+            .obl-badge.deploying {
+                background: var(--warning-dim);
+                border-color: rgba(245,158,11,0.3);
+                color: var(--warning);
+            }
+
+            .obl-badge.pending {
+                background: var(--warning-dim);
+                border-color: rgba(245,158,11,0.3);
+                color: var(--warning);
+            }
+
+            .obl-badge.failed {
+                background: var(--danger-dim);
+                border-color: rgba(239,68,68,0.3);
+                color: var(--danger);
+            }
+
+            .obl-badge.unmet {
+                background: var(--danger-dim);
+                border-color: rgba(239,68,68,0.3);
+                color: var(--danger);
+            }
+
+            .obl-badge.ineligible {
+                background: rgba(107,114,128,0.08);
+                border-color: rgba(107,114,128,0.15);
+                color: var(--text-muted);
+            }
+
+        /* Ineligible / not-obligated card styling */
+        .sysvm-card.ineligible {
+            opacity: 0.45;
+            border-color: var(--border) !important;
+            filter: grayscale(0.4);
+        }
+
+            .sysvm-card.ineligible .sysvm-name {
+                color: var(--text-muted);
+            }
+
+        /* Obligation unmet — running state border override */
+        .sysvm-card.unmet {
+            border-color: rgba(239,68,68,0.35) !important;
+        }
+
         /* Fully-ready indicator on sysvm cards */
         .sysvm-ready-row {
             display: flex;
@@ -2418,6 +2485,7 @@
             activeCmapTab: 'interfaces',
             ingressBaseDomain: null,  // e.g. "vms.stackfi.tech" — set from summary
             vmIngress: {},            // vmId → "https://..." from orchestrator DB
+            obligations: [],          // SystemVmObligations from orchestrator
         };
 
         // ============================================================
@@ -2431,7 +2499,7 @@
         });
 
         async function loadFast() {
-            const [sum, snap, vms, net, ports, svcs, vmIngress] = await Promise.all([
+            const [sum, snap, vms, net, ports, svcs, vmIngress, oblResp] = await Promise.all([
                 get('/api/dashboard/summary'),
                 get('/api/node/snapshot'),
                 get('/api/vms'),
@@ -2439,6 +2507,7 @@
                 get('/api/dashboard/ports'),
                 get('/api/dashboard/services'),
                 get('/api/dashboard/vm-ingress'),
+                get('/api/dashboard/obligations'),
             ]);
             S.summary = sum;
             S.snapshot = snap;
@@ -2447,6 +2516,7 @@
             S.ports = ports;
             S.services = svcs;
             S.vmIngress = vmIngress ?? {};
+            S.obligations = oblResp?.obligations ?? [];
             renderAll();
             $('last-refresh').textContent = 'Updated ' + new Date().toLocaleTimeString();
             if (S.logsVisible) loadLogs();
@@ -2669,59 +2739,110 @@
             }).join('');
         }
 
+        // Maps dashboard card key → SystemVmRole integer
+        const ROLE_FOR_KEY = { relay: 1, dht: 0, bs: 2 };
+
         function paintSysVm(key, vm) {
             const card = $(`svc-${key}`);
             const badge = $(`svc-${key}-badge`);
             const detail = $(`svc-${key}-detail`);
             if (!card) return;
-            if (!vm) {
-                card.className = 'sysvm-card stopped';
-                badge.className = 'sysvm-badge other'; badge.textContent = 'Not deployed';
-                detail.textContent = '—';
+
+            const roleInt = ROLE_FOR_KEY[key] ?? -1;
+            const obl = S.obligations.find(o => o.role === roleInt);
+
+            // ── No obligation → node not eligible for this role ─────────────────────
+            if (!obl) {
+                card.className = 'sysvm-card ineligible';
+                badge.className = 'sysvm-badge other';
+                badge.innerHTML = '<span class="obl-badge ineligible">Not eligible</span>';
+                detail.textContent = 'This node has no obligation for this role.';
+                // Clear any leftover service chips
+                const chips = card.querySelector('.svc-chips');
+                if (chips) chips.innerHTML = '';
                 return;
             }
-            const running = isRunning(vm);
-            card.className = `sysvm-card ${running ? 'running' : 'stopped'}`;
-            badge.className = `sysvm-badge ${running ? 'running' : 'stopped'}`;
-            badge.textContent = vmStateName(vm.state);
 
-            const labels = vm.spec?.labels ?? vm.labels ?? {};
-            const ip = vm.spec?.ipAddress || vm.ipAddress
-                || labels['dht-advertise-ip']
-                || labels['blockstore-advertise-ip']
-                || '—';
+            // ── Obligation exists — determine display state ───────────────────────────
+            const oblStatus = obl.status;     // 0=Pending 1=Deploying 2=Active
+            const oblName = obl.statusName; // "Pending" | "Deploying" | "Active" | "Failed"
+            const running = vm ? isRunning(vm) : false;
 
-            let dashLink = '';
+            // Obligation Active but VM not running = unmet obligation
+            const isUnmet = oblStatus === 2 && !running;
+
+            // Card border class
+            let cardClass = 'sysvm-card';
+            if (isUnmet) cardClass += ' unmet';
+            else if (running) cardClass += ' running';
+            else cardClass += ' stopped';
+            card.className = cardClass;
+
+            // State badge: shows obligation status when VM not deployed, VM state when running
+            badge.className = 'sysvm-badge other';
+            let badgeHtml;
             if (running) {
-                const resolved = resolveVmUrl(vm);
-                if (resolved) {
-                    const title = resolved.source === 'direct'
-                        ? 'Direct IP — may not be reachable outside this host'
-                        : resolved.url;
-                    const color = resolved.source === 'direct' ? 'var(--text-muted)' : 'var(--primary)';
-                    const label = resolved.source === 'direct' ? 'Open (direct) →' : 'Open →';
-                    dashLink = ` &nbsp;<a href="${resolved.url}" target="_blank" style="font-size:0.7rem;color:${color}" title="${title}">${label}</a>`;
+                badgeHtml = `<span class="obl-badge active">Running</span>`;
+            } else if (isUnmet) {
+                badgeHtml = `<span class="obl-badge unmet" title="Obligation Active but VM not running">Unmet</span>`;
+            } else if (oblStatus === 1) {
+                badgeHtml = `<span class="obl-badge deploying">Deploying</span>`;
+            } else if (oblStatus === 0) {
+                badgeHtml = `<span class="obl-badge pending">Pending</span>`;
+            } else if (oblStatus === 3 || obl.failureCount > 0) {
+                const errTip = obl.lastError ? esc(obl.lastError).slice(0, 120) : '';
+                badgeHtml = `<span class="obl-badge failed" title="${errTip}">Failed (${obl.failureCount}x)</span>`;
+            } else {
+                badgeHtml = `<span class="obl-badge ${oblName.toLowerCase()}">${oblName}</span>`;
+            }
+            badge.innerHTML = badgeHtml;
+
+            // ── Detail row: IP + open link ────────────────────────────────────────────
+            const labels = vm?.spec?.labels ?? vm?.labels ?? {};
+            const ip = vm?.spec?.ipAddress || vm?.ipAddress
+                || labels['dht-advertise-ip']
+                || labels['blockstore-advertise-ip'];
+
+            let detailHtml = '';
+            if (ip) {
+                let dashLink = '';
+                if (running) {
+                    const resolved = resolveVmUrl(vm);
+                    if (resolved) {
+                        const title = resolved.source === 'direct' ? 'Direct IP — may not be reachable outside this host' : resolved.url;
+                        const color = resolved.source === 'direct' ? 'var(--text-muted)' : 'var(--primary)';
+                        const label = resolved.source === 'direct' ? 'Open (direct) →' : 'Open →';
+                        dashLink = ` &nbsp;<a href="${resolved.url}" target="_blank" style="font-size:0.7rem;color:${color}" title="${title}">${label}</a>`;
+                    }
                 }
+                detailHtml = `<span style="font-family:var(--mono);font-size:0.78rem">${esc(ip)}</span>${dashLink}`;
+            } else if (obl.vmId) {
+                detailHtml = `<span style="font-size:0.73rem;color:var(--text-muted)">VM ${truncId(obl.vmId)} — booting</span>`;
+            } else if (oblStatus === 0) {
+                detailHtml = `<span style="font-size:0.73rem;color:var(--text-muted)">Waiting for scheduler…</span>`;
+            } else {
+                detailHtml = `<span style="font-size:0.73rem;color:var(--text-muted)">—</span>`;
             }
 
-            detail.innerHTML = `<span style="font-family:var(--mono);font-size:0.78rem">${ip}</span>${dashLink}`;
+            // Add obligation error note if any failures
+            if (obl.failureCount > 0 && obl.lastError) {
+                detailHtml += `<div style="font-size:0.68rem;color:var(--danger);margin-top:0.2rem;font-family:var(--mono)">${esc(obl.lastError).slice(0, 80)}</div>`;
+            }
+            detail.innerHTML = detailHtml;
 
-            // Services health row
+            // ── Service health chips (only when VM is present) ────────────────────────
             let servicesEl = card.querySelector('.svc-chips');
             if (!servicesEl) {
                 servicesEl = document.createElement('div');
                 servicesEl.className = 'svc-chips';
                 card.appendChild(servicesEl);
             }
-            const svcs = vm.services ?? [];
+            const svcs = vm?.services ?? [];
             if (svcs.length) {
                 const readyAll = vm.isFullyReady;
                 const readyCount = svcs.filter(s => svcReadiness(s) === 'ready').length;
-
-                // Overall readiness indicator
-                const rdot = readyAll ? 'ready' : readyCount > 0 ? 'partial' : 'pending';
                 const rdotFailed = svcs.some(s => ['timedout', 'failed'].includes(svcReadiness(s)));
-
+                const rdot = readyAll ? 'ready' : readyCount > 0 ? 'partial' : 'pending';
                 servicesEl.innerHTML =
                     `<div class="sysvm-ready-row">
             <span class="sysvm-ready-dot ${rdotFailed ? 'failed' : rdot}"></span>

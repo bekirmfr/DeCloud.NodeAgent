@@ -292,6 +292,31 @@ public interface IOrchestratorClient
     /// VMs without a route are omitted. Returns empty dict on failure.
     /// </summary>
     Task<Dictionary<string, string>> GetVmIngressUrlsAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Fetch SystemVmObligations for this node from the orchestrator.
+    /// Endpoint: GET /api/nodes/me/obligations
+    /// Returns null on failure (dashboard falls back to cached data).
+    /// </summary>
+    Task<List<SystemVmObligationDto>?> GetObligationsAsync(CancellationToken ct = default);
+}
+
+/// <summary>
+/// DTO for a single system VM obligation, returned by GET /api/nodes/me/obligations.
+/// Mirrors the orchestrator's SystemVmObligation model without introducing a dependency
+/// on the Orchestrator project from the Core layer.
+/// </summary>
+public class SystemVmObligationDto
+{
+    public int Role { get; set; }
+    public string RoleName { get; set; } = "";
+    public string? VmId { get; set; }
+    public int Status { get; set; }
+    public string StatusName { get; set; } = "";
+    public int FailureCount { get; set; }
+    public string? LastError { get; set; }
+    public string? DeployedAt { get; set; }
+    public string? ActiveAt { get; set; }
 }
 
 /// <summary>
