@@ -1039,6 +1039,35 @@ func (n *BlockNode) loadExistingAccessTimes(ctx context.Context) {
 	}
 }
 
+// reannounceExistingBlocks re-publishes DHT provider records for all locally
+// stored blocks after startup. Called after connectBootstrapPeers so the
+// routing table has time to populate before Provide() calls are issued.
+// Handles: binary restart, DHT VM redeployment, 24h record expiry.
+func (n *BlockNode) reannounceExistingBlocks(ctx context.Context) {
+    time.Sleep(15 * time.Second) // wait for Kademlia routing table to populate
+
+    ch, err := n.bstore.AllKeysChan(ctx)
+    if err != nil {
+        log.Printf("reannounce: failed to list blocks: %v", err)
+        return
+    }
+
+    count := 0
+    for c := range ch {
+        if ctx.Err() != nil {
+            return
+        }
+        announceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+        _ = n.dht.Provide(announceCtx, c, true)
+        cancel()
+        count++
+        if count%100 == 0 {
+            log.Printf("reannounce: %d blocks announced to DHT", count)
+        }
+    }
+    log.Printf("reannounce: complete — %d blocks re-announced to DHT", count)
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // main
 // ═══════════════════════════════════════════════════════════════════
@@ -1063,6 +1092,7 @@ func main() {
 	node.loadExistingAccessTimes(ctx)
 	node.loadExistingManifests(ctx)
 	node.connectBootstrapPeers(ctx)
+	go node.reannounceExistingBlocks(ctx)
 
 	if err := node.startGossipSubSubscription(ctx); err != nil {
 		log.Printf("Warning: GossipSub subscription failed: %v", err)
