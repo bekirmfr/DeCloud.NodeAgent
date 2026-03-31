@@ -10,7 +10,6 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using Orchestrator.Models;
-using Org.BouncyCastle.Asn1.Ocsp;
 using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Services;
@@ -424,6 +423,35 @@ public partial class OrchestratorClient
         {
             _logger.LogError(ex, "Error during node synchronization");
             return NodeSyncResult.Failed($"Synchronization error: {ex.Message}");
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<Dictionary<string, string>> GetVmIngressUrlsAsync(
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var response = await _httpClient.GetAsync("/api/nodes/me/vm-ingress", ct);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogDebug(
+                    "GetVmIngressUrls returned {Status}", (int)response.StatusCode);
+                return new Dictionary<string, string>();
+            }
+
+            var content = await response.Content.ReadAsStringAsync(ct);
+
+            var result = JsonSerializer.Deserialize<Dictionary<string, string>>(
+                content, _jsonOptions);
+
+            return result ?? new Dictionary<string, string>();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not fetch VM ingress URLs from orchestrator");
+            return new Dictionary<string, string>();
         }
     }
 

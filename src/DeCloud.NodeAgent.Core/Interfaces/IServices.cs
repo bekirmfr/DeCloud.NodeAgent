@@ -283,6 +283,15 @@ public interface IOrchestratorClient
         bool isSeeding = false,
         int replicationFactor = 3,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Fetch ingress public URLs for all VMs on this node from the orchestrator.
+    /// Endpoint: GET /api/nodes/me/vm-ingress
+    ///
+    /// Returns a vmId → publicUrl map for VMs that have an active ingress route.
+    /// VMs without a route are omitted. Returns empty dict on failure.
+    /// </summary>
+    Task<Dictionary<string, string>> GetVmIngressUrlsAsync(CancellationToken ct = default);
 }
 
 /// <summary>

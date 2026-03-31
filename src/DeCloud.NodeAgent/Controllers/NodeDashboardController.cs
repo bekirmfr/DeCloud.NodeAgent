@@ -136,6 +136,52 @@ public class NodeDashboardController : ControllerBase
     }
 
     // ==========================================================================
+    // GET /api/dashboard/vm-ingress
+    // Returns a vmId → publicUrl map for all VMs on this node, sourced from the
+    // orchestrator database. Cached for 30 seconds.
+    // Falls back gracefully: orchestrator unreachable → empty dict (JS handles
+    // fallback to formula).
+    // ==========================================================================
+
+    private static Dictionary<string, string> _cachedVmIngress = new();
+    private static DateTime _vmIngressCacheExpiry = DateTime.MinValue;
+    private static readonly SemaphoreSlim _vmIngressCacheLock = new(1, 1);
+
+    [HttpGet("/api/dashboard/vm-ingress")]
+    public async Task<IActionResult> GetVmIngress(CancellationToken ct)
+    {
+        // Fast path — valid cache
+        if (_vmIngressCacheExpiry > DateTime.UtcNow)
+            return Ok(_cachedVmIngress);
+
+        if (!await _vmIngressCacheLock.WaitAsync(TimeSpan.FromSeconds(2), ct))
+            return Ok(_cachedVmIngress); // return stale rather than block
+
+        try
+        {
+            // Re-check inside lock
+            if (_vmIngressCacheExpiry > DateTime.UtcNow)
+                return Ok(_cachedVmIngress);
+
+            var urls = await _orchestratorClient.GetVmIngressUrlsAsync(ct);
+
+            _cachedVmIngress = urls;
+            _vmIngressCacheExpiry = DateTime.UtcNow.AddSeconds(30);
+
+            return Ok(urls);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to fetch VM ingress URLs");
+            return Ok(_cachedVmIngress); // return whatever we have
+        }
+        finally
+        {
+            _vmIngressCacheLock.Release();
+        }
+    }
+
+    // ==========================================================================
     // GetIngressBaseDomainAsync
     // Fetches the central ingress base domain from the orchestrator's public
     // /api/central-ingress/status endpoint (AllowAnonymous — no auth needed).
@@ -299,43 +345,75 @@ public class NodeDashboardController : ControllerBase
     // ==========================================================================
     // GET /api/dashboard/firewall
     // UFW status + rules, iptables INPUT / FORWARD / NAT POSTROUTING chains
+    // All commands are wrapped individually — ufw/iptables may not be installed
+    // on every host (minimal installs, containers, WSL). Missing binaries return
+    // a graceful "not available" result rather than a 500.
     // ==========================================================================
 
     [HttpGet("/api/dashboard/firewall")]
     public async Task<IActionResult> GetFirewall(CancellationToken ct)
     {
-        var ufwTask = _executor.ExecuteAsync("ufw", "status verbose", TimeSpan.FromSeconds(5), ct);
-        var inputTask = _executor.ExecuteAsync("iptables", "-L INPUT -v -n --line-numbers", TimeSpan.FromSeconds(5), ct);
-        var fwdTask = _executor.ExecuteAsync("iptables", "-L FORWARD -v -n --line-numbers", TimeSpan.FromSeconds(5), ct);
-        var natTask = _executor.ExecuteAsync("iptables", "-t nat -L POSTROUTING -v -n --line-numbers", TimeSpan.FromSeconds(5), ct);
+        static async Task<CommandResult> SafeRun(
+            ICommandExecutor exec, string cmd, string args, TimeSpan timeout, CancellationToken ct)
+        {
+            try
+            {
+                return await exec.ExecuteAsync(cmd, args, timeout, ct);
+            }
+            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception
+                                            or System.IO.IOException
+                                            or InvalidOperationException)
+            {
+                // Binary not found or not executable — return empty success-like result
+                return new CommandResult
+                {
+                    ExitCode = 127,  // POSIX "command not found"
+                    StandardOutput = "",
+                    StandardError = $"{cmd}: command not found"
+                };
+            }
+        }
+
+        var ufwTask = SafeRun(_executor, "ufw", "status verbose", TimeSpan.FromSeconds(5), ct);
+        var inputTask = SafeRun(_executor, "iptables", "-L INPUT -v -n --line-numbers", TimeSpan.FromSeconds(5), ct);
+        var fwdTask = SafeRun(_executor, "iptables", "-L FORWARD -v -n --line-numbers", TimeSpan.FromSeconds(5), ct);
+        var natTask = SafeRun(_executor, "iptables", "-t nat -L POSTROUTING -v -n --line-numbers", TimeSpan.FromSeconds(5), ct);
 
         await Task.WhenAll(ufwTask, inputTask, fwdTask, natTask);
 
+        var ufwResult = ufwTask.Result;
+        var inputResult = inputTask.Result;
+        var fwdResult = fwdTask.Result;
+        var natResult = natTask.Result;
+
         return Ok(new
         {
-            ufw = ParseUfwOutput(ufwTask.Result.StandardOutput),
+            ufw = ParseUfwOutput(ufwResult.Success ? ufwResult.StandardOutput : ""),
             iptables = new
             {
                 input = new
                 {
                     chain = "INPUT",
-                    policy = ParseChainPolicy(inputTask.Result.StandardOutput),
-                    rules = ParseIptablesRules(inputTask.Result.StandardOutput),
-                    raw = inputTask.Result.StandardOutput
+                    policy = ParseChainPolicy(inputResult.StandardOutput),
+                    rules = ParseIptablesRules(inputResult.StandardOutput),
+                    raw = inputResult.StandardOutput,
+                    available = inputResult.ExitCode != 127
                 },
                 forward = new
                 {
                     chain = "FORWARD",
-                    policy = ParseChainPolicy(fwdTask.Result.StandardOutput),
-                    rules = ParseIptablesRules(fwdTask.Result.StandardOutput),
-                    raw = fwdTask.Result.StandardOutput
+                    policy = ParseChainPolicy(fwdResult.StandardOutput),
+                    rules = ParseIptablesRules(fwdResult.StandardOutput),
+                    raw = fwdResult.StandardOutput,
+                    available = fwdResult.ExitCode != 127
                 },
                 natPostrouting = new
                 {
                     chain = "POSTROUTING (nat)",
-                    policy = ParseChainPolicy(natTask.Result.StandardOutput),
-                    rules = ParseIptablesRules(natTask.Result.StandardOutput),
-                    raw = natTask.Result.StandardOutput
+                    policy = ParseChainPolicy(natResult.StandardOutput),
+                    rules = ParseIptablesRules(natResult.StandardOutput),
+                    raw = natResult.StandardOutput,
+                    available = natResult.ExitCode != 127
                 }
             },
             collectedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds()

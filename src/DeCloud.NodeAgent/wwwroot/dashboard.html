@@ -2936,6 +2936,14 @@
         function renderIptChain(bodyId, polId, chain) {
             const tbody = $(bodyId); if (!tbody) return;
             const polEl = $(polId);
+
+            // available=false means the binary (iptables) was not found on this host
+            if (chain?.available === false) {
+                polEl && (polEl.textContent = '—');
+                tbody.innerHTML = '<tr><td colspan="9" class="empty" style="color:var(--text-muted)">iptables not available on this host</td></tr>';
+                return;
+            }
+
             if (polEl && chain?.policy) {
                 polEl.textContent = chain.policy;
                 polEl.className = `fw-policy-pill ${chain.policy}`;
