@@ -487,6 +487,23 @@ func startAPIServer(port string, state *NodeState) {
 			}
 		}
 
+		// Trigger Kademlia routing table refresh after new connections.
+		// host.Connect() establishes the libp2p connection but does not
+		// walk the new peer's k-buckets. Bootstrap() does the DHT walk
+		// so routingTable > 0 immediately — essential for FindProviders
+		// and provider record announcement to work correctly.
+		if connected > 0 {
+			go func() {
+				refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := state.dht.Bootstrap(refreshCtx); err != nil {
+					log.Printf("POST /connect: DHT bootstrap refresh error: %v", err)
+				} else {
+					log.Printf("POST /connect: DHT routing table refreshed after %d new peer(s)", connected)
+				}
+			}()
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"results":   results,
@@ -571,11 +588,7 @@ func startAPIServer(port string, state *NodeState) {
 		})
 	})
 
-	// Bind to all interfaces so the orchestrator can reach this API
-	// via the WireGuard mesh (10.20.x.x). The API port is not exposed
-	// via nginx and is not reachable from the public internet —
-	// only WG mesh peers (orchestrator, relay, system VMs) can connect.
-	addr := fmt.Sprintf("0.0.0.0:%s", port)
+	addr := fmt.Sprintf("127.0.0.1:%s", port)
 	log.Printf("HTTP API listening on %s", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("HTTP API server failed: %v", err)
