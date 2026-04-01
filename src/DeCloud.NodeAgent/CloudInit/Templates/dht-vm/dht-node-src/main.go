@@ -519,18 +519,31 @@ func startAPIServer(port string, state *NodeState) {
 		}
 
 		var payload struct {
-			Data string `json:"data"`
+			Topic string `json:"topic"` // optional — defaults to eventTopic
+			Data  string `json:"data"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
 
-		state.mu.RLock()
-		topic := state.eventTopic
-		state.mu.RUnlock()
+		var publishTopic *pubsub.Topic
+		if payload.Topic == "" {
+			// Default: region events topic (backwards compatible)
+			state.mu.RLock()
+			publishTopic = state.eventTopic
+			state.mu.RUnlock()
+		} else {
+			// Arbitrary topic — join on demand
+			t, err := state.pubsub.Join(payload.Topic)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("join topic failed: %v", err), http.StatusInternalServerError)
+				return
+			}
+			publishTopic = t
+		}
 
-		if err := topic.Publish(context.Background(), []byte(payload.Data)); err != nil {
+		if err := publishTopic.Publish(context.Background(), []byte(payload.Data)); err != nil {
 			http.Error(w, fmt.Sprintf("publish failed: %v", err), http.StatusInternalServerError)
 			return
 		}

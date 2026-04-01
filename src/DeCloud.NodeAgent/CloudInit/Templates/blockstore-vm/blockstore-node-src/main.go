@@ -16,7 +16,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -58,8 +60,9 @@ import (
 // ═══════════════════════════════════════════════════════════════════
 
 const (
-	GossipSubTopic  = "decloud/blockstore/new-blocks"
-	IdentityKeyFile = "identity.key"
+	GossipSubTopic        = "decloud/blockstore/new-blocks"
+	GossipSubVmDelTopic   = "decloud/blockstore/vm-deleted"
+	IdentityKeyFile       = "identity.key"
 	PeerIDFile      = "peer-id"
 	BlocksSubdir    = "blocks"
 	DagsSubdir      = "dags"   // ResourceManifest JSON files
@@ -857,11 +860,8 @@ func (n *BlockNode) handleBlocks(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleOwnerDelete: DELETE /owners/{vmId}
-// Deletes all blocks associated with a VM owner, withdraws DHT provider
-// records, and removes the owner index file. Called by NodeAgent when a
-// VM is deleted — single HTTP call replaces N individual block deletes.
-// Reference counting: a block is only evicted from FlatFS when all of its
-// owner references are removed (rare — VM overlays produce unique blocks).
+// HTTP entry point for owner-indexed block deletion.
+// Delegates to deleteOwnerBlocks which is shared with the GossipSub path.
 func (n *BlockNode) handleOwnerDelete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
 		http.Error(w, "DELETE only", http.StatusMethodNotAllowed)
@@ -873,82 +873,17 @@ func (n *BlockNode) handleOwnerDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing vmId", http.StatusBadRequest)
 		return
 	}
- 
+
+	// Check owner file exists before delegating — return 204 if nothing to do
 	ownerFile := filepath.Join(StorageDir, OwnersSubdir, vmId+".cids")
-	data, err := os.ReadFile(ownerFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// No owner file — nothing to delete, idempotent success
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		http.Error(w, fmt.Sprintf("read owner file: %v", err), http.StatusInternalServerError)
+	if _, err := os.Stat(ownerFile); os.IsNotExist(err) {
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
- 
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	ctx := r.Context()
-	deleted := 0
-	skipped := 0
- 
-	for _, cidStr := range lines {
-		cidStr = strings.TrimSpace(cidStr)
-		if cidStr == "" {
-			continue
-		}
-		c, err := cid.Decode(cidStr)
-		if err != nil {
-			log.Printf("owner delete: invalid CID %q: %v", cidStr, err)
-			continue
-		}
- 
-		// Reference counting: check if any other owner still references this CID.
-		// Scan all other owner files for this CID before deleting from FlatFS.
-		// In practice VM overlay blocks are unique so this is rarely needed.
-		otherOwnerRefs, scanErr := n.cidHasOtherOwners(vmId, cidStr)
-		if scanErr != nil {
-			log.Printf("owner delete: ref-count scan failed for %s: %v", cidStr[:12], scanErr)
-		}
-		if otherOwnerRefs {
-			skipped++
-			continue
-		}
- 
-		// Delete from FlatFS
-		if err := n.bstore.DeleteBlock(ctx, c); err != nil {
-			log.Printf("owner delete: FlatFS delete failed for %s: %v", cidStr[:12], err)
-			continue
-		}
- 
-		// Clean up LRU tracking
-		n.accessMu.Lock()
-		delete(n.accessTimes, cidStr)
-		delete(n.blockSizes, cidStr)
-		n.accessMu.Unlock()
- 
-		// Withdraw DHT provider record (best-effort, non-blocking)
-		go func(c cid.Cid) {
-			withdrawCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			_ = n.dht.Provide(withdrawCtx, c, false)
-		}(c)
- 
-		deleted++
-	}
- 
-	// Remove owner index file
-	if err := os.Remove(ownerFile); err != nil && !os.IsNotExist(err) {
-		log.Printf("owner delete: failed to remove owner file %s: %v", ownerFile, err)
-	}
- 
-	log.Printf("owner delete: VM %s — deleted %d blocks, skipped %d (other owners)", vmId, deleted, skipped)
-	json.NewEncoder(w).Encode(map[string]any{
-		"vmId":    vmId,
-		"deleted": deleted,
-		"skipped": skipped,
-	})
+
+	n.deleteOwnerBlocks(r.Context(), vmId)
+	w.WriteHeader(http.StatusNoContent)
 }
- 
 // cidHasOtherOwners returns true if any owner file other than excludeOwner
 // contains the given CID string. Used for reference counting on delete.
 func (n *BlockNode) cidHasOtherOwners(excludeOwner, cidStr string) (bool, error) {
@@ -1237,7 +1172,7 @@ func main() {
 	if err := node.startGossipSubSubscription(ctx); err != nil {
 		log.Printf("Warning: GossipSub subscription failed: %v", err)
 	}
-
+	go node.startVmDeletedSubscription(ctx)
 	node.startHTTPServer(ctx)
 	go node.startGCLoop(ctx)
 
@@ -1253,4 +1188,156 @@ func main() {
 	log.Println("Shutting down block store node...")
 	cancel()
 	time.Sleep(500 * time.Millisecond)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// VM-deleted GossipSub event handling
+// ═══════════════════════════════════════════════════════════════════
+
+type VmDeletedEvent struct {
+	VmId      string `json:"vmId"`
+	NodeId    string `json:"nodeId"`
+	Timestamp string `json:"timestamp"`
+	Signature string `json:"signature"`
+}
+
+// startVmDeletedSubscription subscribes to decloud/blockstore/vm-deleted.
+// When a verified event is received, all blocks owned by that VM are evicted.
+func (n *BlockNode) startVmDeletedSubscription(ctx context.Context) {
+	topic, err := n.pubsub.Join(GossipSubVmDelTopic)
+	if err != nil {
+		log.Printf("vm-deleted: failed to join topic: %v", err)
+		return
+	}
+	sub, err := topic.Subscribe()
+	if err != nil {
+		log.Printf("vm-deleted: failed to subscribe: %v", err)
+		return
+	}
+	log.Printf("Subscribed to GossipSub topic: %s", GossipSubVmDelTopic)
+
+	for {
+		msg, err := sub.Next(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("vm-deleted: receive error: %v", err)
+			continue
+		}
+		// Skip messages we published ourselves
+		if msg.ReceivedFrom == n.host.ID() {
+			continue
+		}
+		var evt VmDeletedEvent
+		if err := json.Unmarshal(msg.Data, &evt); err != nil {
+			log.Printf("vm-deleted: invalid payload: %v", err)
+			continue
+		}
+		if err := n.verifyVmDeletedEvent(evt); err != nil {
+			log.Printf("vm-deleted: rejected event for VM %s: %v",
+				evt.VmId, err)
+			continue
+		}
+		go n.deleteOwnerBlocks(ctx, evt.VmId)
+	}
+}
+
+// verifyVmDeletedEvent validates HMAC signature and timestamp freshness.
+// Signature: HMAC-SHA256(authToken, vmId:nodeId:timestamp)
+// Timestamp must be within ±5 minutes to prevent replay attacks.
+func (n *BlockNode) verifyVmDeletedEvent(evt VmDeletedEvent) error {
+	if evt.VmId == "" || evt.NodeId == "" || evt.Timestamp == "" || evt.Signature == "" {
+		return fmt.Errorf("missing required fields")
+	}
+
+	// Replay protection
+	ts, err := time.Parse(time.RFC3339, evt.Timestamp)
+	if err != nil {
+		return fmt.Errorf("invalid timestamp: %w", err)
+	}
+	diff := time.Since(ts)
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > 5*time.Minute {
+		return fmt.Errorf("timestamp too old or too far in future: %v", diff)
+	}
+
+	// HMAC verification
+	if n.cfg.AuthToken == "" {
+		return fmt.Errorf("no auth token configured — cannot verify event")
+	}
+	message := fmt.Sprintf("%s:%s:%s", evt.VmId, evt.NodeId, evt.Timestamp)
+	mac := hmac.New(sha256.New, []byte(n.cfg.AuthToken))
+	mac.Write([]byte(message))
+	expected := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(evt.Signature), []byte(expected)) {
+		return fmt.Errorf("invalid signature")
+	}
+	return nil
+}
+
+// deleteOwnerBlocks evicts all FlatFS blocks owned by vmId, withdraws
+// their DHT provider records, and removes the owner index file.
+// Shared by handleOwnerDelete (HTTP) and startVmDeletedSubscription (GossipSub).
+func (n *BlockNode) deleteOwnerBlocks(ctx context.Context, vmId string) {
+	ownerFile := filepath.Join(StorageDir, OwnersSubdir, vmId+".cids")
+	data, err := os.ReadFile(ownerFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return // no blocks for this VM on this node — normal case
+		}
+		log.Printf("deleteOwnerBlocks: read owner file failed for VM %s: %v", vmId, err)
+		return
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	deleted := 0
+	skipped := 0
+
+	for _, cidStr := range lines {
+		cidStr = strings.TrimSpace(cidStr)
+		if cidStr == "" {
+			continue
+		}
+		c, err := cid.Decode(cidStr)
+		if err != nil {
+			log.Printf("deleteOwnerBlocks: invalid CID %q: %v", cidStr, err)
+			continue
+		}
+
+		// Reference counting — skip if another VM also owns this block
+		others, _ := n.cidHasOtherOwners(vmId, cidStr)
+		if others {
+			skipped++
+			continue
+		}
+
+		if err := n.bstore.DeleteBlock(ctx, c); err != nil {
+			log.Printf("deleteOwnerBlocks: FlatFS delete failed for %s: %v", cidStr[:12], err)
+			continue
+		}
+
+		n.accessMu.Lock()
+		delete(n.accessTimes, cidStr)
+		delete(n.blockSizes, cidStr)
+		n.accessMu.Unlock()
+
+		// Withdraw DHT provider record (best-effort)
+		go func(c cid.Cid) {
+			wCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = n.dht.Provide(wCtx, c, false)
+		}(c)
+
+		deleted++
+	}
+
+	if err := os.Remove(ownerFile); err != nil && !os.IsNotExist(err) {
+		log.Printf("deleteOwnerBlocks: failed to remove owner file for VM %s: %v", vmId, err)
+	}
+
+	log.Printf("deleteOwnerBlocks: VM %s — deleted %d blocks, skipped %d (shared owners)",
+		vmId, deleted, skipped)
 }
