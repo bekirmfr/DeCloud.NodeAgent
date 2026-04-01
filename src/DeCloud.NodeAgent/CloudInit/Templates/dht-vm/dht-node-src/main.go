@@ -170,6 +170,27 @@ func main() {
 	// Start background peer counter
 	go trackPeers(ctx, state)
 
+	// Subscribe to blockstore GossipSub topics so this DHT VM participates
+	// in the mesh as a relay between blockstore nodes.
+	// DHT VMs sit between blockstores in the libp2p topology — without
+	// subscribing, GossipSub treats them as dead ends and messages never
+	// propagate across nodes. No processing needed — subscription alone
+	// is sufficient for mesh routing.
+	for _, bsTopic := range []string{
+		"decloud/blockstore/new-blocks",
+		"decloud/blockstore/vm-deleted",
+	} {
+		if t, err := ps.Join(bsTopic); err == nil {
+			if sub, err := t.Subscribe(); err == nil {
+				go drainSubscription(ctx, sub)
+			} else {
+				log.Printf("Warning: failed to subscribe to %s: %v", bsTopic, err)
+			}
+		} else {
+			log.Printf("Warning: failed to join topic %s: %v", bsTopic, err)
+		}
+	}
+
 	// Start bootstrap retry goroutine — handles the race condition where
 	// this node deployed before other DHT nodes' PeerIds were captured.
 	// Periodically reads dynamic-peers file for runtime peer injection.
@@ -299,6 +320,18 @@ func handleEvents(ctx context.Context, sub *pubsub.Subscription) {
 		}
 		// Log event receipt (could be extended to handle specific event types)
 		log.Printf("Received event from %s (%d bytes)", msg.GetFrom().String()[:12], len(msg.Data))
+	}
+}
+
+// drainSubscription consumes and discards messages from a subscription.
+// Used for topics where this node participates in the GossipSub mesh
+// purely as a relay (e.g. blockstore topics) without processing messages.
+func drainSubscription(ctx context.Context, sub *pubsub.Subscription) {
+	defer sub.Cancel()
+	for {
+		if _, err := sub.Next(ctx); err != nil {
+			return
+		}
 	}
 }
 
