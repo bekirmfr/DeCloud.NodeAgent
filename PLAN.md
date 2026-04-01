@@ -871,6 +871,96 @@ can only host ephemeral (`replicationFactor=0`) VMs.
 | Source-offline alerting | `replicationFactor=0` → LOST (by design, no alert); `>0` → UNRECOVERABLE / RECOVERING / MIGRATING |
 | Dashboard | Show replication factor + "Ephemeral" badge when factor=0 |
 
+### Phase D+1: Replication-Aware GC (Priority Eviction of Confirmed Blocks)
+
+**Context:** The local blockstore on the VM's hosting node is a transit buffer, not a
+durable store. The VM overlay disk itself is the primary copy. The local blockstore
+exists to stage blocks before they scatter to remote nodes via Kademlia. Once blocks
+are confirmed replicated remotely (`remoteCount >= replicationFactor`), the local
+copy is redundant from a durability standpoint.
+
+**Current behavior:** Local GC is pure LRU — evicts by last access time regardless of
+whether remote copies exist. This wastes the 5% duty on blocks that are already safe.
+
+**Proposed GC priority order:**
+
+```
+1. Evict blocks confirmed remote (remoteCount >= RF, per last audit)
+   → Safe: redundant copies exist on ≥N other nodes
+   → Frees space for blocks still needing replication
+
+2. Evict blocks not referenced by any current manifest
+   → Orphaned chunks from old manifest versions — safe to evict anywhere
+
+3. Evict by LRU (fallback)
+   → May trigger Kademlia re-replication if provider count drops below RF
+   → Current behavior
+```
+
+**Effect:** The local blockstore becomes a true **write-through cache** — it holds
+blocks long enough for them to scatter, then evicts them to make room for new ones.
+This maximises the useful throughput of the 5% duty rather than filling it with
+already-safe data.
+
+**Implementation touchpoints:**
+
+| Component | Change |
+|-----------|--------|
+| `LazysyncManager` | After advancing `ConfirmedVersion`, write confirmed CID set to a per-VM confirmed-blocks file on the node (via orchestrator → node agent callback or node agent polling) |
+| `blockstore-node main.go` | `runGC()`: before LRU pass, evict all CIDs present in the confirmed-blocks set for any VM. Withdraw provider record after eviction |
+| `POST /api/blockstore/confirmed` | New NodeAgent endpoint: receives confirmed CID list from orchestrator after each audit cycle |
+| Confirmed CIDs storage | Simple newline-delimited file per VM: `/var/lib/decloud-blockstore/confirmed/{vmId}.cids` — updated after each `ConfirmedVersion` advance |
+
+**Note:** The local blockstore still serves bitswap requests for evicted blocks —
+remote peers can fetch them from the remaining ≥N providers. Eviction only removes
+the local copy; provider records are withdrawn so peers route requests elsewhere.
+
+**Dependency:** Requires stable `ConfirmedVersion` audit loop (Phase D) and the
+`reannounceExistingBlocks` startup fix (Phase D+1 — see item below).
+
+### Phase D+1: Startup Re-announce (Provider Record Recovery)
+
+**Problem:** When the blockstore binary restarts, `dht.Provide()` is only called for
+newly written blocks. Existing blocks on FlatFS are loaded into the LRU cache but
+never re-announced. Provider records in the DHT expire after 24 hours — a restarted
+blockstore becomes invisible to `FindProvidersAsync` until new blocks are written.
+
+**Affected scenarios:**
+- Binary restart / systemctl restart
+- DHT VM redeployment (fresh LevelDB, all provider records wiped)
+- Node agent update triggering blockstore restart
+- 24h provider record TTL expiry with no new writes
+
+**Fix:** Add `reannounceExistingBlocks()` goroutine to `main.go`, called after
+`connectBootstrapPeers()` with a 15s delay to allow the Kademlia routing table
+to populate first.
+
+```go
+func (n *BlockNode) reannounceExistingBlocks(ctx context.Context) {
+    time.Sleep(15 * time.Second) // routing table warmup
+    ch, err := n.bstore.AllKeysChan(ctx)
+    if err != nil { return }
+    count := 0
+    for c := range ch {
+        if ctx.Err() != nil { return }
+        announceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+        _ = n.dht.Provide(announceCtx, c, true)
+        cancel()
+        count++
+        if count%100 == 0 {
+            log.Printf("reannounce: %d blocks announced", count)
+        }
+    }
+    log.Printf("reannounce: complete — %d blocks re-announced", count)
+}
+```
+
+**Insertion point in `main()`:**
+```go
+node.connectBootstrapPeers(ctx)
+go node.reannounceExistingBlocks(ctx)  // ← add this line
+```
+
 ---
 
 ## 6. VM Disk Replication & Migration (Lazysync)
@@ -1232,101 +1322,6 @@ For the **normal fast path** (GossipSub announce → pull decision), the block s
 - Dashboard visualization of block distribution
 
 This endpoint is added to the DHT VM's existing localhost HTTP API (port 5080), alongside `/health`, `/peers`, `/connect`, and `/publish`.
-
----
-
-## 6.8 Storage Revenue Distribution
-
-### Economic Model
-
-Every replicated VM contributes a `storage_replication_cost` component to its
-hourly bill. This cost is owed to the block store operators who are bearing the
-actual storage duty — disk space, I/O, and bitswap bandwidth. Without this
-distribution, storage contribution is an uncompensated obligation. With it,
-node operators earn from two separate streams:
-
-- **Compute earnings** — for VMs hosted on their node
-- **Storage earnings** — for blocks held by their BlockStore VM
-
-The two streams are economically independent: a small node with a large disk
-earns storage revenue even when it cannot host large compute workloads.
-
-### Settlement: `settleCycle()` (Atomic, One Transaction Per Cycle)
-
-Every billing cycle (hourly), the orchestrator calls `settleCycle()` on the
-`DeCloudEscrow` contract. This single transaction atomically:
-
-1. **Bills all VMs** — deducts `computeAmount + storageAmount` from each user.
-   Compute portion (85%) credits the hosting node. Storage portion (85%) flows
-   into the in-contract `storagePool`.
-
-2. **Distributes the storage pool** — in the same transaction, proportional
-   rewards are calculated on-chain and credited to block store node operators:
-```
-reward_i = storagePool × (node_i.UsedBytes / Σ allNodes.UsedBytes)
-```
-
-`storageAmount` is calculated by the orchestrator from the manifest:
-```
-storageAmount = blockCount × blockSizeKb / 1024 × replicationFactor × costPerMbPerHour
-```
-
-`storagePool` distribution uses raw `UsedBytes` reported by each BlockStore VM
-via health checks — the orchestrator passes byte counts, the contract does the
-division. This is fully verifiable on-chain from transaction inputs.
-
-### Why Atomic Settlement Matters
-
-Separate collection and distribution calls create a window where storage fees
-are collected but not yet distributed. `settleCycle()` closes this window: it
-is structurally impossible to collect storage fees without distributing them in
-the same transaction. The `storagePool` balance visible on-chain represents only
-unprocessed dust from integer division — it rolls over to the next cycle.
-
-### Contract State (DeCloudEscrow.sol)
-```
-storagePool              — current cycle's undistributed dust (rolls over)
-totalStorageCollected    — lifetime storage fees collected
-totalStorageDistributed  — lifetime storage rewards distributed
-costPerMbPerHour         — platform rate (owner-settable, e.g. 1 = 0.000001 USDC)
-
-Events:
-  StorageCollected(user, vmId, storageAmount, platformFee, poolContribution)
-  StorageRewarded(storageNode, rewardAmount, contributedBytes, totalNetworkBytes, cycleId)
-```
-
-### `settleCycle()` Input Arrays
-```solidity
-function settleCycle(
-    // Per-VM billing (one entry per VM this cycle)
-    address[] users,              // VM owner wallets
-    address[] computeNodes,       // Hosting node wallets
-    uint256[] computeAmounts,     // Compute cost in USDC
-    uint256[] blockCounts,        // Manifest block count (from LazysyncManager)
-    uint256[] blockSizeKbs,       // Chunk size in KB (1024/65536/256/4096)
-    uint256[] replicationFactors, // VM replication factor (0/1/3/5)
-    string[]  vmIds,              // For event tracking
-
-    // Per-storage-node (one entry per active BlockStore node)
-    address[] storageNodes,       // BlockStore operator wallets
-    uint256[] storageBytes,       // node.BlockStoreInfo.UsedBytes
-
-    string    cycleId             // ISO timestamp for auditability
-)
-```
-
-The contract applies `costPerMbPerHour` to
-`blockCounts × blockSizeKbs / 1024 × replicationFactors` on-chain. The
-orchestrator cannot inflate storage amounts — it only reports integers that
-are verifiable from manifest state.
-
-### Voluntary Storage Excess (Phase D+1)
-
-The 5% storage duty is the minimum obligation. Node operators may optionally
-contribute more (up to a configurable maximum, e.g. 20%) for proportionally
-higher storage earnings. This grows the network's total storage capacity and
-increases distribution granularity without changing the billing formula.
-Implementation: add `voluntaryStoragePercent` to node configuration.
 
 ---
 
@@ -1824,6 +1819,22 @@ private List<string> GetInvalidVmsForNode(string nodeId, List<string> reportedRu
     new qcow2 at correct offsets + regenerate cloud-init ISO from VM labels
 36. **End-to-end migration test** — simulate node failure, verify VM rescheduling from
     confirmed manifest (base image + overlay from bitswap + cloud-init)
+37. **Owner-indexed block deletion** — blockstore binary maintains a per-VM owner index
+    (`/var/lib/decloud-blockstore/owners/{vmId}.cids`, append-only, newline-delimited)
+    updated on every `POST /blocks?cid={cid}&owner={vmId}` write. On VM deletion,
+    NodeAgent calls `DELETE /owners/{vmId}` — blockstore reads the owner file, deletes
+    each referenced block from FlatFS, withdraws DHT provider records, and removes the
+    owner file. Single HTTP call regardless of block count (3,420 blocks = 1 call).
+    Reference counting: a block shared by multiple owners (rare in practice — VM overlays
+    are unique) is only evicted from FlatFS when its last owner is deleted.
+    Orchestrator hook: `VmLifecycleManager.OnVmDeletedAsync` calls
+    `DataStore.DeleteManifestAsync(vmId)` to remove the MongoDB manifest record.
+    NodeAgent hook: `HandleDeleteVmAsync` calls `DELETE /owners/{vmId}` on the local
+    blockstore after successful VM deletion, before cleaning up the VM directory.
+    Changes: `blockstore-node main.go` (owner index write + DELETE endpoint),
+    `LazysyncDaemon.cs` (append `?owner={vmId}` to block push URL),
+    `LibvirtVmManager.DeleteVmAsync` (call blockstore owner delete),
+    `VmLifecycleManager.OnVmDeletedAsync` (call DeleteManifestAsync).
 
 ### Phase E: Split-Brain / Zombie VM Prevention
 
