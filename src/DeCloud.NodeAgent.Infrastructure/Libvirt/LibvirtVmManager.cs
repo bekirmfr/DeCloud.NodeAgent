@@ -1095,6 +1095,9 @@ public class LibvirtVmManager : IVmManager
             }
         }
 
+        // Delete blocks owned by this VM from local BlockStore (best-effort, non-fatal)
+        await NotifyBlockstoreOwnerDeleteAsync(vmId, ct);
+
         // Clean up directory
         CleanupVmDirectory(vmId, orphaned: false);
 
@@ -3186,5 +3189,37 @@ public class LibvirtVmManager : IVmManager
                 </channel>
               </devices>
             </domain>";
+    }
+    /// <summary>
+    /// Notify the local BlockStore VM to delete all blocks owned by this VM.
+    /// Best-effort — failure is logged but does not block VM deletion.
+    /// </summary>
+    private async Task NotifyBlockstoreOwnerDeleteAsync(string vmId, CancellationToken ct)
+    {
+        try
+        {
+            var blockstoreVm = _vms.Values
+                .FirstOrDefault(v => v.Spec.VmType == VmType.BlockStore &&
+                                     v.State == VmState.Running);
+            if (blockstoreVm == null || string.IsNullOrEmpty(blockstoreVm.Spec.IpAddress))
+            {
+                _logger.LogDebug("VM {VmId}: no local BlockStore VM running — skipping owner block cleanup", vmId);
+                return;
+            }
+
+            var url = $"http://{blockstoreVm.Spec.IpAddress}:5090/owners/{vmId}";
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+            using var request = new HttpRequestMessage(HttpMethod.Delete, url);
+            var response = await http.SendAsync(request, ct);
+
+            if (response.IsSuccessStatusCode)
+                _logger.LogInformation("VM {VmId}: blockstore owner blocks deleted", vmId);
+            else
+                _logger.LogWarning("VM {VmId}: blockstore owner delete returned {Status}", vmId, response.StatusCode);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "VM {VmId}: blockstore owner block cleanup failed (non-fatal)", vmId);
+        }
     }
 }

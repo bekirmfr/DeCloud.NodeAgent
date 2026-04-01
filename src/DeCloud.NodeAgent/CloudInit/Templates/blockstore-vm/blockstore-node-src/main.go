@@ -62,7 +62,8 @@ const (
 	IdentityKeyFile = "identity.key"
 	PeerIDFile      = "peer-id"
 	BlocksSubdir    = "blocks"
-	DagsSubdir      = "dags" // ResourceManifest JSON files
+	DagsSubdir      = "dags"   // ResourceManifest JSON files
+	OwnersSubdir    = "owners" // Per-VM CID owner index files
 	StorageDir      = "/var/lib/decloud-blockstore"
 
 	// GC thresholds
@@ -272,7 +273,7 @@ type BlockNode struct {
 // ═══════════════════════════════════════════════════════════════════
 
 func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
-	for _, sub := range []string{"", BlocksSubdir, DagsSubdir} {
+	for _, sub := range []string{"", BlocksSubdir, DagsSubdir, OwnersSubdir} {
 		if err := os.MkdirAll(filepath.Join(StorageDir, sub), 0755); err != nil {
 			return nil, fmt.Errorf("create dir %s: %w", sub, err)
 		}
@@ -677,6 +678,7 @@ func (n *BlockNode) startHTTPServer(ctx context.Context) {
 	mux.HandleFunc("/connect", n.handleConnect)
 	mux.HandleFunc("/manifests/", n.handleManifestByID)
 	mux.HandleFunc("/manifests", n.handleManifests)
+	mux.HandleFunc("/owners/", n.handleOwnerDelete)
 
 	// Bind to all interfaces so the NodeAgent host can reach the API
 	// via the virbr0 bridge (192.168.122.x). The API port is not
@@ -825,15 +827,153 @@ func (n *BlockNode) handleBlocks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n.touchBlock(c.String(), int64(len(data)))
-
+ 
+	// Append CID to owner index if ?owner= query param is present.
+	// Owner index: /var/lib/decloud-blockstore/owners/{vmId}.cids
+	// One CID per line. Used by DELETE /owners/{vmId} for bulk cleanup on VM delete.
+	if owner := r.URL.Query().Get("owner"); owner != "" {
+		go func(ownerID, cidStr string) {
+			ownerFile := filepath.Join(StorageDir, OwnersSubdir, ownerID+".cids")
+			f, err := os.OpenFile(ownerFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				log.Printf("owner index: failed to open %s: %v", ownerFile, err)
+				return
+			}
+			defer f.Close()
+			if _, err := fmt.Fprintln(f, cidStr); err != nil {
+				log.Printf("owner index: failed to write CID %s: %v", cidStr[:12], err)
+			}
+		}(owner, c.String())
+	}
+ 
 	go func() {
 		announceCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = n.dht.Provide(announceCtx, c, true)
 	}()
 	go n.publishNewBlock(c, int64(len(data)))
-
+ 
 	json.NewEncoder(w).Encode(map[string]string{"cid": c.String()})
+}
+
+// handleOwnerDelete: DELETE /owners/{vmId}
+// Deletes all blocks associated with a VM owner, withdraws DHT provider
+// records, and removes the owner index file. Called by NodeAgent when a
+// VM is deleted — single HTTP call replaces N individual block deletes.
+// Reference counting: a block is only evicted from FlatFS when all of its
+// owner references are removed (rare — VM overlays produce unique blocks).
+func (n *BlockNode) handleOwnerDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "DELETE only", http.StatusMethodNotAllowed)
+		return
+	}
+	vmId := strings.TrimPrefix(r.URL.Path, "/owners/")
+	vmId = strings.TrimSpace(vmId)
+	if vmId == "" {
+		http.Error(w, "missing vmId", http.StatusBadRequest)
+		return
+	}
+ 
+	ownerFile := filepath.Join(StorageDir, OwnersSubdir, vmId+".cids")
+	data, err := os.ReadFile(ownerFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No owner file — nothing to delete, idempotent success
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		http.Error(w, fmt.Sprintf("read owner file: %v", err), http.StatusInternalServerError)
+		return
+	}
+ 
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	ctx := r.Context()
+	deleted := 0
+	skipped := 0
+ 
+	for _, cidStr := range lines {
+		cidStr = strings.TrimSpace(cidStr)
+		if cidStr == "" {
+			continue
+		}
+		c, err := cid.Decode(cidStr)
+		if err != nil {
+			log.Printf("owner delete: invalid CID %q: %v", cidStr, err)
+			continue
+		}
+ 
+		// Reference counting: check if any other owner still references this CID.
+		// Scan all other owner files for this CID before deleting from FlatFS.
+		// In practice VM overlay blocks are unique so this is rarely needed.
+		otherOwnerRefs, scanErr := n.cidHasOtherOwners(vmId, cidStr)
+		if scanErr != nil {
+			log.Printf("owner delete: ref-count scan failed for %s: %v", cidStr[:12], scanErr)
+		}
+		if otherOwnerRefs {
+			skipped++
+			continue
+		}
+ 
+		// Delete from FlatFS
+		if err := n.bstore.DeleteBlock(ctx, c); err != nil {
+			log.Printf("owner delete: FlatFS delete failed for %s: %v", cidStr[:12], err)
+			continue
+		}
+ 
+		// Clean up LRU tracking
+		n.accessMu.Lock()
+		delete(n.accessTimes, cidStr)
+		delete(n.blockSizes, cidStr)
+		n.accessMu.Unlock()
+ 
+		// Withdraw DHT provider record (best-effort, non-blocking)
+		go func(c cid.Cid) {
+			withdrawCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = n.dht.Provide(withdrawCtx, c, false)
+		}(c)
+ 
+		deleted++
+	}
+ 
+	// Remove owner index file
+	if err := os.Remove(ownerFile); err != nil && !os.IsNotExist(err) {
+		log.Printf("owner delete: failed to remove owner file %s: %v", ownerFile, err)
+	}
+ 
+	log.Printf("owner delete: VM %s — deleted %d blocks, skipped %d (other owners)", vmId, deleted, skipped)
+	json.NewEncoder(w).Encode(map[string]any{
+		"vmId":    vmId,
+		"deleted": deleted,
+		"skipped": skipped,
+	})
+}
+ 
+// cidHasOtherOwners returns true if any owner file other than excludeOwner
+// contains the given CID string. Used for reference counting on delete.
+func (n *BlockNode) cidHasOtherOwners(excludeOwner, cidStr string) (bool, error) {
+	ownersDir := filepath.Join(StorageDir, OwnersSubdir)
+	entries, err := os.ReadDir(ownersDir)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".cids") {
+			continue
+		}
+		ownerID := strings.TrimSuffix(e.Name(), ".cids")
+		if ownerID == excludeOwner {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(ownersDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		if strings.Contains(string(data), cidStr) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (n *BlockNode) handleStats(w http.ResponseWriter, r *http.Request) {

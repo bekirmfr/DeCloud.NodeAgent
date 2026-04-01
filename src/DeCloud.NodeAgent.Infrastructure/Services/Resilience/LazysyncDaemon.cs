@@ -350,7 +350,7 @@ public class LazysyncDaemon : BackgroundService
             content.Headers.ContentType =
                 new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
 
-            var url = $"{blockstoreAddr}/blocks?cid={Uri.EscapeDataString(cid)}";
+            var url = $"{blockstoreAddr}/blocks?cid={Uri.EscapeDataString(cid)}&owner={Uri.EscapeDataString(vmId)}";
             var response = await _blockstoreClient.PostAsync(url, content, ct);
 
             if (!response.IsSuccessStatusCode)
