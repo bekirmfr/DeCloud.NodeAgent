@@ -2052,7 +2052,6 @@ download_node_agent() {
     if [ -d "$DHT_TEMPLATE_DIR" ]; then
         mkdir -p "$DHT_CACHE_DIR"
         # Back up hash file and pre-built binaries
-        cp -f "$DHT_TEMPLATE_DIR/.dht-node-source.sha256" "$DHT_CACHE_DIR/" 2>/dev/null || true
         cp -f "$DHT_TEMPLATE_DIR"/dht-node-*.gz.b64 "$DHT_CACHE_DIR/" 2>/dev/null || true
         log_info "Preserved DHT build cache"
     fi
@@ -2063,9 +2062,7 @@ download_node_agent() {
 
     if [ -d "$BLOCKSTORE_TEMPLATE_DIR" ]; then
         mkdir -p "$BLOCKSTORE_CACHE_DIR"
-        cp -f "$BLOCKSTORE_TEMPLATE_DIR/.blockstore-node-source.sha256" "$BLOCKSTORE_CACHE_DIR/" 2>/dev/null || true
-        cp -f "$BLOCKSTORE_TEMPLATE_DIR"/blockstore-node-*.gz.b64 "$BLOCKSTORE_CACHE_DIR/" 2>/dev/null || true
-        log_info "Preserved BlockStore build cache"
+        cp -f "$BLOCKSTORE_TEMPLATE_DIR"/blockstore-node-*.gz.b64 "$BLOCKSTORE_CACHE_DIR/" 2>/dev/null || true        log_info "Preserved BlockStore build cache"
     fi
     
     if [ -d "$INSTALL_DIR/DeCloud.NodeAgent" ]; then
@@ -2078,22 +2075,24 @@ download_node_agent() {
     cd DeCloud.NodeAgent
     COMMIT=$(git rev-parse --short HEAD)
     
-    # Restore DHT build cache so build.sh can skip unchanged builds
+    # Restore DHT build cache — only restore binaries as fallback, NOT the hash file.
+    # Restoring the hash file would trick build.sh into skipping a rebuild even when
+    # source has changed (new commits). build.sh will recompute the hash from fresh
+    # source and rebuild if needed; cached binaries are used only if build fails.
     local NEW_DHT_TEMPLATE_DIR="$INSTALL_DIR/DeCloud.NodeAgent/src/DeCloud.NodeAgent/CloudInit/Templates/dht-vm"
     if [ -d "$DHT_CACHE_DIR" ] && [ -d "$NEW_DHT_TEMPLATE_DIR" ]; then
-        cp -f "$DHT_CACHE_DIR/.dht-node-source.sha256" "$NEW_DHT_TEMPLATE_DIR/" 2>/dev/null || true
         cp -f "$DHT_CACHE_DIR"/dht-node-*.gz.b64 "$NEW_DHT_TEMPLATE_DIR/" 2>/dev/null || true
         rm -rf "$DHT_CACHE_DIR"
-        log_info "Restored DHT build cache"
+        log_info "Restored DHT binary cache (hash file not restored — forces rebuild check)"
     fi
 
-    # Restore BlockStore build cache so build.sh can skip unchanged builds
+    # Restore BlockStore build cache — only restore binaries as fallback, NOT the hash file.
+    # Same reasoning as DHT: restoring the hash would prevent detection of source changes.
     local NEW_BLOCKSTORE_TEMPLATE_DIR="$INSTALL_DIR/DeCloud.NodeAgent/src/DeCloud.NodeAgent/CloudInit/Templates/blockstore-vm"
     if [ -d "$BLOCKSTORE_CACHE_DIR" ] && [ -d "$NEW_BLOCKSTORE_TEMPLATE_DIR" ]; then
-        cp -f "$BLOCKSTORE_CACHE_DIR/.blockstore-node-source.sha256" "$NEW_BLOCKSTORE_TEMPLATE_DIR/" 2>/dev/null || true
         cp -f "$BLOCKSTORE_CACHE_DIR"/blockstore-node-*.gz.b64 "$NEW_BLOCKSTORE_TEMPLATE_DIR/" 2>/dev/null || true
         rm -rf "$BLOCKSTORE_CACHE_DIR"
-        log_info "Restored BlockStore build cache"
+        log_info "Restored BlockStore binary cache (hash file not restored — forces rebuild check)"
     fi
     
     log_success "Code downloaded (commit: $COMMIT)"
