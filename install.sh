@@ -2124,6 +2124,10 @@ build_dht_binary() {
 
     log_info "Building DHT binary for ${HOST_ARCH:-all architectures}..."
 
+    # Always remove the hash file before building so build.sh recomputes
+    # the source hash and detects stale binaries from previous installs.
+    rm -f "$(dirname "$BUILD_SCRIPT")/../.dht-node-source.sha256"
+
     if bash "$BUILD_SCRIPT" $HOST_ARCH 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
         log_success "DHT binary built from source (hash-checked)"
     else
@@ -2156,7 +2160,10 @@ build_blockstore_binary() {
             ;;
     esac
 
-    log_info "Building BlockStore binary for ${HOST_ARCH:-all architectures}..."
+        log_info "Building BlockStore binary for ${HOST_ARCH:-all architectures}..."
+
+    # Always remove the hash file before building so build.sh detects stale binaries.
+    rm -f "$(dirname "$BUILD_SCRIPT")/../.blockstore-node-source.sha256"
 
     if bash "$BUILD_SCRIPT" $HOST_ARCH 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
         log_success "BlockStore binary built from source (hash-checked)"
