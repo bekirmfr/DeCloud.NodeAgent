@@ -92,13 +92,18 @@ log "Advertise IP: ${ADVERTISE_IP:-<not set>}"
 # ═══════════════════════════════════════════════════════════════════
 log "Entering bootstrap poll loop..."
 CONSECUTIVE_FAILURES=0
+# Always poll orchestrator at least once on startup, regardless of peer count.
+# This ensures blockstore-to-blockstore connections are established via the
+# join response even when already connected to the local DHT VM.
+# Without this, bitswap must rely on slow DHT FindProviders for every block fetch.
+INITIAL_POLL_DONE=false
 
 while true; do
     # Check current peer count
     HEALTH=$(curl -s --max-time 3 "http://127.0.0.1:${API_PORT}/health" 2>/dev/null) || true
     CONNECTED=$(echo "$HEALTH" | jq -r '.connectedPeers // 0' 2>/dev/null) || CONNECTED=0
 
-    if [ "$CONNECTED" -gt 0 ]; then
+    if [ "$CONNECTED" -gt 0 ] && [ "$INITIAL_POLL_DONE" = "true" ]; then
         if [ "$CONSECUTIVE_FAILURES" -gt 0 ]; then
             log "Connected to $CONNECTED peer(s) — resuming maintenance polling"
             CONSECUTIVE_FAILURES=0
@@ -107,7 +112,12 @@ while true; do
         continue
     fi
 
-    log "No connected peers — polling orchestrator for bootstrap peers..."
+    if [ "$CONNECTED" -gt 0 ]; then
+        log "Connected to $CONNECTED peer(s) — performing initial orchestrator poll to discover other blockstores..."
+    else
+        log "No connected peers — polling orchestrator for bootstrap peers..."
+    fi
+    INITIAL_POLL_DONE=true
 
     # Call orchestrator /api/blockstore/join
     RESPONSE=$(curl -X POST "${ORCHESTRATOR_URL}/api/blockstore/join" \
