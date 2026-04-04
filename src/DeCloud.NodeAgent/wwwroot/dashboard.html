@@ -452,6 +452,32 @@
                 background: var(--danger);
             }
 
+        /* Sparkline / history histogram */
+        .hw-spark {
+            width: 100%;
+            height: 36px;
+            margin: 0.35rem 0 0.1rem;
+            overflow: hidden;
+            position: relative;
+        }
+
+            .hw-spark svg {
+                display: block;
+                width: 100%;
+                height: 100%;
+            }
+
+        .hw-spark-area {
+            opacity: 0.18;
+        }
+
+        .hw-spark-line {
+            fill: none;
+            stroke-width: 1.5;
+            stroke-linejoin: round;
+            stroke-linecap: round;
+        }
+
         /* Compact hardware grid — replaces the 4-card expanded layout */
         .hw-compact-grid {
             display: grid;
@@ -2646,18 +2672,21 @@
                     <div class="hw-compact-label">CPU</div>
                     <div class="hw-compact-value" id="hw-cpu-pct">—</div>
                     <div class="hw-compact-bar"><div class="hw-fill" id="hw-cpu-bar"></div></div>
+                    <div id="hw-cpu-spark" class="hw-spark"></div>
                     <div class="hw-compact-sub" id="hw-cpu-info">—</div>
                 </div>
                 <div class="hw-compact-card">
                     <div class="hw-compact-label">Memory</div>
                     <div class="hw-compact-value" id="hw-ram-pct">—</div>
                     <div class="hw-compact-bar"><div class="hw-fill" id="hw-ram-bar"></div></div>
+                    <div id="hw-ram-spark" class="hw-spark"></div>
                     <div class="hw-compact-sub" id="hw-ram-detail">—</div>
                 </div>
                 <div class="hw-compact-card">
                     <div class="hw-compact-label">Storage</div>
                     <div class="hw-compact-value" id="hw-stor-pct">—</div>
                     <div class="hw-compact-bar"><div class="hw-fill" id="hw-stor-bar"></div></div>
+                    <div id="hw-stor-spark" class="hw-spark"></div>
                     <div class="hw-compact-sub" id="hw-stor-detail">—</div>
                 </div>
                 <div class="hw-compact-card">
@@ -3073,6 +3102,55 @@
         // ============================================================
         // Hardware
         // ============================================================
+        // ── Metric history ring buffers (last 30 samples = 5 min at 10s poll) ────────
+        const HW_HISTORY = { cpu: [], ram: [], stor: [] };
+        const HW_MAX_PTS = 30;
+
+        /**
+         * Build an inline SVG sparkline / area chart from an array of 0-100 values.
+         * w × h are the viewBox dimensions; actual display size is CSS-controlled.
+         * color  — stroke + fill colour (CSS variable string or hex)
+         * Returns an SVG string ready for innerHTML.
+         */
+        function sparklineSvg(data, color) {
+            if (data.length < 2) return '';
+
+            const W = 200, H = 36, PAD = 2;
+            const plotH = H - PAD * 2;
+            const pts = data.length;
+            const xStep = (W - PAD * 2) / (HW_MAX_PTS - 1);
+
+            // Map value → y coordinate (inverted: 0% at bottom, 100% at top)
+            const y = v => PAD + plotH * (1 - Math.min(v, 100) / 100);
+            // Map index → x (right-align: newest point is at the right edge)
+            const x = i => PAD + (HW_MAX_PTS - pts + i) * xStep;
+
+            // Build polyline points
+            const linePts = data.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+
+            // Area: close to the bottom
+            const firstX = x(0).toFixed(1);
+            const lastX = x(data.length - 1).toFixed(1);
+            const bottom = (PAD + plotH).toFixed(1);
+            const areaD = `M${firstX},${bottom} L${linePts.split(' ').map(p => `${p.split(',')[0]},${p.split(',')[1]}`).join(' L')} L${lastX},${bottom} Z`;
+
+            // Color based on latest value
+            const latest = data[data.length - 1];
+            const c = latest >= 90 ? 'var(--danger)'
+                : latest >= 75 ? 'var(--warning)'
+                    : color;
+
+            return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+        <path class="hw-spark-area" d="${areaD}" fill="${c}"/>
+        <polyline class="hw-spark-line" points="${linePts}" stroke="${c}"/>
+      </svg>`;
+        }
+
+        function pushHistory(key, value) {
+            HW_HISTORY[key].push(Math.round(value * 10) / 10);
+            if (HW_HISTORY[key].length > HW_MAX_PTS) HW_HISTORY[key].shift();
+        }
+
         function renderHardware() {
             const snap = S.snapshot; if (!snap) return;
             const cpu = snap.virtualCpuUsagePercent ?? 0;
@@ -3095,6 +3173,19 @@
             const kvmEl = $('hw-kvm');
             if (kvmEl) { kvmEl.textContent = kvm ? 'KVM Available' : 'KVM Unavailable'; kvmEl.style.color = kvm ? 'var(--primary)' : 'var(--danger)'; }
             set('hw-virt-sub', snap.cpuArchitecture ?? '—');
+
+            // Update ring buffers and render sparklines
+            pushHistory('cpu', cpu);
+            pushHistory('ram', ramP);
+            pushHistory('stor', stP);
+
+            const sparkEl = (id, key, color) => {
+                const el = $(id); if (!el) return;
+                el.innerHTML = sparklineSvg(HW_HISTORY[key], color);
+            };
+            sparkEl('hw-cpu-spark', 'cpu', 'var(--primary)');
+            sparkEl('hw-ram-spark', 'ram', 'var(--primary)');
+            sparkEl('hw-stor-spark', 'stor', 'var(--primary)');
         }
 
         // ============================================================
