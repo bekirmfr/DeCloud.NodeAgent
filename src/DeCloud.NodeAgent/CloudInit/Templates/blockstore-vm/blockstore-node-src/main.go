@@ -7,7 +7,7 @@
 // Exchange: Bitswap (block fetching from network peers)
 // Routing:  Kademlia DHT client (provider record announce/lookup)
 // Events:   GossipSub subscription for `decloud/blockstore/new-blocks`
-// API:      HTTP on localhost:5090 (internal only)
+// API:      HTTP on 0.0.0.0:{BLOCKSTORE_API_PORT}
 //
 // LRU eviction at 85% capacity, hard refuse writes at 95%.
 // Adaptive XOR pull threshold based on local capacity utilization.
@@ -25,6 +25,7 @@ import (
 	"io"
 	"log"
 	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -35,7 +36,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"net"
 
 	bsnetwork "github.com/ipfs/boxo/bitswap/network"
 	"github.com/ipfs/boxo/bitswap"
@@ -60,14 +60,14 @@ import (
 // ═══════════════════════════════════════════════════════════════════
 
 const (
-	GossipSubTopic        = "decloud/blockstore/new-blocks"
-	GossipSubVmDelTopic   = "decloud/blockstore/vm-deleted"
-	IdentityKeyFile       = "identity.key"
-	PeerIDFile      = "peer-id"
-	BlocksSubdir    = "blocks"
-	DagsSubdir      = "dags"   // ResourceManifest JSON files
-	OwnersSubdir    = "owners" // Per-VM CID owner index files
-	StorageDir      = "/var/lib/decloud-blockstore"
+	GossipSubTopic      = "decloud/blockstore/new-blocks"
+	GossipSubVmDelTopic = "decloud/blockstore/vm-deleted"
+	IdentityKeyFile     = "identity.key"
+	PeerIDFile          = "peer-id"
+	BlocksSubdir        = "blocks"
+	DagsSubdir          = "dags"   // ResourceManifest JSON files
+	OwnersSubdir        = "owners" // Per-VM CID owner index files
+	StorageDir          = "/var/lib/decloud-blockstore"
 
 	// GC thresholds
 	GCTriggerPercent = 85
@@ -80,26 +80,105 @@ const (
 
 	// Bitswap fetch timeout
 	BitswapTimeout = 30 * time.Second
+
+	// Diagnostics ring buffer capacity
+	diagLogCap = 300
 )
 
 // ═══════════════════════════════════════════════════════════════════
-// Resource types — what kind of data a manifest describes
+// Diagnostic event log
+// ═══════════════════════════════════════════════════════════════════
+
+// DiagEvent is a single timestamped diagnostic event.
+type DiagEvent struct {
+	TS      string                 `json:"ts"`
+	Event   string                 `json:"event"`
+	Details map[string]interface{} `json:"details,omitempty"`
+}
+
+// DiagLog is a thread-safe fixed-capacity ring buffer (newest overwrites oldest).
+type DiagLog struct {
+	mu     sync.RWMutex
+	events []DiagEvent
+	cap    int
+	head   int
+	count  int
+}
+
+func newDiagLog(capacity int) *DiagLog {
+	return &DiagLog{cap: capacity, events: make([]DiagEvent, capacity)}
+}
+
+func (l *DiagLog) Add(event string, details map[string]interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.events[l.head] = DiagEvent{
+		TS:      time.Now().UTC().Format(time.RFC3339),
+		Event:   event,
+		Details: details,
+	}
+	l.head = (l.head + 1) % l.cap
+	if l.count < l.cap {
+		l.count++
+	}
+}
+
+// Snapshot returns events in chronological order (oldest → newest).
+func (l *DiagLog) Snapshot() []DiagEvent {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if l.count == 0 {
+		return nil
+	}
+	result := make([]DiagEvent, l.count)
+	if l.count < l.cap {
+		copy(result, l.events[:l.count])
+	} else {
+		for i := 0; i < l.cap; i++ {
+			result[i] = l.events[(l.head+i)%l.cap]
+		}
+	}
+	return result
+}
+
+// DiagCounters holds aggregate diagnostic counters for the /diagnostics endpoint.
+type DiagCounters struct {
+	// GossipSub
+	GossipSubReceived  int64     `json:"gossipSubReceived"`
+	GossipSubPublished int64     `json:"gossipSubPublished"`
+	LastGossipSubRxAt  time.Time `json:"lastGossipSubRxAt,omitempty"`
+	LastGossipSubTxAt  time.Time `json:"lastGossipSubTxAt,omitempty"`
+	// DHT Announce
+	DHTAnnounceSuccess int64     `json:"dhtAnnounceSuccess"`
+	DHTAnnounceFail    int64     `json:"dhtAnnounceFail"`
+	LastAnnounceAt     time.Time `json:"lastAnnounceAt,omitempty"`
+	// XOR proximity decisions
+	XORAccepted int64 `json:"xorAccepted"`
+	XORRejected int64 `json:"xorRejected"`
+	// GC
+	GCRunCount      int64 `json:"gcRunCount"`
+	GCBlocksEvicted int64 `json:"gcBlocksEvicted"`
+	GCBytesFreed    int64 `json:"gcBytesFreed"`
+	// Reannounce
+	ReannounceCount  int64     `json:"reannounceCount"`
+	LastReannounceAt time.Time `json:"lastReannounceAt,omitempty"`
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Resource types
 // ═══════════════════════════════════════════════════════════════════
 
 type ResourceType string
 
 const (
-	ResourceTypeVMOverlay     ResourceType = "VMOverlay"     // VM disk overlay chunks (lazysync)
-	ResourceTypeModelShard    ResourceType = "ModelShard"    // AI model weight shard
-	ResourceTypeLoRAAdapter   ResourceType = "LoRAAdapter"   // LoRA fine-tune adapter weights
-	ResourceTypeImageTemplate ResourceType = "ImageTemplate" // Base OS image template
+	ResourceTypeVMOverlay     ResourceType = "VMOverlay"
+	ResourceTypeModelShard    ResourceType = "ModelShard"
+	ResourceTypeLoRAAdapter   ResourceType = "LoRAAdapter"
+	ResourceTypeImageTemplate ResourceType = "ImageTemplate"
 	ResourceTypeUnknown       ResourceType = "Unknown"
 )
 
 // ShardMetadata describes an AI model shard for distributed inference routing.
-// When a large model (e.g. Llama-3 70B) is split into shards, each shard covers
-// a range of transformer layers. Inference VMs use this to build a pipeline:
-// shard 0 (layers 0-15) → shard 1 (layers 16-31) → ... → output.
 type ShardMetadata struct {
 	ModelName      string `json:"modelName"`
 	ModelVersion   string `json:"modelVersion"`
@@ -108,23 +187,21 @@ type ShardMetadata struct {
 	LayerStart     int    `json:"layerStart"`
 	LayerEnd       int    `json:"layerEnd"`
 	ParameterCount int64  `json:"parameterCount"`
-	QuantBits      int    `json:"quantBits"` // 4, 8, 16, 32
+	QuantBits      int    `json:"quantBits"`
 }
 
-// ResourceManifest tracks a stored resource: its type, owner, chunk CIDs,
-// and optional AI model shard metadata.
-// Persisted to /var/lib/decloud-blockstore/dags/{rootCid}.json.
+// ResourceManifest tracks a stored resource.
 type ResourceManifest struct {
-	RootCid       string        `json:"rootCid"`
-	ResourceType  ResourceType  `json:"resourceType"`
-	ResourceID    string        `json:"resourceId"`    // vmId, model name, template slug
-	ResourceOwner string        `json:"resourceOwner"` // wallet address
-	Version       int           `json:"version"`
-	TotalBytes    int64         `json:"totalBytes"`
-	ChunkCIDs     []string      `json:"chunkCids"`
+	RootCid       string         `json:"rootCid"`
+	ResourceType  ResourceType   `json:"resourceType"`
+	ResourceID    string         `json:"resourceId"`
+	ResourceOwner string         `json:"resourceOwner"`
+	Version       int            `json:"version"`
+	TotalBytes    int64          `json:"totalBytes"`
+	ChunkCIDs     []string       `json:"chunkCids"`
 	ShardMeta     *ShardMetadata `json:"shardMeta,omitempty"`
-	RegisteredAt  time.Time     `json:"registeredAt"`
-	UpdatedAt     time.Time     `json:"updatedAt"`
+	RegisteredAt  time.Time      `json:"registeredAt"`
+	UpdatedAt     time.Time      `json:"updatedAt"`
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -187,63 +264,6 @@ func splitPeers(s string) []string {
 	return out
 }
 
-// isIPOnAnyInterface checks if ip is assigned to any local network interface.
-func isIPOnAnyInterface(ip string) bool {
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return false
-	}
-	for _, iface := range ifaces {
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, addr := range addrs {
-			var ifIP net.IP
-			switch v := addr.(type) {
-			case *net.IPNet:
-				ifIP = v.IP
-			case *net.IPAddr:
-				ifIP = v.IP
-			}
-			if ifIP != nil && ifIP.String() == ip {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// Identity
-// ═══════════════════════════════════════════════════════════════════
-
-func loadOrCreateIdentity(dir string) (crypto.PrivKey, error) {
-	keyPath := filepath.Join(dir, IdentityKeyFile)
-	if data, err := os.ReadFile(keyPath); err == nil {
-		priv, err := crypto.UnmarshalPrivateKey(data)
-		if err != nil {
-			return nil, fmt.Errorf("unmarshal identity key: %w", err)
-		}
-		log.Printf("Loaded persistent identity from %s", keyPath)
-		return priv, nil
-	}
-
-	priv, _, err := crypto.GenerateEd25519Key(nil)
-	if err != nil {
-		return nil, fmt.Errorf("generate identity key: %w", err)
-	}
-	data, err := crypto.MarshalPrivateKey(priv)
-	if err != nil {
-		return nil, fmt.Errorf("marshal identity key: %w", err)
-	}
-	if err := os.WriteFile(keyPath, data, 0600); err != nil {
-		return nil, fmt.Errorf("write identity key: %w", err)
-	}
-	log.Printf("Generated new Ed25519 identity, saved to %s", keyPath)
-	return priv, nil
-}
-
 // ═══════════════════════════════════════════════════════════════════
 // BlockNode — main node state
 // ═══════════════════════════════════════════════════════════════════
@@ -263,12 +283,71 @@ type BlockNode struct {
 
 	// Manifest registry
 	manifestsMu sync.RWMutex
-	manifests   map[string]*ResourceManifest // rootCid → manifest
+	manifests   map[string]*ResourceManifest
 
 	// Counters
 	mu              sync.RWMutex
 	bitswapSent     uint64
 	bitswapReceived uint64
+
+	// Diagnostics
+	diagLog *DiagLog
+	diag    DiagCounters
+}
+
+// cidShort returns the first 12 chars of a CID string (safe).
+func cidShort(s string) string {
+	if len(s) <= 12 {
+		return s
+	}
+	return s[:12]
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// main
+// ═══════════════════════════════════════════════════════════════════
+
+func main() {
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	log.Println("DeCloud Block Store Node starting...")
+
+	cfg := parseConfig()
+	log.Printf("Config: listenPort=%d apiPort=%d storageBytes=%d nodeID=%s vmID=%s",
+		cfg.ListenPort, cfg.APIPort, cfg.StorageBytes, cfg.NodeID, cfg.VMID)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	node, err := setup(ctx, cfg)
+	if err != nil {
+		log.Fatalf("Setup failed: %v", err)
+	}
+	defer node.host.Close()
+
+	node.loadExistingAccessTimes(ctx)
+	node.loadExistingManifests(ctx)
+	node.connectBootstrapPeers(ctx)
+	go node.reannounceExistingBlocks(ctx)
+
+	if err := node.startGossipSubSubscription(ctx); err != nil {
+		log.Printf("Warning: GossipSub subscription failed: %v", err)
+	}
+	go node.startVmDeletedSubscription(ctx)
+	node.startHTTPServer(ctx)
+	go node.startGCLoop(ctx)
+
+	for _, addr := range node.host.Addrs() {
+		log.Printf("Listening: %s/p2p/%s", addr, node.host.ID())
+	}
+	log.Printf("Block store node ready — peer ID: %s", node.host.ID())
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+
+	log.Println("Shutting down block store node...")
+	cancel()
+	time.Sleep(500 * time.Millisecond)
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -309,9 +388,6 @@ func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
 	bs := blockstore.NewIdStore(blockstore.NewBlockstore(mds))
 
 	// Wait up to 30s for the WG mesh interface to be assigned the advertise IP.
-	// The binary starts concurrently with wg-quick; without this wait the
-	// libp2p host logs only the libvirt bridge IP and the AddrsFactory below
-	// advertises an IP that isn't yet on any interface.
 	if cfg.AdvertiseIP != "" {
 		deadline := time.Now().Add(30 * time.Second)
 		for time.Now().Before(deadline) {
@@ -323,8 +399,7 @@ func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
 			time.Sleep(2 * time.Second)
 		}
 		if !isIPOnAnyInterface(cfg.AdvertiseIP) {
-			log.Printf("Warning: advertise IP %s not found on any interface after 30s — "+
-				"peering via WG mesh will not work", cfg.AdvertiseIP)
+			log.Printf("Warning: advertise IP %s not found on any interface after 30s", cfg.AdvertiseIP)
 		}
 	}
 
@@ -334,8 +409,6 @@ func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
 		libp2p.Identity(priv),
 	}
 
-	// Only advertise the WG tunnel IP — don't expose unreachable
-	// libvirt bridge or localhost addresses to other peers.
 	if cfg.AdvertiseIP != "" {
 		extAddr := fmt.Sprintf("/ip4/%s/tcp/%d", cfg.AdvertiseIP, cfg.ListenPort)
 		extMA, maErr := multiaddr.NewMultiaddr(extAddr)
@@ -387,7 +460,62 @@ func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
 		accessTimes: make(map[string]time.Time),
 		blockSizes:  make(map[string]int64),
 		manifests:   make(map[string]*ResourceManifest),
+		diagLog:     newDiagLog(diagLogCap),
 	}, nil
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Identity
+// ═══════════════════════════════════════════════════════════════════
+
+func loadOrCreateIdentity(dir string) (crypto.PrivKey, error) {
+	keyPath := filepath.Join(dir, IdentityKeyFile)
+	if data, err := os.ReadFile(keyPath); err == nil {
+		priv, err := crypto.UnmarshalPrivateKey(data)
+		if err != nil {
+			return nil, fmt.Errorf("unmarshal identity key: %w", err)
+		}
+		log.Printf("Loaded persistent identity from %s", keyPath)
+		return priv, nil
+	}
+
+	priv, _, err := crypto.GenerateEd25519Key(nil)
+	if err != nil {
+		return nil, fmt.Errorf("generate identity key: %w", err)
+	}
+	data, err := crypto.MarshalPrivateKey(priv)
+	if err != nil {
+		return nil, fmt.Errorf("marshal identity key: %w", err)
+	}
+	if err := os.WriteFile(keyPath, data, 0600); err != nil {
+		return nil, fmt.Errorf("write identity key: %w", err)
+	}
+	log.Printf("Generated new Ed25519 identity, saved to %s", keyPath)
+	return priv, nil
+}
+
+// isIPOnAnyInterface checks if ip is assigned to any local network interface.
+func isIPOnAnyInterface(ip string) bool {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	for _, iface := range ifaces {
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			var ifIP net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ifIP = v.IP
+			case *net.IPAddr:
+				ifIP = v.IP
+			}
+			if ifIP != nil && ifIP.String() == ip {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -422,47 +550,7 @@ func (n *BlockNode) connectBootstrapPeers(ctx context.Context) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Manifest registry
-// ═══════════════════════════════════════════════════════════════════
-
-func (n *BlockNode) loadExistingManifests(ctx context.Context) {
-	dagsDir := filepath.Join(StorageDir, DagsSubdir)
-	entries, err := os.ReadDir(dagsDir)
-	if err != nil {
-		return
-	}
-	count := 0
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dagsDir, e.Name()))
-		if err != nil {
-			continue
-		}
-		var m ResourceManifest
-		if err := json.Unmarshal(data, &m); err != nil {
-			continue
-		}
-		n.manifests[m.RootCid] = &m
-		count++
-	}
-	if count > 0 {
-		log.Printf("Loaded %d manifests from disk", count)
-	}
-}
-
-func (n *BlockNode) saveManifest(m *ResourceManifest) error {
-	data, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(StorageDir, DagsSubdir, m.RootCid+".json")
-	return os.WriteFile(path, data, 0644)
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// GossipSub subscription
+// GossipSub — new-blocks subscription
 // ═══════════════════════════════════════════════════════════════════
 
 type NewBlockAnnouncement struct {
@@ -498,6 +586,18 @@ func (n *BlockNode) startGossipSubSubscription(ctx context.Context) error {
 			if err := json.Unmarshal(msg.Data, &ann); err != nil {
 				continue
 			}
+
+			// Track receive in diagnostics
+			n.mu.Lock()
+			n.diag.GossipSubReceived++
+			n.diag.LastGossipSubRxAt = time.Now()
+			n.mu.Unlock()
+			n.diagLog.Add("gossipsub_receive", map[string]interface{}{
+				"cid":    cidShort(ann.CID),
+				"size":   ann.Size,
+				"source": cidShort(ann.SourceNodeID),
+			})
+
 			go n.handleNewBlockAnnouncement(ctx, ann)
 		}
 	}()
@@ -516,17 +616,48 @@ func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlock
 	usedBytes, _ := n.usedBytes(ctx)
 	usagePct := float64(usedBytes) / float64(n.cfg.StorageBytes) * 100
 	if usagePct >= GCHardLimit {
+		n.diagLog.Add("xor_reject", map[string]interface{}{
+			"cid":    cidShort(ann.CID),
+			"reason": "capacity_full",
+			"usage":  fmt.Sprintf("%.1f%%", usagePct),
+		})
 		return
 	}
 	if !n.isWithinXORThreshold(c, usagePct) {
+		n.mu.Lock()
+		n.diag.XORRejected++
+		n.mu.Unlock()
+		n.diagLog.Add("xor_reject", map[string]interface{}{
+			"cid":    cidShort(ann.CID),
+			"reason": "xor_too_far",
+			"usage":  fmt.Sprintf("%.1f%%", usagePct),
+		})
 		return
 	}
+	n.mu.Lock()
+	n.diag.XORAccepted++
+	n.mu.Unlock()
+
 	pullCtx, cancel := context.WithTimeout(ctx, BitswapTimeout)
-	defer cancel()
+	fetchStart := time.Now()
 	blk, err := n.bsExch.GetBlock(pullCtx, c)
+	fetchMs := time.Since(fetchStart).Milliseconds()
+	cancel()
 	if err != nil {
+		n.diagLog.Add("bitswap_fetch_fail", map[string]interface{}{
+			"cid":         cidShort(ann.CID),
+			"error":       err.Error(),
+			"duration_ms": fetchMs,
+		})
 		return
 	}
+	n.diagLog.Add("bitswap_fetch", map[string]interface{}{
+		"cid":         cidShort(ann.CID),
+		"bytes":       len(blk.RawData()),
+		"duration_ms": fetchMs,
+		"source":      cidShort(ann.SourceNodeID),
+	})
+
 	if err := n.bstore.Put(ctx, blk); err != nil {
 		return
 	}
@@ -534,8 +665,191 @@ func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlock
 	n.mu.Lock()
 	n.bitswapReceived++
 	n.mu.Unlock()
-	_ = n.dht.Provide(ctx, c, true)
+
+	// Announce ourselves as a provider to the DHT
+	announceCtx, aCancel := context.WithTimeout(ctx, 15*time.Second)
+	announceErr := n.dht.Provide(announceCtx, c, true)
+	aCancel()
+	n.mu.Lock()
+	if announceErr != nil {
+		n.diag.DHTAnnounceFail++
+		n.diagLog.Add("dht_announce_fail", map[string]interface{}{
+			"cid":   cidShort(c.String()),
+			"error": announceErr.Error(),
+			"role":  "gossipsub_pull",
+		})
+	} else {
+		n.diag.DHTAnnounceSuccess++
+		n.diag.LastAnnounceAt = time.Now()
+		n.diagLog.Add("dht_announce", map[string]interface{}{
+			"cid":  cidShort(c.String()),
+			"role": "gossipsub_pull",
+		})
+	}
+	n.mu.Unlock()
+
 	log.Printf("Pulled block %s (%d bytes) via GossipSub + bitswap", ann.CID[:12], len(blk.RawData()))
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// GossipSub — publisher
+// ═══════════════════════════════════════════════════════════════════
+
+func (n *BlockNode) publishNewBlock(c cid.Cid, size int64) {
+	topic, err := n.pubsub.Join(GossipSubTopic)
+	if err != nil {
+		return
+	}
+	ann := NewBlockAnnouncement{CID: c.String(), Size: size, SourceNodeID: n.cfg.NodeID}
+	data, err := json.Marshal(ann)
+	if err != nil {
+		return
+	}
+	pubCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pubErr := topic.Publish(pubCtx, data)
+	n.mu.Lock()
+	n.diag.GossipSubPublished++
+	n.diag.LastGossipSubTxAt = time.Now()
+	n.mu.Unlock()
+	if pubErr != nil {
+		n.diagLog.Add("gossipsub_publish_fail", map[string]interface{}{
+			"cid":   cidShort(c.String()),
+			"error": pubErr.Error(),
+		})
+	} else {
+		n.diagLog.Add("gossipsub_publish", map[string]interface{}{
+			"cid":  cidShort(c.String()),
+			"size": size,
+		})
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// VM-deleted GossipSub subscription
+// ═══════════════════════════════════════════════════════════════════
+
+type VmDeletedEvent struct {
+	VmId      string `json:"vmId"`
+	NodeId    string `json:"nodeId"`
+	Timestamp string `json:"timestamp"`
+	Signature string `json:"signature"`
+}
+
+func (n *BlockNode) startVmDeletedSubscription(ctx context.Context) {
+	topic, err := n.pubsub.Join(GossipSubVmDelTopic)
+	if err != nil {
+		log.Printf("vm-deleted: failed to join topic: %v", err)
+		return
+	}
+	sub, err := topic.Subscribe()
+	if err != nil {
+		log.Printf("vm-deleted: failed to subscribe: %v", err)
+		return
+	}
+	log.Printf("Subscribed to GossipSub topic: %s", GossipSubVmDelTopic)
+
+	for {
+		msg, err := sub.Next(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("vm-deleted: receive error: %v", err)
+			continue
+		}
+		if msg.ReceivedFrom == n.host.ID() {
+			continue
+		}
+		var evt VmDeletedEvent
+		if err := json.Unmarshal(msg.Data, &evt); err != nil {
+			log.Printf("vm-deleted: invalid payload: %v", err)
+			continue
+		}
+		if err := n.verifyVmDeletedEvent(evt); err != nil {
+			log.Printf("vm-deleted: rejected event for VM %s: %v", evt.VmId, err)
+			continue
+		}
+		go n.deleteOwnerBlocks(ctx, evt.VmId)
+	}
+}
+
+func (n *BlockNode) verifyVmDeletedEvent(evt VmDeletedEvent) error {
+	if evt.VmId == "" || evt.NodeId == "" || evt.Timestamp == "" || evt.Signature == "" {
+		return fmt.Errorf("missing required fields")
+	}
+	ts, err := time.Parse(time.RFC3339, evt.Timestamp)
+	if err != nil {
+		return fmt.Errorf("invalid timestamp: %w", err)
+	}
+	diff := time.Since(ts)
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > 5*time.Minute {
+		return fmt.Errorf("timestamp too old or too far in future: %v", diff)
+	}
+	if n.cfg.AuthToken == "" {
+		return fmt.Errorf("no auth token configured — cannot verify event")
+	}
+	message := fmt.Sprintf("%s:%s:%s", evt.VmId, evt.NodeId, evt.Timestamp)
+	mac := hmac.New(sha256.New, []byte(n.cfg.AuthToken))
+	mac.Write([]byte(message))
+	expected := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(evt.Signature), []byte(expected)) {
+		return fmt.Errorf("invalid signature")
+	}
+	return nil
+}
+
+func (n *BlockNode) deleteOwnerBlocks(ctx context.Context, vmId string) {
+	ownerFile := filepath.Join(StorageDir, OwnersSubdir, vmId+".cids")
+	data, err := os.ReadFile(ownerFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		log.Printf("deleteOwnerBlocks: read owner file failed for VM %s: %v", vmId, err)
+		return
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	deleted := 0
+	skipped := 0
+
+	for _, cidStr := range lines {
+		cidStr = strings.TrimSpace(cidStr)
+		if cidStr == "" {
+			continue
+		}
+		c, err := cid.Decode(cidStr)
+		if err != nil {
+			continue
+		}
+		others, _ := n.cidHasOtherOwners(vmId, cidStr)
+		if others {
+			skipped++
+			continue
+		}
+		if err := n.bstore.DeleteBlock(ctx, c); err != nil {
+			continue
+		}
+		n.accessMu.Lock()
+		delete(n.accessTimes, cidStr)
+		delete(n.blockSizes, cidStr)
+		n.accessMu.Unlock()
+		go func(c cid.Cid) {
+			wCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = n.dht.Provide(wCtx, c, false)
+		}(c)
+		deleted++
+	}
+
+	if err := os.Remove(ownerFile); err != nil && !os.IsNotExist(err) {
+		log.Printf("deleteOwnerBlocks: failed to remove owner file for VM %s: %v", vmId, err)
+	}
+	log.Printf("deleteOwnerBlocks: VM %s — deleted %d blocks, skipped %d (shared owners)", vmId, deleted, skipped)
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -613,6 +927,8 @@ func (n *BlockNode) runGC(ctx context.Context) (int64, error) {
 	for c, t := range n.accessTimes {
 		entries = append(entries, entry{c, t, n.blockSizes[c]})
 	}
+	usedBefore, _ := n.usedBytes(ctx)
+	usagePctBefore := float64(usedBefore) / float64(n.cfg.StorageBytes) * 100
 	n.accessMu.Unlock()
 
 	sort.Slice(entries, func(i, j int) bool {
@@ -620,6 +936,7 @@ func (n *BlockNode) runGC(ctx context.Context) (int64, error) {
 	})
 
 	var freed int64
+	var evicted int64
 	for _, e := range entries {
 		usedBytes, _ := n.usedBytes(ctx)
 		if float64(usedBytes)/float64(n.cfg.StorageBytes)*100 < GCTriggerPercent {
@@ -633,10 +950,24 @@ func (n *BlockNode) runGC(ctx context.Context) (int64, error) {
 			continue
 		}
 		freed += e.size
+		evicted++
 		n.accessMu.Lock()
 		delete(n.accessTimes, e.cid)
 		delete(n.blockSizes, e.cid)
 		n.accessMu.Unlock()
+	}
+
+	if evicted > 0 {
+		n.mu.Lock()
+		n.diag.GCRunCount++
+		n.diag.GCBlocksEvicted += evicted
+		n.diag.GCBytesFreed += freed
+		n.mu.Unlock()
+		n.diagLog.Add("gc_run", map[string]interface{}{
+			"blocks_evicted": evicted,
+			"bytes_freed":    freed,
+			"usage_before":   fmt.Sprintf("%.1f%%", usagePctBefore),
+		})
 	}
 	return freed, nil
 }
@@ -668,6 +999,108 @@ func (n *BlockNode) blockCount(ctx context.Context) (int, error) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// LRU bootstrap from existing blocks
+// ═══════════════════════════════════════════════════════════════════
+
+func (n *BlockNode) loadExistingAccessTimes(ctx context.Context) {
+	ch, err := n.bstore.AllKeysChan(ctx)
+	if err != nil {
+		return
+	}
+	n.accessMu.Lock()
+	defer n.accessMu.Unlock()
+	for c := range ch {
+		cidStr := c.String()
+		if _, exists := n.accessTimes[cidStr]; !exists {
+			n.accessTimes[cidStr] = time.Now()
+			buf := new(bytes.Buffer)
+			_ = binary.Write(buf, binary.BigEndian, int64(len(c.Bytes())))
+			n.blockSizes[cidStr] = 1024
+		}
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Reannounce existing blocks on startup
+// ═══════════════════════════════════════════════════════════════════
+
+// reannounceExistingBlocks re-publishes DHT provider records for all locally
+// stored blocks after startup. Called after connectBootstrapPeers so the
+// routing table has time to populate before Provide() calls are issued.
+// Handles: binary restart, DHT VM redeployment, 24h record expiry.
+func (n *BlockNode) reannounceExistingBlocks(ctx context.Context) {
+	time.Sleep(15 * time.Second) // wait for Kademlia routing table to populate
+
+	ch, err := n.bstore.AllKeysChan(ctx)
+	if err != nil {
+		log.Printf("reannounce: failed to list blocks: %v", err)
+		return
+	}
+
+	count := 0
+	for c := range ch {
+		if ctx.Err() != nil {
+			return
+		}
+		announceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		_ = n.dht.Provide(announceCtx, c, true)
+		cancel()
+		count++
+		if count%100 == 0 {
+			log.Printf("reannounce: %d blocks announced to DHT", count)
+		}
+	}
+	log.Printf("reannounce: complete — %d blocks re-announced to DHT", count)
+
+	n.mu.Lock()
+	n.diag.ReannounceCount++
+	n.diag.LastReannounceAt = time.Now()
+	n.mu.Unlock()
+	n.diagLog.Add("reannounce_complete", map[string]interface{}{
+		"blocks": count,
+	})
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Manifest registry
+// ═══════════════════════════════════════════════════════════════════
+
+func (n *BlockNode) loadExistingManifests(ctx context.Context) {
+	dagsDir := filepath.Join(StorageDir, DagsSubdir)
+	entries, err := os.ReadDir(dagsDir)
+	if err != nil {
+		return
+	}
+	count := 0
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dagsDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var m ResourceManifest
+		if err := json.Unmarshal(data, &m); err != nil {
+			continue
+		}
+		n.manifests[m.RootCid] = &m
+		count++
+	}
+	if count > 0 {
+		log.Printf("Loaded %d manifests from disk", count)
+	}
+}
+
+func (n *BlockNode) saveManifest(m *ResourceManifest) error {
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(StorageDir, DagsSubdir, m.RootCid+".json")
+	return os.WriteFile(path, data, 0644)
+}
+// ═══════════════════════════════════════════════════════════════════
 // HTTP API
 // ═══════════════════════════════════════════════════════════════════
 
@@ -682,6 +1115,7 @@ func (n *BlockNode) startHTTPServer(ctx context.Context) {
 	mux.HandleFunc("/manifests/", n.handleManifestByID)
 	mux.HandleFunc("/manifests", n.handleManifests)
 	mux.HandleFunc("/owners/", n.handleOwnerDelete)
+	mux.HandleFunc("/diagnostics", n.handleDiagnostics)
 
 	// Bind to all interfaces so the NodeAgent host can reach the API
 	// via the virbr0 bridge (192.168.122.x). The API port is not
@@ -705,6 +1139,7 @@ func (n *BlockNode) startHTTPServer(ctx context.Context) {
 	}()
 }
 
+// ── GET /health ──────────────────────────────────────────────────────────────
 func (n *BlockNode) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	usedBytes, _ := n.usedBytes(ctx)
@@ -723,6 +1158,7 @@ func (n *BlockNode) handleHealth(w http.ResponseWriter, r *http.Request) {
 	manifestCount := len(n.manifests)
 	n.manifestsMu.RUnlock()
 
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"status":          "ok",
 		"peerId":          peerID,
@@ -739,6 +1175,7 @@ func (n *BlockNode) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ── GET|DELETE /blocks/{cid} ─────────────────────────────────────────────────
 func (n *BlockNode) handleBlock(w http.ResponseWriter, r *http.Request) {
 	cidStr := strings.TrimPrefix(r.URL.Path, "/blocks/")
 	if cidStr == "" {
@@ -781,7 +1218,7 @@ func (n *BlockNode) getBlock(w http.ResponseWriter, r *http.Request, c cid.Cid) 
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Block-CID", c.String())
-	w.Write(blk.RawData())
+	_, _ = w.Write(blk.RawData())
 }
 
 func (n *BlockNode) deleteBlock(w http.ResponseWriter, r *http.Request, c cid.Cid) {
@@ -797,6 +1234,7 @@ func (n *BlockNode) deleteBlock(w http.ResponseWriter, r *http.Request, c cid.Ci
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ── POST /blocks ─────────────────────────────────────────────────────────────
 func (n *BlockNode) handleBlocks(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -830,10 +1268,8 @@ func (n *BlockNode) handleBlocks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n.touchBlock(c.String(), int64(len(data)))
- 
+
 	// Append CID to owner index if ?owner= query param is present.
-	// Owner index: /var/lib/decloud-blockstore/owners/{vmId}.cids
-	// One CID per line. Used by DELETE /owners/{vmId} for bulk cleanup on VM delete.
 	if owner := r.URL.Query().Get("owner"); owner != "" {
 		go func(ownerID, cidStr string) {
 			ownerFile := filepath.Join(StorageDir, OwnersSubdir, ownerID+".cids")
@@ -848,69 +1284,39 @@ func (n *BlockNode) handleBlocks(w http.ResponseWriter, r *http.Request) {
 			}
 		}(owner, c.String())
 	}
- 
-	go func() {
+
+	// Announce to DHT (with diagnostics tracking)
+	go func(c cid.Cid) {
 		announceCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = n.dht.Provide(announceCtx, c, true)
-	}()
+		announceErr := n.dht.Provide(announceCtx, c, true)
+		n.mu.Lock()
+		if announceErr != nil {
+			n.diag.DHTAnnounceFail++
+			n.diagLog.Add("dht_announce_fail", map[string]interface{}{
+				"cid":   cidShort(c.String()),
+				"error": announceErr.Error(),
+				"role":  "http_write",
+			})
+		} else {
+			n.diag.DHTAnnounceSuccess++
+			n.diag.LastAnnounceAt = time.Now()
+			n.diagLog.Add("dht_announce", map[string]interface{}{
+				"cid":  cidShort(c.String()),
+				"role": "http_write",
+			})
+		}
+		n.mu.Unlock()
+	}(c)
+
+	// Broadcast via GossipSub (with diagnostics tracking inside publishNewBlock)
 	go n.publishNewBlock(c, int64(len(data)))
- 
+
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"cid": c.String()})
 }
 
-// handleOwnerDelete: DELETE /owners/{vmId}
-// HTTP entry point for owner-indexed block deletion.
-// Delegates to deleteOwnerBlocks which is shared with the GossipSub path.
-func (n *BlockNode) handleOwnerDelete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "DELETE only", http.StatusMethodNotAllowed)
-		return
-	}
-	vmId := strings.TrimPrefix(r.URL.Path, "/owners/")
-	vmId = strings.TrimSpace(vmId)
-	if vmId == "" {
-		http.Error(w, "missing vmId", http.StatusBadRequest)
-		return
-	}
-
-	// Check owner file exists before delegating — return 204 if nothing to do
-	ownerFile := filepath.Join(StorageDir, OwnersSubdir, vmId+".cids")
-	if _, err := os.Stat(ownerFile); os.IsNotExist(err) {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	n.deleteOwnerBlocks(r.Context(), vmId)
-	w.WriteHeader(http.StatusNoContent)
-}
-// cidHasOtherOwners returns true if any owner file other than excludeOwner
-// contains the given CID string. Used for reference counting on delete.
-func (n *BlockNode) cidHasOtherOwners(excludeOwner, cidStr string) (bool, error) {
-	ownersDir := filepath.Join(StorageDir, OwnersSubdir)
-	entries, err := os.ReadDir(ownersDir)
-	if err != nil {
-		return false, err
-	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".cids") {
-			continue
-		}
-		ownerID := strings.TrimSuffix(e.Name(), ".cids")
-		if ownerID == excludeOwner {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(ownersDir, e.Name()))
-		if err != nil {
-			continue
-		}
-		if strings.Contains(string(data), cidStr) {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
+// ── GET /stats ───────────────────────────────────────────────────────────────
 func (n *BlockNode) handleStats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	usedBytes, _ := n.usedBytes(ctx)
@@ -919,6 +1325,7 @@ func (n *BlockNode) handleStats(w http.ResponseWriter, r *http.Request) {
 	sent := n.bitswapSent
 	recv := n.bitswapReceived
 	n.mu.RUnlock()
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"capacityBytes":   n.cfg.StorageBytes,
 		"usedBytes":       usedBytes,
@@ -930,6 +1337,7 @@ func (n *BlockNode) handleStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ── POST /gc ─────────────────────────────────────────────────────────────────
 func (n *BlockNode) handleGC(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -941,12 +1349,14 @@ func (n *BlockNode) handleGC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	usedBytes, _ := n.usedBytes(r.Context())
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"freedBytes":     freed,
 		"remainingBytes": usedBytes,
 	})
 }
 
+// ── POST /connect ─────────────────────────────────────────────────────────────
 func (n *BlockNode) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -972,8 +1382,8 @@ func (n *BlockNode) handleConnect(w http.ResponseWriter, r *http.Request) {
 			results = append(results, map[string]any{"addr": addrStr, "ok": false, "error": err.Error()})
 			continue
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		err = n.host.Connect(ctx, *pi)
+		connCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		err = n.host.Connect(connCtx, *pi)
 		cancel()
 		if err != nil {
 			results = append(results, map[string]any{"addr": addrStr, "ok": false, "error": err.Error()})
@@ -982,6 +1392,7 @@ func (n *BlockNode) handleConnect(w http.ResponseWriter, r *http.Request) {
 			connected++
 		}
 	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"results":   results,
 		"connected": connected,
@@ -989,10 +1400,9 @@ func (n *BlockNode) handleConnect(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ── Manifest endpoints ────────────────────────────────────────────
-
-// handleManifests: GET returns all manifests, POST registers a new one.
+// ── GET /manifests, POST /manifests ──────────────────────────────────────────
 func (n *BlockNode) handleManifests(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	switch r.Method {
 	case http.MethodGet:
 		n.manifestsMu.RLock()
@@ -1002,7 +1412,6 @@ func (n *BlockNode) handleManifests(w http.ResponseWriter, r *http.Request) {
 		}
 		n.manifestsMu.RUnlock()
 
-		// Sort by UpdatedAt descending (most recent first)
 		sort.Slice(list, func(i, j int) bool {
 			return list[i].UpdatedAt.After(list[j].UpdatedAt)
 		})
@@ -1028,7 +1437,6 @@ func (n *BlockNode) handleManifests(w http.ResponseWriter, r *http.Request) {
 		now := time.Now().UTC()
 		n.manifestsMu.Lock()
 		if existing, ok := n.manifests[m.RootCid]; ok {
-			// Update existing — preserve RegisteredAt
 			m.RegisteredAt = existing.RegisteredAt
 		} else {
 			m.RegisteredAt = now
@@ -1052,7 +1460,7 @@ func (n *BlockNode) handleManifests(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleManifestByID: GET /manifests/{rootCid}
+// ── GET /manifests/{rootCid} ─────────────────────────────────────────────────
 func (n *BlockNode) handleManifestByID(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1070,274 +1478,122 @@ func (n *BlockNode) handleManifestByID(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "manifest not found", http.StatusNotFound)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(m)
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// GossipSub publisher
-// ═══════════════════════════════════════════════════════════════════
-
-func (n *BlockNode) publishNewBlock(c cid.Cid, size int64) {
-	topic, err := n.pubsub.Join(GossipSubTopic)
-	if err != nil {
+// ── DELETE /owners/{vmId} ────────────────────────────────────────────────────
+func (n *BlockNode) handleOwnerDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "DELETE only", http.StatusMethodNotAllowed)
 		return
 	}
-	ann := NewBlockAnnouncement{CID: c.String(), Size: size, SourceNodeID: n.cfg.NodeID}
-	data, err := json.Marshal(ann)
-	if err != nil {
+	vmId := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/owners/"))
+	if vmId == "" {
+		http.Error(w, "missing vmId", http.StatusBadRequest)
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = topic.Publish(ctx, data)
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// Bootstrap LRU from existing blocks
-// ═══════════════════════════════════════════════════════════════════
-
-func (n *BlockNode) loadExistingAccessTimes(ctx context.Context) {
-	ch, err := n.bstore.AllKeysChan(ctx)
-	if err != nil {
-		return
-	}
-	n.accessMu.Lock()
-	defer n.accessMu.Unlock()
-	for c := range ch {
-		cidStr := c.String()
-		if _, exists := n.accessTimes[cidStr]; !exists {
-			n.accessTimes[cidStr] = time.Now()
-			buf := new(bytes.Buffer)
-			_ = binary.Write(buf, binary.BigEndian, int64(len(c.Bytes())))
-			n.blockSizes[cidStr] = 1024
-		}
-	}
-}
-
-// reannounceExistingBlocks re-publishes DHT provider records for all locally
-// stored blocks after startup. Called after connectBootstrapPeers so the
-// routing table has time to populate before Provide() calls are issued.
-// Handles: binary restart, DHT VM redeployment, 24h record expiry.
-func (n *BlockNode) reannounceExistingBlocks(ctx context.Context) {
-    time.Sleep(15 * time.Second) // wait for Kademlia routing table to populate
-
-    ch, err := n.bstore.AllKeysChan(ctx)
-    if err != nil {
-        log.Printf("reannounce: failed to list blocks: %v", err)
-        return
-    }
-
-    count := 0
-    for c := range ch {
-        if ctx.Err() != nil {
-            return
-        }
-        announceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-        _ = n.dht.Provide(announceCtx, c, true)
-        cancel()
-        count++
-        if count%100 == 0 {
-            log.Printf("reannounce: %d blocks announced to DHT", count)
-        }
-    }
-    log.Printf("reannounce: complete — %d blocks re-announced to DHT", count)
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// main
-// ═══════════════════════════════════════════════════════════════════
-
-func main() {
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
-	log.Println("DeCloud Block Store Node starting...")
-
-	cfg := parseConfig()
-	log.Printf("Config: listenPort=%d apiPort=%d storageBytes=%d nodeID=%s vmID=%s",
-		cfg.ListenPort, cfg.APIPort, cfg.StorageBytes, cfg.NodeID, cfg.VMID)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	node, err := setup(ctx, cfg)
-	if err != nil {
-		log.Fatalf("Setup failed: %v", err)
-	}
-	defer node.host.Close()
-
-	node.loadExistingAccessTimes(ctx)
-	node.loadExistingManifests(ctx)
-	node.connectBootstrapPeers(ctx)
-	go node.reannounceExistingBlocks(ctx)
-
-	if err := node.startGossipSubSubscription(ctx); err != nil {
-		log.Printf("Warning: GossipSub subscription failed: %v", err)
-	}
-	go node.startVmDeletedSubscription(ctx)
-	node.startHTTPServer(ctx)
-	go node.startGCLoop(ctx)
-
-	for _, addr := range node.host.Addrs() {
-		log.Printf("Listening: %s/p2p/%s", addr, node.host.ID())
-	}
-	log.Printf("Block store node ready — peer ID: %s", node.host.ID())
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-
-	log.Println("Shutting down block store node...")
-	cancel()
-	time.Sleep(500 * time.Millisecond)
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// VM-deleted GossipSub event handling
-// ═══════════════════════════════════════════════════════════════════
-
-type VmDeletedEvent struct {
-	VmId      string `json:"vmId"`
-	NodeId    string `json:"nodeId"`
-	Timestamp string `json:"timestamp"`
-	Signature string `json:"signature"`
-}
-
-// startVmDeletedSubscription subscribes to decloud/blockstore/vm-deleted.
-// When a verified event is received, all blocks owned by that VM are evicted.
-func (n *BlockNode) startVmDeletedSubscription(ctx context.Context) {
-	topic, err := n.pubsub.Join(GossipSubVmDelTopic)
-	if err != nil {
-		log.Printf("vm-deleted: failed to join topic: %v", err)
-		return
-	}
-	sub, err := topic.Subscribe()
-	if err != nil {
-		log.Printf("vm-deleted: failed to subscribe: %v", err)
-		return
-	}
-	log.Printf("Subscribed to GossipSub topic: %s", GossipSubVmDelTopic)
-
-	for {
-		msg, err := sub.Next(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			log.Printf("vm-deleted: receive error: %v", err)
-			continue
-		}
-		// Skip messages we published ourselves
-		if msg.ReceivedFrom == n.host.ID() {
-			continue
-		}
-		var evt VmDeletedEvent
-		if err := json.Unmarshal(msg.Data, &evt); err != nil {
-			log.Printf("vm-deleted: invalid payload: %v", err)
-			continue
-		}
-		if err := n.verifyVmDeletedEvent(evt); err != nil {
-			log.Printf("vm-deleted: rejected event for VM %s: %v",
-				evt.VmId, err)
-			continue
-		}
-		go n.deleteOwnerBlocks(ctx, evt.VmId)
-	}
-}
-
-// verifyVmDeletedEvent validates HMAC signature and timestamp freshness.
-// Signature: HMAC-SHA256(authToken, vmId:nodeId:timestamp)
-// Timestamp must be within ±5 minutes to prevent replay attacks.
-func (n *BlockNode) verifyVmDeletedEvent(evt VmDeletedEvent) error {
-	if evt.VmId == "" || evt.NodeId == "" || evt.Timestamp == "" || evt.Signature == "" {
-		return fmt.Errorf("missing required fields")
-	}
-
-	// Replay protection
-	ts, err := time.Parse(time.RFC3339, evt.Timestamp)
-	if err != nil {
-		return fmt.Errorf("invalid timestamp: %w", err)
-	}
-	diff := time.Since(ts)
-	if diff < 0 {
-		diff = -diff
-	}
-	if diff > 5*time.Minute {
-		return fmt.Errorf("timestamp too old or too far in future: %v", diff)
-	}
-
-	// HMAC verification
-	if n.cfg.AuthToken == "" {
-		return fmt.Errorf("no auth token configured — cannot verify event")
-	}
-	message := fmt.Sprintf("%s:%s:%s", evt.VmId, evt.NodeId, evt.Timestamp)
-	mac := hmac.New(sha256.New, []byte(n.cfg.AuthToken))
-	mac.Write([]byte(message))
-	expected := base64.StdEncoding.EncodeToString(mac.Sum(nil))
-	if !hmac.Equal([]byte(evt.Signature), []byte(expected)) {
-		return fmt.Errorf("invalid signature")
-	}
-	return nil
-}
-
-// deleteOwnerBlocks evicts all FlatFS blocks owned by vmId, withdraws
-// their DHT provider records, and removes the owner index file.
-// Shared by handleOwnerDelete (HTTP) and startVmDeletedSubscription (GossipSub).
-func (n *BlockNode) deleteOwnerBlocks(ctx context.Context, vmId string) {
 	ownerFile := filepath.Join(StorageDir, OwnersSubdir, vmId+".cids")
-	data, err := os.ReadFile(ownerFile)
+	if _, err := os.Stat(ownerFile); os.IsNotExist(err) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	n.deleteOwnerBlocks(r.Context(), vmId)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// cidHasOtherOwners returns true if any owner file other than excludeOwner
+// contains the given CID string.
+func (n *BlockNode) cidHasOtherOwners(excludeOwner, cidStr string) (bool, error) {
+	ownersDir := filepath.Join(StorageDir, OwnersSubdir)
+	entries, err := os.ReadDir(ownersDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return // no blocks for this VM on this node — normal case
+		return false, err
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".cids") {
+			continue
 		}
-		log.Printf("deleteOwnerBlocks: read owner file failed for VM %s: %v", vmId, err)
+		ownerID := strings.TrimSuffix(e.Name(), ".cids")
+		if ownerID == excludeOwner {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(ownersDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		if strings.Contains(string(data), cidStr) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// ── GET /diagnostics ─────────────────────────────────────────────────────────
+// Full diagnostic snapshot: event log + aggregate counters + peer details.
+// Used by the dashboard's Export feature and for debugging replication issues.
+func (n *BlockNode) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	deleted := 0
-	skipped := 0
+	n.mu.RLock()
+	diag := n.diag // value copy — avoids holding lock during JSON encode
+	sent := n.bitswapSent
+	recv := n.bitswapReceived
+	n.mu.RUnlock()
 
-	for _, cidStr := range lines {
-		cidStr = strings.TrimSpace(cidStr)
-		if cidStr == "" {
-			continue
+	// GossipSub topics this node has joined
+	topics := n.pubsub.GetTopics()
+
+	// Peer details with addresses
+	peers := n.host.Network().Peers()
+	peerDetails := make([]map[string]interface{}, 0, len(peers))
+	for _, p := range peers {
+		addrs := n.host.Network().Peerstore().Addrs(p)
+		addrStrs := make([]string, len(addrs))
+		for i, a := range addrs {
+			addrStrs[i] = a.String()
 		}
-		c, err := cid.Decode(cidStr)
-		if err != nil {
-			log.Printf("deleteOwnerBlocks: invalid CID %q: %v", cidStr, err)
-			continue
-		}
-
-		// Reference counting — skip if another VM also owns this block
-		others, _ := n.cidHasOtherOwners(vmId, cidStr)
-		if others {
-			skipped++
-			continue
-		}
-
-		if err := n.bstore.DeleteBlock(ctx, c); err != nil {
-			log.Printf("deleteOwnerBlocks: FlatFS delete failed for %s: %v", cidStr[:12], err)
-			continue
-		}
-
-		n.accessMu.Lock()
-		delete(n.accessTimes, cidStr)
-		delete(n.blockSizes, cidStr)
-		n.accessMu.Unlock()
-
-		// Withdraw DHT provider record (best-effort)
-		go func(c cid.Cid) {
-			wCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			_ = n.dht.Provide(wCtx, c, false)
-		}(c)
-
-		deleted++
+		peerDetails = append(peerDetails, map[string]interface{}{
+			"id":    p.String(),
+			"addrs": addrStrs,
+		})
 	}
 
-	if err := os.Remove(ownerFile); err != nil && !os.IsNotExist(err) {
-		log.Printf("deleteOwnerBlocks: failed to remove owner file for VM %s: %v", vmId, err)
-	}
-
-	log.Printf("deleteOwnerBlocks: VM %s — deleted %d blocks, skipped %d (shared owners)",
-		vmId, deleted, skipped)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"timestamp":      time.Now().UTC().Format(time.RFC3339),
+		"connectedPeers": len(peers),
+		"gossipSub": map[string]interface{}{
+			"topics":            topics,
+			"messagesReceived":  diag.GossipSubReceived,
+			"messagesPublished": diag.GossipSubPublished,
+			"lastReceivedAt":    diag.LastGossipSubRxAt,
+			"lastPublishedAt":   diag.LastGossipSubTxAt,
+		},
+		"dhtAnnounce": map[string]interface{}{
+			"success":          diag.DHTAnnounceSuccess,
+			"fail":             diag.DHTAnnounceFail,
+			"lastAt":           diag.LastAnnounceAt,
+			"reannounceCount":  diag.ReannounceCount,
+			"lastReannounceAt": diag.LastReannounceAt,
+		},
+		"xor": map[string]interface{}{
+			"accepted": diag.XORAccepted,
+			"rejected": diag.XORRejected,
+		},
+		"bitswap": map[string]interface{}{
+			"received":  recv,
+			"sent":      sent,
+		},
+		"gc": map[string]interface{}{
+			"runCount":      diag.GCRunCount,
+			"blocksEvicted": diag.GCBlocksEvicted,
+			"bytesFreed":    diag.GCBytesFreed,
+		},
+		"peers":    peerDetails,
+		"eventLog": n.diagLog.Snapshot(),
+	})
 }

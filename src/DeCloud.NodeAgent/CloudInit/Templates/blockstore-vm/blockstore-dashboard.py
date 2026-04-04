@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 DeCloud Block Store Dashboard Server
-Version: 1.0.0
+Version: 2.0.0 - Added /diagnostics proxy endpoint
 
 Lightweight HTTP server that serves the dashboard UI and proxies
 API requests to the block store Go binary running on localhost.
@@ -23,7 +23,7 @@ LISTEN_PORT = 8080
 
 # API endpoints to proxy to the Go binary (read-only only).
 # Mutating endpoints (/gc, /connect) are not exposed publicly.
-PROXY_PATHS = {"/health", "/stats", "/manifests"}
+PROXY_PATHS = {"/health", "/stats", "/manifests", "/diagnostics"}
 
 # ==================== Logging ====================
 logging.basicConfig(
@@ -104,7 +104,7 @@ class BlockStoreDashboardHandler(BaseHTTPRequestHandler):
             req = Request(url, method=method)
             req.add_header("Accept", "application/json")
 
-            resp = urlopen(req, timeout=5)
+            resp = urlopen(req, timeout=10)
             data = resp.read()
 
             self.send_response(resp.status)
@@ -143,6 +143,7 @@ def main():
     server = HTTPServer(("0.0.0.0", LISTEN_PORT), BlockStoreDashboardHandler)
     logger.info("Block Store Dashboard server listening on :%d", LISTEN_PORT)
     logger.info("  Proxying API to block store binary on :%d", BLOCKSTORE_API_PORT)
+    logger.info("  Proxied paths: %s", ", ".join(sorted(PROXY_PATHS)))
     logger.info("  Serving static files from %s", STATIC_DIR)
 
     try:

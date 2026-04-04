@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 DeCloud DHT Node Dashboard Server
-Version: 1.0.0
+Version: 2.0.0 - Added /diagnostics proxy endpoint
 
 Lightweight HTTP server that serves the dashboard UI and proxies
 API requests to the DHT Go binary running on localhost.
@@ -25,7 +25,9 @@ LISTEN_PORT = 8080
 # API endpoints to proxy to the Go binary (read-only only).
 # Mutating endpoints (/connect, /publish) are not exposed — they require
 # a Bearer token and are only called by internal services (dht-bootstrap-poll.sh).
-PROXY_PATHS = {"/health", "/peers"}
+PROXY_PATHS = {"/health", "/peers", "/diagnostics"}
+
+# /providers/ is proxied with prefix match (see do_GET below)
 
 # ==================== Logging ====================
 logging.basicConfig(
@@ -44,7 +46,7 @@ class DhtDashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
 
-        if path in PROXY_PATHS:
+        if path in PROXY_PATHS or path.startswith("/providers/"):
             self._proxy_to_dht(path)
         elif path == "/" or path == "/index.html":
             self._serve_dashboard()
@@ -74,11 +76,9 @@ class DhtDashboardHandler(BaseHTTPRequestHandler):
         rel = url_path.replace("/static/", "", 1)
         fpath = os.path.join(STATIC_DIR, rel)
 
-        # Prevent directory traversal
         if not os.path.abspath(fpath).startswith(os.path.abspath(STATIC_DIR)):
             self._send_error(403, "Forbidden")
             return
-
         if not os.path.isfile(fpath):
             self._send_error(404, "File not found")
             return
@@ -117,7 +117,7 @@ class DhtDashboardHandler(BaseHTTPRequestHandler):
             if body:
                 req.add_header("Content-Type", "application/json")
 
-            resp = urlopen(req, timeout=5)
+            resp = urlopen(req, timeout=35)  # /providers/ can take up to 30s
             data = resp.read()
 
             self.send_response(resp.status)
@@ -156,6 +156,7 @@ def main():
     server = HTTPServer(("0.0.0.0", LISTEN_PORT), DhtDashboardHandler)
     logger.info("DHT Dashboard server listening on :%d", LISTEN_PORT)
     logger.info("  Proxying API to DHT binary on :%d", DHT_API_PORT)
+    logger.info("  Proxied paths: %s + /providers/*", ", ".join(sorted(PROXY_PATHS)))
     logger.info("  Serving static files from %s", STATIC_DIR)
 
     try:

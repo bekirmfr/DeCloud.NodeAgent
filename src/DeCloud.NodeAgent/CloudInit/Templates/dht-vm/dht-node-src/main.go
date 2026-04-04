@@ -32,6 +32,83 @@ const (
 	keyFileName    = "identity.key"
 )
 
+// ═══════════════════════════════════════════════════════════════════
+// Diagnostic event log — ring buffer for real-time debugging
+// ═══════════════════════════════════════════════════════════════════
+
+// DiagEvent is a single timestamped diagnostic event.
+type DiagEvent struct {
+	TS      string                 `json:"ts"`
+	Event   string                 `json:"event"`
+	Details map[string]interface{} `json:"details,omitempty"`
+}
+
+// DiagLog is a thread-safe fixed-capacity ring buffer (newest overwrites oldest).
+type DiagLog struct {
+	mu     sync.RWMutex
+	events []DiagEvent
+	cap    int
+	head   int
+	count  int
+}
+
+func newDiagLog(capacity int) *DiagLog {
+	return &DiagLog{cap: capacity, events: make([]DiagEvent, capacity)}
+}
+
+func (l *DiagLog) Add(event string, details map[string]interface{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.events[l.head] = DiagEvent{
+		TS:      time.Now().UTC().Format(time.RFC3339),
+		Event:   event,
+		Details: details,
+	}
+	l.head = (l.head + 1) % l.cap
+	if l.count < l.cap {
+		l.count++
+	}
+}
+
+// Snapshot returns events in chronological order (oldest → newest).
+func (l *DiagLog) Snapshot() []DiagEvent {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if l.count == 0 {
+		return nil
+	}
+	result := make([]DiagEvent, l.count)
+	if l.count < l.cap {
+		copy(result, l.events[:l.count])
+	} else {
+		for i := 0; i < l.cap; i++ {
+			result[i] = l.events[(l.head+i)%l.cap]
+		}
+	}
+	return result
+}
+
+// DHTDiagCounters holds aggregate diagnostic counters.
+type DHTDiagCounters struct {
+	// Bootstrap
+	BootstrapAttempts int64     `json:"bootstrapAttempts"`
+	BootstrapSuccess  int64     `json:"bootstrapSuccess"`
+	LastBootstrapAt   time.Time `json:"lastBootstrapAt,omitempty"`
+	// Peer lifecycle
+	PeerConnects    int64 `json:"peerConnects"`
+	PeerDisconnects int64 `json:"peerDisconnects"`
+	// Provider lookups (from /providers/ API)
+	ProviderLookups    int64 `json:"providerLookups"`
+	ProviderLookupFail int64 `json:"providerLookupFail"`
+	// GossipSub relay
+	GossipSubMessages int64     `json:"gossipSubMessages"`
+	LastGossipSubAt   time.Time `json:"lastGossipSubAt,omitempty"`
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Config and NodeState
+// ═══════════════════════════════════════════════════════════════════
+
 // Config holds the DHT node configuration from environment variables.
 type Config struct {
 	ListenPort     string
@@ -53,7 +130,15 @@ type NodeState struct {
 	startTime      time.Time
 	connectedPeers int
 	status         string
+
+	// Diagnostics
+	diagLog *DiagLog
+	diag    DHTDiagCounters
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// main
+// ═══════════════════════════════════════════════════════════════════
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmsgprefix)
@@ -148,7 +233,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to subscribe to events topic: %v", err)
 	}
-	go handleEvents(ctx, sub)
+
+	state := &NodeState{
+		host:       h,
+		dht:        kadDHT,
+		pubsub:     ps,
+		eventTopic: topic,
+		startTime:  time.Now(),
+		status:     "active",
+		diagLog:    newDiagLog(200),
+	}
+
+	go handleEvents(ctx, sub, state)
 
 	// Start mDNS discovery for local peers
 	mdnsService := mdns.NewMdnsService(h, protocolPrefix, &mdnsNotifee{h: h, ctx: ctx})
@@ -156,15 +252,6 @@ func main() {
 		log.Printf("mDNS discovery failed to start (non-fatal): %v", err)
 	} else {
 		defer mdnsService.Close()
-	}
-
-	state := &NodeState{
-		host:      h,
-		dht:       kadDHT,
-		pubsub:    ps,
-		eventTopic: topic,
-		startTime: time.Now(),
-		status:    "active",
 	}
 
 	// Start background peer counter
@@ -181,8 +268,8 @@ func main() {
 		"decloud/blockstore/vm-deleted",
 	} {
 		if t, err := ps.Join(bsTopic); err == nil {
-			if sub, err := t.Subscribe(); err == nil {
-				go drainSubscription(ctx, sub)
+			if bsSub, err := t.Subscribe(); err == nil {
+				go drainSubscription(ctx, bsSub, bsTopic, state)
 			} else {
 				log.Printf("Warning: failed to subscribe to %s: %v", bsTopic, err)
 			}
@@ -194,7 +281,7 @@ func main() {
 	// Start bootstrap retry goroutine — handles the race condition where
 	// this node deployed before other DHT nodes' PeerIds were captured.
 	// Periodically reads dynamic-peers file for runtime peer injection.
-	go retryBootstrap(ctx, h, cfg)
+	go retryBootstrap(ctx, h, cfg, state)
 
 	// Start HTTP API server (localhost-only — no external access)
 	go startAPIServer(cfg.APIPort, state)
@@ -215,6 +302,10 @@ func main() {
 	kadDHT.Close()
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// Config loading
+// ═══════════════════════════════════════════════════════════════════
+
 func loadConfig() Config {
 	return Config{
 		ListenPort:     envOrDefault("DHT_LISTEN_PORT", "4001"),
@@ -233,6 +324,10 @@ func envOrDefault(key, fallback string) string {
 	}
 	return fallback
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Identity
+// ═══════════════════════════════════════════════════════════════════
 
 // loadOrCreateIdentity loads a persistent Ed25519 key or generates a new one.
 func loadOrCreateIdentity(dataDir string) (crypto.PrivKey, error) {
@@ -272,6 +367,10 @@ func loadOrCreateIdentity(dataDir string) (crypto.PrivKey, error) {
 	return privKey, nil
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// Bootstrap
+// ═══════════════════════════════════════════════════════════════════
+
 func connectBootstrapPeers(ctx context.Context, h host.Host, peersStr string) {
 	if peersStr == "" {
 		log.Println("No bootstrap peers configured (first node in network)")
@@ -308,7 +407,12 @@ func connectBootstrapPeers(ctx context.Context, h host.Host, peersStr string) {
 	log.Printf("Connected to %d/%d bootstrap peers", connected, len(peers))
 }
 
-func handleEvents(ctx context.Context, sub *pubsub.Subscription) {
+// ═══════════════════════════════════════════════════════════════════
+// Event handling / GossipSub
+// ═══════════════════════════════════════════════════════════════════
+
+// handleEvents processes the region events topic. Now also updates diagnostic counters.
+func handleEvents(ctx context.Context, sub *pubsub.Subscription, state *NodeState) {
 	for {
 		msg, err := sub.Next(ctx)
 		if err != nil {
@@ -323,17 +427,28 @@ func handleEvents(ctx context.Context, sub *pubsub.Subscription) {
 	}
 }
 
-// drainSubscription consumes and discards messages from a subscription.
-// Used for topics where this node participates in the GossipSub mesh
-// purely as a relay (e.g. blockstore topics) without processing messages.
-func drainSubscription(ctx context.Context, sub *pubsub.Subscription) {
+// drainSubscription consumes and discards messages from a subscription while
+// tracking GossipSub relay statistics for the diagnostics endpoint.
+func drainSubscription(ctx context.Context, sub *pubsub.Subscription, topicName string, state *NodeState) {
 	defer sub.Cancel()
 	for {
-		if _, err := sub.Next(ctx); err != nil {
+		msg, err := sub.Next(ctx)
+		if err != nil {
 			return
+		}
+		// Count relayed GossipSub messages for diagnostics
+		if msg.ReceivedFrom != state.host.ID() {
+			state.mu.Lock()
+			state.diag.GossipSubMessages++
+			state.diag.LastGossipSubAt = time.Now()
+			state.mu.Unlock()
 		}
 	}
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Peer tracking
+// ═══════════════════════════════════════════════════════════════════
 
 func trackPeers(ctx context.Context, state *NodeState) {
 	ticker := time.NewTicker(15 * time.Second)
@@ -345,11 +460,33 @@ func trackPeers(ctx context.Context, state *NodeState) {
 			return
 		case <-ticker.C:
 			state.mu.Lock()
-			state.connectedPeers = len(state.host.Network().Peers())
+			prev := state.connectedPeers
+			current := len(state.host.Network().Peers())
+			state.connectedPeers = current
+
+			if current > prev {
+				delta := current - prev
+				state.diag.PeerConnects += int64(delta)
+				state.diagLog.Add("peer_connect", map[string]interface{}{
+					"count": current,
+					"delta": delta,
+				})
+			} else if current < prev {
+				delta := prev - current
+				state.diag.PeerDisconnects += int64(delta)
+				state.diagLog.Add("peer_disconnect", map[string]interface{}{
+					"count": current,
+					"delta": delta,
+				})
+			}
 			state.mu.Unlock()
 		}
 	}
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Bootstrap retry
+// ═══════════════════════════════════════════════════════════════════
 
 // retryBootstrap periodically attempts to connect to peers when isolated.
 // Handles two scenarios:
@@ -357,7 +494,7 @@ func trackPeers(ctx context.Context, state *NodeState) {
 //     so it booted with 0 bootstrap peers. Retry original list in case they come online.
 //  2. Dynamic peers: reads /var/lib/decloud-dht/dynamic-peers file for runtime injection.
 //     The node agent can write new peers to this file when the orchestrator discovers them.
-func retryBootstrap(ctx context.Context, h host.Host, cfg Config) {
+func retryBootstrap(ctx context.Context, h host.Host, cfg Config, state *NodeState) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -375,6 +512,14 @@ func retryBootstrap(ctx context.Context, h host.Host, cfg Config) {
 
 			log.Println("No connected peers — attempting peer discovery...")
 
+			// Log retry attempt
+			state.mu.Lock()
+			state.diag.BootstrapAttempts++
+			state.diagLog.Add("bootstrap_retry", map[string]interface{}{
+				"reason": "isolated",
+			})
+			state.mu.Unlock()
+
 			// Try original bootstrap peers
 			if cfg.BootstrapPeers != "" {
 				connectBootstrapPeers(ctx, h, cfg.BootstrapPeers)
@@ -388,9 +533,25 @@ func retryBootstrap(ctx context.Context, h host.Host, cfg Config) {
 					connectBootstrapPeers(ctx, h, dynamicPeers)
 				}
 			}
+
+			// Check if we successfully connected after retry
+			newPeerCount := len(h.Network().Peers())
+			if newPeerCount > 0 {
+				state.mu.Lock()
+				state.diag.BootstrapSuccess++
+				state.diag.LastBootstrapAt = time.Now()
+				state.diagLog.Add("bootstrap_success", map[string]interface{}{
+					"peers": newPeerCount,
+				})
+				state.mu.Unlock()
+			}
 		}
 	}
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// HTTP API
+// ═══════════════════════════════════════════════════════════════════
 
 // startAPIServer runs the HTTP health/status API.
 // Binds to 127.0.0.1 only — only localhost processes (dashboard, bootstrap-poll,
@@ -400,6 +561,7 @@ func retryBootstrap(ctx context.Context, h host.Host, cfg Config) {
 func startAPIServer(port string, state *NodeState) {
 	mux := http.NewServeMux()
 
+	// ── GET /health ──────────────────────────────────────────────────────────
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		state.mu.RLock()
 		defer state.mu.RUnlock()
@@ -418,6 +580,7 @@ func startAPIServer(port string, state *NodeState) {
 		json.NewEncoder(w).Encode(resp)
 	})
 
+	// ── GET /peers ───────────────────────────────────────────────────────────
 	mux.HandleFunc("/peers", func(w http.ResponseWriter, r *http.Request) {
 		state.mu.RLock()
 		defer state.mu.RUnlock()
@@ -435,6 +598,7 @@ func startAPIServer(port string, state *NodeState) {
 		})
 	})
 
+	// ── POST /connect ─────────────────────────────────────────────────────────
 	mux.HandleFunc("/connect", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -526,6 +690,15 @@ func startAPIServer(port string, state *NodeState) {
 		// so routingTable > 0 immediately — essential for FindProviders
 		// and provider record announcement to work correctly.
 		if connected > 0 {
+			state.mu.Lock()
+			state.diag.BootstrapSuccess++
+			state.diag.LastBootstrapAt = time.Now()
+			state.diagLog.Add("bootstrap_connect", map[string]interface{}{
+				"connected": connected,
+				"total":     len(payload.Peers),
+			})
+			state.mu.Unlock()
+
 			go func() {
 				refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
@@ -545,6 +718,7 @@ func startAPIServer(port string, state *NodeState) {
 		})
 	})
 
+	// ── POST /publish ─────────────────────────────────────────────────────────
 	mux.HandleFunc("/publish", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -585,7 +759,7 @@ func startAPIServer(port string, state *NodeState) {
 		json.NewEncoder(w).Encode(map[string]string{"status": "published"})
 	})
 
-	// GET /providers/{cid}
+	// ── GET /providers/{cid} ─────────────────────────────────────────────────
 	// Query the DHT for provider records for a given CID.
 	// Used by LazysyncManager (orchestrator) to audit chunk replication.
 	// Returns provider count + peer IDs. Timeout: 30s.
@@ -612,19 +786,39 @@ func startAPIServer(port string, state *NodeState) {
 		// FindProvidersAsync returns a channel of peer.AddrInfo.
 		// Cap at 20 providers — enough to verify replication factor.
 		// 30s timeout guards against slow DHT walks.
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		findCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 
 		state.mu.RLock()
 		kadDHT := state.dht
 		state.mu.RUnlock()
 
-		providerCh := kadDHT.FindProvidersAsync(ctx, c, 20)
+		providerCh := kadDHT.FindProvidersAsync(findCtx, c, 20)
 
 		var providers []string
 		for p := range providerCh {
 			providers = append(providers, p.ID.String())
 		}
+
+		// Track provider lookup in diagnostics
+		state.mu.Lock()
+		shortCid := cidStr
+		if len(shortCid) > 12 {
+			shortCid = shortCid[:12]
+		}
+		if len(providers) == 0 {
+			state.diag.ProviderLookupFail++
+			state.diagLog.Add("provider_lookup_fail", map[string]interface{}{
+				"cid": shortCid,
+			})
+		} else {
+			state.diag.ProviderLookups++
+			state.diagLog.Add("provider_lookup", map[string]interface{}{
+				"cid":   shortCid,
+				"count": len(providers),
+			})
+		}
+		state.mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -634,12 +828,81 @@ func startAPIServer(port string, state *NodeState) {
 		})
 	})
 
+	// ── GET /diagnostics ─────────────────────────────────────────────────────
+	// Full diagnostic snapshot: event log + aggregate counters + peer details.
+	// Used by dashboard export and for debugging replication issues.
+	mux.HandleFunc("/diagnostics", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+
+		state.mu.RLock()
+		diag := state.diag // value copy
+		connectedPeers := state.connectedPeers
+		rtSize := state.dht.RoutingTable().Size()
+		state.mu.RUnlock()
+
+		// GossipSub topics this node has joined
+		topics := state.pubsub.GetTopics()
+
+		// Peer details with addresses
+		peers := state.host.Network().Peers()
+		peerDetails := make([]map[string]interface{}, 0, len(peers))
+		for _, p := range peers {
+			addrs := state.host.Network().Peerstore().Addrs(p)
+			addrStrs := make([]string, len(addrs))
+			for i, a := range addrs {
+				addrStrs[i] = a.String()
+			}
+			peerDetails = append(peerDetails, map[string]interface{}{
+				"id":    p.String(),
+				"addrs": addrStrs,
+			})
+		}
+
+		resp := map[string]interface{}{
+			"timestamp":      time.Now().UTC().Format(time.RFC3339),
+			"connectedPeers": connectedPeers,
+			"routingTable": map[string]interface{}{
+				"size": rtSize,
+			},
+			"gossipSub": map[string]interface{}{
+				"topics":          topics,
+				"messagesRelayed": diag.GossipSubMessages,
+				"lastMessageAt":   diag.LastGossipSubAt,
+			},
+			"bootstrap": map[string]interface{}{
+				"attempts":  diag.BootstrapAttempts,
+				"successes": diag.BootstrapSuccess,
+				"lastAt":    diag.LastBootstrapAt,
+			},
+			"peerEvents": map[string]interface{}{
+				"connects":    diag.PeerConnects,
+				"disconnects": diag.PeerDisconnects,
+			},
+			"providerLookups": map[string]interface{}{
+				"success": diag.ProviderLookups,
+				"fail":    diag.ProviderLookupFail,
+			},
+			"peers":    peerDetails,
+			"eventLog": state.diagLog.Snapshot(),
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
 	addr := fmt.Sprintf("127.0.0.1:%s", port)
 	log.Printf("HTTP API listening on %s", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("HTTP API server failed: %v", err)
 	}
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Helpers
+// ═══════════════════════════════════════════════════════════════════
 
 func formatAddresses(h host.Host) []string {
 	addrs := h.Addrs()
