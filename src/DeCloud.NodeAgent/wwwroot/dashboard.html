@@ -690,11 +690,6 @@
             align-items: stretch;
             justify-content: space-between;
             border-bottom: 1px solid var(--border);
-            background: var(--bg-elevated);
-            position: sticky;
-            top: 54px;
-            z-index: 80;
-            background: var(--bg-elevated);
         }
 
         .cmap-title {
@@ -2095,6 +2090,7 @@
             .collapsible-body.open {
                 max-height: 12000px;
                 opacity: 1;
+                overflow: visible;
             }
 
         .collapsible-wrap {
@@ -3180,22 +3176,28 @@
 
             const roleInt = ROLE_FOR_KEY[key] ?? -1;
             const obl = S.obligations.find(o => o.role === roleInt);
+            const obligationsLoaded = S.obligations.length > 0;
 
-            // ── No obligation → node not eligible for this role ─────────────────────
+            // ── No obligation ────────────────────────────────────────────────────────
             if (!obl) {
-                card.className = 'sysvm-card ineligible';
-                badge.className = 'sysvm-badge other';
-                badge.innerHTML = '<span class="obl-badge ineligible">Not eligible</span>';
-                detail.textContent = 'Not assigned to this node.';
-                // Clear any leftover service chips
-                const chips = card.querySelector('.svc-chips');
-                if (chips) chips.innerHTML = '';
-                return;
+                if (!obligationsLoaded) {
+                    // Obligations not fetched yet (orchestrator unreachable / patch not applied).
+                    // Fall through to VM-presence-based rendering below — don't grey out.
+                } else {
+                    // Obligations DID load but this role is absent → genuinely ineligible.
+                    card.className = 'sysvm-card ineligible';
+                    badge.className = 'sysvm-badge other';
+                    badge.innerHTML = '<span class="obl-badge ineligible">Not eligible</span>';
+                    detail.textContent = 'Not assigned to this node.';
+                    const chips = card.querySelector('.svc-chips');
+                    if (chips) chips.innerHTML = '';
+                    return;
+                }
             }
 
-            // ── Obligation exists — determine display state ───────────────────────────
-            const oblStatus = obl.status;     // 0=Pending 1=Deploying 2=Active
-            const oblName = obl.statusName; // "Pending" | "Deploying" | "Active" | "Failed"
+            // ── Obligation present (or not loaded) — determine display state ──────────
+            const oblStatus = obl?.status ?? (vm && isRunning(vm) ? 2 : -1);
+            const oblName = obl?.statusName ?? (vm && isRunning(vm) ? 'Active' : 'Unknown');
             const running = vm ? isRunning(vm) : false;
 
             // Obligation Active but VM not running = unmet obligation
@@ -3246,7 +3248,7 @@
                     }
                 }
                 detailHtml = `<span style="font-family:var(--mono);font-size:0.78rem">${esc(ip)}</span>${dashLink}`;
-            } else if (obl.vmId) {
+            } else if (obl?.vmId) {
                 detailHtml = `<span style="font-size:0.73rem;color:var(--text-muted)">VM ${truncId(obl.vmId)} — booting</span>`;
             } else if (oblStatus === 0) {
                 detailHtml = `<span style="font-size:0.73rem;color:var(--text-muted)">Waiting for scheduler…</span>`;
@@ -3255,7 +3257,7 @@
             }
 
             // Add obligation error note if any failures
-            if (obl.failureCount > 0 && obl.lastError) {
+            if (obl?.failureCount > 0 && obl.lastError) {
                 detailHtml += `<div style="font-size:0.68rem;color:var(--danger);margin-top:0.2rem;font-family:var(--mono)">${esc(obl.lastError).slice(0, 80)}</div>`;
             }
             detail.innerHTML = detailHtml;
