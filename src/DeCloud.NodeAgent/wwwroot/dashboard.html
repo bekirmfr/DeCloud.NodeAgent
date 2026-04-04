@@ -215,9 +215,8 @@
             display: flex;
             align-items: center;
             gap: 0.6rem;
-            flex-direction: column;
-            text-align: right;
-            padding: 0.65rem 1.1rem;
+            flex-direction: row;
+            padding: 0.3rem 0.75rem;
             border-radius: var(--radius);
             border: 1px solid var(--border);
             background: var(--bg-card);
@@ -250,7 +249,7 @@
         /* Quick Stats */
         .quick-stats {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            grid-template-columns: repeat(7, minmax(0, 1fr));
             gap: 1px;
             background: var(--border);
             border: 1px solid var(--border);
@@ -366,7 +365,7 @@
                 content: '';
                 display: inline-block;
                 width: 3px;
-                height: 12px;
+                height: 14px;
                 background: var(--primary);
                 border-radius: 2px;
                 flex-shrink: 0;
@@ -681,11 +680,20 @@
             overflow: hidden;
         }
 
+        .collapsible-body .cmap-wrap {
+            border: none;
+            border-radius: 0;
+        }
+
         .cmap-header {
             display: flex;
             align-items: stretch;
             justify-content: space-between;
             border-bottom: 1px solid var(--border);
+            background: var(--bg-elevated);
+            position: sticky;
+            top: 54px;
+            z-index: 80;
             background: var(--bg-elevated);
         }
 
@@ -706,7 +714,7 @@
         }
 
         .tab-count {
-            display: inline-block;
+            display: none; /* hidden until JS populates it */
             background: var(--bg);
             color: var(--text-muted);
             font-size: 0.6rem;
@@ -718,6 +726,10 @@
             border: 1px solid var(--border);
         }
 
+            .tab-count:not(:empty) {
+                display: inline-block;
+            }
+        /* only show when non-empty */
         .cmap-tab.active .tab-count {
             background: var(--primary-dim);
             border-color: var(--primary-border);
@@ -2075,7 +2087,7 @@
 
         .collapsible-body {
             overflow: hidden;
-            transition: max-height 0.25s ease, opacity 0.2s ease;
+            transition: max-height 0.2s ease, opacity 0.15s ease;
             max-height: 0;
             opacity: 0;
         }
@@ -2098,18 +2110,15 @@
         .status-strip {
             display: flex;
             align-items: center;
-            gap: 1.5rem;
+            gap: 1.25rem;
             flex-wrap: nowrap;
-            padding: 0.45rem 0;
-            border-bottom: 1px solid var(--border);
-            margin-bottom: 0;
+            padding: 0.4rem 1rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            margin: 0.6rem 0 0;
             overflow-x: auto;
             scrollbar-width: none;
-            position: sticky;
-            top: 54px;
-            z-index: 85;
-            background: var(--bg-elevated);
-            backdrop-filter: blur(8px);
+            background: var(--bg-card);
         }
 
             .status-strip::-webkit-scrollbar {
@@ -2625,7 +2634,7 @@
         <nav class="section-nav">
             <button class="nav-tab active" onclick="scrollSec('hardware',this)">Hardware</button>
             <button class="nav-tab" onclick="scrollSec('vms',this)">VMs</button>
-            <button class="nav-tab" onclick="scrollSec('network',this)">Connection Map</button>
+            <button class="nav-tab" onclick="scrollSec('network',this)">Network</button>
             <button class="nav-tab" onclick="scrollSec('firewall',this)">Firewall</button>
             <button class="nav-tab" onclick="scrollSec('services',this)">Services</button>
             <button class="nav-tab" onclick="scrollSec('logs',this)">Logs</button>
@@ -2635,7 +2644,7 @@
         <!-- Hardware                                                      -->
         <!-- ============================================================ -->
         <section class="section" id="hardware">
-            <div class="section-title">◈ Hardware</div>
+            <div class="section-title">Hardware</div>
             <div class="hw-compact-grid">
                 <div class="hw-compact-card">
                     <div class="hw-compact-label">CPU</div>
@@ -2664,7 +2673,7 @@
         </section>
 
         <section class="section" id="vms">
-            <div class="section-title">◈ Virtual Machines <span class="count-badge" id="vm-count-badge">0</span></div>
+            <div class="section-title">Virtual Machines <span class="count-badge" id="vm-count-badge">0</span></div>
             <div class="sub-section-label">System VMs</div>
             <div class="sysvm-row" id="sysvm-row">
                 <div class="sysvm-card" id="svc-relay"><div class="sysvm-head"><span class="sysvm-name">Relay</span><span class="sysvm-badge other" id="svc-relay-badge">—</span></div><div class="sysvm-detail" id="svc-relay-detail">—</div></div>
@@ -2694,46 +2703,57 @@
         <!-- Connection Map                                                -->
         <!-- ============================================================ -->
         <section class="section" id="network">
-            <div class="section-title">◈ Network</div>
-            <div class="cmap-wrap">
-                <div class="cmap-header">
-                    <div class="cmap-title">Network Inspector</div>
-                    <div class="cmap-tabs">
-                        <button class="cmap-tab active" onclick="cmapTab('interfaces',this)">Interfaces <span class="tab-count" id="tab-ct-iface"></span></button>
-                        <button class="cmap-tab" onclick="cmapTab('wireguard',this)">WireGuard <span class="tab-count" id="tab-ct-wg"></span></button>
-                        <button class="cmap-tab" onclick="cmapTab('bridges',this)">Bridges &amp; VMs <span class="tab-count" id="tab-ct-bridge"></span></button>
-                        <button class="cmap-tab" onclick="cmapTab('ports',this)">Ports <span class="tab-count" id="tab-ct-ports"></span></button>
-                        <button class="cmap-tab" onclick="cmapTab('routes',this)">Routes <span class="tab-count" id="tab-ct-routes"></span></button>
+            <div class="section-title">Network</div>
+            <div class="collapsible-wrap">
+                <div class="collapsible-head" onclick="toggleCollapsible('net-inspector-body','net-inspector-chev')">
+                    <div class="collapsible-toggle">
+                        <span class="collapsible-title">Network Inspector</span>
+                        <span class="collapsible-meta" id="net-inspector-meta"></span>
                     </div>
+                    <span class="collapsible-chevron" id="net-inspector-chev">▼</span>
                 </div>
-                <div class="cmap-body">
-                    <div id="tab-interfaces" class="net-tab active"><div class="iface-list" id="iface-list"><div class="empty">Loading…</div></div></div>
-                    <div id="tab-wireguard" class="net-tab" style="display:none"><div id="wg-panels"><div class="empty">Loading…</div></div></div>
-                    <div id="tab-bridges" class="net-tab" style="display:none"><div class="bridge-list" id="bridge-list"><div class="empty">Loading…</div></div></div>
-                    <div id="tab-ports" class="net-tab" style="display:none">
-                        <div class="ports-grid">
-                            <div>
-                                <div class="ports-proto-head"><span class="proto-pill tcp">TCP</span> Listening</div>
-                                <div class="ports-table-wrap"><table class="ports-table"><thead><tr><th>Port</th><th>Address</th><th>Process</th></tr></thead><tbody id="tcp-body"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody></table></div>
-                            </div>
-                            <div>
-                                <div class="ports-proto-head"><span class="proto-pill udp">UDP</span> Listening</div>
-                                <div class="ports-table-wrap"><table class="ports-table"><thead><tr><th>Port</th><th>Address</th><th>Process</th></tr></thead><tbody id="udp-body"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody></table></div>
+                <div class="collapsible-body" id="net-inspector-body">
+                    <div class="cmap-wrap" style="border:none;border-radius:0">
+                        <div class="cmap-header" style="border-radius:0">
+                            <div class="cmap-title" style="display:none">Network Inspector</div>
+                            <div class="cmap-tabs">
+                                <button class="cmap-tab active" onclick="cmapTab('interfaces',this)">Interfaces <span class="tab-count" id="tab-ct-iface"></span></button>
+                                <button class="cmap-tab" onclick="cmapTab('wireguard',this)">WireGuard <span class="tab-count" id="tab-ct-wg"></span></button>
+                                <button class="cmap-tab" onclick="cmapTab('bridges',this)">Bridges &amp; VMs <span class="tab-count" id="tab-ct-bridge"></span></button>
+                                <button class="cmap-tab" onclick="cmapTab('ports',this)">Ports <span class="tab-count" id="tab-ct-ports"></span></button>
+                                <button class="cmap-tab" onclick="cmapTab('routes',this)">Routes <span class="tab-count" id="tab-ct-routes"></span></button>
                             </div>
                         </div>
-                    </div>
-                    <div id="tab-routes" class="net-tab" style="display:none">
-                        <div class="routes-wrap"><table class="routes-table"><thead><tr><th>Destination</th><th>Gateway</th><th>Interface</th><th>Protocol</th><th>Scope</th><th>Metric</th></tr></thead><tbody id="routes-body"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody></table></div>
-                    </div>
-                </div>
-            </div>
+                        <div class="cmap-body">
+                            <div id="tab-interfaces" class="net-tab active"><div class="iface-list" id="iface-list"><div class="empty">Loading…</div></div></div>
+                            <div id="tab-wireguard" class="net-tab" style="display:none"><div id="wg-panels"><div class="empty">Loading…</div></div></div>
+                            <div id="tab-bridges" class="net-tab" style="display:none"><div class="bridge-list" id="bridge-list"><div class="empty">Loading…</div></div></div>
+                            <div id="tab-ports" class="net-tab" style="display:none">
+                                <div class="ports-grid">
+                                    <div>
+                                        <div class="ports-proto-head"><span class="proto-pill tcp">TCP</span> Listening</div>
+                                        <div class="ports-table-wrap"><table class="ports-table"><thead><tr><th>Port</th><th>Address</th><th>Process</th></tr></thead><tbody id="tcp-body"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody></table></div>
+                                    </div>
+                                    <div>
+                                        <div class="ports-proto-head"><span class="proto-pill udp">UDP</span> Listening</div>
+                                        <div class="ports-table-wrap"><table class="ports-table"><thead><tr><th>Port</th><th>Address</th><th>Process</th></tr></thead><tbody id="udp-body"><tr><td colspan="3" class="empty">Loading…</td></tr></tbody></table></div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="tab-routes" class="net-tab" style="display:none">
+                                <div class="routes-wrap"><table class="routes-table"><thead><tr><th>Destination</th><th>Gateway</th><th>Interface</th><th>Protocol</th><th>Scope</th><th>Metric</th></tr></thead><tbody id="routes-body"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody></table></div>
+                            </div>
+                        </div>
+                    </div>  <!-- /.cmap-wrap -->
+                </div>  <!-- /.collapsible-body -->
+            </div>  <!-- /.collapsible-wrap -->
         </section>
 
         <!-- ============================================================ -->
         <!-- Firewall                                                      -->
         <!-- ============================================================ -->
         <section class="section" id="firewall">
-            <div class="section-title">◈ Firewall</div>
+            <div class="section-title">Firewall</div>
             <div id="ufw-banner" class="ufw-banner unknown">
                 <span class="ufw-status-word" id="ufw-status-word">Loading…</span>
                 <div class="ufw-policies" id="ufw-policies"></div>
@@ -2792,7 +2812,7 @@
         <!-- Services                                                      -->
         <!-- ============================================================ -->
         <section class="section" id="services">
-            <div class="section-title">◈ Services</div>
+            <div class="section-title">Services</div>
             <div class="collapsible-wrap">
                 <div class="collapsible-head" onclick="toggleCollapsible('services-body','services-chev')">
                     <div class="collapsible-toggle">
@@ -2814,7 +2834,7 @@
         <!-- ============================================================ -->
         <section class="section" id="logs">
             <div class="log-header">
-                <div class="section-title" style="margin-bottom:0">◈ Logs</div>
+                <div class="section-title" style="margin-bottom:0">Logs</div>
                 <div class="log-controls">
                     <input class="log-filter" id="log-filter" type="text" placeholder="Filter…" oninput="filterLogs()">
                     <button class="log-toggle-btn" id="log-btn" onclick="toggleLogs()">Show Logs</button>
@@ -3110,6 +3130,13 @@
             paintSysVm('dht', dht);
             paintSysVm('bs', bs);
 
+            // Dim section badge when all roles are ineligible
+            if (S.obligations.length > 0) {
+                const eligibleCount = [1, 0, 2].filter(role => S.obligations.some(o => o.role === role)).length;
+                const secBadge = $('vm-count-badge');
+                if (secBadge) secBadge.style.opacity = eligibleCount === 0 ? '0.4' : '1';
+            }
+
             // Tenant table
             const tbody = $('tenant-tbody');
             if (!tenants.length) {
@@ -3159,7 +3186,7 @@
                 card.className = 'sysvm-card ineligible';
                 badge.className = 'sysvm-badge other';
                 badge.innerHTML = '<span class="obl-badge ineligible">Not eligible</span>';
-                detail.textContent = 'This node has no obligation for this role.';
+                detail.textContent = 'Not assigned to this node.';
                 // Clear any leftover service chips
                 const chips = card.querySelector('.svc-chips');
                 if (chips) chips.innerHTML = '';
@@ -3273,6 +3300,8 @@
         function renderInterfaces() {
             const el = $('iface-list');
             const ifaces = S.network.interfaces ?? [];
+            const ifCt = $('tab-ct-iface');
+            if (ifCt) ifCt.textContent = ifaces.length > 0 ? ifaces.length : '';
             if (!ifaces.length) { el.innerHTML = '<div class="empty-state"><div class="empty-icon">⬡</div><div>No interfaces detected</div></div>'; return; }
 
             el.innerHTML = ifaces.map(i => {
@@ -3298,6 +3327,9 @@
         function renderWireGuard() {
             const el = $('wg-panels');
             const wgs = S.network.wireguard ?? [];
+            const wgCt = $('tab-ct-wg');
+            const totalWgPeers = wgs.reduce((s, w) => s + (w.peers?.length ?? 0), 0);
+            if (wgCt) wgCt.textContent = totalWgPeers > 0 ? totalWgPeers : '';
             if (!wgs.length) {
                 el.innerHTML = '<div class="empty-state"><div class="empty-icon">⬡</div><div>No WireGuard interfaces configured</div></div>';
                 return;
@@ -3365,7 +3397,9 @@
         function renderBridges() {
             const el = $('bridge-list');
             const bridges = S.network.bridges ?? [];
-            if (!bridges.length) { el.innerHTML = '<div class="empty">No bridge interfaces found</div>'; return; }
+            const bCt = $('tab-ct-bridge');
+            if (bCt) bCt.textContent = bridges.length > 0 ? bridges.length : '';
+            if (!bridges.length) { el.innerHTML = '<div class="empty-state"><div class="empty-icon">⬡</div><div>No bridge interfaces</div></div>'; return; }
 
             el.innerHTML = bridges.map(b => {
                 const ipStr = b.ipAddresses?.join(', ') || 'no address';
@@ -3399,6 +3433,10 @@
             const p = S.ports; if (!p) return;
             $('tcp-body').innerHTML = portRows(p.tcp ?? []);
             $('udp-body').innerHTML = portRows(p.udp ?? []);
+            // Update ports tab count badge
+            const totalPorts = (p.tcp?.length ?? 0) + (p.udp?.length ?? 0);
+            const portsCt = $('tab-ct-ports');
+            if (portsCt) portsCt.textContent = totalPorts > 0 ? totalPorts : '';
         }
 
         function portRows(list) {
@@ -3415,6 +3453,8 @@
         function renderRoutes() {
             const tbody = $('routes-body');
             const routes = S.network.routes ?? [];
+            const rtCt = $('tab-ct-routes');
+            if (rtCt) rtCt.textContent = routes.length > 0 ? routes.length : '';
             if (!routes.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty">No routes</td></tr>'; return; }
 
             tbody.innerHTML = routes.map(r => {
@@ -3458,8 +3498,8 @@
             if (ufwMeta) ufwMeta.textContent = ufw.active
                 ? `${ufw.rules?.length ?? 0} rule${ufw.rules?.length !== 1 ? 's' : ''}`
                 : 'inactive';
-            // Auto-expand UFW section when active
-            if (ufw.active) autoExpand('ufw-rules-body-wrap', 'ufw-rules-chev');
+            // Auto-expand UFW section only when active with rules
+            if (ufw.active && ufw.rules?.length > 0) autoExpand('ufw-rules-body-wrap', 'ufw-rules-chev');
 
             // UFW Rules
             const ufwBody = $('ufw-rules-body');
@@ -3514,10 +3554,18 @@
                 tbody.innerHTML = '<tr><td colspan="9" class="empty">No rules (chain empty)</td></tr>';
                 return;
             }
-            // Auto-expand chains that have rules
+            // Auto-expand chains that have non-trivial rules (non-libvirt OR has traffic)
             const wrapId = IPT_WRAP[bodyId];
             const chevId = IPT_CHEV[bodyId];
-            if (wrapId) autoExpand(wrapId, chevId);
+            if (wrapId) {
+                const pktNum = r => parseInt(r.packets) || 0;
+                const hasInteresting = rules.some(r => {
+                    const t = r.target?.toUpperCase() ?? '';
+                    const isNoise = t.startsWith('LIBVIRT') || t.startsWith('DOCKER');
+                    return !isNoise || pktNum(r) > 0;
+                });
+                if (hasInteresting) autoExpand(wrapId, chevId);
+            }
             tbody.innerHTML = rules.map(r => `
         <tr>
           <td class="num-col">${r.lineNumber || ''}</td>
