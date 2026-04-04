@@ -43,9 +43,8 @@ bootcmd:
 # Single-tenant VMs get direct root access (similar to Hetzner, Vultr, Linode)
 disable_root: false
 
-# SSH public key authentication (placeholder will be replaced with actual block)
-# Format: ssh_authorized_keys:\n  - ssh-ed25519 AAA...
-# __SSH_AUTHORIZED_KEYS_BLOCK__
+# SSH public key for root (injected by NodeAgent at VM creation time)
+__SSH_AUTHORIZED_KEYS_BLOCK__
 
 # Password authentication (placeholder will be replaced with actual block)
 # Format (cloud-init 22.3+, Ubuntu 22.04 / Ubuntu 24.04 / Debian 12 / Fedora 40):
@@ -56,7 +55,7 @@ disable_root: false
 #         type: text
 #     expire: false
 # NOTE: The old chpasswd.list format was removed in cloud-init 23.4 and
-# silently fails on Ubuntu 24.04. __PASSWORD_CONFIG_BLOCK__ now uses
+# silently fails on Ubuntu 24.04. The chpasswd block below now uses
 # chpasswd.users. For Debian 11 and Alpine, bootcmd above is the authoritative
 # password setter.
 __PASSWORD_CONFIG_BLOCK__
