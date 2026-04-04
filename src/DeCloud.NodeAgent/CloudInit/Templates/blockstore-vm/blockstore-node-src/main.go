@@ -268,11 +268,12 @@ func splitPeers(s string) []string {
 // BlockNode — main node state
 // ═══════════════════════════════════════════════════════════════════
 
-type BlockNode struct {
+type BlockNode struct {s
 	cfg    Config
 	host   host.Host
 	dht    *dht.IpfsDHT
-	pubsub *pubsub.PubSub
+	pubsub          *pubsub.PubSub
+	newBlocksTopic  *pubsub.Topic
 	bstore blockstore.Blockstore
 	bsExch *bitswap.Bitswap
 
@@ -561,6 +562,9 @@ type NewBlockAnnouncement struct {
 
 func (n *BlockNode) startGossipSubSubscription(ctx context.Context) error {
 	topic, err := n.pubsub.Join(GossipSubTopic)
+	if err == nil {
+		n.newBlocksTopic = topic
+	}
 	if err != nil {
 		return fmt.Errorf("join gossipsub topic: %w", err)
 	}
@@ -696,8 +700,8 @@ func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlock
 // ═══════════════════════════════════════════════════════════════════
 
 func (n *BlockNode) publishNewBlock(c cid.Cid, size int64) {
-	topic, err := n.pubsub.Join(GossipSubTopic)
-	if err != nil {
+	topic := n.newBlocksTopic
+	if topic == nil {
 		return
 	}
 	ann := NewBlockAnnouncement{CID: c.String(), Size: size, SourceNodeID: n.cfg.NodeID}
