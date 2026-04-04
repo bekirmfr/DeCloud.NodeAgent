@@ -310,7 +310,7 @@
             border-bottom: 1px solid var(--border);
             margin: 1.5rem 0 2rem;
             position: sticky;
-            top: 54px;
+            top: 96px;
             z-index: 90;
             background: var(--bg);
             overflow-x: auto;
@@ -341,8 +341,8 @@
         /* Sections */
         .section {
             padding-top: 0.25rem;
-            margin-bottom: 3rem;
-            scroll-margin-top: 110px;
+            margin-bottom: 2rem;
+            scroll-margin-top: 130px;
         }
 
         .section-title {
@@ -357,7 +357,20 @@
             display: flex;
             align-items: center;
             gap: 0.6rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
         }
+
+            .section-title::before {
+                content: '';
+                display: inline-block;
+                width: 3px;
+                height: 12px;
+                background: var(--primary);
+                border-radius: 2px;
+                flex-shrink: 0;
+            }
 
         .count-badge {
             background: var(--bg-elevated);
@@ -439,6 +452,61 @@
             .hw-fill.crit {
                 background: var(--danger);
             }
+
+        /* Compact hardware grid — replaces the 4-card expanded layout */
+        .hw-compact-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1px;
+            background: var(--border);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+        }
+
+        .hw-compact-card {
+            background: var(--bg-card);
+            padding: 0.9rem 1.1rem;
+        }
+
+        .hw-compact-label {
+            font-size: 0.62rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.9px;
+            margin-bottom: 0.3rem;
+        }
+
+        .hw-compact-value {
+            font-family: var(--mono);
+            font-size: 1.35rem;
+            font-weight: 700;
+            color: var(--text);
+            line-height: 1;
+        }
+
+        .hw-compact-bar {
+            height: 3px;
+            background: var(--bg);
+            border-radius: 2px;
+            margin: 0.4rem 0 0.3rem;
+            overflow: hidden;
+        }
+
+        .hw-compact-sub {
+            font-size: 0.68rem;
+            color: var(--text-muted);
+            font-family: var(--mono);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        @media (max-width: 700px) {
+            .hw-compact-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
 
         /* System VM Row */
         .sysvm-row {
@@ -637,6 +705,25 @@
             display: flex;
         }
 
+        .tab-count {
+            display: inline-block;
+            background: var(--bg);
+            color: var(--text-muted);
+            font-size: 0.6rem;
+            font-family: var(--mono);
+            border-radius: 8px;
+            padding: 0.05rem 0.4rem;
+            margin-left: 0.3rem;
+            vertical-align: middle;
+            border: 1px solid var(--border);
+        }
+
+        .cmap-tab.active .tab-count {
+            background: var(--primary-dim);
+            border-color: var(--primary-border);
+            color: var(--primary);
+        }
+
         .cmap-tab {
             padding: 0.75rem 1.1rem;
             font-size: 0.78rem;
@@ -802,6 +889,33 @@
             }
 
         /* WireGuard Peers */
+        .wg-meta-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1rem;
+            padding: 0.65rem 1rem;
+            background: var(--bg);
+            border-bottom: 1px solid var(--border);
+            font-size: 0.72rem;
+        }
+
+        .wg-meta-item {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            font-family: var(--mono);
+            color: var(--text-secondary);
+        }
+
+        .wg-meta-label {
+            color: var(--text-muted);
+            margin-right: 0.2rem;
+            font-family: var(--sans, inherit);
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
         .wg-iface-block {
             margin-bottom: 1.5rem;
             border: 1px solid var(--border);
@@ -1447,6 +1561,22 @@
                 color: var(--warning);
             }
 
+        /* Improved empty states */
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 2.5rem 1rem;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+        }
+
+        .empty-icon {
+            font-size: 1.6rem;
+            opacity: 0.4;
+        }
+
         /* VM Service Health Chips */
         .svc-chips {
             display: flex;
@@ -1884,6 +2014,168 @@
             }
         }
 
+        /* ============================================================ */
+        /* Collapsible blocks                                           */
+        /* ============================================================ */
+        .collapsible-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            cursor: pointer;
+            user-select: none;
+            padding: 0.6rem 1rem;
+            background: var(--bg-elevated);
+            border-bottom: 1px solid var(--border);
+            outline: none;
+            transition: background 0.15s;
+        }
+
+            .collapsible-head:hover {
+                background: var(--bg-hover);
+            }
+
+            .collapsible-head:focus-visible {
+                outline: 2px solid var(--primary);
+                outline-offset: -2px;
+            }
+
+        .collapsible-toggle {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex: 1;
+        }
+
+        .collapsible-title {
+            font-size: 0.67rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.9px;
+            color: var(--text-muted);
+        }
+
+        .collapsible-meta {
+            font-size: 0.67rem;
+            color: var(--text-muted);
+            font-family: var(--mono);
+            margin-left: 0.5rem;
+        }
+
+        .collapsible-chevron {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            transition: transform 0.2s;
+            margin-left: auto;
+            flex-shrink: 0;
+        }
+
+            .collapsible-chevron.open {
+                transform: rotate(180deg);
+            }
+
+        .collapsible-body {
+            overflow: hidden;
+            transition: max-height 0.25s ease, opacity 0.2s ease;
+            max-height: 0;
+            opacity: 0;
+        }
+
+            .collapsible-body.open {
+                max-height: 12000px;
+                opacity: 1;
+            }
+
+        .collapsible-wrap {
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+            margin-bottom: 1rem;
+        }
+
+        /* ============================================================ */
+        /* Sticky section status strip (between header and nav)        */
+        /* ============================================================ */
+        .status-strip {
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+            flex-wrap: nowrap;
+            padding: 0.45rem 0;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 0;
+            overflow-x: auto;
+            scrollbar-width: none;
+            position: sticky;
+            top: 54px;
+            z-index: 85;
+            background: var(--bg-elevated);
+            backdrop-filter: blur(8px);
+        }
+
+            .status-strip::-webkit-scrollbar {
+                display: none;
+            }
+
+        .strip-item {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            font-size: 0.72rem;
+            white-space: nowrap;
+            cursor: default;
+        }
+
+        .strip-label {
+            color: var(--text-muted);
+        }
+
+        .strip-value {
+            font-family: var(--mono);
+            font-weight: 600;
+            color: var(--text);
+        }
+
+        .strip-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--text-muted);
+        }
+
+            .strip-dot.ok {
+                background: var(--primary);
+                animation: pulse 2.5s infinite;
+            }
+
+            .strip-dot.warn {
+                background: var(--warning);
+            }
+
+            .strip-dot.err {
+                background: var(--danger);
+            }
+
+        /* ============================================================ */
+        /* Scroll-spy — active nav tab highlight                       */
+        /* ============================================================ */
+        .nav-tab.spy-active {
+            color: var(--primary);
+            border-bottom-color: var(--primary);
+        }
+
+        /* ============================================================ */
+        /* Section title improvements                                  */
+        /* ============================================================ */
+        .section-num {
+            font-size: 0.6rem;
+            font-weight: 700;
+            color: var(--bg-elevated);
+            background: var(--text-muted);
+            border-radius: 3px;
+            padding: 0.05rem 0.35rem;
+            font-family: var(--mono);
+        }
+
         /* Toggle switch */
         .tog {
             position: relative;
@@ -2307,15 +2599,26 @@
             </div>
         </div>
 
+        <!-- Status strip — always-visible key metrics -->
+        <div class="status-strip" id="status-strip">
+            <div class="strip-item"><span class="strip-dot" id="strip-orch-dot"></span><span class="strip-label">Orch</span><span class="strip-value" id="strip-orch">—</span></div>
+            <div class="strip-item"><span class="strip-label">CPU</span><span class="strip-value" id="strip-cpu">—</span></div>
+            <div class="strip-item"><span class="strip-label">RAM</span><span class="strip-value" id="strip-ram">—</span></div>
+            <div class="strip-item"><span class="strip-label">VMs</span><span class="strip-value" id="strip-vms">—</span></div>
+            <div class="strip-item"><span class="strip-label">WG Peers</span><span class="strip-value" id="strip-peers">—</span></div>
+            <div class="strip-item"><span class="strip-label">Uptime</span><span class="strip-value" id="strip-uptime">—</span></div>
+            <div class="strip-item"><span class="strip-label">Agent</span><span class="strip-value" id="strip-agent">—</span></div>
+        </div>
+
         <!-- Quick Stats -->
         <div class="quick-stats">
-            <div class="stat-cell"><div class="stat-label">CPU Usage</div><div class="stat-value" id="qs-cpu">—</div><div class="stat-bar"><div class="stat-bar-fill" id="qs-cpu-bar" style="width:0%"></div></div></div>
+            <div class="stat-cell"><div class="stat-label">CPU</div><div class="stat-value" id="qs-cpu">—</div><div class="stat-bar"><div class="stat-bar-fill" id="qs-cpu-bar" style="width:0%"></div></div></div>
             <div class="stat-cell"><div class="stat-label">Memory</div><div class="stat-value" id="qs-ram">—</div><div class="stat-bar"><div class="stat-bar-fill" id="qs-ram-bar" style="width:0%"></div></div></div>
             <div class="stat-cell"><div class="stat-label">Storage</div><div class="stat-value" id="qs-storage">—</div><div class="stat-bar"><div class="stat-bar-fill" id="qs-storage-bar" style="width:0%"></div></div></div>
             <div class="stat-cell"><div class="stat-label">VMs Running</div><div class="stat-value" id="qs-vms">—</div></div>
-            <div class="stat-cell"><div class="stat-label">WG Interfaces</div><div class="stat-value" id="qs-wg">—</div></div>
-            <div class="stat-cell"><div class="stat-label">WG Peers</div><div class="stat-value" id="qs-peers">—</div></div>
-            <div class="stat-cell"><div class="stat-label">Listen Ports</div><div class="stat-value" id="qs-ports">—</div></div>
+            <div class="stat-cell"><div class="stat-label">WG</div><div class="stat-value" id="qs-wg">—</div></div>
+            <div class="stat-cell"><div class="stat-label">Peers</div><div class="stat-value" id="qs-peers">—</div></div>
+            <div class="stat-cell"><div class="stat-label">Ports</div><div class="stat-value" id="qs-ports">—</div></div>
         </div>
 
         <!-- Section Nav -->
@@ -2332,51 +2635,58 @@
         <!-- Hardware                                                      -->
         <!-- ============================================================ -->
         <section class="section" id="hardware">
-            <div class="section-title">Hardware Resources</div>
-            <div class="hw-grid">
-                <div class="hw-card">
-                    <div class="hw-label">CPU Usage</div>
-                    <div class="hw-value" id="hw-cpu-pct">—</div>
-                    <div class="hw-sub" id="hw-cpu-info">—</div>
-                    <div class="hw-bar"><div class="hw-fill" id="hw-cpu-bar" style="width:0%"></div></div>
+            <div class="section-title">◈ Hardware</div>
+            <div class="hw-compact-grid">
+                <div class="hw-compact-card">
+                    <div class="hw-compact-label">CPU</div>
+                    <div class="hw-compact-value" id="hw-cpu-pct">—</div>
+                    <div class="hw-compact-bar"><div class="hw-fill" id="hw-cpu-bar"></div></div>
+                    <div class="hw-compact-sub" id="hw-cpu-info">—</div>
                 </div>
-                <div class="hw-card">
-                    <div class="hw-label">Memory</div>
-                    <div class="hw-value" id="hw-ram-pct">—</div>
-                    <div class="hw-sub" id="hw-ram-detail">—</div>
-                    <div class="hw-bar"><div class="hw-fill" id="hw-ram-bar" style="width:0%"></div></div>
+                <div class="hw-compact-card">
+                    <div class="hw-compact-label">Memory</div>
+                    <div class="hw-compact-value" id="hw-ram-pct">—</div>
+                    <div class="hw-compact-bar"><div class="hw-fill" id="hw-ram-bar"></div></div>
+                    <div class="hw-compact-sub" id="hw-ram-detail">—</div>
                 </div>
-                <div class="hw-card">
-                    <div class="hw-label">Storage</div>
-                    <div class="hw-value" id="hw-stor-pct">—</div>
-                    <div class="hw-sub" id="hw-stor-detail">—</div>
-                    <div class="hw-bar"><div class="hw-fill" id="hw-stor-bar" style="width:0%"></div></div>
+                <div class="hw-compact-card">
+                    <div class="hw-compact-label">Storage</div>
+                    <div class="hw-compact-value" id="hw-stor-pct">—</div>
+                    <div class="hw-compact-bar"><div class="hw-fill" id="hw-stor-bar"></div></div>
+                    <div class="hw-compact-sub" id="hw-stor-detail">—</div>
                 </div>
-                <div class="hw-card">
-                    <div class="hw-label">Virtualisation</div>
-                    <div class="hw-value" id="hw-kvm">—</div>
-                    <div class="hw-sub" id="hw-virt-sub">—</div>
+                <div class="hw-compact-card">
+                    <div class="hw-compact-label">Virtualisation</div>
+                    <div class="hw-compact-value" id="hw-kvm" style="font-size:0.9rem">—</div>
+                    <div class="hw-compact-sub" id="hw-virt-sub">—</div>
                 </div>
             </div>
         </section>
 
-        <!-- ============================================================ -->
-        <!-- Virtual Machines                                              -->
-        <!-- ============================================================ -->
         <section class="section" id="vms">
-            <div class="section-title">Virtual Machines <span class="count-badge" id="vm-count-badge">0</span></div>
+            <div class="section-title">◈ Virtual Machines <span class="count-badge" id="vm-count-badge">0</span></div>
             <div class="sub-section-label">System VMs</div>
             <div class="sysvm-row" id="sysvm-row">
-                <div class="sysvm-card" id="svc-relay"><div class="sysvm-head"><span class="sysvm-name">Relay</span><span class="sysvm-badge" id="svc-relay-badge">—</span></div><div class="sysvm-detail" id="svc-relay-detail">—</div></div>
-                <div class="sysvm-card" id="svc-dht"><div class="sysvm-head"><span class="sysvm-name">DHT</span><span class="sysvm-badge" id="svc-dht-badge">—</span></div><div class="sysvm-detail" id="svc-dht-detail">—</div></div>
-                <div class="sysvm-card" id="svc-bs"><div class="sysvm-head"><span class="sysvm-name">Block Store</span><span class="sysvm-badge" id="svc-bs-badge">—</span></div><div class="sysvm-detail" id="svc-bs-detail">—</div></div>
+                <div class="sysvm-card" id="svc-relay"><div class="sysvm-head"><span class="sysvm-name">Relay</span><span class="sysvm-badge other" id="svc-relay-badge">—</span></div><div class="sysvm-detail" id="svc-relay-detail">—</div></div>
+                <div class="sysvm-card" id="svc-dht"><div class="sysvm-head"><span class="sysvm-name">DHT</span><span class="sysvm-badge other" id="svc-dht-badge">—</span></div><div class="sysvm-detail" id="svc-dht-detail">—</div></div>
+                <div class="sysvm-card" id="svc-bs"><div class="sysvm-head"><span class="sysvm-name">Block Store</span><span class="sysvm-badge other" id="svc-bs-badge">—</span></div><div class="sysvm-detail" id="svc-bs-detail">—</div></div>
             </div>
-            <div class="sub-section-label">Tenant VMs</div>
-            <div class="vm-table-wrap">
-                <table class="vm-table">
-                    <thead><tr><th>Name</th><th>VM ID</th><th>State</th><th>Health</th><th>vCPU</th><th>RAM</th><th>IP</th><th>VNC Port</th><th>Uptime</th><th>Owner</th></tr></thead>
-                    <tbody id="tenant-tbody"><tr><td colspan="10" class="empty">Loading…</td></tr></tbody>
-                </table>
+            <div class="collapsible-wrap" style="margin-top:1rem">
+                <div class="collapsible-head" onclick="toggleCollapsible('tenant-table-body','tenant-chev')">
+                    <div class="collapsible-toggle">
+                        <span class="collapsible-title">Tenant VMs</span>
+                        <span class="collapsible-meta" id="tenant-count-meta"></span>
+                    </div>
+                    <span class="collapsible-chevron" id="tenant-chev">▼</span>
+                </div>
+                <div class="collapsible-body" id="tenant-table-body">
+                    <div class="vm-table-wrap" style="border:none;border-radius:0">
+                        <table class="vm-table">
+                            <thead><tr><th>Name</th><th>VM ID</th><th>State</th><th>Health</th><th>vCPU</th><th>RAM</th><th>IP</th><th>VNC Port</th><th>Uptime</th><th>Owner</th></tr></thead>
+                            <tbody id="tenant-tbody"><tr><td colspan="10" class="empty">Loading…</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
         </section>
 
@@ -2384,16 +2694,16 @@
         <!-- Connection Map                                                -->
         <!-- ============================================================ -->
         <section class="section" id="network">
-            <div class="section-title">Connection Map &amp; Network Topology</div>
+            <div class="section-title">◈ Network</div>
             <div class="cmap-wrap">
                 <div class="cmap-header">
                     <div class="cmap-title">Network Inspector</div>
                     <div class="cmap-tabs">
-                        <button class="cmap-tab active" onclick="cmapTab('interfaces',this)">Interfaces</button>
-                        <button class="cmap-tab" onclick="cmapTab('wireguard',this)">WireGuard Peers</button>
-                        <button class="cmap-tab" onclick="cmapTab('bridges',this)">Bridges &amp; VMs</button>
-                        <button class="cmap-tab" onclick="cmapTab('ports',this)">Listening Ports</button>
-                        <button class="cmap-tab" onclick="cmapTab('routes',this)">Routes</button>
+                        <button class="cmap-tab active" onclick="cmapTab('interfaces',this)">Interfaces <span class="tab-count" id="tab-ct-iface"></span></button>
+                        <button class="cmap-tab" onclick="cmapTab('wireguard',this)">WireGuard <span class="tab-count" id="tab-ct-wg"></span></button>
+                        <button class="cmap-tab" onclick="cmapTab('bridges',this)">Bridges &amp; VMs <span class="tab-count" id="tab-ct-bridge"></span></button>
+                        <button class="cmap-tab" onclick="cmapTab('ports',this)">Ports <span class="tab-count" id="tab-ct-ports"></span></button>
+                        <button class="cmap-tab" onclick="cmapTab('routes',this)">Routes <span class="tab-count" id="tab-ct-routes"></span></button>
                     </div>
                 </div>
                 <div class="cmap-body">
@@ -2423,26 +2733,58 @@
         <!-- Firewall                                                      -->
         <!-- ============================================================ -->
         <section class="section" id="firewall">
-            <div class="section-title">Firewall &amp; Packet Filtering</div>
+            <div class="section-title">◈ Firewall</div>
             <div id="ufw-banner" class="ufw-banner unknown">
                 <span class="ufw-status-word" id="ufw-status-word">Loading…</span>
                 <div class="ufw-policies" id="ufw-policies"></div>
             </div>
-            <div class="fw-block" id="ufw-rules-block">
-                <div class="fw-block-head">UFW Rules <span class="fw-policy-pill" id="ufw-rule-count"></span></div>
-                <div class="fw-table-scroll"><table class="fw-table"><thead><tr><th class="num-col">#</th><th>To</th><th>Action</th><th>Dir</th><th>From</th></tr></thead><tbody id="ufw-rules-body"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody></table></div>
+            <div class="collapsible-wrap" id="ufw-rules-block">
+                <div class="collapsible-head" onclick="toggleCollapsible('ufw-rules-body-wrap','ufw-rules-chev')">
+                    <div class="collapsible-toggle">
+                        <span class="collapsible-title">UFW Rules</span>
+                        <span class="collapsible-meta" id="ufw-rule-count"></span>
+                    </div>
+                    <span class="collapsible-chevron" id="ufw-rules-chev">▼</span>
+                </div>
+                <div class="collapsible-body" id="ufw-rules-body-wrap">
+                    <div class="fw-table-scroll"><table class="fw-table"><thead><tr><th class="num-col">#</th><th>To</th><th>Action</th><th>Dir</th><th>From</th></tr></thead><tbody id="ufw-rules-body"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody></table></div>
+                </div>
             </div>
-            <div class="fw-block">
-                <div class="fw-block-head">iptables INPUT <span class="fw-policy-pill ACCEPT" id="ipt-input-policy">—</span></div>
-                <div class="fw-table-scroll"><table class="fw-table"><thead><tr><th class="num-col">#</th><th>Target</th><th>Proto</th><th>In</th><th>Out</th><th>Source</th><th>Destination</th><th>Options</th><th class="pkts-col">Pkts</th></tr></thead><tbody id="ipt-input-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody></table></div>
+            <div class="collapsible-wrap">
+                <div class="collapsible-head" onclick="toggleCollapsible('ipt-input-wrap','ipt-input-chev')">
+                    <div class="collapsible-toggle">
+                        <span class="collapsible-title">iptables INPUT</span>
+                        <span class="fw-policy-pill ACCEPT collapsible-meta" id="ipt-input-policy" style="margin-left:0.5rem">—</span>
+                    </div>
+                    <span class="collapsible-chevron" id="ipt-input-chev">▼</span>
+                </div>
+                <div class="collapsible-body" id="ipt-input-wrap">
+                    <div class="fw-table-scroll"><table class="fw-table"><thead><tr><th class="num-col">#</th><th>Target</th><th>Proto</th><th>In</th><th>Out</th><th>Source</th><th>Destination</th><th>Options</th><th class="pkts-col">Pkts</th></tr></thead><tbody id="ipt-input-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody></table></div>
+                </div>
             </div>
-            <div class="fw-block">
-                <div class="fw-block-head">iptables FORWARD <span class="fw-policy-pill ACCEPT" id="ipt-fwd-policy">—</span></div>
-                <div class="fw-table-scroll"><table class="fw-table"><thead><tr><th class="num-col">#</th><th>Target</th><th>Proto</th><th>In</th><th>Out</th><th>Source</th><th>Destination</th><th>Options</th><th class="pkts-col">Pkts</th></tr></thead><tbody id="ipt-fwd-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody></table></div>
+            <div class="collapsible-wrap">
+                <div class="collapsible-head" onclick="toggleCollapsible('ipt-fwd-wrap','ipt-fwd-chev')">
+                    <div class="collapsible-toggle">
+                        <span class="collapsible-title">iptables FORWARD</span>
+                        <span class="fw-policy-pill ACCEPT collapsible-meta" id="ipt-fwd-policy" style="margin-left:0.5rem">—</span>
+                    </div>
+                    <span class="collapsible-chevron" id="ipt-fwd-chev">▼</span>
+                </div>
+                <div class="collapsible-body" id="ipt-fwd-wrap">
+                    <div class="fw-table-scroll"><table class="fw-table"><thead><tr><th class="num-col">#</th><th>Target</th><th>Proto</th><th>In</th><th>Out</th><th>Source</th><th>Destination</th><th>Options</th><th class="pkts-col">Pkts</th></tr></thead><tbody id="ipt-fwd-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody></table></div>
+                </div>
             </div>
-            <div class="fw-block">
-                <div class="fw-block-head">iptables NAT POSTROUTING <span class="fw-policy-pill ACCEPT" id="ipt-nat-policy">—</span></div>
-                <div class="fw-table-scroll"><table class="fw-table"><thead><tr><th class="num-col">#</th><th>Target</th><th>Proto</th><th>In</th><th>Out</th><th>Source</th><th>Destination</th><th>Options</th><th class="pkts-col">Pkts</th></tr></thead><tbody id="ipt-nat-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody></table></div>
+            <div class="collapsible-wrap">
+                <div class="collapsible-head" onclick="toggleCollapsible('ipt-nat-wrap','ipt-nat-chev')">
+                    <div class="collapsible-toggle">
+                        <span class="collapsible-title">iptables NAT POSTROUTING</span>
+                        <span class="fw-policy-pill ACCEPT collapsible-meta" id="ipt-nat-policy" style="margin-left:0.5rem">—</span>
+                    </div>
+                    <span class="collapsible-chevron" id="ipt-nat-chev">▼</span>
+                </div>
+                <div class="collapsible-body" id="ipt-nat-wrap">
+                    <div class="fw-table-scroll"><table class="fw-table"><thead><tr><th class="num-col">#</th><th>Target</th><th>Proto</th><th>In</th><th>Out</th><th>Source</th><th>Destination</th><th>Options</th><th class="pkts-col">Pkts</th></tr></thead><tbody id="ipt-nat-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody></table></div>
+                </div>
             </div>
         </section>
 
@@ -2450,8 +2792,21 @@
         <!-- Services                                                      -->
         <!-- ============================================================ -->
         <section class="section" id="services">
-            <div class="section-title">System Services</div>
-            <div class="services-grid" id="services-grid"><div class="empty">Loading…</div></div>
+            <div class="section-title">◈ Services</div>
+            <div class="collapsible-wrap">
+                <div class="collapsible-head" onclick="toggleCollapsible('services-body','services-chev')">
+                    <div class="collapsible-toggle">
+                        <span class="collapsible-title">Service Status</span>
+                        <span class="collapsible-meta" id="services-meta"></span>
+                    </div>
+                    <span class="collapsible-chevron" id="services-chev">▼</span>
+                </div>
+                <div class="collapsible-body" id="services-body">
+                    <div style="padding:1rem">
+                        <div class="services-grid" id="services-grid"><div class="empty">Loading…</div></div>
+                    </div>
+                </div>
+            </div>
         </section>
 
         <!-- ============================================================ -->
@@ -2459,7 +2814,7 @@
         <!-- ============================================================ -->
         <section class="section" id="logs">
             <div class="log-header">
-                <div class="section-title" style="margin-bottom:0">Node Agent Logs</div>
+                <div class="section-title" style="margin-bottom:0">◈ Logs</div>
                 <div class="log-controls">
                     <input class="log-filter" id="log-filter" type="text" placeholder="Filter…" oninput="filterLogs()">
                     <button class="log-toggle-btn" id="log-btn" onclick="toggleLogs()">Show Logs</button>
@@ -2492,10 +2847,30 @@
         // Boot
         // ============================================================
         document.addEventListener('DOMContentLoaded', () => {
+            initScrollSpy();
             loadFast();
             loadFirewall();
             setInterval(loadFast, 10_000);
             setInterval(loadFirewall, 60_000);
+        });
+
+        // Keyboard: press C to collapse all collapsibles, X to expand all
+        document.addEventListener('keydown', e => {
+            if (e.target.tagName === 'INPUT') return;
+            if (e.key === 'c' || e.key === 'C') {
+                document.querySelectorAll('.collapsible-body.open').forEach(el => {
+                    el.classList.remove('open');
+                    const chev = document.getElementById(el.id.replace('-body-', '-chev-').replace('-wrap', '-chev').replace('-body', '-chev'));
+                    if (chev) chev.classList.remove('open');
+                });
+            }
+            if (e.key === 'x' || e.key === 'X') {
+                document.querySelectorAll('.collapsible-body:not(.open)').forEach(el => {
+                    el.classList.add('open');
+                    const chev = document.getElementById(el.id.replace('-body-', '-chev-').replace('-wrap', '-chev').replace('-body', '-chev'));
+                    if (chev) chev.classList.add('open');
+                });
+            }
         });
 
         async function loadFast() {
@@ -2598,6 +2973,13 @@
                 htxt.textContent = `Critical (${issues.length})`;
             }
             pill.title = issues.join('\n') || 'All systems operational';
+
+            // Populate status strip (reuse orch already declared above)
+            const orchDot = $('strip-orch-dot');
+            if (orchDot) orchDot.className = 'strip-dot ' + (orch.connected ? 'ok' : 'err');
+            set('strip-orch', orch.connected ? 'Connected' : 'Disconnected');
+            set('strip-uptime', fmtUptime(d.uptimeSeconds ?? 0));
+            set('strip-agent', d.agentVersion ?? '—');
         }
 
         function collectIssues() {
@@ -2620,7 +3002,7 @@
         function renderQuickStats() {
             const snap = S.snapshot;
             if (snap) {
-                const cpu = snap.cpuUsagePercent ?? 0;
+                const cpu = snap.virtualCpuUsagePercent ?? 0;
                 const ramP = snap.totalMemoryBytes > 0 ? snap.usedMemoryBytes / snap.totalMemoryBytes * 100 : 0;
                 const stP = snap.totalStorageBytes > 0 ? snap.usedStorageBytes / snap.totalStorageBytes * 100 : 0;
                 set('qs-cpu', cpu.toFixed(1) + '%'); setBar('qs-cpu-bar', cpu);
@@ -2641,6 +3023,23 @@
             if (S.ports) {
                 set('qs-ports', (S.ports.tcp?.length ?? 0) + (S.ports.udp?.length ?? 0));
             }
+
+            // Keep status strip in sync
+            if (S.snapshot) {
+                const cpu = S.snapshot.virtualCpuUsagePercent ?? 0;
+                const ramP = S.snapshot.totalMemoryBytes > 0
+                    ? S.snapshot.usedMemoryBytes / S.snapshot.totalMemoryBytes * 100 : 0;
+                set('strip-cpu', cpu.toFixed(1) + '%');
+                set('strip-ram', ramP.toFixed(1) + '%');
+            }
+            if (S.vms) {
+                const run = S.vms.filter(v => isRunning(v)).length;
+                set('strip-vms', `${run}/${S.vms.length}`);
+            }
+            if (S.network) {
+                const peers = (S.network.wireguard ?? []).reduce((s, w) => s + (w.peers?.length ?? 0), 0);
+                set('strip-peers', peers);
+            }
         }
 
         function setBar(id, pct) {
@@ -2660,7 +3059,7 @@
         // ============================================================
         function renderHardware() {
             const snap = S.snapshot; if (!snap) return;
-            const cpu = snap.cpuUsagePercent ?? 0;
+            const cpu = snap.virtualCpuUsagePercent ?? 0;
             const ramP = snap.totalMemoryBytes > 0 ? snap.usedMemoryBytes / snap.totalMemoryBytes * 100 : 0;
             const stP = snap.totalStorageBytes > 0 ? snap.usedStorageBytes / snap.totalStorageBytes * 100 : 0;
 
@@ -2703,6 +3102,9 @@
             const tenants = all.filter(v => !isRelay(v) && !isDht(v) && !isBs(v));
 
             $('vm-count-badge').textContent = all.length;
+            // Update tenant collapsible meta
+            const tenantMeta = $('tenant-count-meta');
+            if (tenantMeta) tenantMeta.textContent = tenants.length ? `${tenants.length} VM${tenants.length === 1 ? '' : 's'}` : 'empty';
 
             paintSysVm('relay', relay);
             paintSysVm('dht', dht);
@@ -2714,6 +3116,7 @@
                 tbody.innerHTML = '<tr><td colspan="10" class="empty">No tenant VMs</td></tr>';
                 return;
             }
+            autoExpand('tenant-table-body', 'tenant-chev');
             tbody.innerHTML = tenants.map(vm => {
                 const spec = vm.spec ?? {};
                 const uptime = vm.startedAt ? fmtUptime(Math.floor((Date.now() - new Date(vm.startedAt).getTime()) / 1000)) : '—';
@@ -2870,7 +3273,7 @@
         function renderInterfaces() {
             const el = $('iface-list');
             const ifaces = S.network.interfaces ?? [];
-            if (!ifaces.length) { el.innerHTML = '<div class="empty">No interfaces found</div>'; return; }
+            if (!ifaces.length) { el.innerHTML = '<div class="empty-state"><div class="empty-icon">⬡</div><div>No interfaces detected</div></div>'; return; }
 
             el.innerHTML = ifaces.map(i => {
                 const rxTx = i.rxBytes > 0 || i.txBytes > 0
@@ -2895,47 +3298,64 @@
         function renderWireGuard() {
             const el = $('wg-panels');
             const wgs = S.network.wireguard ?? [];
-            if (!wgs.length) { el.innerHTML = '<div class="empty">No WireGuard interfaces</div>'; return; }
+            if (!wgs.length) {
+                el.innerHTML = '<div class="empty-state"><div class="empty-icon">⬡</div><div>No WireGuard interfaces configured</div></div>';
+                return;
+            }
 
-            el.innerHTML = wgs.map(wg => {
-                const peersHtml = !wg.peers?.length
-                    ? '<tr><td colspan="7" class="empty">No peers configured</td></tr>'
+            el.innerHTML = wgs.map((wg, wi) => {
+                const bodyId = `wg-body-${wi}`;
+                const chevId = `wg-chev-${wi}`;
+                const peerCount = wg.peers?.length ?? 0;
+                const stale = wg.peers?.filter(p => p.handshakeStatus === 'dead').length ?? 0;
+                const isOpen = peerCount > 0;  // auto-open when peers exist
+
+                const peersHtml = !peerCount
+                    ? '<tr><td colspan="8" class="empty">No peers configured</td></tr>'
                     : wg.peers.map(p => {
                         const hs = p.handshakeStatus ?? 'never';
                         const hsAge = p.handshakeSecondsAgo != null ? fmtAge(p.handshakeSecondsAgo) : 'Never';
-                        const endpt = p.endpoint ?? '<span style="color:var(--text-muted)">no endpoint</span>';
+                        const endpt = p.endpoint ?? '—';
                         const ka = p.persistentKeepalive > 0 ? p.persistentKeepalive + 's' : '—';
                         return `<tr>
                 <td><div class="hs-badge"><span class="hs-dot ${hs}"></span><span class="hs-txt ${hs}">${hs.toUpperCase()}</span></div></td>
                 <td><div style="display:flex;align-items:center;gap:0.4rem">
-                  <span style="font-size:0.72rem">${trunc(p.publicKey, 16)}</span>
+                  <span style="font-family:var(--mono);font-size:0.7rem">${trunc(p.publicKey, 16)}</span>
                   <button class="copy-btn" onclick="copyKey('${esc(p.publicKey)}',this)">copy</button>
                 </div></td>
-                <td>${esc(endpt)}</td>
-                <td><span style="font-family:var(--mono);font-size:0.73rem">${esc(p.allowedIps)}</span></td>
+                <td style="font-family:var(--mono);font-size:0.7rem">${esc(endpt)}</td>
+                <td style="font-family:var(--mono);font-size:0.7rem">${esc(p.allowedIps)}</td>
                 <td><span class="hs-txt ${hs}">${hsAge}</span></td>
                 <td class="xfer-cell"><span class="rx">↓${fmtBytes(p.rxBytes)}</span></td>
                 <td class="xfer-cell"><span class="tx">↑${fmtBytes(p.txBytes)}</span></td>
-                <td>${ka}</td>
+                <td style="font-family:var(--mono);font-size:0.7rem">${ka}</td>
               </tr>`;
                     }).join('');
 
+                const staleNote = stale ? `<span style="color:var(--danger);margin-left:0.5rem">${stale} stale</span>` : '';
+                const metaText = `${peerCount} peer${peerCount !== 1 ? 's' : ''}  ·  port ${wg.listenPort ?? '—'}${staleNote}`;
+
                 return `
-        <div class="wg-iface-block">
-          <div class="wg-iface-head">
-            <span class="wg-iface-name">${esc(wg.name)}</span>
-            <span class="wg-port">:${wg.listenPort}</span>
-            <span class="wg-pubkey">
-              ${trunc(wg.publicKey, 16)}
-              <button class="copy-btn" onclick="copyKey('${esc(wg.publicKey)}',this)">copy</button>
-            </span>
-            <span class="wg-peer-count">${wg.peers?.length ?? 0} peer${wg.peers?.length === 1 ? '' : 's'}</span>
+        <div class="collapsible-wrap" style="margin-bottom:0.75rem">
+          <div class="collapsible-head" onclick="toggleCollapsible('${bodyId}','${chevId}')">
+            <div class="collapsible-toggle">
+              <span class="collapsible-title" style="font-size:0.8rem;font-family:var(--mono);color:var(--primary)">${esc(wg.name)}</span>
+              <span class="collapsible-meta" style="margin-left:0.75rem">${metaText}</span>
+            </div>
+            <span class="collapsible-chevron ${isOpen ? 'open' : ''}" id="${chevId}">▼</span>
           </div>
-          <div class="wg-table-scroll">
-            <table class="wg-table">
-              <thead><tr><th>Status</th><th>Public Key</th><th>Endpoint</th><th>Allowed IPs</th><th>Last Handshake</th><th>RX</th><th>TX</th><th>Keepalive</th></tr></thead>
-              <tbody>${peersHtml}</tbody>
-            </table>
+          <div class="collapsible-body ${isOpen ? 'open' : ''}" id="${bodyId}">
+            <div class="wg-meta-row">
+              <span class="wg-meta-item"><span class="wg-meta-label">Public Key</span>${trunc(wg.publicKey, 20)}
+                <button class="copy-btn" onclick="copyKey('${esc(wg.publicKey)}',this)">copy</button></span>
+              <span class="wg-meta-item"><span class="wg-meta-label">Address</span>${esc(wg.address ?? '—')}</span>
+            </div>
+            <div class="wg-table-scroll">
+              <table class="wg-table">
+                <thead><tr><th>Status</th><th>Public Key</th><th>Endpoint</th><th>Allowed IPs</th><th>Last Handshake</th><th>RX</th><th>TX</th><th>KA</th></tr></thead>
+                <tbody>${peersHtml}</tbody>
+              </table>
+            </div>
           </div>
         </div>`;
             }).join('');
@@ -3033,6 +3453,14 @@
                 ].map(p => `<div class="pol-item"><span class="pol-label">${p.label}</span><span class="pol-val ${(p.val || '').toLowerCase()}">${p.val || '—'}</span></div>`).join('');
             }
 
+            // UFW meta count
+            const ufwMeta = $('ufw-rule-count');
+            if (ufwMeta) ufwMeta.textContent = ufw.active
+                ? `${ufw.rules?.length ?? 0} rule${ufw.rules?.length !== 1 ? 's' : ''}`
+                : 'inactive';
+            // Auto-expand UFW section when active
+            if (ufw.active) autoExpand('ufw-rules-body-wrap', 'ufw-rules-chev');
+
             // UFW Rules
             const ufwBody = $('ufw-rules-body');
             if (!ufw.rules?.length) {
@@ -3054,6 +3482,18 @@
             renderIptChain('ipt-nat-body', 'ipt-nat-policy', fw.iptables?.natPostrouting);
         }
 
+        // Map of chain bodyId → collapsible wrap id
+        const IPT_WRAP = {
+            'ipt-input-body': 'ipt-input-wrap',
+            'ipt-fwd-body': 'ipt-fwd-wrap',
+            'ipt-nat-body': 'ipt-nat-wrap',
+        };
+        const IPT_CHEV = {
+            'ipt-input-body': 'ipt-input-chev',
+            'ipt-fwd-body': 'ipt-fwd-chev',
+            'ipt-nat-body': 'ipt-nat-chev',
+        };
+
         function renderIptChain(bodyId, polId, chain) {
             const tbody = $(bodyId); if (!tbody) return;
             const polEl = $(polId);
@@ -3067,13 +3507,17 @@
 
             if (polEl && chain?.policy) {
                 polEl.textContent = chain.policy;
-                polEl.className = `fw-policy-pill ${chain.policy}`;
+                polEl.className = `fw-policy-pill ${chain.policy} collapsible-meta`;
             }
             const rules = chain?.rules ?? [];
             if (!rules.length) {
                 tbody.innerHTML = '<tr><td colspan="9" class="empty">No rules (chain empty)</td></tr>';
                 return;
             }
+            // Auto-expand chains that have rules
+            const wrapId = IPT_WRAP[bodyId];
+            const chevId = IPT_CHEV[bodyId];
+            if (wrapId) autoExpand(wrapId, chevId);
             tbody.innerHTML = rules.map(r => `
         <tr>
           <td class="num-col">${r.lineNumber || ''}</td>
@@ -3096,6 +3540,11 @@
             const svcs = S.services?.services ?? [];
             if (!svcs.length) { el.innerHTML = '<div class="empty">No service data</div>'; return; }
 
+            const active = svcs.filter(s => s.isActive).length;
+            const failed = svcs.filter(s => s.subState === 'failed').length;
+            const metaEl = $('services-meta');
+            if (metaEl) metaEl.textContent = `${active}/${svcs.length} active${failed ? ' · ' + failed + ' failed' : ''}`;
+
             el.innerHTML = svcs.map(s => {
                 const cls = s.loadState === 'not-found' ? 'not-found'
                     : !s.isLoaded ? 'not-found'
@@ -3110,6 +3559,8 @@
           </div>
         </div>`;
             }).join('');
+            // Auto-expand if any service is failed
+            if (failed > 0) autoExpand('services-body', 'services-chev');
         }
 
         // ============================================================
@@ -3165,9 +3616,52 @@
         // ============================================================
         // UI helpers
         // ============================================================
+
+        /** Toggle a collapsible body open/closed */
+        function toggleCollapsible(bodyId, chevId, forceOpen) {
+            const body = $(bodyId);
+            const chev = $(chevId);
+            if (!body) return;
+            const isOpen = body.classList.contains('open');
+            const open = forceOpen !== undefined ? forceOpen : !isOpen;
+            body.classList.toggle('open', open);
+            if (chev) chev.classList.toggle('open', open);
+        }
+
+        /** Open a collapsible if it contains data (non-empty tbody or grid) */
+        function autoExpand(bodyId, chevId) {
+            const body = $(bodyId); if (!body) return;
+            // Already open — leave it
+            if (body.classList.contains('open')) return;
+            toggleCollapsible(bodyId, chevId, true);
+        }
+
+        /** Scroll-spy: highlight nav tab matching the section currently in view */
+        function initScrollSpy() {
+            const sections = ['hardware', 'vms', 'network', 'firewall', 'services', 'logs'];
+            const tabs = document.querySelectorAll('.nav-tab');
+
+            const obs = new IntersectionObserver(entries => {
+                entries.forEach(e => {
+                    if (e.isIntersecting) {
+                        const id = e.target.id;
+                        tabs.forEach(t => {
+                            t.classList.toggle('spy-active',
+                                t.getAttribute('onclick')?.includes(`'${id}'`));
+                        });
+                    }
+                });
+            }, { threshold: 0.15, rootMargin: '-60px 0px -40% 0px' });
+
+            sections.forEach(id => {
+                const el = $(id);
+                if (el) obs.observe(el);
+            });
+        }
+
         function scrollSec(id, btn) {
             const el = $(id); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active', 'spy-active'));
             if (btn) btn.classList.add('active');
         }
 
@@ -3650,7 +4144,7 @@
             const snap = p.snapshot;
             if (snap) {
                 h2('Hardware Resources');
-                kv('CPU Usage', (snap.cpuUsagePercent ?? 0).toFixed(1) + '%');
+                kv('CPU Usage', (snap.virtualCpuUsagePercent ?? 0).toFixed(1) + '%');
                 kv('Memory', `${fmtBytes(snap.usedMemoryBytes)} / ${fmtBytes(snap.totalMemoryBytes)}`);
                 kv('Storage', `${fmtBytes(snap.usedStorageBytes)} / ${fmtBytes(snap.totalStorageBytes)}`);
                 kv('KVM', snap.kvmAvailable !== false ? 'Available' : 'Unavailable');
