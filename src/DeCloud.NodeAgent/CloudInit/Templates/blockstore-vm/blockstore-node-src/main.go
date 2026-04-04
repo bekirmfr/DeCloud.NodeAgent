@@ -268,7 +268,7 @@ func splitPeers(s string) []string {
 // BlockNode — main node state
 // ═══════════════════════════════════════════════════════════════════
 
-type BlockNode struct {s
+type BlockNode struct {
 	cfg    Config
 	host   host.Host
 	dht    *dht.IpfsDHT
