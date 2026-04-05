@@ -60,8 +60,9 @@ import (
 // ═══════════════════════════════════════════════════════════════════
 
 const (
-	GossipSubTopic      = "decloud/blockstore/new-blocks"
-	GossipSubVmDelTopic = "decloud/blockstore/vm-deleted"
+	GossipSubTopic         = "decloud/blockstore/new-blocks"
+	GossipSubVmDelTopic    = "decloud/blockstore/vm-deleted"
+	GossipSubPresenceTopic = "decloud/blockstore/presence"
 	IdentityKeyFile     = "identity.key"
 	PeerIDFile          = "peer-id"
 	BlocksSubdir        = "blocks"
@@ -333,6 +334,7 @@ func main() {
 	if err := node.startGossipSubSubscription(ctx); err != nil {
 		log.Printf("Warning: GossipSub subscription failed: %v", err)
 	}
+	node.startPresenceTopic(ctx)
 	go node.startVmDeletedSubscription(ctx)
 	node.startHTTPServer(ctx)
 	go node.startGCLoop(ctx)
@@ -860,6 +862,40 @@ func (n *BlockNode) deleteOwnerBlocks(ctx context.Context, vmId string) {
 // XOR proximity
 // ═══════════════════════════════════════════════════════════════════
 
+// startPresenceTopic joins the blockstore-only presence topic.
+// DHT VMs never subscribe to this topic — so ListPeers(presence)
+// gives an exact live count of other blockstore nodes in the mesh.
+// No orchestrator needed — fully self-healing as nodes join/leave.
+func (n *BlockNode) startPresenceTopic(ctx context.Context) {
+	topic, err := n.pubsub.Join(GossipSubPresenceTopic)
+	if err != nil {
+		log.Printf("Warning: could not join presence topic: %v", err)
+		return
+	}
+	sub, err := topic.Subscribe()
+	if err != nil {
+		log.Printf("Warning: could not subscribe to presence topic: %v", err)
+		return
+	}
+	log.Printf("Subscribed to GossipSub topic: %s", GossipSubPresenceTopic)
+	// Drain only — mesh participation is the point, not message processing.
+	go func() {
+		for {
+			_, err := sub.Next(ctx)
+			if err != nil {
+				return
+			}
+		}
+	}()
+}
+
+// blockstorePeerCount returns the number of other blockstore nodes
+// currently in the GossipSub presence mesh. Updates live as nodes
+// join and leave — no polling, no orchestrator intervention needed.
+func (n *BlockNode) blockstorePeerCount() int {
+	return len(n.pubsub.ListPeers(GossipSubPresenceTopic))
+}
+
 func (n *BlockNode) isWithinXORThreshold(c cid.Cid, usagePct float64) bool {
 	peerHash := sha256.Sum256([]byte(n.host.ID()))
 	cidHash := sha256.Sum256(c.Bytes())
@@ -874,14 +910,18 @@ func (n *BlockNode) isWithinXORThreshold(c cid.Cid, usagePct float64) bool {
 		new(big.Float).SetInt(maxInt),
 	).Float64()
 
-	var threshold float64
-	switch {
-	case usagePct >= 75:
-		threshold = XORThresholdFull
-	case usagePct >= 50:
-		threshold = XORThresholdMedium
-	default:
-		threshold = XORThresholdLight
+	// Dynamic threshold: each node covers 1/N of the keyspace where
+	// N = self + live mesh peers. Self-healing — threshold widens
+	// automatically when peers leave, narrows when they join.
+	// Capacity scaling: emptier nodes accept a larger share (up to 3x base).
+	networkSize := n.blockstorePeerCount() + 1 // +1 for self
+	baseThreshold := 1.0 / float64(networkSize)
+	freePct := 1.0 - (usagePct / 100.0)
+	threshold := baseThreshold * (1.0 + 2.0*freePct)
+
+	// Solo or near-solo: accept everything — no other node to hold the block.
+	if threshold >= 1.0 {
+		return true
 	}
 	return xorFraction <= threshold
 }
