@@ -862,10 +862,16 @@ func (n *BlockNode) deleteOwnerBlocks(ctx context.Context, vmId string) {
 // XOR proximity
 // ═══════════════════════════════════════════════════════════════════
 
+// presenceHeartbeat is published periodically on the presence topic.
+// Carries the HTTP API URL so peers can call /owners for block catchup.
+type presenceHeartbeat struct {
+	PeerID string `json:"peerId"`
+	APIURL string `json:"apiUrl"`
+}
+
 // startPresenceTopic joins the blockstore-only presence topic.
-// DHT VMs never subscribe to this topic — so ListPeers(presence)
-// gives an exact live count of other blockstore nodes in the mesh.
-// No orchestrator needed — fully self-healing as nodes join/leave.
+// DHT VMs never join this topic — ListPeers(presence) = exact blockstore count.
+// Also publishes heartbeats and triggers owner-based catchup for new peers.
 func (n *BlockNode) startPresenceTopic(ctx context.Context) {
 	topic, err := n.pubsub.Join(GossipSubPresenceTopic)
 	if err != nil {
@@ -878,15 +884,152 @@ func (n *BlockNode) startPresenceTopic(ctx context.Context) {
 		return
 	}
 	log.Printf("Subscribed to GossipSub topic: %s", GossipSubPresenceTopic)
-	// Drain only — mesh participation is the point, not message processing.
+
+	// Publish heartbeat so peers know our API URL for catchup.
+	apiURL := fmt.Sprintf("http://%s:%d", n.cfg.AdvertiseIP, n.cfg.APIPort)
+	hb, _ := json.Marshal(presenceHeartbeat{
+		PeerID: n.host.ID().String(),
+		APIURL: apiURL,
+	})
 	go func() {
+		time.Sleep(2 * time.Second) // wait for mesh to form
+		_ = topic.Publish(ctx, hb)
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
 		for {
-			_, err := sub.Next(ctx)
-			if err != nil {
+			select {
+			case <-ctx.Done():
 				return
+			case <-ticker.C:
+				_ = topic.Publish(ctx, hb)
 			}
 		}
 	}()
+
+	// Watch for new peers. On first heartbeat from an unseen peer,
+	// fetch their owner CID lists and pull blocks we're responsible for.
+	// seenPeers prevents re-triggering catchup on repeated heartbeats.
+	go func() {
+		seenPeers := make(map[string]bool)
+		for {
+			msg, err := sub.Next(ctx)
+			if err != nil {
+				return
+			}
+			if msg.ReceivedFrom == n.host.ID() {
+				continue
+			}
+			var hb presenceHeartbeat
+			if err := json.Unmarshal(msg.Data, &hb); err != nil || hb.APIURL == "" {
+				continue
+			}
+			if seenPeers[hb.PeerID] {
+				continue
+			}
+			seenPeers[hb.PeerID] = true
+			log.Printf("Presence: new peer %s at %s — starting owner catchup",
+				cidShort(hb.PeerID), hb.APIURL)
+			go n.performCatchupFromPeer(ctx, hb.APIURL)
+		}
+	}()
+}
+
+// performCatchupFromPeer fetches owner CID lists from a peer and pulls any
+// blocks we're responsible for (XOR filter) that we don't yet have.
+// Pure pull-based — no GossipSub flood, no orchestrator involvement.
+// Called once per newly discovered peer, never repeated for the same peer.
+func (n *BlockNode) performCatchupFromPeer(ctx context.Context, peerAPIURL string) {
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	// Step 1: discover which VMs the peer has blocks for
+	resp, err := client.Get(peerAPIURL + "/owners")
+	if err != nil {
+		log.Printf("catchup: failed to fetch owner list from %s: %v", peerAPIURL, err)
+		return
+	}
+	var ownerList struct {
+		VmIds []string `json:"vmIds"`
+	}
+	json.NewDecoder(resp.Body).Decode(&ownerList)
+	resp.Body.Close()
+
+	if len(ownerList.VmIds) == 0 {
+		return
+	}
+	log.Printf("catchup: peer has %d VM(s) — checking for missing blocks", len(ownerList.VmIds))
+
+	pulled, skipped := 0, 0
+
+	// Step 2: for each VM fetch its CIDs and pull what we're missing
+	for _, vmId := range ownerList.VmIds {
+		if ctx.Err() != nil {
+			return
+		}
+		resp, err := client.Get(peerAPIURL + "/owners/" + vmId)
+		if err != nil {
+			continue
+		}
+		var ownerCids struct {
+			Cids []string `json:"cids"`
+		}
+		json.NewDecoder(resp.Body).Decode(&ownerCids)
+		resp.Body.Close()
+
+		for _, cidStr := range ownerCids.Cids {
+			if ctx.Err() != nil {
+				return
+			}
+			c, err := cid.Decode(cidStr)
+			if err != nil {
+				continue
+			}
+			// Already have it
+			if has, _ := n.bstore.Has(ctx, c); has {
+				skipped++
+				continue
+			}
+			// Check capacity
+			usedBytes, _ := n.usedBytes(ctx)
+			usagePct := float64(usedBytes) / float64(n.cfg.StorageBytes) * 100
+			if usagePct >= GCHardLimit {
+				log.Printf("catchup: storage full — stopping")
+				return
+			}
+			// XOR filter — only pull blocks we're responsible for
+			if !n.isWithinXORThreshold(c, usagePct) {
+				skipped++
+				continue
+			}
+			// Pull via bitswap — DHT locates the provider
+			pullCtx, cancel := context.WithTimeout(ctx, BitswapTimeout)
+			blk, err := n.bsExch.GetBlock(pullCtx, c)
+			cancel()
+			if err != nil {
+				n.diagLog.Add("catchup_fail", map[string]interface{}{
+					"cid": cidShort(cidStr), "error": err.Error(),
+				})
+				continue
+			}
+			if err := n.bstore.Put(ctx, blk); err != nil {
+				continue
+			}
+			n.touchBlock(c.String(), int64(len(blk.RawData())))
+			n.mu.Lock()
+			n.bitswapReceived++
+			n.mu.Unlock()
+			go func(c cid.Cid) {
+				aCtx, aCancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer aCancel()
+				_ = n.dht.Provide(aCtx, c, true)
+			}(c)
+			n.diagLog.Add("catchup_fetch", map[string]interface{}{
+				"cid": cidShort(cidStr), "vmId": vmId,
+			})
+			pulled++
+			time.Sleep(10 * time.Millisecond) // rate limit
+		}
+	}
+	log.Printf("catchup: complete — pulled %d, skipped %d", pulled, skipped)
 }
 
 // blockstorePeerCount returns the number of other blockstore nodes
@@ -1091,22 +1234,10 @@ func (n *BlockNode) reannounceExistingBlocks(ctx context.Context) {
 		_ = n.dht.Provide(announceCtx, c, true)
 		cancel()
 
-		// Re-publish to GossipSub so late-joining peers catch up on
-		// blocks they missed before they connected to the mesh.
-		// This covers the scatter window gap: blocks written before a
-		// remote blockstore joined will be re-broadcast here, triggering
-		// their XOR filter and bitswap pull.
-		n.accessMu.Lock()
-		size := n.blockSizes[c.String()]
-		n.accessMu.Unlock()
-		go n.publishNewBlock(c, size)
-
 		count++
 		if count%100 == 0 {
-			log.Printf("reannounce: %d blocks re-announced to DHT + GossipSub", count)
+			log.Printf("reannounce: %d blocks re-announced to DHT", count)
 		}
-		// Rate-limit GossipSub publish to avoid flooding the mesh
-		time.Sleep(10 * time.Millisecond)
 	}
 	log.Printf("reannounce: complete — %d blocks re-announced to DHT + GossipSub", count)
 
@@ -1172,7 +1303,8 @@ func (n *BlockNode) startHTTPServer(ctx context.Context) {
 	mux.HandleFunc("/connect", n.handleConnect)
 	mux.HandleFunc("/manifests/", n.handleManifestByID)
 	mux.HandleFunc("/manifests", n.handleManifests)
-	mux.HandleFunc("/owners/", n.handleOwnerDelete)
+	mux.HandleFunc("/owners", n.handleOwnerList)
+	mux.HandleFunc("/owners/", n.handleOwnerOps)
 	mux.HandleFunc("/diagnostics", n.handleDiagnostics)
 
 	// Bind to all interfaces so the NodeAgent host can reach the API
@@ -1540,24 +1672,69 @@ func (n *BlockNode) handleManifestByID(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(m)
 }
 
-// ── DELETE /owners/{vmId} ────────────────────────────────────────────────────
-func (n *BlockNode) handleOwnerDelete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "DELETE only", http.StatusMethodNotAllowed)
+// ── GET /owners ───────────────────────────────────────────────────────────────
+// Returns list of vmIds this node has owner index files for.
+// Called by joining peers to discover which VMs to catch up on.
+func (n *BlockNode) handleOwnerList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
+	entries, err := os.ReadDir(filepath.Join(StorageDir, OwnersSubdir))
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"vmIds": []string{}})
+		return
+	}
+	vmIds := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".cids") {
+			vmIds = append(vmIds, strings.TrimSuffix(e.Name(), ".cids"))
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"vmIds": vmIds})
+}
+
+// ── GET|DELETE /owners/{vmId} ────────────────────────────────────────────────
+// GET    → returns all CIDs in the owner index (used by peer catchup)
+// DELETE → deletes all blocks owned by the VM
+func (n *BlockNode) handleOwnerOps(w http.ResponseWriter, r *http.Request) {
 	vmId := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/owners/"))
 	if vmId == "" {
 		http.Error(w, "missing vmId", http.StatusBadRequest)
 		return
 	}
 	ownerFile := filepath.Join(StorageDir, OwnersSubdir, vmId+".cids")
-	if _, err := os.Stat(ownerFile); os.IsNotExist(err) {
+	switch r.Method {
+	case http.MethodGet:
+		data, err := os.ReadFile(ownerFile)
+		if err != nil {
+			if os.IsNotExist(err) {
+				http.Error(w, "vmId not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "read error", http.StatusInternalServerError)
+			return
+		}
+		var cids []string
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				cids = append(cids, line)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"vmId": vmId, "cids": cids})
+	case http.MethodDelete:
+		if _, err := os.Stat(ownerFile); os.IsNotExist(err) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		n.deleteOwnerBlocks(r.Context(), vmId)
 		w.WriteHeader(http.StatusNoContent)
-		return
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-	n.deleteOwnerBlocks(r.Context(), vmId)
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // cidHasOtherOwners returns true if any owner file other than excludeOwner
