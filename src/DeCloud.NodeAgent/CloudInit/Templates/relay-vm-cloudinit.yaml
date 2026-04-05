@@ -6,6 +6,13 @@
 hostname: __VM_NAME__
 manage_etc_hosts: true
 
+package_update: false
+package_upgrade: false
+
+bootcmd:
+  - rm -f /etc/machine-id /var/lib/dbus/machine-id
+  - systemd-machine-id-setup
+
 # =====================================================
 # SYSTEM PACKAGES
 # =====================================================
@@ -346,6 +353,10 @@ write_files:
 # RUNTIME COMMANDS
 # =====================================================
 runcmd:
+  # Start QEMU guest agent first so the orchestrator monitor can track progress
+  - ln -sf /lib/systemd/system/qemu-guest-agent.service /etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service
+  - systemctl start qemu-guest-agent
+
   # Enable IP forwarding (required for relay functionality)
   - echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
   - echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
@@ -356,10 +367,6 @@ runcmd:
   - ufw disable || true
   - systemctl stop ufw || true
   - systemctl disable ufw || true
-  
-  # Enable QEMU guest agent (static symlink — systemctl enable fails on Debian cloud images)
-  - ln -sf /lib/systemd/system/qemu-guest-agent.service /etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service
-  - systemctl start qemu-guest-agent
   
   # Start WireGuard
   - wg-quick up wg-relay-server
