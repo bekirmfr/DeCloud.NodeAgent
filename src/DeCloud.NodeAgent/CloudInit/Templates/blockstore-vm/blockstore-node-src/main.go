@@ -958,6 +958,16 @@ func (n *BlockNode) performCatchupFromPeer(ctx context.Context, peerAPIURL strin
 	}
 	log.Printf("catchup: peer has %d VM(s) — checking for missing blocks", len(ownerList.VmIds))
 
+	// Add the peer's addresses to the peerstore so bitswap can dial
+	// directly without DHT FindProviders. Historical blocks may have
+	// stale or missing DHT records — direct dial is the only reliable path.
+	for _, p := range n.host.Network().Peers() {
+		addrs := n.host.Network().Peerstore().Addrs(p)
+		if len(addrs) > 0 {
+			n.host.Network().Peerstore().AddAddrs(p, addrs, time.Hour)
+		}
+	}
+
 	pulled, skipped := 0, 0
 
 	// Step 2: for each VM fetch its CIDs and pull what we're missing
@@ -1000,16 +1010,38 @@ func (n *BlockNode) performCatchupFromPeer(ctx context.Context, peerAPIURL strin
 				skipped++
 				continue
 			}
-			// Pull via bitswap — DHT locates the provider
-			pullCtx, cancel := context.WithTimeout(ctx, BitswapTimeout)
-			blk, err := n.bsExch.GetBlock(pullCtx, c)
-			cancel()
-			if err != nil {
-				n.diagLog.Add("catchup_fail", map[string]interface{}{
-					"cid": cidShort(cidStr), "error": err.Error(),
-				})
-				continue
-			}
+			// Pull directly via HTTP from the peer we already know about.
+		// Avoids DHT FindProviders entirely — critical for historical blocks
+		// whose DHT provider records may be stale or missing.
+		blockResp, err := client.Get(peerAPIURL + "/blocks/" + cidStr)
+		if err != nil {
+			n.diagLog.Add("catchup_fail", map[string]interface{}{
+				"cid": cidShort(cidStr), "error": err.Error(),
+			})
+			continue
+		}
+		rawData, err := io.ReadAll(io.LimitReader(blockResp.Body, 64*1024*1024))
+		blockResp.Body.Close()
+		if err != nil || blockResp.StatusCode != http.StatusOK {
+			n.diagLog.Add("catchup_fail", map[string]interface{}{
+				"cid": cidShort(cidStr), "error": "http fetch failed",
+			})
+			continue
+		}
+		mhash, err := multihash.Sum(rawData, multihash.SHA2_256, -1)
+		if err != nil {
+			continue
+		}
+		blk, err := blocks.NewBlockWithCid(rawData, cid.NewCidV1(cid.Raw, mhash))
+		if err != nil || blk.Cid().String() != cidStr {
+			n.diagLog.Add("catchup_fail", map[string]interface{}{
+				"cid": cidShort(cidStr), "error": "cid mismatch",
+			})
+			continue
+		}
+		if err := n.bstore.Put(ctx, blk); err != nil {
+			continue
+		}
 			if err := n.bstore.Put(ctx, blk); err != nil {
 				continue
 			}
