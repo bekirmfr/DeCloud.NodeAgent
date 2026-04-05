@@ -1086,15 +1086,29 @@ func (n *BlockNode) reannounceExistingBlocks(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		// Re-announce to DHT so orchestrator audit can find this provider
 		announceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		_ = n.dht.Provide(announceCtx, c, true)
 		cancel()
+
+		// Re-publish to GossipSub so late-joining peers catch up on
+		// blocks they missed before they connected to the mesh.
+		// This covers the scatter window gap: blocks written before a
+		// remote blockstore joined will be re-broadcast here, triggering
+		// their XOR filter and bitswap pull.
+		n.accessMu.Lock()
+		size := n.blockSizes[c.String()]
+		n.accessMu.Unlock()
+		go n.publishNewBlock(c, size)
+
 		count++
 		if count%100 == 0 {
-			log.Printf("reannounce: %d blocks announced to DHT", count)
+			log.Printf("reannounce: %d blocks re-announced to DHT + GossipSub", count)
 		}
+		// Rate-limit GossipSub publish to avoid flooding the mesh
+		time.Sleep(10 * time.Millisecond)
 	}
-	log.Printf("reannounce: complete — %d blocks re-announced to DHT", count)
+	log.Printf("reannounce: complete — %d blocks re-announced to DHT + GossipSub", count)
 
 	n.mu.Lock()
 	n.diag.ReannounceCount++

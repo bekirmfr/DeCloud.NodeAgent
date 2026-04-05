@@ -31,6 +31,10 @@
 		<None Include="../../cli/**/*" Link="cli/%(RecursiveDir)%(Filename)%(Extension)" />
 	</ItemGroup>
 
+	<ItemGroup>
+		<None Include="../../releases/**/*" Link="releases/%(RecursiveDir)%(Filename)%(Extension)" />
+	</ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
