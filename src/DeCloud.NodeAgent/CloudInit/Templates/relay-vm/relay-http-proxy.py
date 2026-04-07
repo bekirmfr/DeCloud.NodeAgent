@@ -17,7 +17,7 @@ from threading import Thread, Lock
 
 # Configuration
 ORCHESTRATOR_URL = os.environ.get('ORCHESTRATOR_URL', 'http://10.20.0.1:5000')
-RELAY_ID = os.environ.get('RELAY_ID', '__VM_ID__')
+RELAY_ID = os.environ.get('RELAY_ID', '__NODE_ID__')
 RELAY_TOKEN_FILE = '/etc/wireguard/private.key'
 LISTEN_PORT = 8081
 ROUTING_CACHE_TTL = 30  # seconds
