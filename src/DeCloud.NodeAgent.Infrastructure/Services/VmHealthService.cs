@@ -9,6 +9,7 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
     {
         private readonly IVmManager _vmManager;
         private readonly INatRuleManager _natRuleManager;
+        private readonly IOrchestratorClient _orchestratorClient;
         private readonly ILogger<VmHealthService> _logger;
 
         private static readonly TimeSpan HealthCheckInterval = TimeSpan.FromMinutes(1);
@@ -21,11 +22,13 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
         public VmHealthService(
             IVmManager vmManager,
             INatRuleManager natRuleManager,
+            IOrchestratorClient orchestratorClient,
             ILogger<VmHealthService> logger
             )
         {
             _vmManager = vmManager;
-            _natRuleManager = natRuleManager;  
+            _natRuleManager = natRuleManager;
+            _orchestratorClient = orchestratorClient;
             _logger = logger;
         }
         protected override async Task ExecuteAsync(CancellationToken ct)
@@ -181,12 +184,32 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
 
             if (hasRelayVm) return; // Relay node — rules are managed by CheckRelayVmNatRulesAsync
 
+            // CGNAT nodes use wg-relay for VM routing.
+            // Their iptables contain wg-relay↔virbr0 FORWARD rules whose
+            // raw output includes "51820". Calling `decloud-relay-nat clean`
+            // here would flush those FORWARD rules, severing all subdomain
+            // traffic until WireGuardConfigManager reconciles (~60 s later).
+            var isCgnatNode = _orchestratorClient.GetLastHeartbeat()?.Heartbeat?.CgnatInfo != null;
+            if (isCgnatNode)
+            {
+                _logger.LogDebug(
+                    "Skipping relay NAT cleanup — node is a CGNAT client (wg-relay active)");
+                return;
+            }
+
             // No relay VM — check if any relay NAT rules exist and wipe them
             var existingRules = await _natRuleManager.GetExistingRulesAsync(ct);
-            if (existingRules.Any(r => r.Contains("51820") || r.Contains("8080")))
+
+            // Only match PREROUTING DNAT rules, not arbitrary FORWARD
+            // or conntrack entries that happen to mention port 51820 / 8080.
+            var hasStaleRelayRules = existingRules.Any(r =>
+                r.Contains("DNAT") &&
+                (r.Contains("51820") || r.Contains("8080")));
+
+            if (hasStaleRelayRules)
             {
                 _logger.LogWarning(
-                    "Node has relay NAT rules but no relay VM — cleaning stale rules");
+                    "Node has stale relay PREROUTING DNAT rules but no relay VM — cleaning");
                 await _natRuleManager.RemoveAllRelayNatRulesAsync(ct);
             }
         }

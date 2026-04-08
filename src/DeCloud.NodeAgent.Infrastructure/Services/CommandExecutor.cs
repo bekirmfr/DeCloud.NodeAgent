@@ -22,7 +22,7 @@ public class CommandExecutor : ICommandExecutor
     public async Task<CommandResult> ExecuteAsync(string command, string arguments, TimeSpan timeout, CancellationToken ct = default)
     {
         var sw = Stopwatch.StartNew();
-        
+
         // Use Trace for command execution to reduce log noise
         // Only Debug/Warning will be logged for slow or failed commands
         _logger.LogTrace("Executing: {Command} {Arguments}", command, arguments);
@@ -50,7 +50,7 @@ public class CommandExecutor : ICommandExecutor
             };
 
             using var process = new Process { StartInfo = psi };
-            
+
             var stdoutTask = new TaskCompletionSource<string>();
             var stderrTask = new TaskCompletionSource<string>();
 
@@ -59,7 +59,7 @@ public class CommandExecutor : ICommandExecutor
                 if (e.Data == null)
                     stdoutTask.TrySetResult(string.Empty);
             };
-            
+
             process.ErrorDataReceived += (_, e) =>
             {
                 if (e.Data == null)
@@ -67,12 +67,12 @@ public class CommandExecutor : ICommandExecutor
             };
 
             process.Start();
-            
+
             var stdout = await process.StandardOutput.ReadToEndAsync(cts.Token);
             var stderr = await process.StandardError.ReadToEndAsync(cts.Token);
-            
+
             await process.WaitForExitAsync(cts.Token);
-            
+
             sw.Stop();
 
             var result = new CommandResult
@@ -88,7 +88,7 @@ public class CommandExecutor : ICommandExecutor
                 // Only log Debug for slow commands (>100ms), use Trace for quick ones
                 if (sw.ElapsedMilliseconds > 100)
                 {
-                    _logger.LogDebug("Command succeeded in {Duration}ms: {Command}", 
+                    _logger.LogDebug("Command succeeded in {Duration}ms: {Command}",
                         sw.ElapsedMilliseconds, command);
                 }
                 else
@@ -98,7 +98,7 @@ public class CommandExecutor : ICommandExecutor
             }
             else
             {
-                _logger.LogWarning("Command failed with exit code {ExitCode}: {Stderr}", 
+                _logger.LogWarning("Command failed with exit code {ExitCode}: {Stderr}",
                     result.ExitCode, result.StandardError);
             }
 
@@ -108,7 +108,7 @@ public class CommandExecutor : ICommandExecutor
         {
             sw.Stop();
             _logger.LogError("Command timed out after {Timeout}ms", timeout.TotalMilliseconds);
-            
+
             return new CommandResult
             {
                 ExitCode = -1,
@@ -116,11 +116,44 @@ public class CommandExecutor : ICommandExecutor
                 Duration = sw.Elapsed
             };
         }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception w32ex)
+        {
+            sw.Stop();
+
+            // NativeErrorCode 2 = ENOENT — binary not installed, not a real failure.
+            // Return 127 (POSIX "command not found") and log at Debug only.
+            // Any other Win32 error (e.g. 13 = EACCES permission denied) is a real
+            // failure — return -1 and log at Error, consistent with the general catch.
+            if (w32ex.NativeErrorCode == 2)
+            {
+                _logger.LogDebug(
+                    "Command not found (binary not installed): {Command} {Arguments}",
+                    command, arguments);
+
+                return new CommandResult
+                {
+                    ExitCode = 127,
+                    StandardOutput = "",
+                    StandardError = ex.Message,
+                    Duration = sw.Elapsed
+                };
+            }
+
+            _logger.LogError(ex, "Command execution failed: {Message}", ex.Message);
+
+            return new CommandResult
+            {
+                ExitCode = -1,
+                StandardOutput = "",
+                StandardError = ex.Message,
+                Duration = sw.Elapsed
+            };
+        }
         catch (Exception ex)
         {
             sw.Stop();
             _logger.LogError(ex, "Command execution failed: {Message}", ex.Message);
-            
+
             return new CommandResult
             {
                 ExitCode = -1,
