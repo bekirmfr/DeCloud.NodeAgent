@@ -750,10 +750,9 @@ func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlock
 	n.bitswapReceived++
 	n.mu.Unlock()
 
-	// Announce ourselves as a provider to the DHT
-	announceCtx, aCancel := context.WithTimeout(ctx, 15*time.Second)
-	announceErr := n.dht.Provide(announceCtx, c, true)
-	aCancel()
+	// Announce ourselves as a provider to the DHT.
+	// dhtProvide retries with backoff to handle the DHT VM startup race.
+	announceErr := n.dhtProvide(ctx, c)
 	n.mu.Lock()
 	if announceErr != nil {
 		n.diag.DHTAnnounceFail++
@@ -1139,6 +1138,32 @@ func (n *BlockNode) sessionForPeer(ctx context.Context, p peer.ID) blockFetcher 
 	s := n.bsExch.NewSession(ctx)
 	n.peerSessions[p] = s
 	return s
+}
+
+// dhtProvide announces CID c to the DHT with retry backoff.
+// Retries handle the race between blockstore and DHT VM startup after
+// a NodeAgent restart — the DHT routing table may be empty for the
+// first few minutes if the DHT VM boots after the blockstore.
+// Max wall time: 3 attempts × 15s timeout + 10s + 20s backoff = ~75s.
+func (n *BlockNode) dhtProvide(ctx context.Context, c cid.Cid) error {
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(time.Duration(attempt) * 10 * time.Second):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		announceCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		lastErr = n.dht.Provide(announceCtx, c, true)
+		cancel()
+		if lastErr == nil {
+			return nil
+		}
+	}
+	return lastErr
 }
 
 // blockstorePeerCount returns the number of other blockstore nodes
@@ -1585,11 +1610,12 @@ func (n *BlockNode) handleBlocks(w http.ResponseWriter, r *http.Request) {
 		}(owner, c.String())
 	}
 
-	// Announce to DHT (with diagnostics tracking)
+	// Announce to DHT (with diagnostics tracking).
+	// dhtProvide retries with backoff — 60s context covers 3 attempts.
 	go func(c cid.Cid) {
-		announceCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		announceCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		announceErr := n.dht.Provide(announceCtx, c, true)
+		announceErr := n.dhtProvide(announceCtx, c)
 		n.mu.Lock()
 		if announceErr != nil {
 			n.diag.DHTAnnounceFail++

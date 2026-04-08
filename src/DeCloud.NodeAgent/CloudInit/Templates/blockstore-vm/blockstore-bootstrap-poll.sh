@@ -104,12 +104,25 @@ while true; do
     CONNECTED=$(echo "$HEALTH" | jq -r '.connectedPeers // 0' 2>/dev/null) || CONNECTED=0
 
     if [ "$CONNECTED" -gt 0 ] && [ "$INITIAL_POLL_DONE" = "true" ]; then
-        if [ "$CONSECUTIVE_FAILURES" -gt 0 ]; then
-            log "Connected to $CONNECTED peer(s) — resuming maintenance polling"
-            CONSECUTIVE_FAILURES=0
+        # Check DHT health — not just peer count.
+        # After NodeAgent restart the blockstore may connect to remote peers
+        # via WireGuard while the local DHT VM is still booting, leaving the
+        # routing table empty and all dht.Provide() calls failing.
+        DIAG=$(curl -s --max-time 3 "http://127.0.0.1:${API_PORT}/diagnostics" 2>/dev/null) || DIAG="{}"
+        DHT_OK=$(echo "$DIAG"   | jq -r '.dhtAnnounce.success // 0' 2>/dev/null) || DHT_OK=0
+        DHT_FAIL=$(echo "$DIAG" | jq -r '.dhtAnnounce.fail    // 0' 2>/dev/null) || DHT_FAIL=0
+
+        if [ "$DHT_FAIL" -gt 0 ] && [ "$DHT_OK" -eq 0 ]; then
+            log "DHT routing table empty (fail=$DHT_FAIL, ok=$DHT_OK) — re-polling orchestrator to reconnect local DHT"
+            # Fall through to re-poll rather than sleeping
+        else
+            if [ "$CONSECUTIVE_FAILURES" -gt 0 ]; then
+                log "Connected to $CONNECTED peer(s) — resuming maintenance polling"
+                CONSECUTIVE_FAILURES=0
+            fi
+            sleep "$POLL_INTERVAL_CONNECTED"
+            continue
         fi
-        sleep "$POLL_INTERVAL_CONNECTED"
-        continue
     fi
 
     if [ "$CONNECTED" -gt 0 ]; then
