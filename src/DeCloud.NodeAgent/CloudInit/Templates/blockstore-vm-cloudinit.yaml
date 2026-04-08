@@ -306,6 +306,9 @@ runcmd:
   # Single daemon-reload after all write_files are complete
   - systemctl daemon-reload
 
+  # Open bitswap port for cross-region blockstore connections
+  - ufw allow __BLOCKSTORE_LISTEN_PORT__/tcp comment "DeCloud BlockStore Bitswap" || true
+
   # Nginx
   - ln -sf /etc/nginx/sites-available/blockstore-proxy /etc/nginx/sites-enabled/
   - rm -f /etc/nginx/sites-enabled/default

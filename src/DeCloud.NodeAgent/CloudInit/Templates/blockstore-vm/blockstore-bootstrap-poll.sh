@@ -34,7 +34,7 @@ AUTH_TOKEN="__BLOCKSTORE_AUTH_TOKEN__"
 API_PORT="__BLOCKSTORE_API_PORT__"
 
 POLL_INTERVAL_ISOLATED=30    # seconds between polls when no peers
-POLL_INTERVAL_CONNECTED=300  # seconds between polls when connected
+POLL_INTERVAL_CONNECTED=60  # seconds between polls when connected
 
 # ═══════════════════════════════════════════════════════════════════
 # Wait for block store binary to start
