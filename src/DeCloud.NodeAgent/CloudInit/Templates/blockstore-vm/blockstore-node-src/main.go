@@ -84,6 +84,10 @@ const (
 
 	// Diagnostics ring buffer capacity
 	diagLogCap = 300
+
+	// Max concurrent outbound bitswap fetches triggered by GossipSub.
+	// Prevents flooding a single peer with 20+ simultaneous requests over WAN.
+	GossipSubFetchConcurrency = 4
 )
 
 // blockFetcher is the interface implemented by bitswap sessions.
@@ -308,9 +312,11 @@ type BlockNode struct {
 	manifestsMu sync.RWMutex
 	manifests   map[string]*ResourceManifest
 
+	// Fetch concurrency limiter — caps simultaneous GossipSub-triggered bitswap pulls.
+	fetchSem chan struct{}
+
 	// Counters
 	mu              sync.RWMutex
-	bitswapSent     uint64
 	bitswapReceived uint64
 
 	// Diagnostics
@@ -487,6 +493,7 @@ func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
 		peerSessions:   make(map[peer.ID]blockFetcher),
 		nodeIDToPeerID: make(map[string]peer.ID),
 		diagLog:        newDiagLog(diagLogCap),
+		fetchSem:       make(chan struct{}, GossipSubFetchConcurrency),
 	}, nil
 }
 
@@ -686,9 +693,24 @@ func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlock
 	if hasPeer {
 		fetcher = n.sessionForPeer(ctx, sourcePeer)
 	} else {
-		// Fallback: new session contacts all connected peers
 		fetcher = n.bsExch.NewSession(ctx)
 	}
+
+	// Acquire fetch slot — caps concurrent WAN pulls to GossipSubFetchConcurrency.
+	// Without this, a burst of N GossipSub messages spawns N simultaneous GetBlock
+	// calls against the same peer, exhausting the 30s timeout on all but a few.
+	select {
+	case n.fetchSem <- struct{}{}:
+	default:
+		// All slots occupied — drop this fetch. The DHT neighborhood scan will
+		// retry under-replicated blocks on the next cycle.
+		n.diagLog.Add("bitswap_fetch_skip", map[string]interface{}{
+			"cid":    cidShort(ann.CID),
+			"reason": "concurrency_limit",
+		})
+		return
+	}
+	defer func() { <-n.fetchSem }()
 
 	fetchStart := time.Now()
 	pullCtx, cancel := context.WithTimeout(ctx, BitswapTimeout)
@@ -1412,10 +1434,11 @@ func (n *BlockNode) handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	usedBytes, _ := n.usedBytes(ctx)
 	count, _ := n.blockCount(ctx)
+	bsStat, _ := n.bsExch.Stat()
 	n.mu.RLock()
-	sent := n.bitswapSent
 	recv := n.bitswapReceived
 	n.mu.RUnlock()
+	sent := bsStat.BlocksSent
 
 	peerID := n.host.ID().String()
 	if data, err := os.ReadFile(filepath.Join(StorageDir, PeerIDFile)); err == nil {
@@ -1589,10 +1612,11 @@ func (n *BlockNode) handleStats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	usedBytes, _ := n.usedBytes(ctx)
 	count, _ := n.blockCount(ctx)
+	bsStat, _ := n.bsExch.Stat()
 	n.mu.RLock()
-	sent := n.bitswapSent
 	recv := n.bitswapReceived
 	n.mu.RUnlock()
+	sent := bsStat.BlocksSent
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"capacityBytes":   n.cfg.StorageBytes,
@@ -1851,11 +1875,12 @@ func (n *BlockNode) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	n.mu.RLock()
 	diag := n.diag // value copy — avoids holding lock during JSON encode
-	sent := n.bitswapSent
+	bsStat, _ := n.bsExch.Stat()
+	n.mu.RLock()
 	recv := n.bitswapReceived
 	n.mu.RUnlock()
+	sent := bsStat.BlocksSent
 
 	// GossipSub topics this node has joined
 	topics := n.pubsub.GetTopics()
