@@ -86,9 +86,13 @@ const (
 	// Diagnostics ring buffer capacity
 	diagLogCap = 300
 
-	// Max concurrent outbound bitswap fetches triggered by GossipSub.
-	// Prevents flooding a single peer with 20+ simultaneous requests over WAN.
-	GossipSubFetchConcurrency = 4
+	// Worker pool size for GossipSub-triggered bitswap fetches.
+	// Fixed pool prevents goroutine explosion on large overlay bursts.
+	GossipSubFetchWorkers = 4
+
+	// Buffered announcement queue fed by the GossipSub receive loop.
+	// Sized to absorb a full large overlay burst without dropping.
+	FetchQueueSize = 2000
 )
 
 // blockFetcher is the interface implemented by bitswap sessions.
@@ -298,12 +302,6 @@ type BlockNode struct {
 	peerSessions   map[peer.ID]blockFetcher
 	peerSessionsMu sync.Mutex
 
-	// Maps DeCloud nodeID string → libp2p peer.ID.
-	// Populated from msg.ReceivedFrom in GossipSub receive.
-	// Used to route block fetches to the correct peer session.
-	nodeIDToPeerID   map[string]peer.ID
-	nodeIDToPeerIDMu sync.RWMutex
-
 	// LRU tracking
 	accessMu    sync.Mutex
 	accessTimes map[string]time.Time
@@ -313,8 +311,11 @@ type BlockNode struct {
 	manifestsMu sync.RWMutex
 	manifests   map[string]*ResourceManifest
 
-	// Fetch concurrency limiter — caps simultaneous GossipSub-triggered bitswap pulls.
-	fetchSem chan struct{}
+	// Fetch worker pool — GossipSubFetchWorkers goroutines drain this queue.
+	// Replaces the per-announcement goroutine + semaphore pattern, which
+	// caused goroutine explosion on large bursts and lost blocks when the
+	// 5-minute semaphore wait expired before a slot became available.
+	fetchQueue chan NewBlockAnnouncement
 
 	// Counters
 	mu              sync.RWMutex
@@ -366,6 +367,9 @@ func main() {
 	go node.startVmDeletedSubscription(ctx)
 	node.startHTTPServer(ctx)
 	go node.startGCLoop(ctx)
+	for i := 0; i < GossipSubFetchWorkers; i++ {
+		go node.runFetchWorker(ctx)
+	}
 
 	for _, addr := range node.host.Addrs() {
 		log.Printf("Listening: %s/p2p/%s", addr, node.host.ID())
@@ -482,19 +486,18 @@ func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
 	}
 
 	return &BlockNode{
-		cfg:            cfg,
-		host:           h,
-		dht:            kadDHT,
-		pubsub:         ps,
-		bstore:         bs,
-		bsExch:         bsExch,
-		accessTimes:    make(map[string]time.Time),
-		blockSizes:     make(map[string]int64),
-		manifests:      make(map[string]*ResourceManifest),
-		peerSessions:   make(map[peer.ID]blockFetcher),
-		nodeIDToPeerID: make(map[string]peer.ID),
-		diagLog:        newDiagLog(diagLogCap),
-		fetchSem:       make(chan struct{}, GossipSubFetchConcurrency),
+		cfg:          cfg,
+		host:         h,
+		dht:          kadDHT,
+		pubsub:       ps,
+		bstore:       bs,
+		bsExch:       bsExch,
+		accessTimes:  make(map[string]time.Time),
+		blockSizes:   make(map[string]int64),
+		manifests:    make(map[string]*ResourceManifest),
+		peerSessions: make(map[peer.ID]blockFetcher),
+		diagLog:      newDiagLog(diagLogCap),
+		fetchQueue:   make(chan NewBlockAnnouncement, FetchQueueSize),
 	}, nil
 }
 
@@ -636,12 +639,33 @@ func (n *BlockNode) startGossipSubSubscription(ctx context.Context) error {
 				"source": cidShort(ann.SourceNodeID),
 			})
 
-			// Map DeCloud nodeID → libp2p peer ID so handleNewBlockAnnouncement
-			// can use a peer-specific session without DHT discovery.
-			go n.handleNewBlockAnnouncement(ctx, ann)
+			// Enqueue for fetch worker pool. Non-blocking: if the queue is
+			// full (FetchQueueSize exceeded) the announcement is dropped.
+			// This is extremely unlikely — FetchQueueSize covers several full
+			// overlay cycles — and preferable to unbounded goroutine growth.
+			select {
+			case n.fetchQueue <- ann:
+			default:
+				n.diagLog.Add("fetch_queue_full", map[string]interface{}{
+					"cid": cidShort(ann.CID),
+				})
+			}
 		}
 	}()
 	return nil
+}
+
+// runFetchWorker is one of GossipSubFetchWorkers goroutines that drain
+// fetchQueue. Workers run for the lifetime of the node context.
+func (n *BlockNode) runFetchWorker(ctx context.Context) {
+	for {
+		select {
+		case ann := <-n.fetchQueue:
+			n.handleNewBlockAnnouncement(ctx, ann)
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlockAnnouncement) {
@@ -696,22 +720,6 @@ func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlock
 	if fetcher == nil {
 		fetcher = n.bsExch.NewSession(ctx)
 	}
-
-	// Acquire fetch slot — caps concurrent WAN pulls to GossipSubFetchConcurrency.
-	// Without this, a burst of N GossipSub messages spawns N simultaneous GetBlock
-	// calls against the same peer, exhausting the 30s timeout on all but a few.
-	select {
-	case n.fetchSem <- struct{}{}:
-	case <-time.After(5 * time.Minute): // lazysync cycle duration
-		n.diagLog.Add("bitswap_fetch_skip", map[string]interface{}{
-			"cid":    cidShort(ann.CID),
-			"reason": "wait_timeout",
-		})
-		return
-	case <-ctx.Done():
-		return
-	}
-	defer func() { <-n.fetchSem }()
 
 	fetchStart := time.Now()
 	pullCtx, cancel := context.WithTimeout(ctx, BitswapTimeout)

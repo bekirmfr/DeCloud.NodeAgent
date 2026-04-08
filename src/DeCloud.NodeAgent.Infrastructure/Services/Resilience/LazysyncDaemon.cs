@@ -187,7 +187,7 @@ public class LazysyncDaemon : BackgroundService
             // Subsequent cycles pick up remaining chunks automatically via CID diff.
             var isSeeding = state.Version == 0;
             var totalQueued = changedChunks.Count;
-            if (isSeeding && changedChunks.Count > SeedingMaxBlocksPerCycle)
+            if (changedChunks.Count > SeedingMaxBlocksPerCycle)
             {
                 changedChunks = changedChunks.Take(SeedingMaxBlocksPerCycle).ToList();
                 _logger.LogInformation(
