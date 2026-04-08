@@ -86,6 +86,15 @@ const (
 	diagLogCap = 300
 )
 
+// blockFetcher is the interface implemented by bitswap sessions.
+// Defined locally to avoid importing the exchange package.
+// Sessions send WANT messages to connected peers directly —
+// no DHT FindProviders needed when the peer is already connected.
+type blockFetcher interface {
+	GetBlock(context.Context, cid.Cid) (blocks.Block, error)
+	GetBlocks(context.Context, []cid.Cid) (<-chan blocks.Block, error)
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Diagnostic event log
 // ═══════════════════════════════════════════════════════════════════
@@ -273,12 +282,22 @@ type BlockNode struct {
 	cfg    Config
 	host   host.Host
 	dht    *dht.IpfsDHT
-	pubsub          *pubsub.PubSub
-	newBlocksTopic  *pubsub.Topic
-	peerAPIURLs     map[string]string // peerID → HTTP API URL from presence heartbeats
-	peerAPIURLsMu   sync.RWMutex
-	bstore blockstore.Blockstore
-	bsExch *bitswap.Bitswap
+	pubsub         *pubsub.PubSub
+	newBlocksTopic *pubsub.Topic
+	bstore         blockstore.Blockstore
+	bsExch         *bitswap.Bitswap
+
+	// Bitswap sessions per libp2p peer ID — created on first use,
+	// reused to avoid repeated DHT FindProviders for the same peer.
+	// Sessions send WANT messages directly to connected peers.
+	peerSessions   map[peer.ID]blockFetcher
+	peerSessionsMu sync.Mutex
+
+	// Maps DeCloud nodeID string → libp2p peer.ID.
+	// Populated from msg.ReceivedFrom in GossipSub receive.
+	// Used to route block fetches to the correct peer session.
+	nodeIDToPeerID   map[string]peer.ID
+	nodeIDToPeerIDMu sync.RWMutex
 
 	// LRU tracking
 	accessMu    sync.Mutex
@@ -456,17 +475,18 @@ func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
 	}
 
 	return &BlockNode{
-		cfg:         cfg,
-		host:        h,
-		dht:         kadDHT,
-		pubsub:      ps,
-		bstore:      bs,
-		bsExch:      bsExch,
-		accessTimes: make(map[string]time.Time),
-		peerAPIURLs: make(map[string]string),
-		blockSizes:  make(map[string]int64),
-		manifests:   make(map[string]*ResourceManifest),
-		diagLog:     newDiagLog(diagLogCap),
+		cfg:            cfg,
+		host:           h,
+		dht:            kadDHT,
+		pubsub:         ps,
+		bstore:         bs,
+		bsExch:         bsExch,
+		accessTimes:    make(map[string]time.Time),
+		blockSizes:     make(map[string]int64),
+		manifests:      make(map[string]*ResourceManifest),
+		peerSessions:   make(map[peer.ID]blockFetcher),
+		nodeIDToPeerID: make(map[string]peer.ID),
+		diagLog:        newDiagLog(diagLogCap),
 	}, nil
 }
 
@@ -607,6 +627,13 @@ func (n *BlockNode) startGossipSubSubscription(ctx context.Context) error {
 				"source": cidShort(ann.SourceNodeID),
 			})
 
+			// Map DeCloud nodeID → libp2p peer ID so handleNewBlockAnnouncement
+			// can use a peer-specific session without DHT discovery.
+			if ann.SourceNodeID != "" {
+				n.nodeIDToPeerIDMu.Lock()
+				n.nodeIDToPeerID[ann.SourceNodeID] = msg.ReceivedFrom
+				n.nodeIDToPeerIDMu.Unlock()
+			}
 			go n.handleNewBlockAnnouncement(ctx, ann)
 		}
 	}()
@@ -647,49 +674,32 @@ func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlock
 	n.diag.XORAccepted++
 	n.mu.Unlock()
 
-	// Prefer direct HTTP from the source peer — avoids DHT FindProviders
-	// and concurrent bitswap contention on bulk GossipSub receive.
+	// Look up the source peer's libp2p ID (populated from msg.ReceivedFrom
+	// in the GossipSub receive loop) and use a persistent session.
+	// Sessions send WANT messages directly to the connected peer —
+	// no DHT FindProviders, no 30s timeout on stale records.
+	n.nodeIDToPeerIDMu.RLock()
+	sourcePeer, hasPeer := n.nodeIDToPeerID[ann.SourceNodeID]
+	n.nodeIDToPeerIDMu.RUnlock()
+
+	var fetcher blockFetcher
+	if hasPeer {
+		fetcher = n.sessionForPeer(ctx, sourcePeer)
+	} else {
+		// Fallback: new session contacts all connected peers
+		fetcher = n.bsExch.NewSession(ctx)
+	}
+
 	fetchStart := time.Now()
-	var blk blocks.Block
-
-	n.peerAPIURLsMu.RLock()
-	sourceAPIURL := n.peerAPIURLs[ann.SourceNodeID]
-	n.peerAPIURLsMu.RUnlock()
-
-	if sourceAPIURL != "" {
-		httpClient := &http.Client{Timeout: 15 * time.Second}
-		resp, err := httpClient.Get(sourceAPIURL + "/blocks/" + ann.CID)
-		if err == nil && resp.StatusCode == http.StatusOK {
-			rawData, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024*1024))
-			resp.Body.Close()
-			if readErr == nil {
-				mhash, hashErr := multihash.Sum(rawData, multihash.SHA2_256, -1)
-				if hashErr == nil {
-					blk, err = blocks.NewBlockWithCid(rawData, cid.NewCidV1(cid.Raw, mhash))
-					if blk.Cid().String() != ann.CID {
-						err = fmt.Errorf("cid mismatch")
-						blk = nil
-					}
-				}
-			}
-		} else if resp != nil {
-			resp.Body.Close()
-			err = fmt.Errorf("http status %d", resp.StatusCode)
-		}
-	}
-
-	// Fallback to bitswap if HTTP failed or no API URL known yet
-	if blk == nil {
-		pullCtx, cancel := context.WithTimeout(ctx, BitswapTimeout)
-		blk, _ = n.bsExch.GetBlock(pullCtx, c)
-		cancel()
-	}
-
+	pullCtx, cancel := context.WithTimeout(ctx, BitswapTimeout)
+	blk, err := fetcher.GetBlock(pullCtx, c)
 	fetchMs := time.Since(fetchStart).Milliseconds()
-	if blk == nil {
+	cancel()
+
+	if err != nil {
 		n.diagLog.Add("bitswap_fetch_fail", map[string]interface{}{
 			"cid":         cidShort(ann.CID),
-			"error":       "all fetch methods failed",
+			"error":       err.Error(),
 			"duration_ms": fetchMs,
 		})
 		return
@@ -960,29 +970,31 @@ func (n *BlockNode) startPresenceTopic(ctx context.Context) {
 			if err := json.Unmarshal(msg.Data, &hb); err != nil || hb.APIURL == "" {
 				continue
 			}
-			// Always update the peer API URL map so gossipsub pull
-			// can use direct HTTP regardless of whether it's a new peer.
-			n.peerAPIURLsMu.Lock()
-			n.peerAPIURLs[hb.PeerID] = hb.APIURL
-			n.peerAPIURLsMu.Unlock()
-
 			if seenPeers[hb.PeerID] {
 				continue
 			}
 			seenPeers[hb.PeerID] = true
+			libp2pPeerID, parseErr := peer.Decode(hb.PeerID)
+			if parseErr != nil {
+				log.Printf("Presence: could not parse peer ID %s: %v", hb.PeerID, parseErr)
+				continue
+			}
 			log.Printf("Presence: new peer %s at %s — starting owner catchup",
 				cidShort(hb.PeerID), hb.APIURL)
-			go n.performCatchupFromPeer(ctx, hb.APIURL)
+			go n.performCatchupFromPeer(ctx, hb.APIURL, libp2pPeerID)
 		}
 	}()
 }
 
-// performCatchupFromPeer fetches owner CID lists from a peer and pulls any
-// blocks we're responsible for (XOR filter) that we don't yet have.
-// Pure pull-based — no GossipSub flood, no orchestrator involvement.
+// performCatchupFromPeer fetches owner CID lists from a peer via HTTP
+// (metadata only) and pulls missing blocks via bitswap session.
+// The session sends WANT messages directly to peerID — no DHT walk.
 // Called once per newly discovered peer, never repeated for the same peer.
-func (n *BlockNode) performCatchupFromPeer(ctx context.Context, peerAPIURL string) {
+func (n *BlockNode) performCatchupFromPeer(ctx context.Context, peerAPIURL string, peerID peer.ID) {
 	client := &http.Client{Timeout: 30 * time.Second}
+	// Persistent session for this peer — WANT messages go directly to
+	// peerID without DHT FindProviders, even for historical blocks.
+	session := n.sessionForPeer(ctx, peerID)
 
 	// Step 1: discover which VMs the peer has blocks for
 	resp, err := client.Get(peerAPIURL + "/owners")
@@ -1001,19 +1013,9 @@ func (n *BlockNode) performCatchupFromPeer(ctx context.Context, peerAPIURL strin
 	}
 	log.Printf("catchup: peer has %d VM(s) — checking for missing blocks", len(ownerList.VmIds))
 
-	// Add the peer's addresses to the peerstore so bitswap can dial
-	// directly without DHT FindProviders. Historical blocks may have
-	// stale or missing DHT records — direct dial is the only reliable path.
-	for _, p := range n.host.Network().Peers() {
-		addrs := n.host.Network().Peerstore().Addrs(p)
-		if len(addrs) > 0 {
-			n.host.Network().Peerstore().AddAddrs(p, addrs, time.Hour)
-		}
-	}
-
 	pulled, skipped := 0, 0
 
-	// Step 2: for each VM fetch its CIDs and pull what we're missing
+	// Step 2: for each VM, collect missing CIDs and batch-fetch via session
 	for _, vmId := range ownerList.VmIds {
 		if ctx.Err() != nil {
 			return
@@ -1028,6 +1030,8 @@ func (n *BlockNode) performCatchupFromPeer(ctx context.Context, peerAPIURL strin
 		json.NewDecoder(resp.Body).Decode(&ownerCids)
 		resp.Body.Close()
 
+		// Filter to blocks we're responsible for and don't yet have
+		var missingCIDs []cid.Cid
 		for _, cidStr := range ownerCids.Cids {
 			if ctx.Err() != nil {
 				return
@@ -1036,59 +1040,43 @@ func (n *BlockNode) performCatchupFromPeer(ctx context.Context, peerAPIURL strin
 			if err != nil {
 				continue
 			}
-			// Already have it
 			if has, _ := n.bstore.Has(ctx, c); has {
 				skipped++
 				continue
 			}
-			// Check capacity
 			usedBytes, _ := n.usedBytes(ctx)
 			usagePct := float64(usedBytes) / float64(n.cfg.StorageBytes) * 100
 			if usagePct >= GCHardLimit {
 				log.Printf("catchup: storage full — stopping")
 				return
 			}
-			// XOR filter — only pull blocks we're responsible for
 			if !n.isWithinXORThreshold(c, usagePct) {
 				skipped++
 				continue
 			}
-			// Pull directly via HTTP from the peer we already know about.
-		// Avoids DHT FindProviders entirely — critical for historical blocks
-		// whose DHT provider records may be stale or missing.
-		blockResp, err := client.Get(peerAPIURL + "/blocks/" + cidStr)
+			missingCIDs = append(missingCIDs, c)
+		}
+
+		if len(missingCIDs) == 0 {
+			continue
+		}
+
+		// Batch-fetch all missing blocks via the peer session.
+		// GetBlocks sends a single WANT list to the peer — far more
+		// efficient than one GetBlock call per CID.
+		fetchTimeout := time.Duration(len(missingCIDs)+1) * 10 * time.Second
+		fetchCtx, cancelFetch := context.WithTimeout(ctx, fetchTimeout)
+		blockCh, err := session.GetBlocks(fetchCtx, missingCIDs)
 		if err != nil {
-			n.diagLog.Add("catchup_fail", map[string]interface{}{
-				"cid": cidShort(cidStr), "error": err.Error(),
-			})
+			cancelFetch()
+			log.Printf("catchup: GetBlocks failed for VM %s: %v", vmId, err)
 			continue
 		}
-		rawData, err := io.ReadAll(io.LimitReader(blockResp.Body, 64*1024*1024))
-		blockResp.Body.Close()
-		if err != nil || blockResp.StatusCode != http.StatusOK {
-			n.diagLog.Add("catchup_fail", map[string]interface{}{
-				"cid": cidShort(cidStr), "error": "http fetch failed",
-			})
-			continue
-		}
-		mhash, err := multihash.Sum(rawData, multihash.SHA2_256, -1)
-		if err != nil {
-			continue
-		}
-		blk, err := blocks.NewBlockWithCid(rawData, cid.NewCidV1(cid.Raw, mhash))
-		if err != nil || blk.Cid().String() != cidStr {
-			n.diagLog.Add("catchup_fail", map[string]interface{}{
-				"cid": cidShort(cidStr), "error": "cid mismatch",
-			})
-			continue
-		}
-		if err := n.bstore.Put(ctx, blk); err != nil {
-			continue
-		}
+		for blk := range blockCh {
 			if err := n.bstore.Put(ctx, blk); err != nil {
 				continue
 			}
-			n.touchBlock(c.String(), int64(len(blk.RawData())))
+			n.touchBlock(blk.Cid().String(), int64(len(blk.RawData())))
 			n.mu.Lock()
 			n.bitswapReceived++
 			n.mu.Unlock()
@@ -1096,15 +1084,30 @@ func (n *BlockNode) performCatchupFromPeer(ctx context.Context, peerAPIURL strin
 				aCtx, aCancel := context.WithTimeout(context.Background(), 15*time.Second)
 				defer aCancel()
 				_ = n.dht.Provide(aCtx, c, true)
-			}(c)
+			}(blk.Cid())
 			n.diagLog.Add("catchup_fetch", map[string]interface{}{
-				"cid": cidShort(cidStr), "vmId": vmId,
+				"cid": cidShort(blk.Cid().String()), "vmId": vmId,
 			})
 			pulled++
-			time.Sleep(10 * time.Millisecond) // rate limit
 		}
+		cancelFetch()
 	}
 	log.Printf("catchup: complete — pulled %d, skipped %d", pulled, skipped)
+}
+
+// sessionForPeer returns a cached bitswap session for the given peer,
+// creating one if it doesn't exist. Sessions remember which peers
+// have which blocks and send WANT messages directly to connected
+// peers — no DHT FindProviders walk needed.
+func (n *BlockNode) sessionForPeer(ctx context.Context, p peer.ID) blockFetcher {
+	n.peerSessionsMu.Lock()
+	defer n.peerSessionsMu.Unlock()
+	if s, ok := n.peerSessions[p]; ok {
+		return s
+	}
+	s := n.bsExch.NewSession(ctx)
+	n.peerSessions[p] = s
+	return s
 }
 
 // blockstorePeerCount returns the number of other blockstore nodes
