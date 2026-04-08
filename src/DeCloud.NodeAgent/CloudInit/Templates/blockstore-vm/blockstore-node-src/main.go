@@ -701,13 +701,13 @@ func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlock
 	// calls against the same peer, exhausting the 30s timeout on all but a few.
 	select {
 	case n.fetchSem <- struct{}{}:
-	default:
-		// All slots occupied — drop this fetch. The DHT neighborhood scan will
-		// retry under-replicated blocks on the next cycle.
+	case <-time.After(5 * time.Minute): // lazysync cycle duration
 		n.diagLog.Add("bitswap_fetch_skip", map[string]interface{}{
 			"cid":    cidShort(ann.CID),
-			"reason": "concurrency_limit",
+			"reason": "wait_timeout",
 		})
+		return
+	case <-ctx.Done():
 		return
 	}
 	defer func() { <-n.fetchSem }()
