@@ -275,6 +275,8 @@ type BlockNode struct {
 	dht    *dht.IpfsDHT
 	pubsub          *pubsub.PubSub
 	newBlocksTopic  *pubsub.Topic
+	peerAPIURLs     map[string]string // peerID → HTTP API URL from presence heartbeats
+	peerAPIURLsMu   sync.RWMutex
 	bstore blockstore.Blockstore
 	bsExch *bitswap.Bitswap
 
@@ -461,6 +463,7 @@ func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
 		bstore:      bs,
 		bsExch:      bsExch,
 		accessTimes: make(map[string]time.Time),
+		peerAPIURLs: make(map[string]string),
 		blockSizes:  make(map[string]int64),
 		manifests:   make(map[string]*ResourceManifest),
 		diagLog:     newDiagLog(diagLogCap),
@@ -644,15 +647,49 @@ func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlock
 	n.diag.XORAccepted++
 	n.mu.Unlock()
 
-	pullCtx, cancel := context.WithTimeout(ctx, BitswapTimeout)
+	// Prefer direct HTTP from the source peer — avoids DHT FindProviders
+	// and concurrent bitswap contention on bulk GossipSub receive.
 	fetchStart := time.Now()
-	blk, err := n.bsExch.GetBlock(pullCtx, c)
+	var blk blocks.Block
+
+	n.peerAPIURLsMu.RLock()
+	sourceAPIURL := n.peerAPIURLs[ann.SourceNodeID]
+	n.peerAPIURLsMu.RUnlock()
+
+	if sourceAPIURL != "" {
+		httpClient := &http.Client{Timeout: 15 * time.Second}
+		resp, err := httpClient.Get(sourceAPIURL + "/blocks/" + ann.CID)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			rawData, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024*1024))
+			resp.Body.Close()
+			if readErr == nil {
+				mhash, hashErr := multihash.Sum(rawData, multihash.SHA2_256, -1)
+				if hashErr == nil {
+					blk, err = blocks.NewBlockWithCid(rawData, cid.NewCidV1(cid.Raw, mhash))
+					if blk.Cid().String() != ann.CID {
+						err = fmt.Errorf("cid mismatch")
+						blk = nil
+					}
+				}
+			}
+		} else if resp != nil {
+			resp.Body.Close()
+			err = fmt.Errorf("http status %d", resp.StatusCode)
+		}
+	}
+
+	// Fallback to bitswap if HTTP failed or no API URL known yet
+	if blk == nil {
+		pullCtx, cancel := context.WithTimeout(ctx, BitswapTimeout)
+		blk, _ = n.bsExch.GetBlock(pullCtx, c)
+		cancel()
+	}
+
 	fetchMs := time.Since(fetchStart).Milliseconds()
-	cancel()
-	if err != nil {
+	if blk == nil {
 		n.diagLog.Add("bitswap_fetch_fail", map[string]interface{}{
 			"cid":         cidShort(ann.CID),
-			"error":       err.Error(),
+			"error":       "all fetch methods failed",
 			"duration_ms": fetchMs,
 		})
 		return
@@ -923,6 +960,12 @@ func (n *BlockNode) startPresenceTopic(ctx context.Context) {
 			if err := json.Unmarshal(msg.Data, &hb); err != nil || hb.APIURL == "" {
 				continue
 			}
+			// Always update the peer API URL map so gossipsub pull
+			// can use direct HTTP regardless of whether it's a new peer.
+			n.peerAPIURLsMu.Lock()
+			n.peerAPIURLs[hb.PeerID] = hb.APIURL
+			n.peerAPIURLsMu.Unlock()
+
 			if seenPeers[hb.PeerID] {
 				continue
 			}
