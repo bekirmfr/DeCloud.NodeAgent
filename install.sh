@@ -2071,6 +2071,29 @@ download_node_agent() {
     fi
     log_step "Downloading Node Agent..."
     
+    # Save system VM UUIDs BEFORE stopping NodeAgent.
+    # NodeAgent maps friendly names (blockstore-region-nodeid) to UUIDs via its API.
+    # After the service stops this mapping is unavailable, so we save it to temp files now.
+    rm -f /tmp/decloud-blockstore-vm-id /tmp/decloud-dht-vm-id
+    if [ "$UPDATE_MODE" = true ] && command -v curl &>/dev/null; then
+        if systemctl is-active --quiet decloud-node-agent 2>/dev/null; then
+            local vms_json
+            vms_json=$(curl -sf --max-time 5 "http://127.0.0.1:${AGENT_PORT}/api/vms" 2>/dev/null || echo "")
+            if [ -n "$vms_json" ] && command -v jq &>/dev/null; then
+                local bs_id dht_id
+                bs_id=$(echo "$vms_json" \
+                    | jq -r '.[] | select((.name // .spec.name // "") | test("^blockstore-")) | (.id // .vmId // "")' \
+                    2>/dev/null | head -1 | tr -d '[:space:]' || true)
+                dht_id=$(echo "$vms_json" \
+                    | jq -r '.[] | select((.name // .spec.name // "") | test("^dht-")) | (.id // .vmId // "")' \
+                    2>/dev/null | head -1 | tr -d '[:space:]' || true)
+                [ -n "$bs_id" ]  && echo "$bs_id"  > /tmp/decloud-blockstore-vm-id
+                [ -n "$dht_id" ] && echo "$dht_id" > /tmp/decloud-dht-vm-id
+                log_info "Saved system VM IDs for post-build cleanup"
+            fi
+        fi
+    fi
+
     # Stop service if running (update mode)
     if [ "$UPDATE_MODE" = true ]; then
         log_info "Stopping existing node agent service..."
@@ -2227,7 +2250,7 @@ build_blockstore_binary() {
 # NodeAgent is stopped at this point so the reconciliation loop re-deploys
 # them with the new binary on next start.
 destroy_system_vms() {
-    local role="$1"  # "blockstore" or "dht"
+    local role="$1"
 
     if ! command -v virsh &>/dev/null; then
         log_warn "virsh not available — cannot auto-destroy ${role} VMs"
@@ -2235,22 +2258,39 @@ destroy_system_vms() {
         return 0
     fi
 
-    local vms
-    vms=$(virsh list --all --name 2>/dev/null | grep "^${role}-" || true)
+    # Primary: use VM UUID saved from NodeAgent API before service stopped
+    local vm_id
+    vm_id=$(cat "/tmp/decloud-${role}-vm-id" 2>/dev/null | tr -d '[:space:]' || echo "")
+    rm -f "/tmp/decloud-${role}-vm-id"
 
-    if [ -z "$vms" ]; then
-        log_info "No ${role} VMs found — nothing to destroy"
+    # Fallback: inspect libvirt domain XML — NodeAgent sets <title> to the
+    # friendly name (e.g. blockstore-us-east-1-e9277b2c); domain name is the UUID.
+    if [ -z "$vm_id" ]; then
+        log_info "No saved VM ID for ${role} — scanning libvirt domains..."
+        while IFS= read -r uuid; do
+            [ -z "$uuid" ] && continue
+            local title
+            title=$(virsh dumpxml "$uuid" 2>/dev/null \
+                | grep -oP '(?<=<title>)[^<]*' 2>/dev/null \
+                | tr -d '[:space:]' || true)
+            if [[ "$title" == ${role}-* ]]; then
+                vm_id="$uuid"
+                log_info "  Found ${role} VM via XML title: $title ($uuid)"
+                break
+            fi
+        done < <(virsh list --all --uuid 2>/dev/null)
+    fi
+
+    if [ -z "$vm_id" ]; then
+        log_warn "Could not identify ${role} VM — manual cleanup required"
+        log_warn "Run: virsh list --all  then: virsh destroy <id> && virsh undefine <id> --remove-all-storage"
         return 0
     fi
 
-    log_step "Destroying stale ${role} VM(s) — reconciliation will redeploy on NodeAgent start..."
-    while IFS= read -r vm_name; do
-        [ -z "$vm_name" ] && continue
-        log_info "  Destroying: $vm_name"
-        virsh destroy  "$vm_name"                      2>/dev/null || true
-        virsh undefine "$vm_name" --remove-all-storage 2>/dev/null || true
-        log_success "  $vm_name destroyed"
-    done <<< "$vms"
+    log_step "Destroying stale ${role} VM $vm_id — reconciliation will redeploy on NodeAgent start..."
+    virsh destroy  "$vm_id"                      2>/dev/null || true
+    virsh undefine "$vm_id" --remove-all-storage 2>/dev/null || true
+    log_success "  $vm_id destroyed"
 }
 
 # Compare pre-build and post-build source hashes to detect binary changes.
@@ -2268,6 +2308,8 @@ cleanup_stale_system_vms() {
     NEW_DHT=$(cat "$TEMPLATE_BASE/dht-vm/.dht-node-source.sha256"              2>/dev/null || echo "")
 
     rm -f /tmp/decloud-blockstore-old-hash /tmp/decloud-dht-old-hash
+    # Also clean up any saved VM IDs not consumed by destroy_system_vms
+    rm -f /tmp/decloud-blockstore-vm-id /tmp/decloud-dht-vm-id
 
     local any_change=false
 
