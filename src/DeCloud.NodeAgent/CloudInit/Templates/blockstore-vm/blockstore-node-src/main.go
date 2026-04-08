@@ -48,6 +48,7 @@ import (
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
@@ -590,6 +591,7 @@ type NewBlockAnnouncement struct {
 	CID          string `json:"cid"`
 	Size         int64  `json:"size"`
 	SourceNodeID string `json:"sourceNodeId"`
+	SourcePeerID string `json:"sourcePeerId"`
 }
 
 func (n *BlockNode) startGossipSubSubscription(ctx context.Context) error {
@@ -676,13 +678,24 @@ func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlock
 	n.diag.XORAccepted++
 	n.mu.Unlock()
 
-	// Use a new session so bitswap performs a DHT FindProviders walk to
-	// locate the actual block provider. sessionForPeer is not safe here
-	// because msg.ReceivedFrom in the GossipSub receive loop is the relay
-	// hop (the co-located DHT VM), not the blockstore that published the
-	// block. Targeting that peer sends WANT messages to a node that has
-	// no blocks, causing guaranteed 30s timeouts.
-	fetcher := n.bsExch.NewSession(ctx)
+	// Use a peer-specific session if the source peer ID is known and connected.
+	// ann.SourcePeerID is the libp2p peer ID of the publishing blockstore —
+	// set at publish time from n.host.ID(). This is reliable because it comes
+	// from the announcement payload, not from msg.ReceivedFrom (which is the
+	// relay hop). Targeting the source directly avoids the DHT FindProviders
+	// walk and resolves in milliseconds via WANT-BLOCK to the connected peer.
+	// Falls back to NewSession (DHT walk) if the peer ID is missing or the
+	// peer is not yet connected.
+	var fetcher blockFetcher
+	if ann.SourcePeerID != "" {
+		sourcePeer, parseErr := peer.Decode(ann.SourcePeerID)
+		if parseErr == nil && n.host.Network().Connectedness(sourcePeer) == network.Connected {
+			fetcher = n.sessionForPeer(ctx, sourcePeer)
+		}
+	}
+	if fetcher == nil {
+		fetcher = n.bsExch.NewSession(ctx)
+	}
 
 	// Acquire fetch slot — caps concurrent WAN pulls to GossipSubFetchConcurrency.
 	// Without this, a burst of N GossipSub messages spawns N simultaneous GetBlock
@@ -763,7 +776,7 @@ func (n *BlockNode) publishNewBlock(c cid.Cid, size int64) {
 	if topic == nil {
 		return
 	}
-	ann := NewBlockAnnouncement{CID: c.String(), Size: size, SourceNodeID: n.cfg.NodeID}
+	ann := NewBlockAnnouncement{CID: c.String(), Size: size, SourceNodeID: n.cfg.NodeID, SourcePeerID: n.host.ID().String()}
 	data, err := json.Marshal(ann)
 	if err != nil {
 		return

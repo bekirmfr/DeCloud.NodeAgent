@@ -11,6 +11,7 @@
 | B — NodeAgent + Go binary | ✅ Complete | cloud-init, blockstore-node, scripts, callback controller |
 | C — Integration | ✅ Production-verified 2026-03-20 | Dashboard live, binary build pipeline stable |
 | D — Lazysync & Migration | 🔲 Next | Items 25–33 below |
+| D-fixes — Replication reliability | ✅ Production-verified 2026-04-08 | Overlay-only fix, bitswap peer targeting, concurrency cap, port firewall, retry queue |
 | E — Split-Brain Prevention | 🔲 Follows D | Items 34–41 below |
 **Depends on:** DHT system VMs (production-verified 2026-02-15)
 **Follows patterns from:** Relay VMs, DHT VMs
@@ -961,6 +962,57 @@ node.connectBootstrapPeers(ctx)
 go node.reannounceExistingBlocks(ctx)  // ← add this line
 ```
 
+### Phase D+1: DHT Neighborhood Scan (General Block Recovery)
+
+**Problem:** The GossipSub fetch retry queue (item 31b) recovers blocks where the
+notification arrived but the bitswap fetch failed. It cannot recover blocks where the
+GossipSub message was missed entirely — node was offline, network partition, restart
+during a seeding cycle, or the message was dropped by the ephemeral pub/sub layer.
+In those cases, under-replicated blocks remain permanently undetected by the binary.
+
+**Scope:** This is the general/cold recovery path. The retry queue is the hot path.
+Together they eliminate both failure modes:
+
+```
+GossipSub notification received, fetch failed  → retry queue    (hot path)
+GossipSub notification missed entirely         → neighborhood scan (cold path)
+```
+
+**Mechanism:** Periodically walk the local Kademlia neighborhood to discover blocks
+that belong on this node (based on XOR proximity) but aren't present locally.
+
+```
+Every ScanInterval (e.g. 10 minutes):
+  1. Walk the local Kademlia keyspace neighborhood
+     → Use kadDHT.GetClosestPeers(ctx, myPeerId) to identify the keyspace
+       range this node is responsible for
+  2. For each CID in the neighborhood's provider records:
+     → Call FindProviders(ctx, cid) — returns who has it
+     → Check local bstore.Has(ctx, cid)
+     → If not local AND within XOR threshold AND capacity allows:
+         → GetBlock via bitswap from a provider
+         → Store locally, announce to DHT
+         → Log as neighborhood_pull
+  3. Skip CIDs already in the retry queue (avoid double-fetching)
+  4. Rate-limit: max N blocks per scan cycle to avoid I/O bursts
+```
+
+**Why the DHT alone doesn't do this:** The DHT is a passive lookup service. It
+answers "who has block X?" but never decides "I should have block X." That decision
+requires knowing the XOR proximity threshold and local capacity — context only the
+block store binary has. The neighborhood scan is the bridge between the DHT's passive
+records and the binary's active pull behavior.
+
+**Implementation touchpoints (`main.go`):**
+- Add `ScanInterval = 10 * time.Minute` constant
+- Add `startNeighborhoodScanLoop(ctx)` goroutine launched from `main()`
+- Uses `n.dht.GetClosestPeers()` + `n.dht.FindProvidersAsync()` for discovery
+- Shares `n.fetchSem` with GossipSub fetches to bound total concurrency
+- Logs `neighborhood_pull` and `neighborhood_scan_complete` diag events
+- Skip CIDs present in `n.retryQueue` (check via a shadow `sync.Map`)
+
+**Dependency:** Requires item 32 (DHT proximity endpoint) for the keyspace walk.
+
 ---
 
 ## 6. VM Disk Replication & Migration (Lazysync)
@@ -1806,6 +1858,33 @@ private List<string> GetInvalidVmsForNode(string nodeId, List<string> reportedRu
      Update `BlockchainService` ABI to include `settleCycle` signature.
      Update `SettlementService.RecordUsageAsync` to record compute and storage
      components separately for cycle aggregation.
+31b. **GossipSub fetch retry queue** — block store binary maintains an in-memory
+     retry queue (`chan cid.Cid`, capacity 500) fed by two failure paths:
+     (a) semaphore skip (`bitswap_fetch_skip`) — CID received via GossipSub but all
+     concurrent fetch slots were occupied at arrival;
+     (b) fetch timeout (`bitswap_fetch_fail`) — slot acquired but `GetBlock` exceeded
+     30s deadline, typically on the first cross-region DHT walk before the Kademlia
+     routing table is warm.
+     A `startRetryLoop` background goroutine ticks every 60 seconds (after a 30s
+     startup delay for routing table warmup) and drains the queue **sequentially**
+     (concurrency=1). Sequential processing is intentional: the first retry performs
+     the DHT walk and caches the provider record; all subsequent retries in the same
+     batch resolve via the warm cache in under 8ms each.
+     Per-CID attempt tracking (sync.Map, string→int) caps retries at 3. On max
+     retries exceeded the CID is logged (`retry_give_up`) and abandoned; the DHT
+     neighborhood scan (item 32) handles anything that genuinely cannot be reached.
+     Retry fetches use a 60s timeout (vs 30s for the initial GossipSub path) since
+     the routing table is warm at retry time and the longer window handles cross-region
+     high-latency links. Successfully recovered blocks are announced to the DHT with
+     role `retry_pull` and are eligible for GC like any other block.
+     New diag events: `retry_fetch`, `retry_fetch_fail`, `retry_give_up`,
+     `retry_queue_full`.
+     **Relation to DHT:** The retry queue is the narrow (failure-triggered) recovery
+     path. It only recovers blocks where GossipSub delivery was confirmed but bitswap
+     failed. The DHT neighborhood scan (item 32) is the general recovery path for
+     blocks where GossipSub was missed entirely. The two are complementary and
+     non-redundant — GossipSub → retry queue is the hot path, neighborhood scan is
+     the cold path.
 32. **DHT proximity endpoint** — `GET /proximity/{cid}` on DHT VM for neighborhood scan
     and diagnostics
 33. **Migration planner** — PlanMigrationAsync with scheduling fit + resource headroom;
@@ -1986,7 +2065,7 @@ LevelDB is only used for metadata (access times, block index, stats).
 | Block store VM crash | Medium | Low | Self-healing reconciliation redeploys; blocks scattered across many providers |
 | Node storage full | Medium | Low | Quota enforcement (hard refuse at 95%); LRU GC naturally trims excess as nodes fill up |
 | Source offline before scatter | Low | Medium | GossipSub + bitswap propagation completes in seconds; window is small. Orchestrator alerts on confirmedVersion=0 + node failure. Cannot be fully eliminated without synchronous replication |
-| GossipSub message loss | Low | Low | DHT provider records serve as durable fallback; periodic neighborhood scan catches missed blocks within 5-10 minutes |
+| GossipSub message loss | Low | Low | GossipSub fetch retry queue recovers failed fetches within 60s (hot path); DHT neighborhood scan (Phase D+1) catches entirely missed messages within 10 minutes (cold path) |
 | Ephemeral VM data loss (N=0) | N/A | N/A | By design — user explicitly chose N=0. Dashboard shows ephemeral status. No alert on node failure |
 | Split-brain / zombie VM | Medium | High | NodeId authority enforcement, reconciliation on startup/heartbeat, lazysync fencing, optional network fencing |
 | False positive zombie detection | Low | High | Conservative approach: keep running if orchestrator unreachable; version tracking for edge cases |
@@ -2044,6 +2123,72 @@ LevelDB is only used for metadata (access times, block index, stats).
   non-conforming writes rejected by block store binary
 - Model shard chunk counts are manageable: Llama-3 70B Q4 = 640 × 64 MB blocks;
   manifest fits in memory; DHT provider records scale linearly
+
+### Phase D-fixes (Replication Reliability) — Production-verified 2026-04-08
+
+- Lazysync daemon replicates overlay data only — base OS image excluded via
+  `qemu-img map` depth=0 whitelist; initial seed ~30 MB not ~2 GB
+- GossipSub-triggered bitswap fetches target correct peer via DHT session, not
+  the relay hop; all successful fetches show correct `source` node ID in diag log
+- Blockstores establish direct cross-region libp2p connections on boot; both nodes
+  show each other's WireGuard IP in peer list within 60 seconds of startup
+- `bitswapSent` counter correctly reflects blocks served via bitswap
+- GossipSub fetch retry queue recovers blocks that timed out on initial fetch;
+  `retry_fetch` events visible in diag log within one retry cycle (60s)
+- `retry_give_up` rate is 0 under normal cross-region conditions (routing table
+  warm after first retry; subsequent retries resolve in <8ms)
+
+### Production Bug Fixes (2026-04-08)
+
+Discovered and fixed during initial lazysync seeding tests across two nodes
+(us-east-1 and tr-south) with a VM at replicationFactor=1.
+
+**Bug 1 — LazysyncDaemon replicated full backing chain, not overlay only**
+`qemu-img convert` merges the backing chain into a flat raw file. The `-S 65536`
+flag skips zero/unallocated regions, not backing-file extents. The base OS image
+(~2 GB of non-zero EXT4 data) was replicated every cycle alongside actual overlay
+writes. Fix: run `qemu-img map --force-share --output=json` first to build a
+whitelist of depth=0 chunk offsets; `ScanChunksAsync` skips any offset not in the
+whitelist. File: `LazysyncDaemon.cs`.
+
+**Bug 2 — Bitswap fetches targeted the GossipSub relay hop, not the block provider**
+Blockstores were only connected to their co-located DHT VM. GossipSub messages
+propagated via the DHT relay chain: source blockstore → source DHT → (WireGuard) →
+target DHT → target blockstore. `msg.ReceivedFrom` in the GossipSub receive loop
+was the target's local DHT VM peer ID, not the source blockstore. `sessionForPeer`
+sent WANT messages to that peer — which holds no blocks — causing guaranteed 30s
+timeouts on every fetch. Fix: remove the `nodeIDToPeerID` map write and always use
+`bsExch.NewSession(ctx)` in `handleNewBlockAnnouncement`, which performs a DHT
+FindProviders walk to locate the actual provider. File: `main.go`.
+
+**Bug 3 — Bitswap port 5001 blocked by host firewall**
+`blockstore-vm-cloudinit.yaml` runcmd had no `ufw allow` rule for port 5001.
+`install.sh` only opens agent port 5100/tcp and WireGuard 51820/udp. Direct cross-
+region libp2p connections were dropped at the host firewall; blockstores remained
+permanently isolated from each other via bitswap. Fix: add
+`ufw allow __BLOCKSTORE_LISTEN_PORT__/tcp` to cloud-init runcmd.
+File: `blockstore-vm-cloudinit.yaml`.
+
+**Bug 4 — Bootstrap poll backed off too aggressively on simultaneous boot**
+`POLL_INTERVAL_CONNECTED=300s` (5 minutes). When two blockstores booted
+simultaneously and one joined the orchestrator before the other was registered as
+Active, the first received 0 bootstrap peers, set `INITIAL_POLL_DONE=true`, then
+backed off for 5 minutes while the second blockstore became discoverable within
+seconds. Fix: reduce `POLL_INTERVAL_CONNECTED` to 60s. File:
+`blockstore-bootstrap-poll.sh`.
+
+**Bug 5 — `bitswapSent` counter never incremented**
+`n.bitswapSent uint64` field was declared in `BlockNode` but never written; all
+three handlers reported 0 permanently. Fix: remove field, replace with
+`n.bsExch.Stat().BlocksSent` read in `handleHealth`, `handleStats`, and
+`handleDiagnostics`. File: `main.go`.
+
+**Bug 6 — GossipSub fetch concurrency caused burst timeouts**
+All GossipSub-triggered fetch goroutines fired simultaneously on message burst.
+With 100 messages arriving in one batch and each requiring a 30s DHT walk over WAN,
+concurrent walks saturated the link and all timed out. Fix: add `fetchSem chan struct{}`
+(capacity `GossipSubFetchConcurrency=4`) with blocking `select` and 5-minute wait
+timeout, so goroutines queue rather than drop. File: `main.go`.
 
 ### Phase E (Split-Brain Prevention)
 - Zombie VMs destroyed within 60 seconds of node reconnection
