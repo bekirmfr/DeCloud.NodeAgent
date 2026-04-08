@@ -99,6 +99,7 @@ public class CommandsController : ControllerBase
             6 => CommandType.Shutdown,       // NodeCommandType.Shutdown
             7 => CommandType.AllocatePort,   // NodeCommandType.AllocatePort
             8 => CommandType.RemovePort,     // NodeCommandType.RemovePort
+            9 => CommandType.ReseedVm,       // NodeCommandType.ReseedVm
             _ => throw new ArgumentException($"Unknown command type: {typeValue}")
         };
     }

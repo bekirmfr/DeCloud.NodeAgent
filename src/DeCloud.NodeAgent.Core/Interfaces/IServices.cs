@@ -497,7 +497,8 @@ public enum CommandType
     Benchmark,
     Shutdown,
     AllocatePort,
-    RemovePort
+    RemovePort,
+    ReseedVm
 }
 
 /// <summary>

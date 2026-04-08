@@ -32,6 +32,7 @@ public class CommandProcessorService : BackgroundService
     private readonly VmRepository _repository;
     private readonly ILogger<CommandProcessorService> _logger;
     private readonly CommandProcessorOptions _options;
+    private readonly LibvirtVmManagerOptions _libvirtOptions;
 
     /// <summary>
     /// Tracks GPU PCI addresses currently assigned to VMs via passthrough.
@@ -66,6 +67,7 @@ public class CommandProcessorService : BackgroundService
         PortMappingRepository portMappingRepository,
         VmRepository repository,
         IOptions<CommandProcessorOptions> options,
+        IOptions<LibvirtVmManagerOptions> libvirtOptions,
         ILogger<CommandProcessorService> logger)
     {
         _orchestratorClient = orchestratorClient;
@@ -82,6 +84,7 @@ public class CommandProcessorService : BackgroundService
         _repository = repository;
         _logger = logger;
         _options = options.Value;
+        _libvirtOptions = libvirtOptions.Value;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -259,9 +262,46 @@ public class CommandProcessorService : BackgroundService
             case CommandType.RemovePort:
                 return (await HandleRemovePortAsync(command.Payload, ct), null);
 
+            case CommandType.ReseedVm:
+                return (await HandleReseedVmAsync(command.Payload, ct), null);
+
             default:
                 _logger.LogWarning("Unknown command type: {Type}", command.Type);
                 return (false, null);
+        }
+    }
+
+    private Task<bool> HandleReseedVmAsync(string payload, CancellationToken ct)
+    {
+        try
+        {
+            var root = JsonDocument.Parse(payload).RootElement;
+            var vmId = GetStringProperty(root, "vmId", "VmId");
+            if (string.IsNullOrEmpty(vmId))
+            {
+                _logger.LogWarning("ReseedVm: missing vmId in payload");
+                return Task.FromResult(false);
+            }
+
+            var statePath = Path.Combine(_libvirtOptions.VmStoragePath, vmId, "lazysync.json");
+            if (File.Exists(statePath))
+            {
+                File.Delete(statePath);
+                _logger.LogInformation(
+                    "ReseedVm: deleted lazysync.json for VM {VmId} — daemon reseeds on next cycle", vmId);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "ReseedVm: no lazysync.json for VM {VmId} — already clean", vmId);
+            }
+
+            return Task.FromResult(true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "ReseedVm: failed for payload {Payload}", payload);
+            return Task.FromResult(false);
         }
     }
 
