@@ -16,11 +16,17 @@ namespace DeCloud.NodeAgent.Services;
 ///
 /// Cycle (every 5 minutes, 3 minute startup delay):
 ///   For each Running tenant VM with ReplicationFactor > 0:
-///   1. Export overlay to a sparse raw file via:
-///        qemu-img convert --force-share -f qcow2 -O raw -S 65536 disk.qcow2 tmp.raw
-///      The -S flag skips sparse regions (holes = backing-file data = don't replicate).
-///      --force-share allows reading a QEMU-locked file safely on POSIX.
-///   2. Scan the raw file in 1 MB chunks. Skip all-zero chunks (sparse holes).
+///   1a. Map the overlay extents via:
+///           qemu-img map --force-share --output=json disk.qcow2
+///       Collect all 1 MB chunk offsets where depth=0 (owned by the overlay,
+///       not the backing image) and zero=false. This is the replication whitelist.
+///   1b. Export the full merged raw file via:
+///           qemu-img convert --force-share -f qcow2 -O raw -S 65536 disk.qcow2 tmp.raw
+///       Used only to read actual byte data for CID computation.
+///       NOTE: -S skips zero regions in the merged output (free disk space).
+///             It does NOT filter backing-file data — that is handled by step 1a.
+///   2. Scan the raw file in 1 MB chunks. Skip chunks not in the overlay whitelist
+///      (backing-file data) and skip all-zero chunks (sparse free space).
 ///   3. Compute CIDv1 (raw codec, sha2-256 multihash, base32lower) for each chunk.
 ///   4. Compare against stored manifest: push only genuinely changed chunks.
 ///   5. POST each new block to the local BlockStore VM HTTP API (POST /blocks).
@@ -28,10 +34,18 @@ namespace DeCloud.NodeAgent.Services;
 ///   7. POST updated manifest to the orchestrator.
 ///   8. Delete the temp raw file.
 ///
+/// Why overlay-only matters:
+///   qemu-img convert merges the full backing chain (overlay + base OS image).
+///   The base image (~2 GB, non-zero EXT4 data) would be replicated every cycle
+///   without the depth=0 whitelist from step 1a. With the whitelist, only chunks
+///   that live in disk.qcow2 itself are replicated — typically 100–500 MB on first
+///   boot, then small deltas each cycle. Base image and cloud-init are excluded
+///   because they are reconstructible artifacts (image registry + VM labels).
+///
 /// Dirty bitmap optimization (Phase D+1):
-///   IQmpClient is injected but not used in Phase D. In Phase D+1, replace the
-///   qemu-img convert step with block-dirty-bitmap-add + drive-backup sync=incremental
-///   to read only actually-written clusters instead of all allocated clusters.
+///   IQmpClient is injected but not used in Phase D. In Phase D+1, replace steps
+///   1a+1b with block-dirty-bitmap-add + drive-backup sync=incremental to export
+///   only actually-written clusters, eliminating the need for the overlay map step.
 ///
 /// State persisted per VM: {VmStoragePath}/{vmId}/lazysync.json
 /// </summary>
@@ -41,7 +55,7 @@ public class LazysyncDaemon : BackgroundService
     private static readonly TimeSpan StartupDelay = TimeSpan.FromMinutes(3);
     private const int BlockSizeBytes = 1024 * 1024; // 1 MB
     private const int BlockSizeKb = 1024;
-    private const long SparseScanThreshold = 65536; // -S value for qemu-img
+    private const long SparseScanThreshold = 65536; // -S value for qemu-img convert
 
     // Initial seeding cap: max blocks pushed per cycle when state.Version == 0.
     // At 1 MB/block: 100 blocks = 100 MB per 5-minute cycle.
@@ -139,15 +153,29 @@ public class LazysyncDaemon : BackgroundService
         }
 
         var state = await LoadStateAsync(vm.VmId);
-        var tmpPath = Path.Combine(Path.GetTempPath(), $"lazysync-{vm.VmId[..8]}-{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}.raw");
+        var tmpPath = Path.Combine(Path.GetTempPath(),
+            $"lazysync-{vm.VmId[..8]}-{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}.raw");
 
         try
         {
-            // Step 1: Export overlay to sparse raw file
+            // Step 1a: Build the overlay whitelist — depth=0 chunk offsets only.
+            // Must run before the raw export so we know which chunks belong to the
+            // overlay vs. the backing base image.
+            var overlayOffsets = await GetOverlayChunkOffsetsAsync(diskPath, ct);
+
+            if (overlayOffsets.Count == 0)
+            {
+                _logger.LogDebug("VM {VmId}: overlay has no allocated chunks — skipping", vm.VmId);
+                return;
+            }
+
+            // Step 1b: Export full merged raw (overlay + backing chain merged).
+            // We need this to read actual byte data for CID computation.
+            // Backing-file chunks are filtered out in step 2 via overlayOffsets.
             await ExportOverlayAsync(diskPath, tmpPath, ct);
 
-            // Step 2-4: Scan, compute CIDs, collect changed chunks
-            var (changedChunks, totalBytes) = await ScanChunksAsync(tmpPath, state, ct);
+            // Step 2-4: Scan raw, skip non-overlay chunks, compute CIDs, diff against manifest.
+            var (changedChunks, totalBytes) = await ScanChunksAsync(tmpPath, overlayOffsets, state, ct);
 
             if (changedChunks.Count == 0)
             {
@@ -196,8 +224,7 @@ public class LazysyncDaemon : BackgroundService
 
             _logger.LogInformation(
                 "VM {VmId}: lazysync v{Version} — {Changed} changed / {Total} chunks, {Bytes} bytes",
-                vm.VmId, state.Version, changedChunks.Count, state.Chunks.Count,
-                totalBytes);
+                vm.VmId, state.Version, changedChunks.Count, state.Chunks.Count, totalBytes);
         }
         finally
         {
@@ -207,13 +234,77 @@ public class LazysyncDaemon : BackgroundService
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Overlay extent map — depth=0 whitelist
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Returns the set of 1 MB chunk offsets that belong to the overlay itself
+    /// (depth=0 in qemu-img map output). Chunks at depth≥1 come from the backing
+    /// file (the base OS image) and must NOT be replicated — they are a shared,
+    /// downloadable artifact reconstructible from the image registry.
+    ///
+    /// qemu-img map JSON fields used:
+    ///   start  — byte offset of the extent in the virtual disk address space
+    ///   length — byte count of the extent
+    ///   depth  — 0 = in the overlay (disk.qcow2), 1+ = in a backing file
+    ///   zero   — true = extent is all-zero (unallocated / sparse free space)
+    /// </summary>
+    private async Task<HashSet<long>> GetOverlayChunkOffsetsAsync(string diskPath, CancellationToken ct)
+    {
+        var result = await _executor.ExecuteAsync(
+            "qemu-img",
+            $"map --force-share --output=json \"{diskPath}\"",
+            TimeSpan.FromMinutes(5),
+            ct);
+
+        if (!result.Success)
+            throw new Exception($"qemu-img map failed: {result.StandardError}");
+
+        var offsets = new HashSet<long>();
+        var extents = JsonSerializer.Deserialize<JsonElement[]>(result.StandardOutput) ?? [];
+
+        foreach (var extent in extents)
+        {
+            // depth=0: extent lives in the overlay file — replicate it.
+            // depth≥1: extent comes from the backing chain — skip it.
+            if (extent.GetProperty("depth").GetInt32() != 0) continue;
+
+            // zero=true: unallocated / all-zero region — nothing useful to replicate.
+            if (extent.GetProperty("zero").GetBoolean()) continue;
+
+            var start = extent.GetProperty("start").GetInt64();
+            var length = extent.GetProperty("length").GetInt64();
+
+            // Mark every 1 MB chunk that overlaps this extent.
+            // An extent may span a partial leading chunk and a partial trailing chunk,
+            // both of which still need to be included.
+            var firstChunk = (start / BlockSizeBytes) * BlockSizeBytes;
+            var lastChunk = ((start + length - 1) / BlockSizeBytes) * BlockSizeBytes;
+            for (var off = firstChunk; off <= lastChunk; off += BlockSizeBytes)
+                offsets.Add(off);
+        }
+
+        _logger.LogDebug(
+            "VM {DiskFile}: overlay map — {Count} chunk offset(s) at depth=0",
+            Path.GetFileName(diskPath), offsets.Count);
+
+        return offsets;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // qemu-img export
     // ═══════════════════════════════════════════════════════════════════════
 
     private async Task ExportOverlayAsync(string diskPath, string tmpPath, CancellationToken ct)
     {
-        // --force-share: read QEMU-locked qcow2 (POSIX advisory locks, safe for reads)
-        // -S 65536: skip sparse regions — holes = backing file data = don't replicate
+        // --force-share: read QEMU-locked qcow2 (POSIX advisory locks, safe for reads).
+        // -S 65536: skip zero/unallocated regions in the merged output (free disk space).
+        //
+        // WARNING: qemu-img convert merges the full backing chain — the output raw file
+        //          contains both overlay data AND base OS image data. The -S flag only
+        //          skips truly zero regions; it does NOT filter backing-file extents.
+        //          Use GetOverlayChunkOffsetsAsync() + the overlayOffsets whitelist in
+        //          ScanChunksAsync() to exclude backing-file chunks from replication.
         var result = await _executor.ExecuteAsync(
             "qemu-img",
             $"convert --force-share -f qcow2 -O raw -S {SparseScanThreshold} \"{diskPath}\" \"{tmpPath}\"",
@@ -229,7 +320,7 @@ public class LazysyncDaemon : BackgroundService
     // ═══════════════════════════════════════════════════════════════════════
 
     private async Task<(List<(long Offset, string Cid)> Changed, long TotalBytes)>
-        ScanChunksAsync(string rawPath, LazysyncState state, CancellationToken ct)
+        ScanChunksAsync(string rawPath, HashSet<long> overlayOffsets, LazysyncState state, CancellationToken ct)
     {
         var changed = new List<(long Offset, string Cid)>();
         long totalBytes = 0;
@@ -247,7 +338,16 @@ public class LazysyncDaemon : BackgroundService
             var read = await fs.ReadAsync(buf, 0, BlockSizeBytes, ct);
             if (read == 0) break;
 
-            // Skip all-zero chunks — these are sparse holes (backing file data)
+            // Skip backing-file chunks (depth≥1 extents — base OS image data).
+            // qemu-img convert merges the backing chain into the raw output, so
+            // without this guard we would replicate the entire OS image every cycle.
+            if (!overlayOffsets.Contains(offset))
+            {
+                offset += read;
+                continue;
+            }
+
+            // Skip all-zero chunks — unallocated / sparse free space within the overlay.
             if (IsAllZero(buf, read))
             {
                 offset += read;
@@ -257,7 +357,7 @@ public class LazysyncDaemon : BackgroundService
             totalBytes += read;
             var cid = ComputeCidV1(buf.AsSpan(0, read));
 
-            // Only include if CID actually changed (content-addressed dedup)
+            // Only include if CID actually changed (content-addressed dedup).
             if (!state.Chunks.TryGetValue(offset, out var existing) || existing != cid)
                 changed.Add((offset, cid));
 
