@@ -636,11 +636,6 @@ func (n *BlockNode) startGossipSubSubscription(ctx context.Context) error {
 
 			// Map DeCloud nodeID → libp2p peer ID so handleNewBlockAnnouncement
 			// can use a peer-specific session without DHT discovery.
-			if ann.SourceNodeID != "" {
-				n.nodeIDToPeerIDMu.Lock()
-				n.nodeIDToPeerID[ann.SourceNodeID] = msg.ReceivedFrom
-				n.nodeIDToPeerIDMu.Unlock()
-			}
 			go n.handleNewBlockAnnouncement(ctx, ann)
 		}
 	}()
@@ -681,20 +676,13 @@ func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlock
 	n.diag.XORAccepted++
 	n.mu.Unlock()
 
-	// Look up the source peer's libp2p ID (populated from msg.ReceivedFrom
-	// in the GossipSub receive loop) and use a persistent session.
-	// Sessions send WANT messages directly to the connected peer —
-	// no DHT FindProviders, no 30s timeout on stale records.
-	n.nodeIDToPeerIDMu.RLock()
-	sourcePeer, hasPeer := n.nodeIDToPeerID[ann.SourceNodeID]
-	n.nodeIDToPeerIDMu.RUnlock()
-
-	var fetcher blockFetcher
-	if hasPeer {
-		fetcher = n.sessionForPeer(ctx, sourcePeer)
-	} else {
-		fetcher = n.bsExch.NewSession(ctx)
-	}
+	// Use a new session so bitswap performs a DHT FindProviders walk to
+	// locate the actual block provider. sessionForPeer is not safe here
+	// because msg.ReceivedFrom in the GossipSub receive loop is the relay
+	// hop (the co-located DHT VM), not the blockstore that published the
+	// block. Targeting that peer sends WANT messages to a node that has
+	// no blocks, causing guaranteed 30s timeouts.
+	fetcher := n.bsExch.NewSession(ctx)
 
 	// Acquire fetch slot — caps concurrent WAN pulls to GossipSubFetchConcurrency.
 	// Without this, a burst of N GossipSub messages spawns N simultaneous GetBlock
