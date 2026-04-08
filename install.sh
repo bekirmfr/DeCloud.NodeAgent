@@ -2100,6 +2100,17 @@ download_node_agent() {
         cp -f "$BLOCKSTORE_TEMPLATE_DIR"/blockstore-node-*.gz.b64 "$BLOCKSTORE_CACHE_DIR/" 2>/dev/null || true        log_info "Preserved BlockStore build cache"
     fi
     
+    # Save current binary source hashes before deleting the repo.
+    # Used after rebuild to detect which system VM binaries changed so
+    # install.sh can destroy stale VMs and trigger redeployment with the new binary.
+    if [ "$UPDATE_MODE" = true ]; then
+        local BS_HASH="$BLOCKSTORE_TEMPLATE_DIR/.blockstore-node-source.sha256"
+        local DHT_HASH="$DHT_TEMPLATE_DIR/.dht-node-source.sha256"
+        [ -f "$BS_HASH" ]  && cp "$BS_HASH"  /tmp/decloud-blockstore-old-hash || rm -f /tmp/decloud-blockstore-old-hash
+        [ -f "$DHT_HASH" ] && cp "$DHT_HASH" /tmp/decloud-dht-old-hash        || rm -f /tmp/decloud-dht-old-hash
+        log_info "Saved binary hashes for post-build change detection"
+    fi
+
     if [ -d "$INSTALL_DIR/DeCloud.NodeAgent" ]; then
         rm -rf "$INSTALL_DIR/DeCloud.NodeAgent"
     fi
@@ -2206,6 +2217,78 @@ build_blockstore_binary() {
         log_warn "BlockStore binary build failed — pre-compiled binaries will be used"
         log_info "This is not fatal; the existing .gz.b64 files will still work"
     fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# System VM cleanup — destroy VMs whose binary changed during update
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Destroy all libvirt VMs whose name starts with the given role prefix.
+# NodeAgent is stopped at this point so the reconciliation loop re-deploys
+# them with the new binary on next start.
+destroy_system_vms() {
+    local role="$1"  # "blockstore" or "dht"
+
+    if ! command -v virsh &>/dev/null; then
+        log_warn "virsh not available — cannot auto-destroy ${role} VMs"
+        log_warn "Manually destroy ${role} VMs to get the new binary deployed"
+        return 0
+    fi
+
+    local vms
+    vms=$(virsh list --all --name 2>/dev/null | grep "^${role}-" || true)
+
+    if [ -z "$vms" ]; then
+        log_info "No ${role} VMs found — nothing to destroy"
+        return 0
+    fi
+
+    log_step "Destroying stale ${role} VM(s) — reconciliation will redeploy on NodeAgent start..."
+    while IFS= read -r vm_name; do
+        [ -z "$vm_name" ] && continue
+        log_info "  Destroying: $vm_name"
+        virsh destroy  "$vm_name"                      2>/dev/null || true
+        virsh undefine "$vm_name" --remove-all-storage 2>/dev/null || true
+        log_success "  $vm_name destroyed"
+    done <<< "$vms"
+}
+
+# Compare pre-build and post-build source hashes to detect binary changes.
+# Destroys affected system VMs so the reconciliation loop re-deploys them
+# with the new binary when the NodeAgent restarts.
+cleanup_stale_system_vms() {
+    [ "$UPDATE_MODE" = true ] || return 0
+
+    local TEMPLATE_BASE="$INSTALL_DIR/DeCloud.NodeAgent/src/DeCloud.NodeAgent/CloudInit/Templates"
+
+    local OLD_BS NEW_BS OLD_DHT NEW_DHT
+    OLD_BS=$(cat  /tmp/decloud-blockstore-old-hash 2>/dev/null || echo "")
+    NEW_BS=$(cat  "$TEMPLATE_BASE/blockstore-vm/.blockstore-node-source.sha256" 2>/dev/null || echo "")
+    OLD_DHT=$(cat /tmp/decloud-dht-old-hash        2>/dev/null || echo "")
+    NEW_DHT=$(cat "$TEMPLATE_BASE/dht-vm/.dht-node-source.sha256"              2>/dev/null || echo "")
+
+    rm -f /tmp/decloud-blockstore-old-hash /tmp/decloud-dht-old-hash
+
+    local any_change=false
+
+    if [ -n "$OLD_BS" ] && [ -n "$NEW_BS" ] && [ "$OLD_BS" != "$NEW_BS" ]; then
+        log_info "BlockStore binary changed (${OLD_BS:0:12}… → ${NEW_BS:0:12}…)"
+        destroy_system_vms "blockstore"
+        any_change=true
+    elif [ -n "$NEW_BS" ]; then
+        log_info "BlockStore binary unchanged — skipping VM cleanup"
+    fi
+
+    if [ -n "$OLD_DHT" ] && [ -n "$NEW_DHT" ] && [ "$OLD_DHT" != "$NEW_DHT" ]; then
+        log_info "DHT binary changed (${OLD_DHT:0:12}… → ${NEW_DHT:0:12}…)"
+        destroy_system_vms "dht"
+        any_change=true
+    elif [ -n "$NEW_DHT" ]; then
+        log_info "DHT binary unchanged — skipping VM cleanup"
+    fi
+
+    [ "$any_change" = true ] && \
+        log_success "Stale system VMs destroyed — reconciliation will redeploy on NodeAgent start" || true
 }
 
 build_node_agent() {
@@ -2830,6 +2913,7 @@ main() {
     build_dht_binary
     build_blockstore_binary
     build_gpu_proxy
+    cleanup_stale_system_vms
     build_node_agent
     create_configuration
     create_systemd_service
