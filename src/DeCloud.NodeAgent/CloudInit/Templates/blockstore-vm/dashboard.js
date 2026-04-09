@@ -159,14 +159,27 @@ function renderIdentity() {
 
 // ==================== Render: Resources Table ====================
 function renderResourcesTable() {
-    const wrap  = document.getElementById('resources-table-wrap');
+    const wrap = document.getElementById('resources-table-wrap');
     const badge = document.getElementById('resource-count-badge');
     if (!state.manifestsData) return;
 
     const manifests = state.manifestsData.manifests || [];
-    if (badge) badge.textContent = manifests.length;
 
-    if (manifests.length === 0) {
+    // Group by resourceId — keep only the latest version per resource.
+    // The blockstore stores one manifest entry per rootCid (one per lazysync
+    // cycle), so a single VM may have multiple entries. Only the highest
+    // version is meaningful for display.
+    const grouped = {};
+    for (const m of manifests) {
+        const key = m.resourceId || m.rootCid || '—';
+        if (!grouped[key] || (m.version || 0) > (grouped[key].version || 0)) {
+            grouped[key] = m;
+        }
+    }
+    const latest = Object.values(grouped);
+    if (badge) badge.textContent = latest.length;
+
+    if (latest.length === 0) {
         wrap.innerHTML =
             '<div class="empty-state">' +
             '<span class="empty-icon">&#x1f4e6;</span>' +
@@ -178,28 +191,29 @@ function renderResourcesTable() {
 
     let html = '<table class="resources-table"><thead><tr>' +
         '<th>Type</th><th>Resource</th><th>Owner</th>' +
-        '<th>Root CID</th><th>Size</th><th>Chunks</th><th>Updated</th>' +
+        '<th>Root CID</th><th>Version</th><th>Size</th><th>Chunks</th><th>Updated</th>' +
         '</tr></thead><tbody>';
 
-    for (const m of manifests) html += renderResourceRow(m);
+    for (const m of latest) html += renderResourceRow(m);
     html += '</tbody></table>';
     wrap.innerHTML = html;
 }
 
 function renderResourceRow(m) {
-    const typeBadge  = resourceTypeBadge(m.resourceType);
+    const typeBadge = resourceTypeBadge(m.resourceType);
     const resourceId = truncate(m.resourceId || '—', 24);
-    const owner      = truncateWallet(m.resourceOwner || '—');
-    const rootCid    = truncate(m.rootCid || '—', 20);
-    const size       = formatBytes(m.totalBytes || 0);
-    const chunks     = formatNum(m.chunkCids ? m.chunkCids.length : 0);
-    const updated    = timeAgo(m.updatedAt);
+    const owner = truncateWallet(m.resourceOwner || '—');
+    const rootCid = truncate(m.rootCid || '—', 20);
+    const version = m.version != null ? `v${m.version}` : '—';
+    const size = formatBytes(m.totalBytes || 0);
+    const chunks = formatNum(m.chunkCids ?
 
     return `<tr>
         <td>${typeBadge}</td>
         <td><span class="res-id" title="${m.resourceId || ''}">${resourceId}</span></td>
         <td><span class="mono-sm" title="${m.resourceOwner || ''}">${owner}</span></td>
         <td><span class="mono-sm" title="${m.rootCid || ''}">${rootCid}</span></td>
+        <td><span class="mono-sm">${version}</span></td>
         <td>${size}</td>
         <td>${chunks}</td>
         <td>${updated}</td>

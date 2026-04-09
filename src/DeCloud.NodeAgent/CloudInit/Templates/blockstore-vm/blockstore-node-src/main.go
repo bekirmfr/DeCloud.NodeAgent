@@ -1802,7 +1802,7 @@ func (n *BlockNode) handleManifests(w http.ResponseWriter, r *http.Request) {
 					ResourceID:   vmId,
 					Version:      len(cids), // block count used as proxy version
 					TotalBytes:   int64(len(cids)) * BlockSizeBytes,
-					ChunkCids:    cids[max(0, len(cids)-50):], // last 50 CIDs
+					ChunkCIDs:    cids[max(0, len(cids)-50):], // last 50 CIDs
 					RegisteredAt: updatedAt,
 					UpdatedAt:    updatedAt,
 				})
