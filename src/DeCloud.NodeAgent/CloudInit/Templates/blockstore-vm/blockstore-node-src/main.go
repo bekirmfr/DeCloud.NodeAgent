@@ -80,6 +80,9 @@ const (
 	XORThresholdMedium = 0.10
 	XORThresholdLight  = 0.20
 
+	// Block size for storage calculations (matches LazysyncDaemon BlockSizeBytes)
+	BlockSizeBytes = 1024 * 1024
+
 	// Bitswap fetch timeout
 	BitswapTimeout = 30 * time.Second
 
@@ -595,6 +598,7 @@ type NewBlockAnnouncement struct {
 	Size         int64  `json:"size"`
 	SourceNodeID string `json:"sourceNodeId"`
 	SourcePeerID string `json:"sourcePeerId"`
+	VMId         string `json:"vmId,omitempty"` // owner VM — set by publisher, used by receiver to build owner index
 }
 
 func (n *BlockNode) startGossipSubSubscription(ctx context.Context) error {
@@ -772,18 +776,37 @@ func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlock
 	n.mu.Unlock()
 
 	log.Printf("Pulled block %s (%d bytes) via GossipSub + bitswap", ann.CID[:12], len(blk.RawData()))
+
+	// Write to owner index so this node's /manifests endpoint reflects
+	// which tenant VMs it holds blocks for. This is the only mechanism
+	// by which remote (receiver) blockstores build their manifest view —
+	// no fan-out from the publisher; each node tracks ownership locally.
+	if ann.VMId != "" {
+		go func(ownerID, cidStr string) {
+			ownerFile := filepath.Join(StorageDir, OwnersSubdir, ownerID+".cids")
+			f, err := os.OpenFile(ownerFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				log.Printf("owner index: bitswap pull: failed to open %s: %v", ownerFile, err)
+				return
+			}
+			defer f.Close()
+			if _, err := fmt.Fprintln(f, cidStr); err != nil {
+				log.Printf("owner index: bitswap pull: failed to write CID %s: %v", cidStr[:12], err)
+			}
+		}(ann.VMId, ann.CID)
+	}
 }
 
 // ═══════════════════════════════════════════════════════════════════
 // GossipSub — publisher
 // ═══════════════════════════════════════════════════════════════════
 
-func (n *BlockNode) publishNewBlock(c cid.Cid, size int64) {
+func (n *BlockNode) publishNewBlock(c cid.Cid, size int64, ownerVMId string) {
 	topic := n.newBlocksTopic
 	if topic == nil {
 		return
 	}
-	ann := NewBlockAnnouncement{CID: c.String(), Size: size, SourceNodeID: n.cfg.NodeID, SourcePeerID: n.host.ID().String()}
+	ann := NewBlockAnnouncement{CID: c.String(), Size: size, SourceNodeID: n.cfg.NodeID, SourcePeerID: n.host.ID().String(), VMId: ownerVMId}
 	data, err := json.Marshal(ann)
 	if err != nil {
 		return
@@ -1595,7 +1618,8 @@ func (n *BlockNode) handleBlocks(w http.ResponseWriter, r *http.Request) {
 	n.touchBlock(c.String(), int64(len(data)))
 
 	// Append CID to owner index if ?owner= query param is present.
-	if owner := r.URL.Query().Get("owner"); owner != "" {
+	owner := r.URL.Query().Get("owner")
+	if owner != "" {
 		go func(ownerID, cidStr string) {
 			ownerFile := filepath.Join(StorageDir, OwnersSubdir, ownerID+".cids")
 			f, err := os.OpenFile(ownerFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -1636,7 +1660,7 @@ func (n *BlockNode) handleBlocks(w http.ResponseWriter, r *http.Request) {
 	}(c)
 
 	// Broadcast via GossipSub (with diagnostics tracking inside publishNewBlock)
-	go n.publishNewBlock(c, int64(len(data)))
+	go n.publishNewBlock(c, int64(len(data)), owner)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"cid": c.String()})
@@ -1734,10 +1758,56 @@ func (n *BlockNode) handleManifests(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		n.manifestsMu.RLock()
 		list := make([]*ResourceManifest, 0, len(n.manifests))
+		inManifests := make(map[string]bool) // keyed by resourceId (vmId)
 		for _, m := range n.manifests {
 			list = append(list, m)
+			inManifests[m.ResourceID] = true
 		}
 		n.manifestsMu.RUnlock()
+
+		// Synthesize manifests from owner index for VMs whose blocks were
+		// pulled via bitswap (remote/receiver nodes). These nodes never
+		// receive a POST /manifests call — they build their view locally
+		// from the owner index written during bitswap pulls.
+		ownersDir := filepath.Join(StorageDir, OwnersSubdir)
+		if entries, err := os.ReadDir(ownersDir); err == nil {
+			for _, e := range entries {
+				if e.IsDir() || !strings.HasSuffix(e.Name(), ".cids") {
+					continue
+				}
+				vmId := strings.TrimSuffix(e.Name(), ".cids")
+				if inManifests[vmId] {
+					continue // already have a richer manifest from POST /manifests
+				}
+				data, err := os.ReadFile(filepath.Join(ownersDir, e.Name()))
+				if err != nil {
+					continue
+				}
+				var cids []string
+				for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+					if line = strings.TrimSpace(line); line != "" {
+						cids = append(cids, line)
+					}
+				}
+				if len(cids) == 0 {
+					continue
+				}
+				info, _ := e.Info()
+				updatedAt := time.Now().UTC()
+				if info != nil {
+					updatedAt = info.ModTime().UTC()
+				}
+				list = append(list, &ResourceManifest{
+					ResourceType: ResourceTypeVMOverlay,
+					ResourceID:   vmId,
+					Version:      len(cids), // block count used as proxy version
+					TotalBytes:   int64(len(cids)) * BlockSizeBytes,
+					ChunkCids:    cids[max(0, len(cids)-50):], // last 50 CIDs
+					RegisteredAt: updatedAt,
+					UpdatedAt:    updatedAt,
+				})
+			}
+		}
 
 		sort.Slice(list, func(i, j int) bool {
 			return list[i].UpdatedAt.After(list[j].UpdatedAt)
