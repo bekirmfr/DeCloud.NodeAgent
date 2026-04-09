@@ -57,11 +57,25 @@ public class LazysyncDaemon : BackgroundService
     private const int BlockSizeKb = 1024;
     private const long SparseScanThreshold = 65536; // -S value for qemu-img convert
 
-    // Initial seeding cap: max blocks pushed per cycle when state.Version == 0.
-    // At 1 MB/block: 100 blocks = 100 MB per 5-minute cycle.
-    // A 500 MB overlay (typical after first boot) seeds in ~1 cycle.
-    // A 5 GB overlay seeds in ~5 cycles (~25 minutes). Prevents network saturation.
-    private const int SeedingMaxBlocksPerCycle = 100;
+    // No per-cycle block cap is applied during seeding.
+    //
+    // Design rationale:
+    //   The receiver side uses a fixed worker pool (GossipSubFetchWorkers=4, FetchQueueSize=2000)
+    //   that absorbs any burst without goroutine explosion or block loss. A 1.2 GB overlay
+    //   (~1200 blocks) generates ~1200 GossipSub announcements over ~60 seconds — the receiver
+    //   queue drains them at 4×parallel, completing in ~25 minutes vs ~65 minutes with a cap.
+    //
+    // Scale note:
+    //   Bitswap load on the source is bounded by ReplicationFactor (max 5), not node count.
+    //   XOR threshold filtering ensures only the RF closest nodes pull blocks — the other
+    //   N-RF nodes in the network receive GossipSub messages but do not fetch.
+    //   Worst case: 5 receivers × 4 workers = 20 concurrent bitswap readers on the source.
+    //   This is acceptable at current RF constraints (max RF=5).
+    //
+    //   If RF is raised significantly (e.g. RF=50+) or overlay sizes grow to 100+ GB,
+    //   reinstate a rate-limiter here — not a block count cap but a token bucket or
+    //   configurable BlockPushDelayMs between PushBlocksAsync iterations to keep the
+    //   pipeline continuous without saturating the source node's uplink.
 
     private readonly LibvirtVmManager _vmManager;
     private readonly ICommandExecutor _executor;
@@ -183,17 +197,10 @@ public class LazysyncDaemon : BackgroundService
                 return;
             }
 
-            // Rate-limit initial seeding: cap blocks per cycle when manifest is empty.
-            // Subsequent cycles pick up remaining chunks automatically via CID diff.
+            // All changed blocks are pushed in a single cycle — no cap applied.
+            // The receiver's worker pool handles the burst safely. See class-level
+            // comment on SeedingMaxBlocksPerCycle for full rationale.
             var isSeeding = state.Version == 0;
-            var totalQueued = changedChunks.Count;
-            if (changedChunks.Count > SeedingMaxBlocksPerCycle)
-            {
-                changedChunks = changedChunks.Take(SeedingMaxBlocksPerCycle).ToList();
-                _logger.LogInformation(
-                    "VM {VmId}: initial seeding — pushing {Pushed}/{Total} blocks this cycle",
-                    vm.VmId, changedChunks.Count, totalQueued);
-            }
 
             // Step 5: Push new blocks to BlockStore
             await PushBlocksAsync(vm.VmId, tmpPath, changedChunks, blockstoreAddr, ct);
@@ -222,6 +229,12 @@ public class LazysyncDaemon : BackgroundService
             // Step 8: Persist state
             await SaveStateAsync(vm.VmId, state);
 
+            // Step 9: Notify local blockstore VM so its /manifests endpoint
+            // reflects the current manifest — populates the dashboard Resources table.
+            // Fire-and-forget: dashboard display is non-critical, never block the cycle.
+            _ = NotifyBlockstoreManifestAsync(
+                blockstoreAddr, vm.VmId, rootCid, state, changedChunks, totalBytes, ct);
+
             _logger.LogInformation(
                 "VM {VmId}: lazysync v{Version} — {Changed} changed / {Total} chunks, {Bytes} bytes",
                 vm.VmId, state.Version, changedChunks.Count, state.Chunks.Count, totalBytes);
@@ -230,6 +243,49 @@ public class LazysyncDaemon : BackgroundService
         {
             if (File.Exists(tmpPath))
                 File.Delete(tmpPath);
+        }
+    }
+
+    private async Task NotifyBlockstoreManifestAsync(
+        string blockstoreAddr,
+        string vmId,
+        string rootCid,
+        LazysyncState state,
+        List<(long Offset, string Cid)> changedChunks,
+        long totalBytes,
+        CancellationToken ct)
+    {
+        try
+        {
+            var payload = new
+            {
+                vmId,
+                rootCid,
+                version = state.Version,
+                blockCount = state.Chunks.Count,
+                blockSizeKb = BlockSizeKb,
+                totalBytes,
+                resourceType = "VMOverlay",
+                resourceId = vmId,
+                chunkCids = changedChunks.Select(c => c.Cid).Take(50).ToList()
+            };
+
+            var json = System.Text.Json.JsonSerializer.Serialize(payload);
+            var content = new System.Net.Http.StringContent(
+                json, System.Text.Encoding.UTF8, "application/json");
+
+            var response = await _blockstoreClient.PostAsync(
+                $"{blockstoreAddr}/manifests", content, ct);
+
+            if (!response.IsSuccessStatusCode)
+                _logger.LogDebug(
+                    "VM {VmId}: blockstore manifest notify returned {Status}",
+                    vmId, response.StatusCode);
+        }
+        catch (Exception ex)
+        {
+            // Non-fatal — dashboard display only
+            _logger.LogDebug(ex, "VM {VmId}: blockstore manifest notify failed", vmId);
         }
     }
 
