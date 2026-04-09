@@ -97,13 +97,14 @@ CONSECUTIVE_FAILURES=0
 # join response even when already connected to the local DHT VM.
 # Without this, bitswap must rely on slow DHT FindProviders for every block fetch.
 INITIAL_POLL_DONE=false
+REMOTE_BS_CONNECTED=false
 
 while true; do
     # Check current peer count
     HEALTH=$(curl -s --max-time 3 "http://127.0.0.1:${API_PORT}/health" 2>/dev/null) || true
     CONNECTED=$(echo "$HEALTH" | jq -r '.connectedPeers // 0' 2>/dev/null) || CONNECTED=0
 
-    if [ "$CONNECTED" -gt 0 ] && [ "$INITIAL_POLL_DONE" = "true" ]; then
+    if [ "$CONNECTED" -gt 0 ] && [ "$INITIAL_POLL_DONE" = "true" ] && [ "$REMOTE_BS_CONNECTED" = "true" ]; then
         # Check DHT health — not just peer count.
         # After NodeAgent restart the blockstore may connect to remote peers
         # via WireGuard while the local DHT VM is still booting, leaving the
@@ -168,6 +169,23 @@ while true; do
 
             CONNECTED_COUNT=$(echo "$CONNECT_RESP" | jq -r '.connected // 0' 2>/dev/null) || CONNECTED_COUNT=0
             log "Connected to $CONNECTED_COUNT/$PEER_COUNT bootstrap peer(s)"
+
+            # Wait briefly for libp2p dials to complete — the /connect response
+            # is fast but the actual TCP handshake continues in the background.
+            # Re-check connectedPeers after 8s to confirm the remote blockstore
+            # actually connected (not just the local DHT).
+            if [ "$PEER_COUNT" -gt 0 ]; then
+                sleep 8
+                ACTUAL_PEERS=$(curl -s --max-time 3 "http://127.0.0.1:${API_PORT}/health" 2>/dev/null \
+                    | jq -r '.connectedPeers // 0' 2>/dev/null) || ACTUAL_PEERS=0
+                # connectedPeers > 1 means at least one remote peer beyond local DHT
+                if [ "$ACTUAL_PEERS" -gt 1 ]; then
+                    REMOTE_BS_CONNECTED=true
+                    log "Remote blockstore connected (total peers: $ACTUAL_PEERS)"
+                else
+                    log "Remote blockstore not yet connected (peers: $ACTUAL_PEERS) — will retry"
+                fi
+            fi
         else
             log "No bootstrap peers available yet — will retry in ${POLL_INTERVAL_ISOLATED}s"
         fi
