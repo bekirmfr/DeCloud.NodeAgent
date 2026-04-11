@@ -21,6 +21,7 @@ from __future__ import annotations
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.widgets import ContentSwitcher
 from textual.reactive import reactive
 from textual.widgets import Footer, Header, Label, Static
 
@@ -266,7 +267,16 @@ class DeCloudDashboard(App):
 
     def compose(self) -> ComposeResult:
         yield Sidebar()
-        yield Vertical(id="main-area")
+        with ContentSwitcher(id="main-area", initial="screen-dashboard"):
+            yield DashboardScreen(id="screen-dashboard")
+            yield NodesScreen(id="screen-nodes")
+            yield VmsScreen(id="screen-vms")
+            yield SystemVmsScreen(id="screen-sysvms")
+            yield NetworkScreen(id="screen-network")
+            yield IngressScreen(id="screen-ingress")
+            yield BillingScreen(id="screen-billing")
+            yield LogsScreen(id="screen-logs")
+            yield SettingsScreen(id="screen-settings")
         yield StatusBar()
 
     def on_mount(self) -> None:
@@ -277,22 +287,27 @@ class DeCloudDashboard(App):
     # ── Screen navigation ──────────────────────────────────────────────
 
     def switch_to(self, label: str) -> None:
-        """Mount the chosen widget into #main-area, unmounting the previous."""
-        entry = next((e for e in NAV if e[1] == label), None)
-        if not entry:
+        """Show the chosen screen via ContentSwitcher."""
+        screen_ids = {
+            "Dashboard":        "screen-dashboard",
+            "Nodes":            "screen-nodes",
+            "Virtual Machines": "screen-vms",
+            "System VMs":       "screen-sysvms",
+            "Networking":       "screen-network",
+            "Ingress Routes":   "screen-ingress",
+            "Billing":          "screen-billing",
+            "Live Logs":        "screen-logs",
+            "Settings":         "screen-settings",
+        }
+        sid = screen_ids.get(label)
+        if not sid:
             return
         self._active_label = label
         self._update_nav_highlight(label)
-        self.call_after_refresh(self._do_mount, label)
-
-    def _do_mount(self, label: str) -> None:
-        entry = next((e for e in NAV if e[1] == label), None)
-        if not entry:
-            return
-        _, _, widget_cls = entry
-        area = self.query_one("#main-area", Vertical)
-        area.remove_children()
-        area.mount(widget_cls())
+        try:
+            self.query_one("#main-area", ContentSwitcher).current = sid
+        except Exception:
+            pass
 
     def _update_nav_highlight(self, active_label: str) -> None:
         for item in self.query(NavItem):
