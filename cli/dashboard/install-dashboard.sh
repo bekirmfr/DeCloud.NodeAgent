@@ -25,7 +25,7 @@ log_info()    { echo -e "  ${1}"; }
 
 # ── paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DASHBOARD_DIR="${SCRIPT_DIR}/dashboard"
+DASHBOARD_DIR="${SCRIPT_DIR}"
 VENV_DIR="${HOME}/.decloud/dashboard-venv"
 SHIM="/usr/local/bin/decloud-dashboard"
 DECLOUD_BIN="/usr/local/bin/decloud"
