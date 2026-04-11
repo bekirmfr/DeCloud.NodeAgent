@@ -203,7 +203,7 @@ public class LazysyncDaemon : BackgroundService
             var isSeeding = state.Version == 0;
 
             // Step 5: Push new blocks to BlockStore
-            await PushBlocksAsync(vm.VmId, tmpPath, changedChunks, blockstoreAddr, ct);
+            await PushBlocksAsync(vm.VmId, tmpPath, changedChunks, blockstoreAddr, state.Version + 1, ct);
 
             // Step 6: Update state
             foreach (var (offset, cid) in changedChunks)
@@ -275,7 +275,7 @@ public class LazysyncDaemon : BackgroundService
                 json, System.Text.Encoding.UTF8, "application/json");
 
             var response = await _blockstoreClient.PostAsync(
-                $"{blockstoreAddr}/blocks?owner={vmId}&manifestVersion={state.Version}", content, ct);
+                $"{blockstoreAddr}/manifests", content, ct);
 
             if (!response.IsSuccessStatusCode)
                 _logger.LogDebug(
@@ -484,9 +484,12 @@ public class LazysyncDaemon : BackgroundService
     // ═══════════════════════════════════════════════════════════════════════
 
     private async Task PushBlocksAsync(
-        string vmId, string rawPath,
+        string vmId, 
+        string rawPath,
         List<(long Offset, string Cid)> changedChunks,
-        string blockstoreAddr, CancellationToken ct)
+        string blockstoreAddr, 
+        int manifestVersion, 
+        CancellationToken ct)
     {
         var buf = new byte[BlockSizeBytes];
 
@@ -506,7 +509,7 @@ public class LazysyncDaemon : BackgroundService
             content.Headers.ContentType =
                 new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
 
-            var url = $"{blockstoreAddr}/blocks?cid={Uri.EscapeDataString(cid)}&owner={Uri.EscapeDataString(vmId)}";
+            var url = $"{blockstoreAddr}/blocks?cid={Uri.EscapeDataString(cid)}&owner={Uri.EscapeDataString(vmId)}&manifestVersion={manifestVersion}";
             var response = await _blockstoreClient.PostAsync(url, content, ct);
 
             if (!response.IsSuccessStatusCode)
