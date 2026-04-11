@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal
-from textual.containers import Container
 from textual.widget import Widget
 from textual.widgets import DataTable, Label, Static
 
@@ -17,7 +16,7 @@ from config import cfg
 from api.orchestrator import OrchestratorClient, ApiError
 
 
-class _BalanceCard(Static):
+class _BalanceCard(Vertical):
     DEFAULT_CSS = """
     _BalanceCard {
         border: solid $panel;
@@ -40,9 +39,8 @@ class _BalanceCard(Static):
         self.query_one(f"#{self._amount_id}", Label).update(value)
 
 
-class BillingScreen(Container):
+class BillingScreen(Vertical):
     _is_mounted: bool = False
-    _running: bool = False
 
     """Billing overview — balance + transaction history."""
 
@@ -51,10 +49,10 @@ class BillingScreen(Container):
     def compose(self) -> ComposeResult:
         yield Label("Billing", classes="section-title")
         with Horizontal(id="balance-row"):
-            yield _BalanceCard("Balance", "bal-available")
+            yield _BalanceCard("Available Balance", "bal-available")
             yield _BalanceCard("Earned (30d)", "bal-earned")
-            yield _BalanceCard("Pending", "bal-pending")
-            yield _BalanceCard("Active VMs", "bal-vms")
+            yield _BalanceCard("Pending Settlement", "bal-pending")
+            yield _BalanceCard("Active VMs Billed", "bal-vms")
 
         yield Label("Transaction History", classes="section-title")
         yield DataTable(id="tx-table", zebra_stripes=True)

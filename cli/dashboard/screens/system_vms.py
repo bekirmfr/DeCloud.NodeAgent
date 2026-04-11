@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.containers import ScrollableContainer
-from textual.containers import Container
 from textual.widget import Widget
 from textual.widgets import Label, ProgressBar, Static
 
@@ -20,7 +19,7 @@ _ROLE_LABEL = {"Dht": "DHT Node", "Relay": "Relay VM", "BlockStore": "BlockStore
 _STATUS_COLOR = {"Active": "green", "Deploying": "yellow", "Pending": "cyan", "Failed": "red"}
 
 
-class ObligationCard(Static):
+class ObligationCard(Vertical):
     _is_mounted: bool = False
     _running: bool = False
 
@@ -61,7 +60,7 @@ class ObligationCard(Static):
             yield Label(f"Error: {err}", classes="oc-err")
 
 
-class SystemVmsScreen(Container):
+class SystemVmsScreen(Vertical):
     _is_mounted: bool = False
     _running: bool = False
 

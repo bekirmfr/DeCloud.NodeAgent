@@ -8,7 +8,6 @@ Falls back gracefully when node agent is not configured.
 from __future__ import annotations
 
 from textual.app import ComposeResult
-from textual.containers import Container
 from textual.widget import Widget
 from textual.widgets import DataTable, Label, TabbedContent, TabPane
 
@@ -16,9 +15,8 @@ from config import cfg
 from api.node_agent import NodeAgentClient
 
 
-class NetworkScreen(Container):
+class NetworkScreen(Vertical):
     _is_mounted: bool = False
-    _running: bool = False
 
     """Interfaces + WireGuard peers + port forwarding tabs."""
 

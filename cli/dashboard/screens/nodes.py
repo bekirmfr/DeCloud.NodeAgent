@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, ScrollableContainer
-from textual.containers import Container
 from textual.widget import Widget
 from textual.widgets import Button, Input, Label, ProgressBar, Static
 
@@ -20,7 +19,7 @@ _STATUS_COLOR = {"Online": "green", "Degraded": "yellow", "Offline": "red"}
 _FILTERS = ["All", "Online", "Degraded", "Offline"]
 
 
-class NodeCard(Static):
+class NodeCard(Vertical):
     _is_mounted: bool = False
     _running: bool = False
 
@@ -72,7 +71,7 @@ class NodeCard(Static):
         yield Label(f"VMs running: {vms}", classes="nc-meta")
 
 
-class NodesScreen(Container):
+class NodesScreen(Vertical):
     _is_mounted: bool = False
     _running: bool = False
 

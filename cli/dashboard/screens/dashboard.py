@@ -14,7 +14,6 @@ import asyncio
 import re
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.containers import Container
 from textual.widget import Widget
 from textual.widgets import DataTable, Label, ProgressBar, Static, Log
 
@@ -46,7 +45,7 @@ def _strip_markup(s: str) -> str:
     return re.sub(r"\[/?[\w ]+\]", "", s)
 
 
-class StatCard(Static):
+class StatCard(Vertical):
     _is_mounted: bool = False
     _running: bool = False
 
@@ -74,7 +73,7 @@ class StatCard(Static):
             pass
 
 
-class GaugeRow(Static):
+class GaugeRow(Vertical):
     _is_mounted: bool = False
     _running: bool = False
 
@@ -103,7 +102,7 @@ class GaugeRow(Static):
             pass
 
 
-class LoginBar(Static):
+class LoginBar(Vertical):
     _is_mounted: bool = False
     _running: bool = False
 
@@ -136,7 +135,7 @@ class LoginBar(Static):
             pass
 
 
-class DashboardScreen(Container):
+class DashboardScreen(Vertical):
     _is_mounted: bool = False
     _running: bool = False
 

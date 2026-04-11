@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal
-from textual.containers import Container
 from textual.widget import Widget
 from textual.widgets import Button, Input, Label, Log
 
@@ -28,9 +27,8 @@ _LEVEL_COLOR = {
 _LEVELS = ["ALL", "INFO", "WARN", "ERR"]
 
 
-class LogsScreen(Container):
+class LogsScreen(Vertical):
     _is_mounted: bool = False
-    _running: bool = False
 
     """Live log tail with level filter and keyword search."""
 
@@ -46,7 +44,7 @@ class LogsScreen(Container):
                 yield Button(lvl, id=f"lvl-{lvl}", variant="default")
             yield Button("Clear", id="btn-clear", variant="default")
 
-        yield Log(id="log-out", max_lines=cfg.log_lines)
+        yield Log(id="log-out", max_lines=cfg.log_lines, markup=True)
         yield Label("● live poll", id="log-status")
 
     def on_mount(self) -> None:
