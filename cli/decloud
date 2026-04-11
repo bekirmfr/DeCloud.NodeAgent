@@ -1718,6 +1718,13 @@ ${BOLD}WIREGUARD:${NC}
     wg interfaces           List active interface names
     wg show <interface>     Show details for a specific interface
 
+${BOLD}DASHBOARD:${NC}
+    dashboard               Launch the TUI dashboard
+      --node-only             Node agent only (no orchestrator needed)
+      --url <url>             Override orchestrator URL
+      --token <jwt>           Override API token
+      --refresh <sec>         Auto-refresh interval in seconds
+
 ${BOLD}OTHER:${NC}
     version                 Show CLI version
     -h, --help              Show this help
@@ -1782,6 +1789,26 @@ ${BOLD}EXAMPLES:${NC}
 
 For more information: https://docs.decloud.io
 EOF
+}
+
+# ============================================================================
+# DASHBOARD COMMAND
+# ============================================================================
+
+cmd_dashboard() {
+    local shim="/usr/local/bin/decloud-dashboard"
+
+    if [[ ! -x "$shim" ]]; then
+        echo ""
+        log_error "Dashboard not installed."
+        echo ""
+        log_info "Run the installer first:"
+        log_info "  bash /opt/decloud/DeCloud.NodeAgent/cli/dashboard/install-dashboard.sh"
+        echo ""
+        exit $EXIT_ERROR
+    fi
+
+    exec "$shim" "$@"
 }
 
 # ============================================================================
@@ -1853,6 +1880,7 @@ main() {
         test-api)     cmd_test_api   "$@" ;;
         relay)        cmd_relay      "$@" ;;
         wg)           cmd_wg         "$@" ;;
+        dashboard)    cmd_dashboard  "$@" ;;
         version)      cmd_version ;;
         *)
             log_error "Unknown command: $command"
