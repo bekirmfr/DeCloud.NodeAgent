@@ -14,6 +14,7 @@ import asyncio
 import re
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.containers import Container
 from textual.widget import Widget
 from textual.widgets import DataTable, Label, ProgressBar, Static, Log
 
@@ -135,7 +136,7 @@ class LoginBar(Static):
             pass
 
 
-class DashboardScreen(Widget):
+class DashboardScreen(Container):
     _is_mounted: bool = False
     _running: bool = False
 

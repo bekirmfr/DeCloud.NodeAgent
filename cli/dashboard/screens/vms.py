@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal
+from textual.containers import Container
 from textual.widget import Widget
 from textual.widgets import Button, DataTable, Input, Label, Select
 
@@ -51,7 +52,7 @@ def _fmt_bytes(b) -> str:
     return f"{b}PB"
 
 
-class VmsScreen(Widget):
+class VmsScreen(Container):
     _is_mounted: bool = False
     _running: bool = False
 

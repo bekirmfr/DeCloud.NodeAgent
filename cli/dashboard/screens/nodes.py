@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, ScrollableContainer
+from textual.containers import Container
 from textual.widget import Widget
 from textual.widgets import Button, Input, Label, ProgressBar, Static
 
@@ -71,7 +72,7 @@ class NodeCard(Static):
         yield Label(f"VMs running: {vms}", classes="nc-meta")
 
 
-class NodesScreen(Widget):
+class NodesScreen(Container):
     _is_mounted: bool = False
     _running: bool = False
 

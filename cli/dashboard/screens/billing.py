@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal
+from textual.containers import Container
 from textual.widget import Widget
 from textual.widgets import DataTable, Label, Static
 
@@ -39,7 +40,7 @@ class _BalanceCard(Static):
         self.query_one(f"#{self._amount_id}", Label).update(value)
 
 
-class BillingScreen(Widget):
+class BillingScreen(Container):
     _is_mounted: bool = False
     _running: bool = False
 

@@ -8,6 +8,7 @@ Source: orchestrator GET /api/ingress + /api/central-ingress/status.
 from __future__ import annotations
 
 from textual.app import ComposeResult
+from textual.containers import Container
 from textual.widget import Widget
 from textual.widgets import DataTable, Label
 
@@ -18,7 +19,7 @@ from api.orchestrator import OrchestratorClient, ApiError
 _STATUS_COLOR = {"active": "green", "pending": "yellow", "inactive": "red"}
 
 
-class IngressScreen(Widget):
+class IngressScreen(Container):
     _is_mounted: bool = False
     _running: bool = False
 

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.containers import Container
 from textual.widget import Widget
 from textual.widgets import Button, Input, Label, Select, Static, Switch
 
@@ -134,7 +135,7 @@ class DisplaySettings(SettingsGroup):
             yield Switch(value=cfg.node_only, id="sw-node-only")
 
 
-class SettingsScreen(Widget):
+class SettingsScreen(Container):
     _is_mounted: bool = False
     _running: bool = False
 

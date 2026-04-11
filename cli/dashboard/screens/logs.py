@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal
+from textual.containers import Container
 from textual.widget import Widget
 from textual.widgets import Button, Input, Label, Log
 
@@ -27,7 +28,7 @@ _LEVEL_COLOR = {
 _LEVELS = ["ALL", "INFO", "WARN", "ERR"]
 
 
-class LogsScreen(Widget):
+class LogsScreen(Container):
     _is_mounted: bool = False
     _running: bool = False
 
