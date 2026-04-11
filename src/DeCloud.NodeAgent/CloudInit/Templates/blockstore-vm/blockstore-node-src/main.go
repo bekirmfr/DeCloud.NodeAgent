@@ -594,11 +594,15 @@ func (n *BlockNode) connectBootstrapPeers(ctx context.Context) {
 // ═══════════════════════════════════════════════════════════════════
 
 type NewBlockAnnouncement struct {
-	CID          string `json:"cid"`
-	Size         int64  `json:"size"`
-	SourceNodeID string `json:"sourceNodeId"`
-	SourcePeerID string `json:"sourcePeerId"`
-	VMId         string `json:"vmId,omitempty"` // owner VM — set by publisher, used by receiver to build owner index
+	CID             string `json:"cid"`
+	Size            int64  `json:"size"`
+	SourceNodeID    string `json:"sourceNodeId"`
+	SourcePeerID    string `json:"sourcePeerId"`
+	VMId            string `json:"vmId,omitempty"`            // owner VM — set by publisher, used by receiver to build owner index
+	ManifestVersion int    `json:"manifestVersion,omitempty"` // lazysync version at publish time — receivers
+	                                                           // drop announcements where their local version
+	                                                           // already equals or exceeds this value, avoiding
+	                                                           // redundant pulls of blocks from stale cycles
 }
 
 func (n *BlockNode) startGossipSubSubscription(ctx context.Context) error {
@@ -680,6 +684,31 @@ func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlock
 	has, _ := n.bstore.Has(ctx, c)
 	if has {
 		return
+	}
+
+	// Drop announcement if our local manifest for this VM is already at or
+	// ahead of the announced version — block belongs to a stale cycle.
+	// omitempty means ManifestVersion=0 on old peers is treated as unknown
+	// and passes through (backward compatible).
+	if ann.ManifestVersion > 0 && ann.VMId != "" {
+		ownerFile := filepath.Join(StorageDir, OwnersSubdir, ann.VMId+".cids")
+		if info, err := os.Stat(ownerFile); err == nil {
+			// Use line count as proxy for local version — same approach as GET /manifests synthesis.
+			// A proper version store can replace this once manifest versioning is persisted locally.
+			if data, err := os.ReadFile(ownerFile); err == nil {
+				localCount := len(strings.Split(strings.TrimSpace(string(data)), "\n"))
+				if localCount >= ann.ManifestVersion {
+					n.diagLog.Add("announcement_stale", map[string]interface{}{
+						"cid":             cidShort(ann.CID),
+						"vmId":            cidShort(ann.VMId),
+						"announcedVersion": ann.ManifestVersion,
+						"localCount":      localCount,
+					})
+					_ = info
+					return
+				}
+			}
+		}
 	}
 	usedBytes, _ := n.usedBytes(ctx)
 	usagePct := float64(usedBytes) / float64(n.cfg.StorageBytes) * 100
@@ -801,12 +830,12 @@ func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlock
 // GossipSub — publisher
 // ═══════════════════════════════════════════════════════════════════
 
-func (n *BlockNode) publishNewBlock(c cid.Cid, size int64, ownerVMId string) {
+func (n *BlockNode) publishNewBlock(c cid.Cid, size int64, ownerVMId string, manifestVersion int) {
 	topic := n.newBlocksTopic
 	if topic == nil {
 		return
 	}
-	ann := NewBlockAnnouncement{CID: c.String(), Size: size, SourceNodeID: n.cfg.NodeID, SourcePeerID: n.host.ID().String(), VMId: ownerVMId}
+	ann := NewBlockAnnouncement{CID: c.String(), Size: size, SourceNodeID: n.cfg.NodeID, SourcePeerID: n.host.ID().String(), VMId: ownerVMId, ManifestVersion: manifestVersion}
 	data, err := json.Marshal(ann)
 	if err != nil {
 		return
@@ -1660,7 +1689,13 @@ func (n *BlockNode) handleBlocks(w http.ResponseWriter, r *http.Request) {
 	}(c)
 
 	// Broadcast via GossipSub (with diagnostics tracking inside publishNewBlock)
-	go n.publishNewBlock(c, int64(len(data)), owner)
+	manifestVersion := 0
+	if mv := r.URL.Query().Get("manifestVersion"); mv != "" {
+		if n, err := strconv.Atoi(mv); err == nil {
+			manifestVersion = n
+		}
+	}
+	go n.publishNewBlock(c, int64(len(data)), owner, manifestVersion)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"cid": c.String()})

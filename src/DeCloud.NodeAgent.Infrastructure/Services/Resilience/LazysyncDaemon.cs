@@ -275,7 +275,7 @@ public class LazysyncDaemon : BackgroundService
                 json, System.Text.Encoding.UTF8, "application/json");
 
             var response = await _blockstoreClient.PostAsync(
-                $"{blockstoreAddr}/manifests", content, ct);
+                $"{blockstoreAddr}/blocks?owner={vmId}&manifestVersion={state.Version}", content, ct);
 
             if (!response.IsSuccessStatusCode)
                 _logger.LogDebug(
