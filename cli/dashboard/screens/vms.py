@@ -32,6 +32,7 @@ _ACTIONS = ["start", "stop", "restart", "forceStop"]
 
 class VmsScreen(Widget):
     _is_mounted: bool = False
+    _running: bool = False
 
     """VM fleet table with inline action bar."""
 

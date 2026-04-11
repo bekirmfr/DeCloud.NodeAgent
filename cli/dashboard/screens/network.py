@@ -17,6 +17,7 @@ from api.node_agent import NodeAgentClient
 
 class NetworkScreen(Widget):
     _is_mounted: bool = False
+    _running: bool = False
 
     """Interfaces + WireGuard peers + port forwarding tabs."""
 

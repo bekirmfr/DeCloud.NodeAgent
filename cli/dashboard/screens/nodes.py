@@ -87,6 +87,7 @@ class NodeCard(Static):
 
 class NodesScreen(Widget):
     _is_mounted: bool = False
+    _running: bool = False
 
     """Filterable node fleet view."""
 

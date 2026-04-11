@@ -29,6 +29,7 @@ _LEVELS = ["ALL", "INFO", "WARN", "ERR"]
 
 class LogsScreen(Widget):
     _is_mounted: bool = False
+    _running: bool = False
 
     """Live log tail with level filter and keyword search."""
 

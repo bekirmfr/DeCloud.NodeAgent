@@ -136,6 +136,7 @@ class DisplaySettings(SettingsGroup):
 
 class SettingsScreen(Widget):
     _is_mounted: bool = False
+    _running: bool = False
 
     """Connection and display settings."""
 

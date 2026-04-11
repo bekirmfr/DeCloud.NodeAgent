@@ -41,6 +41,7 @@ class _BalanceCard(Static):
 
 class BillingScreen(Widget):
     _is_mounted: bool = False
+    _running: bool = False
 
     """Billing overview — balance + transaction history."""
 

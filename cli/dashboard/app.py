@@ -283,16 +283,16 @@ class DeCloudDashboard(App):
             return
         self._active_label = label
         self._update_nav_highlight(label)
-        self.run_worker(self._mount_screen(label), exclusive=True, name="switch")
+        self.call_after_refresh(self._do_mount, label)
 
-    async def _mount_screen(self, label: str) -> None:
+    def _do_mount(self, label: str) -> None:
         entry = next((e for e in NAV if e[1] == label), None)
         if not entry:
             return
         _, _, widget_cls = entry
         area = self.query_one("#main-area", Vertical)
-        await area.remove_children()
-        await area.mount(widget_cls())
+        area.remove_children()
+        area.mount(widget_cls())
 
     def _update_nav_highlight(self, active_label: str) -> None:
         for item in self.query(NavItem):

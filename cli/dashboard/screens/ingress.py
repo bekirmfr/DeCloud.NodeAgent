@@ -20,6 +20,7 @@ _STATUS_COLOR = {"active": "green", "pending": "yellow", "inactive": "red"}
 
 class IngressScreen(Widget):
     _is_mounted: bool = False
+    _running: bool = False
 
     """Ingress route viewer."""
 

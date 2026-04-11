@@ -98,6 +98,7 @@ class GaugeRow(Static):
 
 class DashboardScreen(Widget):
     _is_mounted: bool = False
+    _running: bool = False
 
     """Main overview — stat cards, resource gauges, event log, node table."""
 

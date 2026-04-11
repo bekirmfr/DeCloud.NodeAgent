@@ -99,6 +99,7 @@ class NodeObligationsPanel(Static):
 
 class SystemVmsScreen(Widget):
     _is_mounted: bool = False
+    _running: bool = False
 
     """System VM (DHT / Relay / BlockStore) obligation overview."""
 
