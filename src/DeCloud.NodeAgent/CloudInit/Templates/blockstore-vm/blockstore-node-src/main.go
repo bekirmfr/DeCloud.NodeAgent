@@ -1840,6 +1840,18 @@ func (n *BlockNode) handleManifests(w http.ResponseWriter, r *http.Request) {
 		}
 		m.UpdatedAt = now
 		n.manifests[m.RootCid] = &m
+
+		// Evict older versions for the same resourceId — keep only the latest.
+		// The map is keyed by rootCid so each lazysync cycle adds a new entry.
+		// Without pruning this grows unboundedly (one entry per cycle, forever).
+		if m.ResourceID != "" {
+			for k, v := range n.manifests {
+				if v.ResourceID == m.ResourceID && k != m.RootCid && v.Version < m.Version {
+					delete(n.manifests, k)
+					_ = os.Remove(filepath.Join(StorageDir, DagsSubdir, k+".json"))
+				}
+			}
+		}
 		n.manifestsMu.Unlock()
 
 		if err := n.saveManifest(&m); err != nil {
