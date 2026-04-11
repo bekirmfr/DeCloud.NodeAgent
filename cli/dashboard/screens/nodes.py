@@ -87,13 +87,12 @@ class NodeCard(Static):
 
 class NodesScreen(Widget):
     _is_mounted: bool = False
-    _running: bool = False
 
     """Filterable node fleet view."""
 
     BINDINGS = [("r", "refresh", "Refresh")]
 
-    _nodes: reactive[list] = reactive([])
+    _node_data: reactive[list] = reactive([])
     _filter_status: reactive[str] = reactive("All")
     _filter_text: reactive[str] = reactive("")
 
@@ -118,16 +117,16 @@ class NodesScreen(Widget):
             return
         client = OrchestratorClient(cfg.orchestrator_url, cfg.token)
         try:
-            self._nodes = await client.list_nodes()
+            self._node_data = await client.list_nodes()
         except ApiError:
             pass
         finally:
             await client.close()
-        self._render()
+        self._render_list()
 
     def on_input_changed(self, event: Input.Changed) -> None:
         self._filter_text = event.value.lower()
-        self._render()
+        self._render_list()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         for label in _FILTER_LABELS:
@@ -135,11 +134,11 @@ class NodesScreen(Widget):
             self.query_one(f"#{btn_id}", Button).variant = "default"
         event.button.variant = "primary"
         self._filter_status = event.button.label  # type: ignore[arg-type]
-        self._render()
+        self._render_list()
 
-    def _render(self) -> None:
+    def _render_list(self) -> None:
         filtered = [
-            n for n in self._nodes
+            n for n in self._node_data
             if self._matches(n)
         ]
         container = self.query_one("#node-list", ScrollableContainer)
@@ -147,7 +146,7 @@ class NodesScreen(Widget):
         for node in filtered:
             container.mount(NodeCard(node))
         self.query_one("#node-count", Label).update(
-            f"Showing {len(filtered)} / {len(self._nodes)} nodes"
+            f"Showing {len(filtered)} / {len(self._node_data)} nodes"
         )
 
     def _matches(self, node: dict) -> bool:
