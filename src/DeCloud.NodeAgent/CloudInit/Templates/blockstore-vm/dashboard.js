@@ -206,7 +206,8 @@ function renderResourceRow(m) {
     const rootCid = truncate(m.rootCid || '—', 20);
     const version = m.version != null ? `v${m.version}` : '—';
     const size = formatBytes(m.totalBytes || 0);
-    const chunks = formatNum(m.chunkCids ?
+    const chunks = formatNum(m.chunkCids ? m.chunkCids.length : 0);
+    const updated = m.updatedAt ? timeAgo(m.updatedAt) : '—';
 
     return `<tr>
         <td>${typeBadge}</td>
