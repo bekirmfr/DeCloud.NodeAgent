@@ -50,10 +50,10 @@ class BillingScreen(Widget):
     def compose(self) -> ComposeResult:
         yield Label("Billing", classes="section-title")
         with Horizontal(id="balance-row"):
-            yield _BalanceCard("Available Balance", "bal-available")
+            yield _BalanceCard("Balance", "bal-available")
             yield _BalanceCard("Earned (30d)", "bal-earned")
-            yield _BalanceCard("Pending Settlement", "bal-pending")
-            yield _BalanceCard("Active VMs Billed", "bal-vms")
+            yield _BalanceCard("Pending", "bal-pending")
+            yield _BalanceCard("Active VMs", "bal-vms")
 
         yield Label("Transaction History", classes="section-title")
         yield DataTable(id="tx-table", zebra_stripes=True)

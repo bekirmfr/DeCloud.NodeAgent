@@ -184,6 +184,8 @@ class DashboardScreen(Widget):
         self._log_event(f"[dim]Refreshed — {len(nodes)} nodes[/]")
 
     def _log_event(self, msg: str) -> None:
+        import re
+        msg = re.sub(r"\[/?[\w ]+\]", "", msg)
         self.query_one("#event-log", Log).write_line(msg)
 
 
