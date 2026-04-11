@@ -45,7 +45,7 @@ class LogsScreen(Widget):
                 yield Button(lvl, id=f"lvl-{lvl}", variant="default")
             yield Button("Clear", id="btn-clear", variant="default")
 
-        yield Log(id="log-out", max_lines=cfg.log_lines, markup=True)
+        yield Log(id="log-out", max_lines=cfg.log_lines)
         yield Label("● live poll", id="log-status")
 
     def on_mount(self) -> None:
