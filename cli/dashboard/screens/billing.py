@@ -1,65 +1,38 @@
-"""
-screens/billing.py — Billing and payment screen.
-
-Shows USDC balance on Polygon and the recent transaction log.
-Source: orchestrator GET /api/user/balance + /api/user/transactions.
-"""
+"""screens/billing.py — Billing and transactions."""
 
 from __future__ import annotations
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal
-from textual.widget import Widget
-from textual.widgets import DataTable, Label, Static
+from textual.containers import Horizontal, Vertical
+from textual.widgets import DataTable, Label
 
 from config import cfg
-from api.orchestrator import OrchestratorClient, ApiError
+from api.orchestrator import OrchestratorClient
+from screens._base import BaseScreen
 
 
-class _BalanceCard(Vertical):
-    DEFAULT_CSS = """
-    _BalanceCard {
-        border: solid $panel;
-        padding: 1 2;
-        width: 1fr;
-        height: 7;
-    }
-    """
-
-    def __init__(self, label: str, amount_id: str) -> None:
-        super().__init__()
-        self._label = label
-        self._amount_id = amount_id
-
-    def compose(self) -> ComposeResult:
-        yield Label(self._label, classes="card-label")
-        yield Label("—", id=self._amount_id, classes="card-value")
-
-    def set_value(self, value: str) -> None:
-        self.query_one(f"#{self._amount_id}", Label).update(value)
-
-
-class BillingScreen(Vertical):
-    _is_mounted: bool = False
-
-    """Billing overview — balance + transaction history."""
-
+class BillingScreen(BaseScreen):
+    ACTIVE_LABEL = "Billing"
     BINDINGS = [("r", "refresh", "Refresh")]
 
-    def compose(self) -> ComposeResult:
+    def compose_content(self) -> ComposeResult:
         yield Label("Billing", classes="section-title")
         with Horizontal(id="balance-row"):
-            yield _BalanceCard("Available Balance", "bal-available")
-            yield _BalanceCard("Earned (30d)", "bal-earned")
-            yield _BalanceCard("Pending Settlement", "bal-pending")
-            yield _BalanceCard("Active VMs Billed", "bal-vms")
+            for cid, lbl in [
+                ("bal-available","Balance"), ("bal-earned","Earned (30d)"),
+                ("bal-pending","Pending"),   ("bal-vms","Active VMs"),
+            ]:
+                with Vertical(classes="stat-card", id=cid):
+                    yield Label(lbl, classes="card-label")
+                    yield Label("—", classes="card-value")
 
         yield Label("Transaction History", classes="section-title")
         yield DataTable(id="tx-table", zebra_stripes=True)
 
     def on_mount(self) -> None:
-        table = self.query_one("#tx-table", DataTable)
-        table.add_columns("VM / Description", "Duration", "Amount (USDC)", "Trigger", "Status")
+        self.query_one("#tx-table", DataTable).add_columns(
+            "VM / Description", "Duration", "Amount (USDC)", "Trigger", "Status"
+        )
         self.set_interval(cfg.refresh_interval, self._load)
         self.run_worker(self._load(), exclusive=True)
 
@@ -69,49 +42,39 @@ class BillingScreen(Vertical):
     async def _load(self) -> None:
         if not cfg.has_orchestrator:
             return
-
-        client = OrchestratorClient(cfg.orchestrator_url, cfg.token)
+        import asyncio
+        oc = OrchestratorClient(cfg.orchestrator_url, cfg.token)
         try:
-            import asyncio
             balance, txs = await asyncio.gather(
-                client.get_balance(),
-                client.list_transactions(),
+                oc.get_balance(), oc.list_transactions(),
                 return_exceptions=True,
             )
         finally:
-            await client.close()
+            await oc.close()
 
         if isinstance(balance, dict):
-            self._apply_balance(balance)
+            self._set("bal-available", f"${float(balance.get('availableBalance',0)):.2f}")
+            self._set("bal-earned",    f"${float(balance.get('earned30d',0)):.2f}")
+            self._set("bal-pending",   f"${float(balance.get('pendingBalance',0)):.2f}")
+            self._set("bal-vms",       str(balance.get("billedVmCount",balance.get("activeVms","—"))))
 
         if isinstance(txs, list):
-            self._render_txs(txs)
+            t = self.query_one("#tx-table", DataTable)
+            t.clear()
+            for tx in txs:
+                amount = tx.get("amount", tx.get("amountUsdc", 0))
+                status = tx.get("status","—")
+                color  = "green" if status.lower() == "settled" else "yellow"
+                t.add_row(
+                    f"{tx.get('vmId','—')[:10]}  {tx.get('description','')}",
+                    tx.get("duration", tx.get("durationHuman","—")),
+                    f"[green]+${float(amount):.2f}[/]",
+                    tx.get("trigger","—"),
+                    f"[{color}]{status}[/]",
+                )
 
-    def _apply_balance(self, b: dict) -> None:
-        self.query_one("#bal-available", Label).update(
-            f"[bold cyan]${b.get('availableBalance', 0):.2f}[/]"
-        )
-        self.query_one("#bal-earned", Label).update(
-            f"[green]${b.get('earned30d', 0):.2f}[/]"
-        )
-        self.query_one("#bal-pending", Label).update(
-            f"${b.get('pendingBalance', b.get('pendingSettlement', 0)):.2f}"
-        )
-        self.query_one("#bal-vms", Label).update(
-            str(b.get("billedVmCount", b.get("activeVms", "—")))
-        )
-
-    def _render_txs(self, txs: list) -> None:
-        table = self.query_one("#tx-table", DataTable)
-        table.clear()
-        for tx in txs:
-            amount = tx.get("amount", tx.get("amountUsdc", 0))
-            status = tx.get("status", "—")
-            color = "green" if status.lower() == "settled" else "yellow"
-            table.add_row(
-                f"{tx.get('vmId', '—')[:10]}  {tx.get('description', '')}",
-                tx.get("duration", tx.get("durationHuman", "—")),
-                f"[green]+${float(amount):.2f}[/]",
-                tx.get("trigger", "—"),
-                f"[{color}]{status}[/]",
-            )
+    def _set(self, cid: str, value: str) -> None:
+        try:
+            self.query_one(f"#{cid} .card-value", Label).update(value)
+        except Exception:
+            pass
