@@ -12,6 +12,8 @@ package_upgrade: false
 bootcmd:
   - rm -f /etc/machine-id /var/lib/dbus/machine-id
   - systemd-machine-id-setup
+  # Mask snapd/LXD — unused in system VMs, adds ~50s boot delay
+  - systemctl mask snapd.service snapd.socket snapd.seeded.service snap.lxd.activate.service lxd.service lxd-agent.service 2>/dev/null || true
 
 # =====================================================
 # SYSTEM PACKAGES

@@ -6,9 +6,16 @@
 hostname: __HOSTNAME__
 manage_etc_hosts: true
 
+package_update: false
+package_upgrade: false
+
 bootcmd:
   - rm -f /etc/machine-id /var/lib/dbus/machine-id
   - systemd-machine-id-setup
+  # Mask snapd/LXD — unused in system VMs, adds ~50s boot delay
+  - systemctl mask snapd.service snapd.socket snapd.seeded.service snap.lxd.activate.service lxd.service lxd-agent.service 2>/dev/null || true
+  # Start qemu-guest-agent early, independent of runcmd
+  - systemctl start qemu-guest-agent 2>/dev/null || true
 
 disable_root: false
 
@@ -286,7 +293,6 @@ write_files:
 runcmd:
   # QEMU guest agent (static unit — systemctl enable fails silently on Debian)
   - ln -sf /lib/systemd/system/qemu-guest-agent.service /etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service
-  - systemctl start qemu-guest-agent
 
   # WireGuard mesh enrollment — must happen before block store starts
   # Skip gracefully if no relay was configured at deploy time
