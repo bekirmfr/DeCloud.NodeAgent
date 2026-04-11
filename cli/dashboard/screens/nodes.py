@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, ScrollableContainer
-from textual.screen import Screen
+from textual.widget import Widget
 from textual.widgets import Button, DataTable, Input, Label, ProgressBar, Static
 from textual.reactive import reactive
 
@@ -85,7 +85,9 @@ class NodeCard(Static):
             yield Label("  ".join(parts), markup=True, classes="node-meta")
 
 
-class NodesScreen(Screen):
+class NodesScreen(Widget):
+    _is_mounted: bool = False
+
     """Filterable node fleet view."""
 
     BINDINGS = [("r", "refresh", "Refresh")]

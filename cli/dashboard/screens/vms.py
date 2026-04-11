@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal
-from textual.screen import Screen
+from textual.widget import Widget
 from textual.widgets import Button, DataTable, Input, Label, Select
 from textual.reactive import reactive
 
@@ -30,7 +30,9 @@ _STATUS_OPTS = [("All", ""), ("Running", "running"), ("Stopped", "stopped"), ("P
 _ACTIONS = ["start", "stop", "restart", "forceStop"]
 
 
-class VmsScreen(Screen):
+class VmsScreen(Widget):
+    _is_mounted: bool = False
+
     """VM fleet table with inline action bar."""
 
     BINDINGS = [

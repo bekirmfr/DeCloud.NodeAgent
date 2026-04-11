@@ -11,7 +11,7 @@ from __future__ import annotations
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
-from textual.screen import Screen
+from textual.widget import Widget
 from textual.widgets import (
     DataTable,
     Label,
@@ -48,8 +48,8 @@ class StatCard(Static):
     StatCard .card-sub   { color: $text-muted; }
     """
 
-    def __init__(self, label: str, value: str, sub: str = "", sub_style: str = "") -> None:
-        super().__init__()
+    def __init__(self, label: str, value: str, sub: str = "", sub_style: str = "", **kwargs) -> None:
+        super().__init__(**kwargs)
         self._label = label
         self._value = value
         self._sub = sub
@@ -58,14 +58,15 @@ class StatCard(Static):
     def compose(self) -> ComposeResult:
         yield Label(self._label, classes="card-label")
         yield Label(self._value, classes="card-value")
-        if self._sub:
-            yield Label(f"[{self._sub_style}]{self._sub}[/]" if self._sub_style else self._sub,
-                        classes="card-sub", markup=True)
+        yield Label(self._sub, classes="card-sub")
 
     def update_value(self, value: str, sub: str = "") -> None:
         self.query_one(".card-value", Label).update(value)
         if sub:
-            self.query_one(".card-sub", Label).update(sub)
+            try:
+                self.query_one(".card-sub", Label).update(sub)
+            except Exception:
+                pass
 
 
 class GaugeRow(Static):
@@ -95,7 +96,9 @@ class GaugeRow(Static):
         self.query_one(ProgressBar).advance(self._pct)
 
 
-class DashboardScreen(Screen):
+class DashboardScreen(Widget):
+    _is_mounted: bool = False
+
     """Main overview — stat cards, resource gauges, event log, node table."""
 
     BINDINGS = [("r", "refresh", "Refresh")]
@@ -121,7 +124,7 @@ class DashboardScreen(Screen):
 
             with Vertical(id="events-panel"):
                 yield Label("Recent Events", classes="section-title")
-                yield Log(id="event-log", max_lines=cfg.log_lines, markup=True)
+                yield Log(id="event-log", max_lines=cfg.log_lines)
 
         yield Label("Node Fleet", classes="section-title")
         yield DataTable(id="node-table", zebra_stripes=True)

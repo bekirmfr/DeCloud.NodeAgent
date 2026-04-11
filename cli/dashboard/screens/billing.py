@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal
-from textual.screen import Screen
+from textual.widget import Widget
 from textual.widgets import DataTable, Label, Static
 
 from config import cfg
@@ -39,7 +39,9 @@ class _BalanceCard(Static):
         self.query_one(f"#{self._amount_id}", Label).update(value)
 
 
-class BillingScreen(Screen):
+class BillingScreen(Widget):
+    _is_mounted: bool = False
+
     """Billing overview — balance + transaction history."""
 
     BINDINGS = [("r", "refresh", "Refresh")]

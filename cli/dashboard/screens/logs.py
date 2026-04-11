@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal
-from textual.screen import Screen
+from textual.widget import Widget
 from textual.widgets import Button, Input, Label, Log
 
 from config import cfg
@@ -27,7 +27,9 @@ _LEVEL_COLOR = {
 _LEVELS = ["ALL", "INFO", "WARN", "ERR"]
 
 
-class LogsScreen(Screen):
+class LogsScreen(Widget):
+    _is_mounted: bool = False
+
     """Live log tail with level filter and keyword search."""
 
     BINDINGS = [("r", "refresh", "Refresh"), ("c", "clear", "Clear")]

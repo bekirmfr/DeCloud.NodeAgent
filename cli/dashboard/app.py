@@ -77,7 +77,6 @@ class NavItem(Static):
         height: 2;
         padding: 0 2;
         color: $text-muted;
-        cursor: pointer;
     }
     NavItem:hover { background: $boost; color: $text; }
     NavItem.active {
@@ -278,16 +277,22 @@ class DeCloudDashboard(App):
     # ── Screen navigation ──────────────────────────────────────────────
 
     def switch_to(self, label: str) -> None:
-        """Mount the chosen screen into #main-area, unmounting the previous."""
+        """Mount the chosen widget into #main-area, unmounting the previous."""
         entry = next((e for e in NAV if e[1] == label), None)
         if not entry:
             return
-        _, _, screen_cls = entry
-        area = self.query_one("#main-area", Vertical)
-        area.remove_children()
-        area.mount(screen_cls())
         self._active_label = label
         self._update_nav_highlight(label)
+        self.run_worker(self._mount_screen(label), exclusive=True, name="switch")
+
+    async def _mount_screen(self, label: str) -> None:
+        entry = next((e for e in NAV if e[1] == label), None)
+        if not entry:
+            return
+        _, _, widget_cls = entry
+        area = self.query_one("#main-area", Vertical)
+        await area.remove_children()
+        await area.mount(widget_cls())
 
     def _update_nav_highlight(self, active_label: str) -> None:
         for item in self.query(NavItem):

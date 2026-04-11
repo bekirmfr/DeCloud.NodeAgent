@@ -8,14 +8,16 @@ Falls back gracefully when node agent is not configured.
 from __future__ import annotations
 
 from textual.app import ComposeResult
-from textual.screen import Screen
+from textual.widget import Widget
 from textual.widgets import DataTable, Label, TabbedContent, TabPane
 
 from config import cfg
 from api.node_agent import NodeAgentClient
 
 
-class NetworkScreen(Screen):
+class NetworkScreen(Widget):
+    _is_mounted: bool = False
+
     """Interfaces + WireGuard peers + port forwarding tabs."""
 
     BINDINGS = [("r", "refresh", "Refresh")]

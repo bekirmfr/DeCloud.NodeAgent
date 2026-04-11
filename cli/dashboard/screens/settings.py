@@ -14,7 +14,7 @@ from pathlib import Path
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.screen import Screen
+from textual.widget import Widget
 from textual.widgets import Button, Input, Label, Select, Static, Switch
 
 from config import cfg
@@ -134,7 +134,9 @@ class DisplaySettings(SettingsGroup):
             yield Switch(value=cfg.node_only, id="sw-node-only")
 
 
-class SettingsScreen(Screen):
+class SettingsScreen(Widget):
+    _is_mounted: bool = False
+
     """Connection and display settings."""
 
     BINDINGS = [("ctrl+s", "save", "Save to disk")]

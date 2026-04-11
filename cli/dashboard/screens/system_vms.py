@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from textual.app import ComposeResult
 from textual.containers import ScrollableContainer, Vertical
-from textual.screen import Screen
+from textual.widget import Widget
 from textual.widgets import Label, ProgressBar, Static
 
 from config import cfg
@@ -97,7 +97,9 @@ class NodeObligationsPanel(Static):
             yield ObligationCard(o)
 
 
-class SystemVmsScreen(Screen):
+class SystemVmsScreen(Widget):
+    _is_mounted: bool = False
+
     """System VM (DHT / Relay / BlockStore) obligation overview."""
 
     BINDINGS = [("r", "refresh", "Refresh")]
