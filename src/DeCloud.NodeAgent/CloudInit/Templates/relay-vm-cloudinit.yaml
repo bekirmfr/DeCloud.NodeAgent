@@ -357,7 +357,7 @@ write_files:
 runcmd:
   # Start QEMU guest agent first so the orchestrator monitor can track progress
   - ln -sf /lib/systemd/system/qemu-guest-agent.service /etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service
-  - systemctl start qemu-guest-agent
+  - systemctl start qemu-guest-agent || true
 
   # Enable IP forwarding (required for relay functionality)
   - echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf

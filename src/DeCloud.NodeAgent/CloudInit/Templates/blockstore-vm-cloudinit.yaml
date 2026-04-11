@@ -293,6 +293,7 @@ write_files:
 runcmd:
   # QEMU guest agent (static unit — systemctl enable fails silently on Debian)
   - ln -sf /lib/systemd/system/qemu-guest-agent.service /etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service
+  - systemctl start qemu-guest-agent || true
 
   # WireGuard mesh enrollment — must happen before block store starts
   # Skip gracefully if no relay was configured at deploy time
