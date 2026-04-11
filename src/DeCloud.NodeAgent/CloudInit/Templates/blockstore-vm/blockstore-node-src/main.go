@@ -686,29 +686,27 @@ func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlock
 		return
 	}
 
-	// Drop announcement if our local manifest for this VM is already at or
-	// ahead of the announced version — block belongs to a stale cycle.
-	// omitempty means ManifestVersion=0 on old peers is treated as unknown
-	// and passes through (backward compatible).
+	// Drop announcement if our last fully completed manifest version for this VM
+	// is already >= the announced version — block belongs to a cycle we already have.
+	// Uses a {vmId}.version file written after each complete manifest pull, NOT the
+	// owner index line count (which is block count, not version — using it caused
+	// false positives: as soon as one block was pulled localCount >= version=1).
 	if ann.ManifestVersion > 0 && ann.VMId != "" {
-		ownerFile := filepath.Join(StorageDir, OwnersSubdir, ann.VMId+".cids")
-		if info, err := os.Stat(ownerFile); err == nil {
-			// Use line count as proxy for local version — same approach as GET /manifests synthesis.
-			// A proper version store can replace this once manifest versioning is persisted locally.
-			if data, err := os.ReadFile(ownerFile); err == nil {
-				localCount := len(strings.Split(strings.TrimSpace(string(data)), "\n"))
-				if localCount >= ann.ManifestVersion {
+		versionFile := filepath.Join(StorageDir, OwnersSubdir, ann.VMId+".version")
+		if data, err := os.ReadFile(versionFile); err == nil {
+			if localVersion, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
+				if localVersion >= ann.ManifestVersion {
 					n.diagLog.Add("announcement_stale", map[string]interface{}{
-						"cid":             cidShort(ann.CID),
-						"vmId":            cidShort(ann.VMId),
+						"cid":              cidShort(ann.CID),
+						"vmId":             cidShort(ann.VMId),
 						"announcedVersion": ann.ManifestVersion,
-						"localCount":      localCount,
+						"localVersion":     localVersion,
 					})
-					_ = info
 					return
 				}
 			}
 		}
+		// No version file = never received a complete manifest = pull everything
 	}
 	usedBytes, _ := n.usedBytes(ctx)
 	usagePct := float64(usedBytes) / float64(n.cfg.StorageBytes) * 100
@@ -1891,6 +1889,13 @@ func (n *BlockNode) handleManifests(w http.ResponseWriter, r *http.Request) {
 
 		if err := n.saveManifest(&m); err != nil {
 			log.Printf("Warning: failed to persist manifest %s: %v", m.RootCid[:12], err)
+		}
+
+		// Write version file so handleNewBlockAnnouncement can filter stale
+		// announcements for this VM in subsequent cycles.
+		if m.ResourceID != "" && m.Version > 0 {
+			versionFile := filepath.Join(StorageDir, OwnersSubdir, m.ResourceID+".version")
+			_ = os.WriteFile(versionFile, []byte(strconv.Itoa(m.Version)), 0644)
 		}
 
 		json.NewEncoder(w).Encode(map[string]any{
