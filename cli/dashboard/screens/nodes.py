@@ -1,33 +1,27 @@
 """
-screens/nodes.py — Node fleet management screen.
+screens/nodes.py — Nodes owned by the same wallet as this node.
 
-Filterable list of nodes with per-node resource bars,
-system VM obligation status, and agent version info.
+Data: node agent summary (for wallet) + orchestrator node list (filtered by wallet).
 """
 
 from __future__ import annotations
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical, ScrollableContainer
+from textual.containers import Horizontal, ScrollableContainer
 from textual.widget import Widget
-from textual.widgets import Button, DataTable, Input, Label, ProgressBar, Static
-from textual.reactive import reactive
+from textual.widgets import Button, Input, Label, ProgressBar, Static
 
 from config import cfg
-from api.orchestrator import OrchestratorClient, ApiError
+from api.node_agent import NodeAgentClient
+from api.orchestrator import OrchestratorClient
 
-
-_STATUS_COLOR = {
-    "Online": "green",
-    "Degraded": "yellow",
-    "Offline": "red",
-}
-
-_FILTER_LABELS = ["All", "Online", "Degraded", "Offline"]
+_STATUS_COLOR = {"Online": "green", "Degraded": "yellow", "Offline": "red"}
+_FILTERS = ["All", "Online", "Degraded", "Offline"]
 
 
 class NodeCard(Static):
-    """Compact card showing one node's health."""
+    _is_mounted: bool = False
+    _running: bool = False
 
     DEFAULT_CSS = """
     NodeCard {
@@ -35,77 +29,73 @@ class NodeCard(Static):
         padding: 1 2;
         margin-bottom: 1;
     }
-    NodeCard .node-name  { text-style: bold; color: $accent; }
-    NodeCard .node-meta  { color: $text-muted; }
-    NodeCard .metric-row { height: 2; layout: horizontal; margin-top: 1; }
-    NodeCard .mlabel     { width: 10; color: $text-muted; }
-    NodeCard .mpct       { width: 6; text-align: right; color: $text-muted; }
+    NodeCard .nc-head  { text-style: bold; color: $accent; }
+    NodeCard .nc-meta  { color: $text-muted; }
+    NodeCard .nc-row   { height: 2; layout: horizontal; margin-top: 1; }
+    NodeCard .nc-lbl   { width: 10; color: $text-muted; }
+    NodeCard .nc-pct   { width: 6; text-align: right; color: $text-muted; }
     """
 
-    def __init__(self, node: dict) -> None:
-        super().__init__()
+    def __init__(self, node: dict, is_current: bool = False, **kwargs) -> None:
+        super().__init__(**kwargs)
         self._node = node
+        self._is_current = is_current
 
     def compose(self) -> ComposeResult:
-        n = self._node
-        res = n.get("totalResources") or n.get("availableResources") or {}
-        status = n.get("status", "Unknown")
-        color = _STATUS_COLOR.get(status, "white")
+        n      = self._node
+        status = n.get("status", "?")
+        color  = _STATUS_COLOR.get(status, "white")
+        marker = "  (this node)" if self._is_current else ""
+        res    = n.get("totalResources") or n.get("availableResources") or {}
 
         yield Label(
-            f"[bold cyan]{n.get('name', n.get('id', '?'))}[/]  "
-            f"[{color}]{status}[/]",
-            markup=True,
-            classes="node-name",
+            f"[bold]{(n.get('name') or n.get('id') or '?')[:32]}[/]  [{color}]{status}[/]{marker}",
+            classes="nc-head", markup=True,
         )
         yield Label(
-            f"{n.get('publicIp', '?')} · {n.get('region', '?')} · "
-            f"{n.get('architecture', 'x86_64')} · v{n.get('agentVersion', '?')}",
-            classes="node-meta",
+            f"{n.get('publicIp','?')}  ·  {n.get('region','?')}  ·  "
+            f"{n.get('architecture','x86_64')}  ·  v{n.get('agentVersion','?')}",
+            classes="nc-meta",
         )
 
         for label, key in [("CPU", "cpuUsagePct"), ("Memory", "memUsagePct"), ("Storage", "storageUsagePct")]:
             pct = float(res.get(key, 0))
-            with Horizontal(classes="metric-row"):
-                yield Label(label, classes="mlabel")
+            with Horizontal(classes="nc-row"):
+                yield Label(label, classes="nc-lbl")
                 bar = ProgressBar(total=100, show_eta=False, show_percentage=False)
                 yield bar
-                yield Label(f"{pct:.0f}%", classes="mpct")
+                yield Label(f"{pct:.0f}%", classes="nc-pct")
             bar.advance(pct)
 
-        # Obligation badges
-        obligations = n.get("systemVmObligations") or []
-        if obligations:
-            parts = []
-            for o in obligations:
-                role = o.get("roleName", "?")
-                st = o.get("statusName", "?")
-                c = "green" if st == "Active" else ("yellow" if st == "Deploying" else "red")
-                parts.append(f"[{c}]{role}:{st}[/]")
-            yield Label("  ".join(parts), markup=True, classes="node-meta")
+        vms = n.get("runningVmCount", 0)
+        yield Label(f"VMs running: {vms}", classes="nc-meta")
 
 
 class NodesScreen(Widget):
     _is_mounted: bool = False
-
-    """Filterable node fleet view."""
+    _running: bool = False
 
     BINDINGS = [("r", "refresh", "Refresh")]
 
-    _node_data: reactive[list] = reactive([])
-    _filter_status: reactive[str] = reactive("All")
-    _filter_text: reactive[str] = reactive("")
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._node_data: list = []
+        self._my_wallet: str = ""
+        self._my_node_id: str = ""
+        self._filter_status: str = "All"
+        self._filter_text: str = ""
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="filter-bar"):
             yield Input(placeholder="Filter nodes…", id="search-input")
-            for label in _FILTER_LABELS:
+            for label in _FILTERS:
                 yield Button(label, id=f"btn-{label.lower()}", variant="default")
 
         yield Label("", id="node-count", classes="section-title")
         yield ScrollableContainer(id="node-list")
 
     def on_mount(self) -> None:
+        self.query_one("#btn-all", Button).variant = "primary"
         self.set_interval(cfg.refresh_interval, self._load)
         self.run_worker(self._load(), exclusive=True)
 
@@ -113,53 +103,70 @@ class NodesScreen(Widget):
         self.run_worker(self._load(), exclusive=True)
 
     async def _load(self) -> None:
-        if not cfg.has_orchestrator:
-            return
-        client = OrchestratorClient(cfg.orchestrator_url, cfg.token)
-        try:
-            self._node_data = await client.list_nodes()
-        except ApiError:
-            pass
-        finally:
-            await client.close()
-        self._render_list()
+        # Get wallet + node ID from local node agent
+        if cfg.has_node_agent:
+            na = NodeAgentClient(cfg.node_url)
+            try:
+                summary = await na.get_summary()
+                self._my_wallet  = (summary.get("walletAddress") or "").lower()
+                self._my_node_id = (summary.get("nodeId") or "").lower()
+            except Exception:
+                pass
+            finally:
+                await na.close()
 
-    def on_input_changed(self, event: Input.Changed) -> None:
-        self._filter_text = event.value.lower()
-        self._render_list()
+        # Get fleet from orchestrator, filtered to same wallet
+        if cfg.has_orchestrator:
+            oc = OrchestratorClient(cfg.orchestrator_url, cfg.token)
+            try:
+                all_nodes = await oc.list_nodes()
+                if self._my_wallet:
+                    self._node_data = [
+                        n for n in all_nodes
+                        if (n.get("walletAddress") or "").lower() == self._my_wallet
+                    ]
+                else:
+                    self._node_data = all_nodes
+            except Exception:
+                pass
+            finally:
+                await oc.close()
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        for label in _FILTER_LABELS:
-            btn_id = f"btn-{label.lower()}"
-            self.query_one(f"#{btn_id}", Button).variant = "default"
-        event.button.variant = "primary"
-        self._filter_status = event.button.label  # type: ignore[arg-type]
-        self._render_list()
+        self._render()
 
-    def _render_list(self) -> None:
-        filtered = [
-            n for n in self._node_data
-            if self._matches(n)
-        ]
+    def _render(self) -> None:
+        filtered = [n for n in self._node_data if self._matches(n)]
         container = self.query_one("#node-list", ScrollableContainer)
         container.remove_children()
         for node in filtered:
-            container.mount(NodeCard(node))
+            is_current = (node.get("id") or "").lower() == self._my_node_id
+            container.mount(NodeCard(node, is_current=is_current))
         self.query_one("#node-count", Label).update(
             f"Showing {len(filtered)} / {len(self._node_data)} nodes"
         )
 
     def _matches(self, node: dict) -> bool:
-        status = node.get("status", "")
-        if self._filter_status != "All" and status != self._filter_status:
+        if self._filter_status != "All" and node.get("status") != self._filter_status:
             return False
         if self._filter_text:
-            searchable = " ".join([
-                node.get("name", ""),
-                node.get("id", ""),
-                node.get("region", ""),
-                node.get("publicIp", ""),
+            haystack = " ".join([
+                node.get("name", ""), node.get("id", ""),
+                node.get("region", ""), node.get("publicIp", ""),
             ]).lower()
-            if self._filter_text not in searchable:
+            if self._filter_text not in haystack:
                 return False
         return True
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self._filter_text = event.value.lower()
+        self._render()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id or ""
+        if not bid.startswith("btn-"):
+            return
+        for label in _FILTERS:
+            self.query_one(f"#btn-{label.lower()}", Button).variant = "default"
+        event.button.variant = "primary"
+        self._filter_status = str(event.button.label)
+        self._render()

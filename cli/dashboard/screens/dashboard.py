@@ -1,203 +1,304 @@
 """
-screens/dashboard.py — Cluster overview screen.
+screens/dashboard.py — Node-centric overview.
 
-Shows: stat cards (nodes/VMs/revenue/network), resource gauges,
-recent event feed, and a node fleet snapshot table.
-Auto-refreshes every cfg.refresh_interval seconds.
+Header stats  : System VMs (running/obligations), Tenant VMs (running/scheduled),
+                Revenue/24h (pending USDC), Network In/Out
+Resources     : CPU%, GPU%, Storage%, Network%
+Fleet         : Nodes owned by same wallet (orchestrator)
+Login bar     : node ID, wallet, orchestrator status
 """
 
 from __future__ import annotations
 
+import asyncio
+import re
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.reactive import reactive
 from textual.widget import Widget
-from textual.widgets import (
-    DataTable,
-    Label,
-    Log,
-    ProgressBar,
-    Static,
-)
-from textual.timer import Timer
+from textual.widgets import DataTable, Label, ProgressBar, Static, Log
 
 from config import cfg
-from api.orchestrator import OrchestratorClient, ApiError
 from api.node_agent import NodeAgentClient
+from api.orchestrator import OrchestratorClient
 
 
-_STATUS_STYLE = {
-    "Online": "bold green",
-    "Degraded": "bold yellow",
-    "Offline": "bold red",
-}
+_SYS_VM_TYPES = {5, 6, 8}   # Relay=5, Dht=6, BlockStore=8
+
+
+def _is_running(vm: dict) -> bool:
+    s = vm.get("state", vm.get("status", ""))
+    return s in (1, "Running", "running")
+
+
+def _is_system(vm: dict) -> bool:
+    try:
+        return int((vm.get("spec") or {}).get("vmType", -1)) in _SYS_VM_TYPES
+    except (TypeError, ValueError):
+        return False
+
+
+def _pct(used: float, total: float) -> float:
+    return (used / total * 100) if total > 0 else 0.0
+
+
+def _strip_markup(s: str) -> str:
+    return re.sub(r"\[/?[\w ]+\]", "", s)
 
 
 class StatCard(Static):
-    """A single metric card: label + big value + sub-line."""
+    _is_mounted: bool = False
+    _running: bool = False
 
     DEFAULT_CSS = """
-    StatCard {
-        border: solid $panel;
-        padding: 1 2;
-        width: 1fr;
-        height: 7;
-    }
-    StatCard .card-label { color: $text-muted; }
-    StatCard .card-value { color: $text; text-style: bold; }
-    StatCard .card-sub   { color: $text-muted; }
+    StatCard { border: solid $panel; padding: 1 2; width: 1fr; height: 7; }
+    StatCard .card-label { color: $text-muted; height: 1; }
+    StatCard .card-value { text-style: bold; height: 2; }
+    StatCard .card-sub   { color: $text-muted; height: 1; }
     """
 
-    def __init__(self, label: str, value: str, sub: str = "", sub_style: str = "", **kwargs) -> None:
+    def __init__(self, label: str, **kwargs) -> None:
         super().__init__(**kwargs)
         self._label = label
-        self._value = value
-        self._sub = sub
-        self._sub_style = sub_style
 
     def compose(self) -> ComposeResult:
         yield Label(self._label, classes="card-label")
-        yield Label(self._value, classes="card-value")
-        yield Label(self._sub, classes="card-sub")
+        yield Label("—", classes="card-value")
+        yield Label("", classes="card-sub")
 
-    def update_value(self, value: str, sub: str = "") -> None:
-        self.query_one(".card-value", Label).update(value)
-        if sub:
-            try:
-                self.query_one(".card-sub", Label).update(sub)
-            except Exception:
-                pass
+    def set_value(self, value: str, sub: str = "") -> None:
+        try:
+            self.query_one(".card-value", Label).update(value)
+            self.query_one(".card-sub", Label).update(sub)
+        except Exception:
+            pass
 
 
 class GaugeRow(Static):
-    """Label + progress bar + percentage."""
+    _is_mounted: bool = False
+    _running: bool = False
 
     DEFAULT_CSS = """
-    GaugeRow {
-        height: 2;
-        layout: horizontal;
-    }
-    GaugeRow .gauge-label { width: 12; color: $text-muted; }
-    GaugeRow ProgressBar   { width: 1fr; }
-    GaugeRow .gauge-pct   { width: 6; text-align: right; color: $text-muted; }
+    GaugeRow { height: 2; layout: horizontal; }
+    GaugeRow .gl { width: 12; color: $text-muted; }
+    GaugeRow ProgressBar { width: 1fr; }
+    GaugeRow .gp { width: 7; text-align: right; color: $text-muted; }
     """
 
-    def __init__(self, label: str, pct: float) -> None:
-        super().__init__()
+    def __init__(self, label: str, **kwargs) -> None:
+        super().__init__(**kwargs)
         self._label = label
-        self._pct = pct
 
     def compose(self) -> ComposeResult:
-        yield Label(self._label, classes="gauge-label")
+        yield Label(self._label, classes="gl")
         yield ProgressBar(total=100, show_eta=False, show_percentage=False)
-        yield Label(f"{self._pct:.0f}%", classes="gauge-pct")
+        yield Label("0%", classes="gp")
 
-    def on_mount(self) -> None:
-        self.query_one(ProgressBar).advance(self._pct)
+    def set_pct(self, pct: float) -> None:
+        pct = min(max(pct, 0.0), 100.0)
+        try:
+            self.query_one(ProgressBar).progress = pct
+            self.query_one(".gp", Label).update(f"{pct:.0f}%")
+        except Exception:
+            pass
+
+
+class LoginBar(Static):
+    _is_mounted: bool = False
+    _running: bool = False
+
+    DEFAULT_CSS = """
+    LoginBar {
+        height: 2;
+        background: $surface;
+        border-bottom: solid $panel;
+        layout: horizontal;
+        align: left middle;
+        padding: 0 2;
+    }
+    LoginBar Label { margin-right: 3; color: $text-muted; }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Label("", id="lb-node")
+        yield Label("", id="lb-wallet")
+        yield Label("", id="lb-orch")
+
+    def update(self, node_id: str, wallet: str, connected: bool) -> None:
+        nid = (node_id[:14] + "…") if len(node_id) > 16 else node_id
+        wal = (wallet[:8] + "…" + wallet[-4:]) if len(wallet) > 14 else wallet
+        orch = "Orch: connected" if connected else "Orch: offline"
+        try:
+            self.query_one("#lb-node",   Label).update(f"Node: {nid}")
+            self.query_one("#lb-wallet", Label).update(f"Wallet: {wal}")
+            self.query_one("#lb-orch",   Label).update(orch)
+        except Exception:
+            pass
 
 
 class DashboardScreen(Widget):
     _is_mounted: bool = False
     _running: bool = False
 
-    """Main overview — stat cards, resource gauges, event log, node table."""
-
     BINDINGS = [("r", "refresh", "Refresh")]
 
-    _timer: Timer | None = None
-    nodes: reactive[list] = reactive([])
-    stats: reactive[dict] = reactive({})
-
     def compose(self) -> ComposeResult:
+        yield LoginBar(id="login-bar")
+
         with Horizontal(id="stat-row"):
-            yield StatCard("Nodes Online", "—", "loading…", id="card-nodes")
-            yield StatCard("Running VMs", "—", id="card-vms")
-            yield StatCard("Revenue / 24h", "—", id="card-rev")
-            yield StatCard("Network Out", "—", id="card-net")
+            yield StatCard("System VMs",    id="c-sys")
+            yield StatCard("Tenant VMs",    id="c-vms")
+            yield StatCard("Revenue / 24h", id="c-rev")
+            yield StatCard("Network",       id="c-net")
 
         with Horizontal(id="mid-row"):
             with Vertical(id="gauges-panel"):
-                yield Label("Cluster Resources", classes="section-title")
-                yield GaugeRow("CPU", 0)
-                yield GaugeRow("Memory", 0)
-                yield GaugeRow("Storage", 0)
-                yield GaugeRow("Network", 0)
+                yield Label("Resources", classes="section-title")
+                yield GaugeRow("CPU",     id="g-cpu")
+                yield GaugeRow("GPU",     id="g-gpu")
+                yield GaugeRow("Storage", id="g-stor")
+                yield GaugeRow("Network", id="g-net")
 
             with Vertical(id="events-panel"):
                 yield Label("Recent Events", classes="section-title")
                 yield Log(id="event-log", max_lines=cfg.log_lines)
 
-        yield Label("Node Fleet", classes="section-title")
-        yield DataTable(id="node-table", zebra_stripes=True)
+        yield Label("Node Fleet  (your nodes)", classes="section-title")
+        yield DataTable(id="fleet-table", zebra_stripes=True)
 
     def on_mount(self) -> None:
-        table = self.query_one("#node-table", DataTable)
-        table.add_columns("Node", "Region", "VMs", "CPU", "Mem", "Status", "Last Seen")
-        self._timer = self.set_interval(cfg.refresh_interval, self._refresh_data)
-        self.run_worker(self._refresh_data(), exclusive=True)
+        self.query_one("#fleet-table", DataTable).add_columns(
+            "Node", "Region", "VMs", "CPU%", "Mem%", "Status", "Last Seen"
+        )
+        self.set_interval(cfg.refresh_interval, self._load)
+        self.run_worker(self._load(), exclusive=True)
 
     def action_refresh(self) -> None:
-        self.run_worker(self._refresh_data(), exclusive=True)
+        self.run_worker(self._load(), exclusive=True)
 
-    async def _refresh_data(self) -> None:
-        if not cfg.has_orchestrator:
-            return
-        client = OrchestratorClient(cfg.orchestrator_url, cfg.token)
+    async def _load(self) -> None:
+        na = NodeAgentClient(cfg.node_url) if cfg.has_node_agent else None
+        oc = OrchestratorClient(cfg.orchestrator_url, cfg.token) if cfg.has_orchestrator else None
+
+        summary, obligations, balance, nodes = {}, [], {}, []
+
         try:
-            stats, nodes = await _fetch_overview(client)
-            self._apply_stats(stats)
-            self._apply_nodes(nodes)
-        except ApiError as e:
-            self._log_event(f"[red]API error: {e.message}[/]")
+            coros = [
+                na.get_summary()    if na else self._empty({}),
+                na.get_obligations() if na else self._empty([]),
+                oc.get_balance()    if oc else self._empty({}),
+                oc.list_nodes()     if oc else self._empty([]),
+            ]
+            results = await asyncio.gather(*coros, return_exceptions=True)
+            summary     = results[0] if not isinstance(results[0], Exception) else {}
+            obligations = results[1] if not isinstance(results[1], Exception) else []
+            balance     = results[2] if not isinstance(results[2], Exception) else {}
+            nodes       = results[3] if not isinstance(results[3], Exception) else []
         finally:
-            await client.close()
+            if na: await na.close()
+            if oc: await oc.close()
 
-    def _apply_stats(self, s: dict) -> None:
-        online = s.get("onlineNodes", "—")
-        total = s.get("totalNodes", "—")
-        self.query_one("#card-nodes", StatCard).update_value(
-            f"{online} / {total}", f"{s.get('offlineNodes', 0)} offline"
-        )
-        self.query_one("#card-vms", StatCard).update_value(
-            str(s.get("runningVms", "—")), f"{s.get('totalVms', 0)} total"
-        )
-        self.query_one("#card-net", StatCard).update_value(
-            f"{s.get('totalBandwidthMbps', 0):.0f} Mbps"
-        )
+        self._render_identity(summary)
+        self._render_stats(summary, obligations, balance)
+        self._render_gauges(summary)
+        self._render_fleet(summary, nodes)
 
-    def _apply_nodes(self, nodes: list) -> None:
-        table = self.query_one("#node-table", DataTable)
+    async def _empty(self, val):
+        return val
+
+    def _render_identity(self, s: dict) -> None:
+        nid  = s.get("nodeId", "—")
+        wal  = s.get("walletAddress", "—")
+        orch = s.get("orchestrator", {})
+        conn = orch.get("connected", False) if isinstance(orch, dict) else False
+        try:
+            self.query_one("#login-bar", LoginBar).update(nid, wal, conn)
+        except Exception:
+            pass
+
+    def _render_stats(self, s: dict, obligations: list, balance: dict) -> None:
+        snap    = s.get("snapshot") or s
+        all_vms = s.get("vms") or []
+
+        sys_run   = sum(1 for v in all_vms if _is_system(v) and _is_running(v))
+        sys_total = len(obligations) or sum(1 for v in all_vms if _is_system(v))
+        self._set("c-sys", f"{sys_run} / {sys_total}", "running / obligations")
+
+        tenant     = [v for v in all_vms if not _is_system(v)]
+        ten_run    = sum(1 for v in tenant if _is_running(v))
+        self._set("c-vms", f"{ten_run} / {len(tenant)}", "running / scheduled")
+
+        try:
+            pending = float(balance.get("pendingBalance", balance.get("pending24h", 0)))
+            self._set("c-rev", f"${pending:.2f}", "USDC pending")
+        except (TypeError, ValueError):
+            self._set("c-rev", "—", "USDC pending")
+
+        net = s.get("network", {})
+        if isinstance(net, dict):
+            rx = net.get("totalRxMbps", net.get("rxMbps", 0))
+            tx = net.get("totalTxMbps", net.get("txMbps", 0))
+            self._set("c-net", f"↑{tx:.0f} / ↓{rx:.0f}", "Mbps out / in")
+        else:
+            self._set("c-net", "—", "Mbps out / in")
+
+    def _render_gauges(self, s: dict) -> None:
+        snap = s.get("snapshot") or s
+
+        cpu  = float(snap.get("virtualCpuUsagePercent", 0))
+        mem_used  = float(snap.get("usedMemoryBytes", 0))
+        mem_total = float(snap.get("totalMemoryBytes", 1))
+        sto_used  = float(snap.get("usedStorageBytes", 0))
+        sto_total = float(snap.get("totalStorageBytes", 1))
+
+        gpu_pct = 0.0
+        gpus = snap.get("gpuUsage") or []
+        if gpus:
+            used  = sum(float(g.get("memoryAllocated", 0)) for g in gpus)
+            quota = sum(float(g.get("memoryQuota", 1))     for g in gpus)
+            gpu_pct = _pct(used, max(quota, 1))
+
+        net = s.get("network", {})
+        net_pct = min(float(net.get("txUtilPct", 0)), 100.0) if isinstance(net, dict) else 0.0
+
+        try:
+            self.query_one("#g-cpu",  GaugeRow).set_pct(cpu)
+            self.query_one("#g-gpu",  GaugeRow).set_pct(gpu_pct)
+            self.query_one("#g-stor", GaugeRow).set_pct(_pct(sto_used, sto_total))
+            self.query_one("#g-net",  GaugeRow).set_pct(net_pct)
+        except Exception:
+            pass
+
+        try:
+            self.query_one("#event-log", Log).write_line(
+                f"cpu={cpu:.1f}%  mem={_pct(mem_used, mem_total):.1f}%  "
+                f"stor={_pct(sto_used, sto_total):.1f}%"
+            )
+        except Exception:
+            pass
+
+    def _render_fleet(self, s: dict, nodes: list) -> None:
+        my_wallet = (s.get("walletAddress") or "").lower()
+        fleet = [n for n in nodes if (n.get("walletAddress") or "").lower() == my_wallet] \
+                if my_wallet and nodes else nodes[:20]
+
+        table = self.query_one("#fleet-table", DataTable)
         table.clear()
-        for n in nodes:
-            res = n.get("availableResources") or n.get("totalResources") or {}
-            status = n.get("status", "Unknown")
-            style = _STATUS_STYLE.get(status, "")
+        for n in fleet:
+            status = n.get("status", "?")
+            color  = {"Online": "green", "Degraded": "yellow", "Offline": "red"}.get(status, "white")
+            res    = n.get("availableResources") or n.get("totalResources") or {}
             table.add_row(
-                n.get("id", "")[:12],
+                (n.get("name") or n.get("id") or "?")[:18],
                 n.get("region", "—"),
                 str(n.get("runningVmCount", "—")),
                 f"{res.get('cpuUsagePct', 0):.0f}%",
                 f"{res.get('memUsagePct', 0):.0f}%",
-                f"[{style}]{status}[/]" if style else status,
+                f"[{color}]{status}[/]",
                 n.get("lastSeenAgo", "—"),
             )
-        self._log_event(f"[dim]Refreshed — {len(nodes)} nodes[/]")
 
-    def _log_event(self, msg: str) -> None:
-        import re
-        msg = re.sub(r"\[/?[\w ]+\]", "", msg)
-        self.query_one("#event-log", Log).write_line(msg)
-
-
-async def _fetch_overview(client: OrchestratorClient):
-    import asyncio
-    stats, nodes = await asyncio.gather(
-        client.get_stats(),
-        client.list_nodes(),
-        return_exceptions=True,
-    )
-    if isinstance(stats, Exception):
-        stats = {}
-    if isinstance(nodes, Exception):
-        nodes = []
-    return stats, nodes
+    def _set(self, cid: str, value: str, sub: str = "") -> None:
+        try:
+            self.query_one(f"#{cid}", StatCard).set_value(value, sub)
+        except Exception:
+            pass
