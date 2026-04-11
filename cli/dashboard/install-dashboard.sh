@@ -137,18 +137,70 @@ else
     log_warn "Could not find cli/decloud to patch — run 'decloud-dashboard' directly"
 fi
 
-# ── env template ──────────────────────────────────────────────────────────────
-log_step "Checking credentials"
+# ── auto-fetch credentials ────────────────────────────────────────────────────
+log_step "Auto-fetching credentials from node agent"
 
 USER_CONFIG="${HOME}/.decloud/config"
-if [[ ! -f "${USER_CONFIG}" ]]; then
+NODE_CREDENTIALS="/etc/decloud/credentials"
+APPSETTINGS=""
+
+# Search for appsettings.Production.json in known locations
+for candidate in \
+    "/opt/decloud/DeCloud.NodeAgent/publish/appsettings.Production.json" \
+    "/opt/decloud/publish/appsettings.Production.json" \
+    "/opt/decloud/appsettings.Production.json"; do
+    if [[ -f "$candidate" ]]; then
+        APPSETTINGS="$candidate"
+        break
+    fi
+done
+
+fetch_credentials() {
+    local orch_url="" api_key="" node_url="http://localhost:5100"
+
+    # ── Orchestrator URL from appsettings ──────────────────────────────
+    if [[ -n "$APPSETTINGS" ]]; then
+        orch_url=$(grep -oP '"BaseUrl"\s*:\s*"\K[^"]+' "$APPSETTINGS" 2>/dev/null || true)
+        [[ -n "$orch_url" ]] && log_ok "Orchestrator URL: ${orch_url}" \
+                             || log_warn "Could not parse BaseUrl from ${APPSETTINGS}"
+    else
+        log_warn "appsettings.Production.json not found — DECLOUD_URL needs manual entry"
+    fi
+
+    # ── API key from /etc/decloud/credentials ──────────────────────────
+    if [[ -f "$NODE_CREDENTIALS" ]]; then
+        api_key=$(sudo grep -oP 'API_KEY=\K.+' "$NODE_CREDENTIALS" 2>/dev/null || true)
+        [[ -n "$api_key" ]] && log_ok "API key loaded from ${NODE_CREDENTIALS}" \
+                            || log_warn "API_KEY not found in ${NODE_CREDENTIALS}"
+    else
+        log_warn "${NODE_CREDENTIALS} not found — node may not be registered yet"
+    fi
+
+    # ── Write config file ──────────────────────────────────────────────
     mkdir -p "$(dirname "${USER_CONFIG}")"
-    cp "${DASHBOARD_DIR}/.env.example" "${USER_CONFIG}"
+
+    if [[ -f "${USER_CONFIG}" ]]; then
+        # Preserve existing file — patch only keys we resolved
+        [[ -n "$orch_url" ]] && sed -i "s|^DECLOUD_URL=.*|DECLOUD_URL=${orch_url}|" "${USER_CONFIG}"
+        [[ -n "$api_key"  ]] && sed -i "s|^DECLOUD_TOKEN=.*|DECLOUD_TOKEN=${api_key}|" "${USER_CONFIG}"
+        sed -i "s|^DECLOUD_NODE_URL=.*|DECLOUD_NODE_URL=${node_url}|" "${USER_CONFIG}"
+        log_ok "Updated ${USER_CONFIG}"
+    else
+        cp "${DASHBOARD_DIR}/.env.example" "${USER_CONFIG}"
+        [[ -n "$orch_url" ]] && sed -i "s|^DECLOUD_URL=.*|DECLOUD_URL=${orch_url}|" "${USER_CONFIG}"
+        [[ -n "$api_key"  ]] && sed -i "s|^DECLOUD_TOKEN=.*|DECLOUD_TOKEN=${api_key}|" "${USER_CONFIG}"
+        sed -i "s|^DECLOUD_NODE_URL=.*|DECLOUD_NODE_URL=${node_url}|" "${USER_CONFIG}"
+        log_ok "Created ${USER_CONFIG}"
+    fi
+
     chmod 600 "${USER_CONFIG}"
-    log_warn "Created ${USER_CONFIG} — fill in DECLOUD_URL and DECLOUD_TOKEN"
-else
-    log_ok "Credentials file exists: ${USER_CONFIG}"
-fi
+
+    # ── Warn on anything still missing ────────────────────────────────
+    [[ -z "$orch_url" ]] && log_warn "DECLOUD_URL still needs manual entry in ${USER_CONFIG}"
+    [[ -z "$api_key"  ]] && log_warn "DECLOUD_TOKEN still needs manual entry in ${USER_CONFIG}"
+}
+
+fetch_credentials
 
 # ── done ──────────────────────────────────────────────────────────────────────
 echo ""
@@ -156,7 +208,7 @@ echo -e "${GREEN}${BOLD}Installation complete.${NC}"
 echo ""
 echo -e "  Launch:  ${CYAN}decloud dashboard${NC}"
 echo -e "  Or:      ${CYAN}decloud-dashboard${NC}"
-echo -e "  Or:      ${CYAN}decloud dashboard --node-only --node http://localhost:5100${NC}"
+echo -e "  Or:      ${CYAN}decloud dashboard --node-only${NC}"
 echo ""
 echo -e "  Credentials: ${USER_CONFIG}  (chmod 600)"
 echo ""
