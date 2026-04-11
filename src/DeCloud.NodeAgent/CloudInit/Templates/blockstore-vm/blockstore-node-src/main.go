@@ -1830,10 +1830,20 @@ func (n *BlockNode) handleManifests(w http.ResponseWriter, r *http.Request) {
 				if info != nil {
 					updatedAt = info.ModTime().UTC()
 				}
+				// Read true manifest version from the version file written by
+				// handleManifests POST. Fall back to 0 if not yet received.
+				manifestVersion := 0
+				versionFile := filepath.Join(StorageDir, OwnersSubdir, vmId+".version")
+				if vdata, err := os.ReadFile(versionFile); err == nil {
+					if v, err := strconv.Atoi(strings.TrimSpace(string(vdata))); err == nil {
+						manifestVersion = v
+					}
+				}
+
 				list = append(list, &ResourceManifest{
 					ResourceType: ResourceTypeVMOverlay,
 					ResourceID:   vmId,
-					Version:      len(cids), // block count used as proxy version
+					Version:      manifestVersion,
 					TotalBytes:   int64(len(cids)) * BlockSizeBytes,
 					ChunkCIDs:    cids[max(0, len(cids)-50):], // last 50 CIDs
 					RegisteredAt: updatedAt,
