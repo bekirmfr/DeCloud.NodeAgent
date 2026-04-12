@@ -282,6 +282,7 @@ public interface IOrchestratorClient
         long totalBytes,
         bool isSeeding = false,
         int replicationFactor = 3,
+         Dictionary<long, string>? chunkMap = null,
         CancellationToken ct = default);
 
     /// <summary>

@@ -912,6 +912,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         long totalBytes,
         bool isSeeding = false,
         int replicationFactor = 3,
+        Dictionary<long, string>? chunkMap = null,
         CancellationToken ct = default)
     {
         if (!_nodeState.IsAuthenticated) return false;
@@ -930,7 +931,8 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 manifestType = 0,
                 totalBytes,
                 isSeeding,
-                replicationFactor  // ← pass through from LazysyncDaemon
+                replicationFactor,  // ← pass through from LazysyncDaemon
+                chunkMap
             };
 
             var response = await _httpClient.PostAsJsonAsync(

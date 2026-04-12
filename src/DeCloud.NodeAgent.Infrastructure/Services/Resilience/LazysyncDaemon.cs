@@ -224,6 +224,7 @@ public class LazysyncDaemon : BackgroundService
                 totalBytes,
                 isSeeding,
                 vm.Spec.ReplicationFactor,
+                state.Chunks,
                 ct);
 
             // Step 8: Persist state

@@ -641,26 +641,37 @@ public class LibvirtVmManager : IVmManager
             // =====================================================
             // STEP 2: Create overlay disk
             // =====================================================
-            _logger.LogInformation("VM {VmId}: Creating overlay disk ({DiskGB}GB)",
-                spec.Id, spec.DiskBytes / 1024 / 1024 / 1024);
-
             string diskPath;
             try
             {
                 diskPath = await _imageManager.CreateOverlayDiskAsync(
-                    baseImagePath,
-                    spec.Id,
-                    spec.DiskBytes,
-                    ct);
+                    baseImagePath, spec.Id, spec.DiskBytes, ct);
                 instance.DiskPath = diskPath;
                 _logger.LogInformation("VM {VmId}: Overlay disk created at {Path}", spec.Id, diskPath);
+
+                // If this is a migration, populate the overlay from the block store
+                // before booting. The chunk map tells us which blocks to fetch and
+                // where to write them. The block store bitswap-fetches from DHT
+                // providers automatically when a block is not cached locally.
+                if (spec.OverlayChunkMap is { Count: > 0 })
+                {
+                    _logger.LogInformation(
+                        "VM {VmId}: migration — reconstructing overlay from {Count} blocks (rootCid={RootCid})",
+                        spec.Id, spec.OverlayChunkMap.Count, spec.OverlayRootCid?[..12] ?? "?");
+
+                    await ReconstructOverlayAsync(
+                        diskPath, baseImagePath, spec.OverlayChunkMap, spec.DiskBytes, ct);
+
+                    _logger.LogInformation(
+                        "VM {VmId}: overlay reconstruction complete", spec.Id);
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "VM {VmId}: Failed to create overlay disk", spec.Id);
+                _logger.LogError(ex, "VM {VmId}: Failed to create/reconstruct overlay disk", spec.Id);
                 instance.State = VmState.Failed;
                 await _repository.UpdateVmStateAsync(spec.Id, VmState.Failed);
-                return VmOperationResult.Fail(spec.Id, $"Failed to create disk: {ex.Message}", "DISK_ERROR");
+                return VmOperationResult.Fail(spec.Id, $"Failed to prepare disk: {ex.Message}", "DISK_ERROR");
             }
 
             // =====================================================
@@ -867,6 +878,119 @@ public class LibvirtVmManager : IVmManager
         finally
         {
             _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Reconstructs a VM overlay disk from blocks stored in the local BlockStore VM.
+    ///
+    /// Steps:
+    ///   1. Create a sparse temp raw file at the virtual disk size.
+    ///   2. For each (offset, cid) in chunkMap: GET /blocks/{cid} from the
+    ///      local blockstore (port 5090). The blockstore bitswap-fetches from
+    ///      DHT providers automatically when the block is not cached locally.
+    ///   3. Write the returned bytes at the correct offset in the raw file.
+    ///   4. Convert raw → qcow2 (skipping zero regions for sparseness).
+    ///   5. Rebase the qcow2 to use the base image as backing file.
+    ///   6. Delete the temp raw file.
+    ///
+    /// The resulting disk.qcow2 is a correct qcow2 overlay backed by the base
+    /// image — functionally identical to what the source node had.
+    /// </summary>
+    private async Task ReconstructOverlayAsync(
+        string diskPath,
+        string baseImagePath,
+        Dictionary<long, string> chunkMap,
+        long virtualSizeBytes,
+        CancellationToken ct)
+    {
+        var rawPath = diskPath + ".migration.raw";
+
+        try
+        {
+            // ── Step 1: Sparse raw file ──────────────────────────────────────
+            // SetLength creates a sparse file on Linux — no disk space allocated
+            // for zero regions, making this instant regardless of virtual size.
+            await using (var raw = new FileStream(
+                rawPath, FileMode.Create, FileAccess.Write, FileShare.None,
+                bufferSize: 4096, useAsync: true))
+            {
+                raw.SetLength(virtualSizeBytes);
+
+                // ── Step 2 + 3: Fetch each block and write at correct offset ──
+                // Blocks sorted by offset so writes are sequential (better I/O).
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(90) };
+
+                var blockstoreVm = _vms.Values
+                    .FirstOrDefault(v => v.Spec.VmType == VmType.BlockStore &&
+                        v.State == VmState.Running);
+
+                var blockstoreAddr = blockstoreVm?.Spec.IpAddress is { Length: > 0 } ip
+                    ? $"http://{ip}:5090"
+                    : null;
+
+                if (string.IsNullOrEmpty(blockstoreAddr))
+                    throw new Exception("No local BlockStore VM running — cannot reconstruct overlay");
+
+                foreach (var (offset, cid) in chunkMap.OrderBy(kv => kv.Key))
+                {
+                    ct.ThrowIfCancellationRequested();
+
+                    var url = $"{blockstoreAddr}/blocks/{Uri.EscapeDataString(cid)}";
+                    HttpResponseMessage response;
+                    try
+                    {
+                        response = await http.GetAsync(url, ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new Exception(
+                            $"Block fetch failed for CID {cid[..12]}: {ex.Message}", ex);
+                    }
+
+                    if (!response.IsSuccessStatusCode)
+                        throw new Exception(
+                            $"BlockStore returned {response.StatusCode} for CID {cid[..12]}");
+
+                    var bytes = await response.Content.ReadAsByteArrayAsync(ct);
+
+                    raw.Seek(offset, SeekOrigin.Begin);
+                    await raw.WriteAsync(bytes, ct);
+                }
+            } // FileStream disposed — file is flushed
+
+            // ── Step 4: Convert raw → qcow2 ─────────────────────────────────
+            // -S 65536: skip zero regions (keeps the qcow2 sparse).
+            // Overwrites the empty overlay created by CreateOverlayDiskAsync.
+            var convertResult = await _executor.ExecuteAsync(
+                "qemu-img",
+                $"convert -f raw -O qcow2 -S 65536 \"{rawPath}\" \"{diskPath}\"",
+                TimeSpan.FromMinutes(30),
+                ct);
+
+            if (!convertResult.Success)
+                throw new Exception(
+                    $"qemu-img convert failed: {convertResult.StandardError}");
+
+            // ── Step 5: Rebase to attach backing chain ───────────────────────
+            // -u (unsafe): updates the backing-file pointer without verifying
+            // that the backing data matches. Safe here because we only wrote
+            // overlay chunks; any missing offset reads through to the base image.
+            var rebaseResult = await _executor.ExecuteAsync(
+                "qemu-img",
+                $"rebase -u -f qcow2 -b \"{baseImagePath}\" -F qcow2 \"{diskPath}\"",
+                TimeSpan.FromMinutes(5),
+                ct);
+
+            if (!rebaseResult.Success)
+                throw new Exception(
+                    $"qemu-img rebase failed: {rebaseResult.StandardError}");
+        }
+        finally
+        {
+            // ── Step 6: Clean up ─────────────────────────────────────────────
+            if (File.Exists(rawPath))
+                try { File.Delete(rawPath); } catch { /* non-fatal */ }
         }
     }
 

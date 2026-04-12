@@ -346,6 +346,22 @@ public class CommandProcessorService : BackgroundService
         int deploymentModeInt = GetIntProperty(root, "deploymentMode", "DeploymentMode") ?? 0;
         var deploymentMode = (DeploymentMode)deploymentModeInt;
         string? containerImage = GetStringProperty(root, "containerImage", "ContainerImage");
+        string? overlayRootCid = GetStringProperty(root, "manifestRootCid", "ManifestRootCid");
+
+        Dictionary<long, string>? overlayChunkMap = null;
+        if (root.TryGetProperty("ChunkMap", out var cmElement) ||
+            root.TryGetProperty("chunkMap", out cmElement))
+        {
+            if (cmElement.ValueKind == JsonValueKind.Object)
+            {
+                overlayChunkMap = new Dictionary<long, string>();
+                foreach (var prop in cmElement.EnumerateObject())
+                {
+                    if (long.TryParse(prop.Name, out var offset))
+                        overlayChunkMap[offset] = prop.Value.GetString() ?? "";
+                }
+            }
+        }
 
         // Parse environment variables for containers
         Dictionary<string, string>? environmentVariables = null;
@@ -387,7 +403,9 @@ public class CommandProcessorService : BackgroundService
             ContainerImage = containerImage,
             EnvironmentVariables = environmentVariables,
             Labels = labels,
-            ReplicationFactor = replicationFactor
+            ReplicationFactor = replicationFactor,
+            OverlayRootCid = overlayRootCid,
+            OverlayChunkMap = overlayChunkMap
         };
 
         // Defense-in-depth: reject duplicate system VMs (DHT/Relay/BlockStore) with the same name.

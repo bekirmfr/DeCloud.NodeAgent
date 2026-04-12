@@ -109,6 +109,20 @@ public class VmSpec
     /// on the target node.
     /// </summary>
     public int ReplicationFactor { get; set; } = 0;
+    /// <summary>
+    /// Non-null when this CreateVm is a migration, not a fresh deployment.
+    /// The confirmed manifest root CID — used only for logging/diagnostics.
+    /// Disk reconstruction uses OverlayChunkMap.
+    /// </summary>
+    public string? OverlayRootCid { get; set; }
+
+    /// <summary>
+    /// Offset→CID map from the confirmed manifest.
+    /// When non-null, LibvirtVmManager fetches each block from the local
+    /// BlockStore (which bitswap-fetches from DHT providers) and writes it
+    /// at the correct byte offset in the newly-created overlay before boot.
+    /// </summary>
+    public Dictionary<long, string>? OverlayChunkMap { get; set; }
 }
 
 public class VmNetworkConfig
