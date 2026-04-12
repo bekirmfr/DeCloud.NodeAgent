@@ -69,6 +69,7 @@ const (
 	BlocksSubdir        = "blocks"
 	DagsSubdir          = "dags"   // ResourceManifest JSON files
 	OwnersSubdir        = "owners" // Per-VM CID owner index files
+	ConfirmedSubdir = "confirmed" // Per-VM confirmed-remote CID files
 	StorageDir          = "/var/lib/decloud-blockstore"
 
 	// GC thresholds
@@ -393,7 +394,7 @@ func main() {
 // ═══════════════════════════════════════════════════════════════════
 
 func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
-	for _, sub := range []string{"", BlocksSubdir, DagsSubdir, OwnersSubdir} {
+	for _, sub := range []string{"", BlocksSubdir, DagsSubdir, OwnersSubdir, ConfirmedSubdir} {
 		if err := os.MkdirAll(filepath.Join(StorageDir, sub), 0755); err != nil {
 			return nil, fmt.Errorf("create dir %s: %w", sub, err)
 		}
@@ -1301,13 +1302,68 @@ func (n *BlockNode) runGC(ctx context.Context) (int64, error) {
 	usedBefore, _ := n.usedBytes(ctx)
 	usagePctBefore := float64(usedBefore) / float64(n.cfg.StorageBytes) * 100
 	n.accessMu.Unlock()
-
+ 
+	var freed int64
+	var evicted int64
+ 
+	// ── Priority 1: evict confirmed-remote blocks ─────────────────────────────
+	// Blocks in confirmed/*.cids have ≥N remote providers — they are safe to
+	// remove locally. Evicting them first frees space for blocks still scattering,
+	// turning the local blockstore into a true write-through cache.
+	confirmedSet := n.loadConfirmedCIDs()
+	if len(confirmedSet) > 0 {
+		for _, e := range entries {
+			if !confirmedSet[e.cid] {
+				continue
+			}
+			// Only evict if still above trigger threshold
+			usedBytes, _ := n.usedBytes(ctx)
+			if float64(usedBytes)/float64(n.cfg.StorageBytes)*100 < GCTriggerPercent {
+				break
+			}
+			c, err := cid.Decode(e.cid)
+			if err != nil {
+				continue
+			}
+			if err := n.bstore.DeleteBlock(ctx, c); err != nil {
+				continue
+			}
+			// Withdraw DHT provider record so peers don't route requests here
+			go func(c cid.Cid) {
+				wCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				_ = n.dht.Provide(wCtx, c, false)
+			}(c)
+			freed += e.size
+			evicted++
+			n.accessMu.Lock()
+			delete(n.accessTimes, e.cid)
+			delete(n.blockSizes, e.cid)
+			n.accessMu.Unlock()
+		}
+		if evicted > 0 {
+			n.diagLog.Add("gc_confirmed_evict", map[string]interface{}{
+				"blocks_evicted": evicted,
+				"bytes_freed":    freed,
+			})
+		}
+	}
+ 
+	// ── Priority 2: LRU eviction (existing behaviour, fallback) ──────────────
+	// Re-sort remaining entries by last access time ascending (LRU first).
+	n.accessMu.Lock()
+	entries = entries[:0]
+	for c, t := range n.accessTimes {
+		entries = append(entries, entry{c, t, n.blockSizes[c]})
+	}
+	n.accessMu.Unlock()
+ 
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].lastAccess.Before(entries[j].lastAccess)
 	})
-
-	var freed int64
-	var evicted int64
+ 
+	var lruEvicted int64
+	var lruFreed int64
 	for _, e := range entries {
 		usedBytes, _ := n.usedBytes(ctx)
 		if float64(usedBytes)/float64(n.cfg.StorageBytes)*100 < GCTriggerPercent {
@@ -1320,27 +1376,58 @@ func (n *BlockNode) runGC(ctx context.Context) (int64, error) {
 		if err := n.bstore.DeleteBlock(ctx, c); err != nil {
 			continue
 		}
-		freed += e.size
-		evicted++
+		lruFreed += e.size
+		lruEvicted++
 		n.accessMu.Lock()
 		delete(n.accessTimes, e.cid)
 		delete(n.blockSizes, e.cid)
 		n.accessMu.Unlock()
 	}
-
-	if evicted > 0 {
+ 
+	totalEvicted := evicted + lruEvicted
+	freed += lruFreed
+ 
+	if totalEvicted > 0 {
 		n.mu.Lock()
 		n.diag.GCRunCount++
-		n.diag.GCBlocksEvicted += evicted
+		n.diag.GCBlocksEvicted += totalEvicted
 		n.diag.GCBytesFreed += freed
 		n.mu.Unlock()
 		n.diagLog.Add("gc_run", map[string]interface{}{
-			"blocks_evicted": evicted,
-			"bytes_freed":    freed,
-			"usage_before":   fmt.Sprintf("%.1f%%", usagePctBefore),
+			"blocks_evicted":         totalEvicted,
+			"blocks_evicted_confirmed": evicted,
+			"blocks_evicted_lru":     lruEvicted,
+			"bytes_freed":            freed,
+			"usage_before":           fmt.Sprintf("%.1f%%", usagePctBefore),
 		})
 	}
 	return freed, nil
+}
+
+// loadConfirmedCIDs reads all confirmed/*.cids files and returns a set of CID
+// strings that have been confirmed as remotely replicated (≥N providers).
+func (n *BlockNode) loadConfirmedCIDs() map[string]bool {
+	confirmedDir := filepath.Join(StorageDir, ConfirmedSubdir)
+	entries, err := os.ReadDir(confirmedDir)
+	if err != nil {
+		return nil // confirmed/ dir doesn't exist yet — no priority eviction
+	}
+	set := make(map[string]bool)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".cids") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(confirmedDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				set[line] = true
+			}
+		}
+	}
+	return set
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1490,6 +1577,7 @@ func (n *BlockNode) startHTTPServer(ctx context.Context) {
 	mux.HandleFunc("/owners", n.handleOwnerList)
 	mux.HandleFunc("/owners/", n.handleOwnerOps)
 	mux.HandleFunc("/diagnostics", n.handleDiagnostics)
+	mux.HandleFunc("/confirmed/", n.handleConfirmed)
 
 	// Bind to all interfaces so the NodeAgent host can reach the API
 	// via the virbr0 bridge (192.168.122.x). The API port is not
@@ -1719,6 +1807,53 @@ func (n *BlockNode) handleStats(w http.ResponseWriter, r *http.Request) {
 		"bitswapSent":     sent,
 		"bitswapReceived": recv,
 	})
+}
+
+// ── POST /confirmed/{vmId} ────────────────────────────────────────────────────
+// Receives confirmed CID list from NodeAgent (forwarded from orchestrator).
+// Writes to confirmed/{vmId}.cids — read by runGC() for priority eviction.
+func (n *BlockNode) handleConfirmed(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	vmId := strings.TrimPrefix(r.URL.Path, "/confirmed/")
+	vmId = strings.TrimSpace(vmId)
+	if vmId == "" {
+		http.Error(w, "missing vmId", http.StatusBadRequest)
+		return
+	}
+ 
+	var req struct {
+		Cids []string `json:"cids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if len(req.Cids) == 0 {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+ 
+	confirmedFile := filepath.Join(StorageDir, ConfirmedSubdir, vmId+".cids")
+	f, err := os.OpenFile(confirmedFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		log.Printf("confirmed: failed to open %s: %v", confirmedFile, err)
+		http.Error(w, "write failed", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+ 
+	for _, cid := range req.Cids {
+		if cid = strings.TrimSpace(cid); cid != "" {
+			fmt.Fprintln(f, cid)
+		}
+	}
+ 
+	log.Printf("confirmed: wrote %d CIDs for VM %s", len(req.Cids), vmId)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"success": true, "count": len(req.Cids)})
 }
 
 // ── POST /gc ─────────────────────────────────────────────────────────────────

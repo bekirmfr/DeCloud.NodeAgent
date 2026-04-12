@@ -147,6 +147,78 @@ public class BlockStoreCallbackController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Called by the orchestrator's LazysyncManager after each ConfirmedVersion
+    /// advance to push the confirmed CID list to the local BlockStore VM binary.
+    ///
+    /// The binary writes the CIDs to confirmed/{vmId}.cids. During GC, it evicts
+    /// these confirmed-remote blocks before falling back to LRU, freeing the local
+    /// blockstore's 5% duty for blocks still needing scatter.
+    ///
+    /// No auth required — endpoint is on port 5100 (agent port), only accessible
+    /// to the orchestrator. Data (CID list) is not sensitive.
+    /// </summary>
+    [HttpPost("confirmed")]
+    public async Task<IActionResult> PushConfirmedBlocks(
+        [FromBody] ConfirmedBlocksNotification notification)
+    {
+        if (string.IsNullOrEmpty(notification.VmId) || notification.Cids == null)
+            return BadRequest(new { error = "Missing vmId or cids" });
+
+        // Find the local BlockStore VM
+        var allVms = _vmManager.GetAllVms();
+        var blockstoreVm = allVms.FirstOrDefault(v =>
+            v.Spec.VmType == VmType.BlockStore &&
+            v.State == VmState.Running);
+
+        if (blockstoreVm == null || string.IsNullOrEmpty(blockstoreVm.Spec.IpAddress))
+        {
+            _logger.LogDebug(
+                "PushConfirmedBlocks: no running BlockStore VM — skipping for VM {VmId}",
+                notification.VmId);
+            return Ok(new { success = true, skipped = true });
+        }
+
+        var blockstoreUrl = $"http://{blockstoreVm.Spec.IpAddress}:5090";
+
+        try
+        {
+            var payload = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                cids = notification.Cids
+            });
+
+            using var content = new StringContent(
+                payload, System.Text.Encoding.UTF8, "application/json");
+
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+            var response = await http.PostAsync(
+                $"{blockstoreUrl}/confirmed/{Uri.EscapeDataString(notification.VmId)}",
+                content,
+                HttpContext.RequestAborted);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogDebug(
+                    "Forwarded {Count} confirmed CIDs to blockstore for VM {VmId}",
+                    notification.Cids.Count, notification.VmId);
+                return Ok(new { success = true, count = notification.Cids.Count });
+            }
+
+            _logger.LogWarning(
+                "Blockstore returned {Status} for confirmed CIDs (VM {VmId})",
+                response.StatusCode, notification.VmId);
+            return Ok(new { success = false, status = (int)response.StatusCode });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to forward confirmed CIDs to blockstore for VM {VmId}",
+                notification.VmId);
+            return Ok(new { success = false, error = ex.Message });
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // Helpers
     // ═══════════════════════════════════════════════════════════════
@@ -207,4 +279,9 @@ public class BlockStoreCallbackController : ControllerBase
 public record BlockStoreReadyNotification(
     string VmId,
     string PeerId
+);
+
+public record ConfirmedBlocksNotification(
+    string VmId,
+    List<string> Cids
 );
