@@ -583,6 +583,76 @@ class PeerCleanupThread(threading.Thread):
             logger.error(f"❌ Cleanup error: {e}", exc_info=True)
             cleanup_stats['errors'] += 1
 
+# ==================== WireGuard Watchdog Thread ====================
+class WireGuardWatchdogThread(threading.Thread):
+    """
+    Watches the WireGuard interface every 30 s and restarts it if down.
+    The relay VM is the only entity that can see its own WG state and act
+    on it without depending on the host or orchestrator.
+    """
+
+    CHECK_INTERVAL = 30   # seconds between checks
+    SETTLE_TIME    = 2    # seconds to wait after restart before verifying
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.stop_event = threading.Event()
+        self.name = "WireGuardWatchdogThread"
+
+    def run(self):
+        logger.info(f"🔍 WireGuard watchdog started (interval: {self.CHECK_INTERVAL}s)")
+        # Give the server a moment to finish initialising before first check
+        self.stop_event.wait(10)
+
+        while not self.stop_event.is_set():
+            try:
+                self._check_and_heal()
+            except Exception as e:
+                logger.error(f"WireGuard watchdog error: {e}", exc_info=True)
+            self.stop_event.wait(self.CHECK_INTERVAL)
+
+    def stop(self):
+        self.stop_event.set()
+
+    def _check_and_heal(self):
+        result = subprocess.run(
+            ['wg', 'show', WIREGUARD_INTERFACE],
+            capture_output=True, text=True, timeout=5
+        )
+
+        if result.returncode == 0:
+            logger.debug(f"✓ WireGuard {WIREGUARD_INTERFACE} is up")
+            return
+
+        logger.warning(
+            f"WireGuard {WIREGUARD_INTERFACE} is DOWN — restarting via systemctl"
+        )
+
+        restart = subprocess.run(
+            ['systemctl', 'restart', f'wg-quick@{WIREGUARD_INTERFACE}'],
+            capture_output=True, text=True, timeout=20
+        )
+
+        if restart.returncode != 0:
+            logger.error(
+                f"systemctl restart failed: {restart.stderr.strip()}"
+            )
+            return
+
+        # Brief settle, then verify
+        time.sleep(self.SETTLE_TIME)
+
+        verify = subprocess.run(
+            ['wg', 'show', WIREGUARD_INTERFACE],
+            capture_output=True, text=True, timeout=5
+        )
+
+        if verify.returncode == 0:
+            logger.info(f"✅ WireGuard {WIREGUARD_INTERFACE} recovered successfully")
+        else:
+            logger.error(
+                f"WireGuard still down after restart — manual intervention may be needed"
+            )
 
 # ==================== System Metrics Functions ====================
 
@@ -1665,6 +1735,7 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 logger.error(f"wg show failed: {result.stderr}")
                 return {
                     'interface': WIREGUARD_INTERFACE,
+                    'wireguard_up': False,
                     'relay_id': RELAY_ID,
                     'region': RELAY_REGION,
                     'peer_count': 0,
@@ -1712,6 +1783,7 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
 
             return {
                 'interface': WIREGUARD_INTERFACE,
+                'wireguard_up': True,
                 'relay_id': RELAY_ID,
                 'region': RELAY_REGION,
                 'peer_count': len(peers),
@@ -1726,6 +1798,7 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             logger.error(f"Error getting WireGuard status: {e}", exc_info=True)
             return {
                 'interface': WIREGUARD_INTERFACE,
+                'wireguard_up': False,
                 'relay_id': RELAY_ID,
                 'region': RELAY_REGION,
                 'peer_count': 0,
@@ -1876,6 +1949,9 @@ def main():
         if cleanup_thread:
             cleanup_thread.stop()
             cleanup_thread.join(timeout=5)
+
+        watchdog_thread.stop()
+        watchdog_thread.join(timeout=5)
         
         httpd.shutdown()
         logger.info('✅ Server stopped')
