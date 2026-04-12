@@ -1,4 +1,5 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.Qmp;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using Microsoft.Extensions.Hosting;
@@ -57,6 +58,10 @@ public class LazysyncDaemon : BackgroundService
     private const int BlockSizeKb = 1024;
     private const long SparseScanThreshold = 65536; // -S value for qemu-img convert
 
+    // Bitmap name written to the qcow2 file. Fixed across all VMs so the daemon
+    // can find it by name on startup without querying QEMU for the list.
+    private const string BitmapName = "lazysync";
+
     // No per-cycle block cap is applied during seeding.
     //
     // Design rationale:
@@ -81,6 +86,7 @@ public class LazysyncDaemon : BackgroundService
     private readonly ICommandExecutor _executor;
     private readonly IOrchestratorClient _orchestratorClient;
     private readonly LibvirtVmManagerOptions _vmOptions;
+    private readonly IQmpClient _qmpClient;
     private readonly HttpClient _blockstoreClient;
     private readonly ILogger<LazysyncDaemon> _logger;
 
@@ -92,6 +98,7 @@ public class LazysyncDaemon : BackgroundService
         ICommandExecutor executor,
         IOrchestratorClient orchestratorClient,
         IOptions<LibvirtVmManagerOptions> vmOptions,
+        IQmpClient qmpClient,
         HttpClient blockstoreClient,
         ILogger<LazysyncDaemon> logger)
     {
@@ -99,6 +106,7 @@ public class LazysyncDaemon : BackgroundService
         _executor = executor;
         _orchestratorClient = orchestratorClient;
         _vmOptions = vmOptions.Value;
+        _qmpClient = qmpClient;
         _blockstoreClient = blockstoreClient;
         _logger = logger;
     }
@@ -174,19 +182,86 @@ public class LazysyncDaemon : BackgroundService
         {
             // Step 1a: Build the overlay whitelist — depth=0 chunk offsets only.
             // Must run before the raw export so we know which chunks belong to the
-            // overlay vs. the backing base image.
-            var overlayOffsets = await GetOverlayChunkOffsetsAsync(diskPath, ct);
+            // overlay vs. the backing base image.s
 
-            if (overlayOffsets.Count == 0)
+            // overlayOffsets == null  → incremental export (already overlay-only, no whitelist needed)
+            // overlayOffsets != null  → full export (must filter backing-file chunks)
+            HashSet<long>? overlayOffsets;
+
+            if (!state.BitmapCreated)
             {
-                _logger.LogDebug("VM {VmId}: overlay has no allocated chunks — skipping", vm.VmId);
-                return;
-            }
+                // ── First cycle: full export + bitmap creation ────────────────────
+                // Create the bitmap BEFORE the export so we start tracking writes
+                // immediately. Any writes during the export will be captured by the
+                // next incremental cycle — no data is ever missed.
+                var driveNode = await TryGetDriveNodeAsync(vm.VmId, ct);
+                if (driveNode != null)
+                {
+                    try
+                    {
+                        await _qmpClient.AddDirtyBitmapAsync(vm.VmId, driveNode, BitmapName, ct);
+                        // BitmapCreated = true is set after the full cycle succeeds (step 8),
+                        // so a crash before SaveStateAsync leaves BitmapCreated = false.
+                        // Next cycle retries AddDirtyBitmap — QEMU returns an error if it
+                        // already exists (persistent), which we catch and treat as success.
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex,
+                            "VM {VmId}: AddDirtyBitmap failed — full export each cycle until QMP recovers",
+                            vm.VmId);
+                        // driveNode = null triggers the BitmapCreated = false path below
+                        driveNode = null;
+                    }
+                }
 
-            // Step 1b: Export full merged raw (overlay + backing chain merged).
-            // We need this to read actual byte data for CID computation.
-            // Backing-file chunks are filtered out in step 2 via overlayOffsets.
-            await ExportOverlayAsync(diskPath, tmpPath, ct);
+                overlayOffsets = await GetOverlayChunkOffsetsAsync(diskPath, ct);
+                if (overlayOffsets.Count == 0)
+                {
+                    _logger.LogDebug("VM {VmId}: overlay has no allocated chunks — skipping", vm.VmId);
+                    return;
+                }
+
+                await ExportOverlayAsync(diskPath, tmpPath, ct);
+
+                // Signal that next cycle should use incremental export.
+                // Written to disk in SaveStateAsync (step 8) — only persists if the
+                // full cycle completes without exception.
+                if (driveNode != null)
+                    state.BitmapCreated = true;
+            }
+            else
+            {
+                // ── Subsequent cycles: incremental export via QMP ─────────────────
+                // Only clusters written since last ClearDirtyBitmap are exported.
+                // Output raw file is already overlay-only — no whitelist filter needed.
+                var driveNode = await TryGetDriveNodeAsync(vm.VmId, ct);
+                if (driveNode == null)
+                {
+                    _logger.LogWarning(
+                        "VM {VmId}: QMP drive node unavailable — resetting to full export next cycle",
+                        vm.VmId);
+                    state.BitmapCreated = false;
+                    return;
+                }
+
+                try
+                {
+                    await _qmpClient.DriveBackupIncrementalAsync(
+                        vm.VmId, driveNode, BitmapName, tmpPath, ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "VM {VmId}: incremental backup failed — resetting to full export next cycle",
+                        vm.VmId);
+                    state.BitmapCreated = false;
+                    if (File.Exists(tmpPath)) File.Delete(tmpPath);
+                    return;
+                }
+
+                overlayOffsets = null; // no whitelist — incremental export is overlay-only
+            }
 
             // Step 2-4: Scan raw, skip non-overlay chunks, compute CIDs, diff against manifest.
             var (changedChunks, totalBytes) = await ScanChunksAsync(tmpPath, overlayOffsets, state, ct);
@@ -226,6 +301,37 @@ public class LazysyncDaemon : BackgroundService
                 vm.Spec.ReplicationFactor,
                 state.Chunks,
                 ct);
+
+            // Step 7.5: Clear the dirty bitmap so the next cycle tracks only
+            // writes that occur after this successful push.
+            // Only done when BitmapCreated=true (i.e. an incremental cycle ran).
+            // On first-cycle (full export), the bitmap keeps tracking from creation.
+            if (state.BitmapCreated && overlayOffsets == null)
+            {
+                var driveNode = await TryGetDriveNodeAsync(vm.VmId, ct);
+                if (driveNode != null)
+                {
+                    try
+                    {
+                        await _qmpClient.ClearDirtyBitmapAsync(vm.VmId, driveNode, BitmapName, ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        // Non-fatal: next cycle falls back to full export.
+                        _logger.LogWarning(ex,
+                            "VM {VmId}: ClearDirtyBitmap failed — resetting to full export next cycle",
+                            vm.VmId);
+                        state.BitmapCreated = false;
+                    }
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "VM {VmId}: drive node lost after export — resetting to full export next cycle",
+                        vm.VmId);
+                    state.BitmapCreated = false;
+                }
+            }
 
             // Step 8: Persist state
             await SaveStateAsync(vm.VmId, state);
@@ -377,7 +483,7 @@ public class LazysyncDaemon : BackgroundService
     // ═══════════════════════════════════════════════════════════════════════
 
     private async Task<(List<(long Offset, string Cid)> Changed, long TotalBytes)>
-        ScanChunksAsync(string rawPath, HashSet<long> overlayOffsets, LazysyncState state, CancellationToken ct)
+        ScanChunksAsync(string rawPath, HashSet<long>? overlayOffsets, LazysyncState state, CancellationToken ct)
     {
         var changed = new List<(long Offset, string Cid)>();
         long totalBytes = 0;
@@ -538,6 +644,24 @@ public class LazysyncDaemon : BackgroundService
         return $"http://{blockstoreVm.Spec.IpAddress}:5090";
     }
 
+    /// <summary>
+    /// Returns the QEMU block node name for a VM's primary disk, or null if
+    /// QMP is unavailable (VM starting, stopped, or not a KVM guest).
+    /// Failure is non-fatal — caller falls back to full export.
+    /// </summary>
+    private async Task<string?> TryGetDriveNodeAsync(string vmId, CancellationToken ct)
+    {
+        try
+        {
+            return await _qmpClient.GetPrimaryDriveNodeAsync(vmId, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "VM {VmId}: QMP GetPrimaryDriveNode failed", vmId);
+            return null;
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // State persistence
     // ═══════════════════════════════════════════════════════════════════════
@@ -599,4 +723,16 @@ public class LazysyncState
 
     /// <summary>When the last successful sync completed.</summary>
     public DateTime LastSyncAt { get; set; } = DateTime.MinValue;
+
+    /// <summary>
+    /// True once a persistent dirty bitmap named "lazysync" has been added to
+    /// the VM's primary qcow2 via QMP. When true, SyncVmAsync uses incremental
+    /// drive-backup instead of full qemu-img map + convert, exporting only
+    /// clusters written since the last successful cycle.
+    ///
+    /// Reset to false on any QMP failure so the next cycle falls back to
+    /// the full export path, which recreates the bitmap cleanly.
+    /// Also reset when lazysync.json is deleted (reseed command).
+    /// </summary>
+    public bool BitmapCreated { get; set; } = false;
 }
