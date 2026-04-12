@@ -504,7 +504,7 @@ public class LazysyncDaemon : BackgroundService
             // Skip backing-file chunks (depth≥1 extents — base OS image data).
             // qemu-img convert merges the backing chain into the raw output, so
             // without this guard we would replicate the entire OS image every cycle.
-            if (!overlayOffsets.Contains(offset))
+            if (overlayOffsets != null && !overlayOffsets.Contains(offset))
             {
                 offset += read;
                 continue;
