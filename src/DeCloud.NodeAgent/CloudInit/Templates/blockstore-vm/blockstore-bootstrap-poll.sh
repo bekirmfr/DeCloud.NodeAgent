@@ -104,6 +104,14 @@ while true; do
     HEALTH=$(curl -s --max-time 3 "http://127.0.0.1:${API_PORT}/health" 2>/dev/null) || true
     CONNECTED=$(echo "$HEALTH" | jq -r '.connectedPeers // 0' 2>/dev/null) || CONNECTED=0
 
+    # Detect remote blockstore connectivity from live peer count.
+    # connectedPeers > 1 means at least one peer beyond the local DHT VM.
+    # This covers the case where the binary discovered a remote blockstore
+    # via GossipSub presence heartbeat, without going through the poll path.
+    if [ "$CONNECTED" -gt 1 ]; then
+        REMOTE_BS_CONNECTED=true
+    fi
+
     if [ "$CONNECTED" -gt 0 ] && [ "$INITIAL_POLL_DONE" = "true" ] && [ "$REMOTE_BS_CONNECTED" = "true" ]; then
         # Check DHT health — not just peer count.
         # After NodeAgent restart the blockstore may connect to remote peers

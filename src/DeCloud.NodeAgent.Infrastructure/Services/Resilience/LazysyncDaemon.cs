@@ -267,7 +267,7 @@ public class LazysyncDaemon : BackgroundService
                 totalBytes,
                 resourceType = "VMOverlay",
                 resourceId = vmId,
-                chunkCids = changedChunks.Select(c => c.Cid).Take(50).ToList()
+                chunkCids = changedChunks.Select(c => c.Cid).ToList()
             };
 
             var json = System.Text.Json.JsonSerializer.Serialize(payload);

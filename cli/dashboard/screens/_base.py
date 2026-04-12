@@ -1,9 +1,4 @@
-"""
-screens/_base.py — Sidebar widget and BaseScreen.
-
-Every dashboard screen inherits BaseScreen which composes
-the sidebar + content area. Navigation calls app.switch_screen().
-"""
+"""screens/_base.py — Sidebar widget and BaseScreen."""
 
 from __future__ import annotations
 
@@ -12,9 +7,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Label, Static
 
-
 NAV: list[tuple[str, str, str]] = [
-    # (key, label, section)
     ("1", "Dashboard",        "Overview"),
     ("2", "Nodes",            "Compute"),
     ("3", "Virtual Machines", "Compute"),
@@ -26,24 +19,14 @@ NAV: list[tuple[str, str, str]] = [
     ("9", "Settings",         "Diagnostics"),
 ]
 
-_SECTIONS = ["Overview", "Compute", "Network", "Finance", "Diagnostics"]
-
 
 class NavItem(Static):
-    """A single sidebar navigation entry."""
-
     DEFAULT_CSS = """
-    NavItem {
-        height: 2;
-        padding: 0 2;
-        color: $text-muted;
-    }
+    NavItem { height: 2; padding: 0 2; color: $text-muted; }
     NavItem:hover { background: $boost; color: $text; }
-    NavItem.active {
-        color: $accent;
-        background: $boost;
-        border-left: thick $accent;
-    }
+    NavItem.active { color: $accent; background: $boost; border-left: thick $accent; }
+    NavItem .nav-key   { width: 3; color: $text-disabled; }
+    NavItem .nav-label { width: 1fr; }
     """
 
     def __init__(self, key: str, label: str) -> None:
@@ -53,23 +36,10 @@ class NavItem(Static):
 
     def compose(self) -> ComposeResult:
         with Horizontal():
-            yield Label(self._key, classes="nav-key")
+            yield Label(self._key,   classes="nav-key")
             yield Label(self._label, classes="nav-label")
 
-    DEFAULT_CSS = """
-    NavItem {
-        height: 2;
-        padding: 0 2;
-        color: $text-muted;
-    }
-    NavItem:hover { background: $boost; color: $text; }
-    NavItem.active { color: $accent; background: $boost; border-left: thick $accent; }
-    NavItem .nav-key  { width: 3; color: $text-disabled; }
-    NavItem .nav-label { width: 1fr; }
-    """
-
     def on_click(self) -> None:
-        # Import here to avoid circular imports
         from screens import get_screen
         screen = get_screen(self._label)
         if screen:
@@ -77,30 +47,12 @@ class NavItem(Static):
 
 
 class Sidebar(Static):
-    """Left navigation sidebar — included in every Screen."""
-
     DEFAULT_CSS = """
-    Sidebar {
-        width: 22;
-        height: 100%;
-        background: $surface;
-        border-right: solid $panel;
-        padding: 0;
-    }
-    Sidebar .logo {
-        padding: 1 2;
-        color: $accent;
-        text-style: bold;
-        border-bottom: solid $panel;
-        margin-bottom: 1;
-        height: 3;
-    }
-    Sidebar .section-hdr {
-        padding: 1 2 0 2;
-        color: $text-disabled;
-        text-style: italic;
-        height: 2;
-    }
+    Sidebar { width: 22; height: 100%; background: $surface; border-right: solid $panel; }
+    Sidebar .logo { padding: 1 2; color: $accent; text-style: bold;
+                    border-bottom: solid $panel; margin-bottom: 1; height: 3; }
+    Sidebar .section-hdr { padding: 1 2 0 2; color: $text-disabled;
+                            text-style: italic; height: 2; }
     """
 
     def __init__(self, active: str = "") -> None:
@@ -121,25 +73,17 @@ class Sidebar(Static):
 
 
 class BaseScreen(Screen):
-    """All dashboard screens inherit this.
-
-    Subclasses override compose_content() to provide their panel content.
-    The sidebar is rendered automatically.
-    """
+    """Base screen with sidebar. Subclasses override compose_content()."""
 
     ACTIVE_LABEL: str = ""
 
     DEFAULT_CSS = """
-    BaseScreen {
-        layout: horizontal;
-    }
-    BaseScreen #content {
-        width: 1fr;
-        height: 100%;
-        padding: 1 2;
-        overflow: auto auto;
-    }
+    BaseScreen { layout: horizontal; }
+    BaseScreen #content { width: 1fr; height: 100%; padding: 1 2; overflow: auto auto; }
     """
+
+    def render(self) -> str:
+        return ""
 
     def compose(self) -> ComposeResult:
         yield Sidebar(active=self.ACTIVE_LABEL)
@@ -147,4 +91,4 @@ class BaseScreen(Screen):
             yield from self.compose_content()
 
     def compose_content(self) -> ComposeResult:
-        yield Label(f"[{self.ACTIVE_LABEL}]")
+        yield Label(self.ACTIVE_LABEL)
