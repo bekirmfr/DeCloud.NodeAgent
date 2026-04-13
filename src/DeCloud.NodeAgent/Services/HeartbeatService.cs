@@ -121,6 +121,31 @@ public class HeartbeatService : BackgroundService
                 }
             }
 
+            // Zombie self-check: destroy VMs whose TargetNodeId doesn't match this node.
+            // Fires before the first heartbeat round-trip — catches migrations immediately
+            // on reconnect without waiting for the orchestrator's InvalidVmIds response.
+            var myNodeId = _orchestratorClient.NodeId;
+            if (!string.IsNullOrEmpty(myNodeId))
+            {
+                foreach (var vm in activeVms.Where(v =>
+                    !string.IsNullOrEmpty(v.Spec.TargetNodeId) &&
+                    v.Spec.TargetNodeId != myNodeId &&
+                    v.State == VmState.Running))
+                {
+                    _logger.LogWarning(
+                        "VM {VmId} has TargetNodeId={Target} but we are {Us} — zombie, destroying",
+                        vm.VmId, vm.Spec.TargetNodeId, myNodeId);
+                    _ = Task.Run(async () =>
+                    {
+                        try { await _vmManager.DeleteVmAsync(vm.VmId, ct); }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Failed to destroy zombie VM {VmId}", vm.VmId);
+                        }
+                    }, ct);
+                }
+            }
+
             // =====================================================
             // Build detailed VM summaries for heartbeat
             // =====================================================

@@ -347,6 +347,7 @@ public class CommandProcessorService : BackgroundService
         var deploymentMode = (DeploymentMode)deploymentModeInt;
         string? containerImage = GetStringProperty(root, "containerImage", "ContainerImage");
         string? overlayRootCid = GetStringProperty(root, "manifestRootCid", "ManifestRootCid");
+        string? targetNodeId = GetStringProperty(root, "targetNodeId", "TargetNodeId");
 
         Dictionary<long, string>? overlayChunkMap = null;
         if (root.TryGetProperty("ChunkMap", out var cmElement) ||
@@ -404,6 +405,7 @@ public class CommandProcessorService : BackgroundService
             EnvironmentVariables = environmentVariables,
             Labels = labels,
             ReplicationFactor = replicationFactor,
+            TargetNodeId = targetNodeId,
             OverlayRootCid = overlayRootCid,
             OverlayChunkMap = overlayChunkMap
         };

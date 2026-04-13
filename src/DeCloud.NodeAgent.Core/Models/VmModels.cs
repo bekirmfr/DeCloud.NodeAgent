@@ -109,6 +109,15 @@ public class VmSpec
     /// on the target node.
     /// </summary>
     public int ReplicationFactor { get; set; } = 0;
+
+    /// <summary>
+    /// Authoritative node ID for this VM. Set at CreateVm time, updated on migration.
+    /// NodeAgent compares against its own node ID on startup and each reconciliation
+    /// cycle — mismatch means this VM is a zombie and must be destroyed.
+    /// Null on VMs created before this field was introduced (safe — skipped by check).
+    /// </summary>
+    public string? TargetNodeId { get; set; }
+
     /// <summary>
     /// Non-null when this CreateVm is a migration, not a fresh deployment.
     /// The confirmed manifest root CID — used only for logging/diagnostics.

@@ -23,7 +23,7 @@ public class VmRepository : IDisposable
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly bool _encrypted;
 
-    private const int CURRENT_SCHEMA_VERSION = 5; // Incremented when schema changes
+    private const int CURRENT_SCHEMA_VERSION = 6; // Incremented when schema changes
 
     public VmRepository(string databasePath, ILogger logger, string? encryptionKey = null)
     {
@@ -181,7 +181,8 @@ public class VmRepository : IDisposable
                 SshPublicKey TEXT,
                 EncryptedPassword TEXT,
                 VmType TEXT NOT NULL DEFAULT 'General',
-                LabelsJson TEXT
+                LabelsJson TEXT,
+                TargetNodeId TEXT
             );
             
             CREATE INDEX IF NOT EXISTS idx_tenant ON VmRecords(OwnerId);
@@ -236,6 +237,14 @@ public class VmRepository : IDisposable
                 _logger.LogInformation("Applying migration: v{From} → v5 (VmType, LabelsJson columns)", Math.Max(fromVersion, 4));
                 MigrateToV5();
                 SetSchemaVersion(5);
+            }
+
+            // Migration v5 → v6: Add TargetNodeId column for zombie fencing
+            if (fromVersion < 6)
+            {
+                _logger.LogInformation("Applying migration: v{From} → v6 (TargetNodeId column)", Math.Max(fromVersion, 5));
+                MigrateToV6();
+                SetSchemaVersion(6);
             }
 
             transaction.Commit();
@@ -391,6 +400,17 @@ public class VmRepository : IDisposable
         }
     }
 
+    private void MigrateToV6()
+    {
+        if (!ColumnExists("VmRecords", "TargetNodeId"))
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "ALTER TABLE VmRecords ADD COLUMN TargetNodeId TEXT";
+            cmd.ExecuteNonQuery();
+            _logger.LogInformation("Added TargetNodeId column to VmRecords");
+        }
+    }
+
     /// <summary>
     /// Save or update a VM record
     /// </summary>
@@ -406,14 +426,14 @@ public class VmRepository : IDisposable
                  State, IpAddress, MacAddress, VncPort, Pid,
                  CreatedAt, StartedAt, StoppedAt, LastUpdated, DiskPath, ConfigPath,
                  BaseImageUrl, BaseImageHash, SshPublicKey, EncryptedPassword,
-                 VmType, LabelsJson)
+                 VmType, LabelsJson, TargetNodeId)
                 VALUES
                 (@VmId, @Name, @ServicesJson, @OwnerId, @QualityTier, @ReplicationFactor, @ComputePointCost,
                  @VirtualCpuCores, @MemoryBytes, @DiskBytes,
                  @State, @IpAddress, @MacAddress, @VncPort, @Pid,
                  @CreatedAt, @StartedAt, @StoppedAt, @LastUpdated, @DiskPath, @ConfigPath,
                  @BaseImageUrl, @BaseImageHash, @SshPublicKey, @EncryptedPassword,
-                 @VmType, @LabelsJson)
+                 @VmType, @LabelsJson, @TargetNodeId)
             ";
 
             using var cmd = _connection.CreateCommand();
@@ -451,6 +471,8 @@ public class VmRepository : IDisposable
                 vm.Spec.Labels is { Count: > 0 }
                     ? JsonSerializer.Serialize(vm.Spec.Labels)
                     : (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@TargetNodeId",
+                vm.Spec.TargetNodeId ?? (object)DBNull.Value);
 
             await cmd.ExecuteNonQueryAsync();
 
@@ -756,6 +778,9 @@ public class VmRepository : IDisposable
                     // Leave Labels null — VmType alone is sufficient for classification
                 }
             }
+
+            // Restore TargetNodeId for zombie fencing
+            vm.Spec.TargetNodeId = GetNullableString(reader, "TargetNodeId");
 
             return vm;
         }
