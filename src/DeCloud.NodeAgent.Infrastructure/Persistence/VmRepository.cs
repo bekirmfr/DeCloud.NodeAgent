@@ -680,32 +680,31 @@ public class VmRepository : IDisposable
         {
             var stats = new DatabaseStats();
 
-            var sql = @"
-                SELECT 
-                    State, 
-                    COUNT(*) as Count 
-                FROM VmRecords 
+            // ── Query 1: VMs by state ──────────────────────────────────────────
+            using (var cmd = _connection.CreateCommand())
+            {
+                cmd.CommandText = @"
+                SELECT State, COUNT(*) as Count
+                FROM VmRecords
                 GROUP BY State";
 
-            using var cmd = _connection.CreateCommand();
-            cmd.CommandText = sql;
+                using var reader = await cmd.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    stats.VmsByState[reader.GetString(0)] = reader.GetInt32(1);
+                }
+            } // reader + cmd disposed here — connection is free
 
-            using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
+            // ── Query 2: DB file size ──────────────────────────────────────────
+            using (var cmd = _connection.CreateCommand())
             {
-                var state = reader.GetString(0);
-                var count = reader.GetInt32(1);
-                stats.VmsByState[state] = count;
-            }
+                cmd.CommandText =
+                    "SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()";
 
-            // Get total size
-            sql = "SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()";
-            cmd.CommandText = sql;
-            using var sizeReader = await cmd.ExecuteReaderAsync();
-            if (await sizeReader.ReadAsync())
-            {
-                stats.DatabaseSizeBytes = sizeReader.GetInt64(0);
-            }
+                using var sizeReader = await cmd.ExecuteReaderAsync();
+                if (await sizeReader.ReadAsync())
+                    stats.DatabaseSizeBytes = sizeReader.GetInt64(0);
+            } // reader + cmd disposed here
 
             return stats;
         }
