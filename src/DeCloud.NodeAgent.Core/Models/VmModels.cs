@@ -426,3 +426,21 @@ public class GpuUsageStats
     /// <summary>Time since VM connected (microseconds)</summary>
     public long ConnectTimeUs { get; set; }
 }
+
+public record VmDashboardRecord
+{
+    public string VmId { get; init; } = "";
+    public string Name { get; init; } = "";
+    public string State { get; init; } = "";
+    public string VmType { get; init; } = "";
+    public string? OwnerId { get; init; }
+    public string? IpAddress { get; init; }
+    public int? VncPort { get; init; }
+    public int ReplicationFactor { get; init; }
+    public int VirtualCpuCores { get; init; }
+    public long MemoryBytes { get; init; }
+    public long DiskBytes { get; init; }
+    public string CreatedAt { get; init; } = "";
+    public string LastUpdated { get; init; } = "";
+    public string? TargetNodeId { get; init; }
+}

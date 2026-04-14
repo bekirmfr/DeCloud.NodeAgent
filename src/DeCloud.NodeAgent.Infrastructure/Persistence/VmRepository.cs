@@ -716,6 +716,66 @@ public class VmRepository : IDisposable
     }
 
     /// <summary>
+    /// Returns a sanitized summary of all VM records for dashboard display.
+    /// SECURITY: Excludes SshPublicKey, EncryptedPassword, BaseImageHash.
+    /// </summary>
+    public async Task<List<VmDashboardRecord>> GetDashboardSummaryAsync()
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            var records = new List<VmDashboardRecord>();
+            const string sql = @"
+            SELECT VmId, Name, State, VmType, OwnerId,
+                   IpAddress, VncPort, ReplicationFactor,
+                   VirtualCpuCores, MemoryBytes, DiskBytes,
+                   CreatedAt, LastUpdated, TargetNodeId
+            FROM VmRecords
+            ORDER BY CreatedAt DESC";
+
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = sql;
+
+            using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                records.Add(new VmDashboardRecord
+                {
+                    VmId = reader.GetString(reader.GetOrdinal("VmId")),
+                    Name = reader.GetString(reader.GetOrdinal("Name")),
+                    State = reader.GetString(reader.GetOrdinal("State")),
+                    VmType = reader.GetString(reader.GetOrdinal("VmType")),
+                    OwnerId = reader.IsDBNull(reader.GetOrdinal("OwnerId")) ? null : reader.GetString(reader.GetOrdinal("OwnerId")),
+                    IpAddress = reader.IsDBNull(reader.GetOrdinal("IpAddress")) ? null : reader.GetString(reader.GetOrdinal("IpAddress")),
+                    VncPort = reader.IsDBNull(reader.GetOrdinal("VncPort")) ? null : reader.GetInt32(reader.GetOrdinal("VncPort")),
+                    ReplicationFactor = reader.GetInt32(reader.GetOrdinal("ReplicationFactor")),
+                    VirtualCpuCores = reader.GetInt32(reader.GetOrdinal("VirtualCpuCores")),
+                    MemoryBytes = reader.GetInt64(reader.GetOrdinal("MemoryBytes")),
+                    DiskBytes = reader.GetInt64(reader.GetOrdinal("DiskBytes")),
+                    CreatedAt = reader.GetString(reader.GetOrdinal("CreatedAt")),
+                    LastUpdated = reader.GetString(reader.GetOrdinal("LastUpdated")),
+                    TargetNodeId = reader.IsDBNull(reader.GetOrdinal("TargetNodeId")) ? null : reader.GetString(reader.GetOrdinal("TargetNodeId")),
+                });
+            }
+            return records;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Gets current schema version (exposed for dashboard).
+    /// </summary>
+    public int SchemaVersion => GetSchemaVersion();
+
+    /// <summary>
+    /// Gets the underlying SQLite database file path.
+    /// </summary>
+    public string DatabasePath => _connection.DataSource;
+
+    /// <summary>
     /// Parse VmInstance from database reader using COLUMN NAMES (robust against schema changes)
     /// </summary>
     private VmInstance? ParseVmFromReader(SqliteDataReader reader)

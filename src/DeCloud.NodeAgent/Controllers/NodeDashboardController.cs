@@ -1,10 +1,11 @@
-using System.Text.Json.Nodes;
-using System.Text.RegularExpressions;
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
+using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace DeCloud.NodeAgent.Controllers;
 
@@ -24,6 +25,8 @@ public class NodeDashboardController : ControllerBase
     private readonly IWebHostEnvironment _env;
     private readonly IConfiguration _config;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly VmRepository _vmRepository;
+    private readonly PortMappingRepository _portMappingRepository;
     private readonly ILogger<NodeDashboardController> _logger;
 
     // Cached ingress base domain — fetched once from orchestrator, TTL 5 minutes
@@ -52,6 +55,8 @@ public class NodeDashboardController : ControllerBase
         INodeStateService nodeStateService,
         IWebHostEnvironment env,
         IConfiguration config,
+        VmRepository vmRepository,
+        PortMappingRepository portMappingRepository,
         IHttpClientFactory httpClientFactory,
         ILogger<NodeDashboardController> logger)
     {
@@ -62,6 +67,8 @@ public class NodeDashboardController : ControllerBase
         _env = env;
         _config = config;
         _httpClientFactory = httpClientFactory;
+        _vmRepository = vmRepository;
+        _portMappingRepository = portMappingRepository;
         _logger = logger;
     }
 
@@ -240,6 +247,80 @@ public class NodeDashboardController : ControllerBase
         finally
         {
             _obligationsCacheLock.Release();
+        }
+    }
+
+    // ==========================================================================
+    // GET /api/dashboard/database
+    // Local SQLite state: VmRecords + PortMappings + schema metadata.
+    // Read-only. Sensitive columns (SshPublicKey, EncryptedPassword, BaseImageHash)
+    // are never included.
+    // ==========================================================================
+
+    [HttpGet("/api/dashboard/database")]
+    public async Task<IActionResult> GetDatabase(CancellationToken ct)
+    {
+        try
+        {
+            var dbStats = await _vmRepository.GetStatsAsync();
+            var vmRows = await _vmRepository.GetDashboardSummaryAsync();
+            var portRows = await _portMappingRepository.GetAllActiveAsync();
+
+            // Determine DB file size on disk
+            long dbSizeBytes = 0;
+            try
+            {
+                var dbPath = _vmRepository.DatabasePath;
+                if (!string.IsNullOrEmpty(dbPath) && System.IO.File.Exists(dbPath))
+                    dbSizeBytes = new FileInfo(dbPath).Length;
+            }
+            catch { /* non-critical */ }
+
+            return Ok(new
+            {
+                schemaVersion = _vmRepository.SchemaVersion,
+                databasePath = _vmRepository.DatabasePath,
+                sizeBytes = dbSizeBytes,
+                stats = new
+                {
+                    totalVms = vmRows.Count,
+                    vmsByState = dbStats.VmsByState,
+                },
+                vmRecords = vmRows.Select(v => new
+                {
+                    v.VmId,
+                    v.Name,
+                    v.State,
+                    v.VmType,
+                    v.OwnerId,
+                    v.IpAddress,
+                    v.VncPort,
+                    v.ReplicationFactor,
+                    v.VirtualCpuCores,
+                    memoryGb = Math.Round(v.MemoryBytes / 1073741824.0, 2),
+                    diskGb = Math.Round(v.DiskBytes / 1073741824.0, 2),
+                    v.CreatedAt,
+                    v.LastUpdated,
+                    v.TargetNodeId
+                }),
+                portMappings = portRows.Select(p => new
+                {
+                    p.VmId,
+                    p.VmPrivateIp,
+                    p.VmPort,
+                    p.PublicPort,
+                    protocol = p.Protocol.ToString(),
+                    p.Label,
+                    isActive = p.IsActive,
+                    createdAt = p.CreatedAt.ToString("O")
+                }),
+                collectedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to collect local database info");
+            return StatusCode(500, new { error = "Failed to read local database" });
         }
     }
 
