@@ -88,14 +88,20 @@ TOKEN=$(compute_token)
 # =====================================================
 log "Entering bootstrap poll loop..."
 CONSECUTIVE_FAILURES=0
+# Always poll orchestrator at least once on startup, regardless of peer count.
+# Without this, if the DHT binary connects to a stale baked-in bootstrap peer
+# on startup, CONNECTED > 0 causes an immediate 300s back-off — the node never
+# calls /api/dht/join, never re-registers its PeerId, and never receives the
+# current peer list. Other nodes remain undiscovered until the 300s timer fires.
+INITIAL_POLL_DONE=false
 
 while true; do
     # Check current peer count
     HEALTH=$(curl -s --max-time 3 "http://127.0.0.1:${API_PORT}/health" 2>/dev/null) || true
     CONNECTED=$(echo "$HEALTH" | jq -r '.connectedPeers // 0' 2>/dev/null) || CONNECTED=0
 
-    if [ "$CONNECTED" -gt 0 ]; then
-        # We have peers — back off to maintenance polling
+    if [ "$CONNECTED" -gt 0 ] && [ "$INITIAL_POLL_DONE" = "true" ]; then
+        # We have peers and already did the initial join — back off to maintenance polling
         if [ "$CONSECUTIVE_FAILURES" -gt 0 ]; then
             log "Connected to $CONNECTED peer(s) — resuming maintenance polling"
             CONSECUTIVE_FAILURES=0
@@ -104,7 +110,12 @@ while true; do
         continue
     fi
 
-    log "No connected peers — polling orchestrator for bootstrap peers..."
+    if [ "$CONNECTED" -gt 0 ]; then
+        log "Connected to $CONNECTED peer(s) — performing initial orchestrator poll to register PeerId and discover current peers..."
+    else
+        log "No connected peers — polling orchestrator for bootstrap peers..."
+    fi
+    INITIAL_POLL_DONE=true
 
     # Call orchestrator /api/dht/join
     RESPONSE=$(curl -X POST "${ORCHESTRATOR_URL}/api/dht/join" \
