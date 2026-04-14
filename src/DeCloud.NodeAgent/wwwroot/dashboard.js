@@ -92,7 +92,7 @@ function esc(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&
 // ============================================================
 // Render All
 // ============================================================
-function renderAll() {
+async function renderAll() {
     renderBanner();
     renderQuickStats();
     renderHardware();
@@ -390,15 +390,15 @@ async function fetchAndRenderDatabase() {
         const d = await r.json();
 
         // Meta row
-        setText('db-path', d.databasePath ?? '—');
-        setText('db-size', d.sizeBytes ? fmtBytes(d.sizeBytes) : '—');
-        setText('db-schema-ver', `v${d.schemaVersion ?? '?'}`);
-        setText('db-schema-badge', `v${d.schemaVersion ?? '?'}`);
-        setText('db-total-vms', d.stats?.totalVms ?? '—');
+        set('db-path', d.databasePath ?? '—');
+        set('db-size', d.sizeBytes ? fmtBytes(d.sizeBytes) : '—');
+        set('db-schema-ver', `v${d.schemaVersion ?? '?'}`);
+        set('db-schema-badge', `v${d.schemaVersion ?? '?'}`);
+        set('db-total-vms', d.stats?.totalVms ?? '—');
 
         // VmRecords table
         const vmRows = d.vmRecords ?? [];
-        setText('db-vmrecords-meta', `${vmRows.length} record${vmRows.length !== 1 ? 's' : ''}`);
+        set('db-vmrecords-meta', `${vmRows.length} record${vmRows.length !== 1 ? 's' : ''}`);
         const vmTbody = document.getElementById('db-vmrecords-tbody');
         if (vmTbody) {
             vmTbody.innerHTML = vmRows.length === 0
@@ -421,7 +421,7 @@ async function fetchAndRenderDatabase() {
 
         // PortMappings table
         const portRows = d.portMappings ?? [];
-        setText('db-ports-meta', `${portRows.length} mapping${portRows.length !== 1 ? 's' : ''}`);
+        set('db-ports-meta', `${portRows.length} mapping${portRows.length !== 1 ? 's' : ''}`);
         const portTbody = document.getElementById('db-ports-tbody');
         if (portTbody) {
             portTbody.innerHTML = portRows.length === 0
@@ -449,13 +449,6 @@ function stateBadgeStr(s) {
             : s === 'Stopped' || s === 'Deleted' ? 'state-stopped'
                 : 'state-other';
     return `<span class="state-badge ${cls}">${esc(s)}</span>`;
-}
-
-// Helper: format bytes
-function fmtBytes(bytes) {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / 1048576).toFixed(1)} MB`;
 }
 
 // Helper: relative time from ISO string
