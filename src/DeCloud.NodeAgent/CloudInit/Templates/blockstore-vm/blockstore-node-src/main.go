@@ -328,9 +328,175 @@ type BlockNode struct {
 	// Diagnostics
 	diagLog *DiagLog
 	diag    DiagCounters
+
+	// Per-VM catchup state: debounced diff-check triggered on fetch completion.
+	// Key: vmId, Value: timer reset channel (send to reschedule, close to cancel).
+	catchupMu    sync.Mutex
+	catchupTimers map[string]chan struct{}
 }
 
-// cidShort returns the first 12 chars of a CID string (safe).
+// ── Debounced per-VM catchup ─────────────────────────────────────────────────
+// Triggered on each successful fetch completion. Resets a 10-second timer per VM.
+// When the timer fires (burst settled), does ONE diff check against the source peer
+// and enqueues any missing CIDs. Self-repeating: new fetches from the enqueued CIDs
+// reschedule the timer, looping until the diff is empty.
+const catchupSettleDelay = 10 * time.Second
+
+func (n *BlockNode) scheduleCatchup(ctx context.Context, vmId, sourcePeerID string) {
+	n.catchupMu.Lock()
+	resetCh, exists := n.catchupTimers[vmId]
+	if !exists {
+		// First fetch for this VM in this burst — launch the catchup goroutine
+		resetCh = make(chan struct{}, 1)
+		n.catchupTimers[vmId] = resetCh
+		go n.runVMCatchup(ctx, vmId, sourcePeerID, resetCh)
+	}
+	n.catchupMu.Unlock()
+
+	// Signal the goroutine to reset its settle timer
+	select {
+	case resetCh <- struct{}{}:
+	default: // already a reset pending — fine
+	}
+}
+
+func (n *BlockNode) runVMCatchup(ctx context.Context, vmId, sourcePeerID string, resetCh chan struct{}) {
+	defer func() {
+		n.catchupMu.Lock()
+		delete(n.catchupTimers, vmId)
+		n.catchupMu.Unlock()
+	}()
+
+	timer := time.NewTimer(catchupSettleDelay)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-resetCh:
+			// Fetch activity still ongoing — reset the settle window
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(catchupSettleDelay)
+
+		case <-timer.C:
+			// Burst settled — do ONE diff check
+			queued := n.diffAndEnqueue(ctx, vmId, sourcePeerID)
+			if queued == 0 {
+				// Fully caught up — exit
+				return
+			}
+			// Missing blocks enqueued; their fetch completions will reschedule
+			// this goroutine via scheduleCatchup. Exit now — don't double-run.
+			return
+
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// diffAndEnqueue compares the source peer's owner index for vmId against our
+// local owner index and enqueues any CIDs the peer has that we're missing.
+func (n *BlockNode) diffAndEnqueue(ctx context.Context, vmId, sourcePeerID string) int {
+	// Resolve peer HTTP API URL from peerstore addrs
+	peerID, err := peer.Decode(sourcePeerID)
+	if err != nil {
+		return 0
+	}
+	apiURL := n.resolveBlockstoreAPIURL(peerID)
+	if apiURL == "" {
+		return 0
+	}
+
+	// Fetch peer's CID list for this VM
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet,
+		fmt.Sprintf("%s/owners/%s", apiURL, vmId), nil)
+	if err != nil {
+		return 0
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return 0
+	}
+	defer resp.Body.Close()
+
+	var ownerCIDs struct {
+		CIDs []string `json:"cids"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&ownerCIDs); err != nil {
+		return 0
+	}
+
+	// Load our local CID set for this VM
+	localCIDs := n.loadLocalCIDSet(vmId)
+
+	queued := 0
+	for _, cidStr := range ownerCIDs.CIDs {
+		if _, have := localCIDs[cidStr]; have {
+			continue
+		}
+		c, err := cid.Decode(cidStr)
+		if err != nil {
+			continue
+		}
+		if exists, _ := n.bstore.Has(ctx, c); exists {
+			continue
+		}
+		select {
+		case n.fetchQueue <- NewBlockAnnouncement{
+			CID:          cidStr,
+			Size:         BlockSizeBytes,
+			SourcePeerID: sourcePeerID,
+			VMId:         vmId,
+		}:
+			queued++
+		default:
+			// Queue full — will catch next periodic cycle
+		}
+	}
+
+	if queued > 0 {
+		log.Printf("catchup: VM %s — %d missing blocks enqueued from peer %s",
+			vmId, queued, sourcePeerID[:12])
+	}
+	return queued
+}
+
+// resolveBlockstoreAPIURL derives the blockstore HTTP API URL (port 5090) from
+// the peer's libp2p multiaddrs stored in the peerstore.
+func (n *BlockNode) resolveBlockstoreAPIURL(peerID peer.ID) string {
+	for _, ma := range n.host.Peerstore().Addrs(peerID) {
+		parts := strings.Split(ma.String(), "/")
+		for i, p := range parts {
+			if p == "ip4" && i+1 < len(parts) {
+				return fmt.Sprintf("http://%s:5090", parts[i+1])
+			}
+		}
+	}
+	return ""
+}
+
+// loadLocalCIDSet reads the owner CID index for a specific VM.
+func (n *BlockNode) loadLocalCIDSet(vmId string) map[string]struct{} {
+	result := make(map[string]struct{})
+	data, err := os.ReadFile(filepath.Join(StorageDir, OwnersSubdir, vmId+".cids"))
+	if err != nil {
+		return result
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			result[line] = struct{}{}
+		}
+	}
+	return result
+}
+
 func cidShort(s string) string {
 	if len(s) <= 12 {
 		return s
@@ -501,7 +667,8 @@ func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
 		manifests:    make(map[string]*ResourceManifest),
 		peerSessions: make(map[peer.ID]blockFetcher),
 		diagLog:      newDiagLog(diagLogCap),
-		fetchQueue:   make(chan NewBlockAnnouncement, FetchQueueSize),
+		fetchQueue:    make(chan NewBlockAnnouncement, FetchQueueSize),
+		catchupTimers: make(map[string]chan struct{}),
 	}, nil
 }
 
@@ -804,6 +971,13 @@ func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlock
 	n.mu.Unlock()
 
 	log.Printf("Pulled block %s (%d bytes) via GossipSub + bitswap", ann.CID[:12], len(blk.RawData()))
+
+	// Schedule a debounced catchup diff-check against the source peer.
+	// Each successful fetch resets the timer — the diff runs once the burst
+	// settles, avoiding redundant GET /owners calls during an active seeding.
+	if ann.VMId != "" && ann.SourcePeerID != "" {
+		n.scheduleCatchup(ctx, ann.VMId, ann.SourcePeerID)
+	}
 
 	// Write to owner index so this node's /manifests endpoint reflects
 	// which tenant VMs it holds blocks for. This is the only mechanism
