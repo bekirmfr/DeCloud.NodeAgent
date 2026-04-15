@@ -242,6 +242,7 @@ public class LazysyncDaemon : BackgroundService
                         "VM {VmId}: QMP drive node unavailable — resetting to full export next cycle",
                         vm.VmId);
                     state.BitmapCreated = false;
+                    await SaveStateAsync(vm.VmId, state);
                     return;
                 }
 
@@ -257,6 +258,10 @@ public class LazysyncDaemon : BackgroundService
                         vm.VmId);
                     state.BitmapCreated = false;
                     if (File.Exists(tmpPath)) File.Delete(tmpPath);
+                    // Persist the BitmapCreated=false reset so the next cycle uses full export.
+                    // Without this, LoadStateAsync would read BitmapCreated=true from disk and
+                    // retry the failing incremental path indefinitely, never falling back.
+                    await SaveStateAsync(vm.VmId, state);
                     return;
                 }
 
