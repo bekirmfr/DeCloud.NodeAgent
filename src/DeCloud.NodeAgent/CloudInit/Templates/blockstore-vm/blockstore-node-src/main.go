@@ -854,28 +854,11 @@ func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlock
 		return
 	}
 
-	// Drop announcement if our last fully completed manifest version for this VM
-	// is already >= the announced version — block belongs to a cycle we already have.
-	// Uses a {vmId}.version file written after each complete manifest pull, NOT the
-	// owner index line count (which is block count, not version — using it caused
-	// false positives: as soon as one block was pulled localCount >= version=1).
-	if ann.ManifestVersion > 0 && ann.VMId != "" {
-		versionFile := filepath.Join(StorageDir, OwnersSubdir, ann.VMId+".version")
-		if data, err := os.ReadFile(versionFile); err == nil {
-			if localVersion, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil {
-				if localVersion >= ann.ManifestVersion {
-					n.diagLog.Add("announcement_stale", map[string]interface{}{
-						"cid":              cidShort(ann.CID),
-						"vmId":             cidShort(ann.VMId),
-						"announcedVersion": ann.ManifestVersion,
-						"localVersion":     localVersion,
-					})
-					return
-				}
-			}
-		}
-		// No version file = never received a complete manifest = pull everything
-	}
+	// Version filtering removed: bstore.Has() below already skips blocks this
+	// node holds, making the version file check redundant. The version filter
+	// caused a migration regression — the ex-host's version file reflected the
+	// pre-migration manifest version (e.g. 5), causing it to drop all
+	// announcements from the new publisher which restarted at version 1.
 	usedBytes, _ := n.usedBytes(ctx)
 	usagePct := float64(usedBytes) / float64(n.cfg.StorageBytes) * 100
 	if usagePct >= GCHardLimit {
@@ -2210,12 +2193,7 @@ func (n *BlockNode) handleManifests(w http.ResponseWriter, r *http.Request) {
 			log.Printf("Warning: failed to persist manifest %s: %v", m.RootCid[:12], err)
 		}
 
-		// Write version file so handleNewBlockAnnouncement can filter stale
-		// announcements for this VM in subsequent cycles.
-		if m.ResourceID != "" && m.Version > 0 {
-			versionFile := filepath.Join(StorageDir, OwnersSubdir, m.ResourceID+".version")
-			_ = os.WriteFile(versionFile, []byte(strconv.Itoa(m.Version)), 0644)
-		}
+		// Version file removed — see handleNewBlockAnnouncement.
 
 		json.NewEncoder(w).Encode(map[string]any{
 			"success": true,
