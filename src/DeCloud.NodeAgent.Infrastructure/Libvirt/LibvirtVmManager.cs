@@ -1956,6 +1956,9 @@ public class LibvirtVmManager : IVmManager
             {
                 cloudInitYaml =
                     "#cloud-config\n" +
+                    "package_update: false\n" +
+                    "package_upgrade: false\n" +
+                    "packages: []\n" +
                     "bootcmd:\n" +
                     "  - systemctl start qemu-guest-agent 2>/dev/null || true\n" +
                     "network:\n" +
