@@ -1951,12 +1951,28 @@ public class LibvirtVmManager : IVmManager
 
             await File.WriteAllTextAsync(userDataPath, cloudInitYaml, ct);
 
-            var metaData = $"instance-id: {spec.Id}\nlocal-hostname: {spec.Name}\n";
+            // On migration, generate a fresh instance-id so cloud-init re-runs
+            // on the receiving node. The overlay contains the source node's
+            // cloud-init marker — a new instance-id forces full re-initialization,
+            // fixing machine-specific state (network, guest agent, hostname).
+            var instanceId = spec.OverlayChunkMap is { Count: > 0 }
+                ? $"migration-{spec.Id}-{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}"
+                : spec.Id;
+            var metaData = $"instance-id: {instanceId}\nlocal-hostname: {spec.Name}\n";
             await File.WriteAllTextAsync(metaDataPath, metaData, ct);
 
-            _logger.LogDebug(
+            if (spec.OverlayChunkMap is { Count: > 0 })
+            {
+                _logger.LogInformation(
+                    "VM {VmId}: migration — using fresh cloud-init instance-id {InstanceId}",
+                    spec.Id, instanceId);
+            }
+            else
+            {
+                _logger.LogDebug(
                 "VM {VmId}: Cloud-init configuration:\n{UserData}",
                 spec.Id, cloudInitYaml);
+            }
 
             // =====================================================
             // STEP 8: Create cloud-init ISO
