@@ -1949,6 +1949,25 @@ public class LibvirtVmManager : IVmManager
             var userDataPath = Path.Combine(vmDir, "user-data");
             var metaDataPath = Path.Combine(vmDir, "meta-data");
 
+            // On migration, use a minimal cloud-config that only fixes machine-specific
+            // state (network, guest agent). The full user-data would re-run write_files
+            // and runcmd, overwriting user changes that are already preserved in the overlay.
+            if (spec.OverlayChunkMap is { Count: > 0 })
+            {
+                cloudInitYaml =
+                    "#cloud-config\n" +
+                    "bootcmd:\n" +
+                    "  - systemctl start qemu-guest-agent 2>/dev/null || true\n" +
+                    "network:\n" +
+                    "  version: 2\n" +
+                    "  ethernets:\n" +
+                    "    enp1s0:\n" +
+                    "      dhcp4: true\n";
+                _logger.LogInformation(
+                    "VM {VmId}: migration — using minimal cloud-init to preserve overlay state",
+                    spec.Id);
+            }
+
             await File.WriteAllTextAsync(userDataPath, cloudInitYaml, ct);
 
             // On migration, generate a fresh instance-id so cloud-init re-runs
