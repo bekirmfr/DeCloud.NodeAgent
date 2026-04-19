@@ -176,8 +176,10 @@ public class LazysyncDaemon : BackgroundService
         }
 
         var state = await LoadStateAsync(vm.VmId);
-        var tmpPath = Path.Combine(Path.GetTempPath(),
-            $"lazysync-{vm.VmId[..8]}-{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}.raw");
+        // Use VM's storage directory — AppArmor libvirt profiles allow QEMU to
+        // create files there. /tmp/ is denied by the per-VM AppArmor confinement.
+        var tmpPath = Path.Combine(_vmOptions.VmStoragePath, vm.VmId,
+            $"lazysync-tmp-{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}.raw");
 
         try
         {
