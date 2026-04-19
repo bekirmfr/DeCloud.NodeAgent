@@ -53,7 +53,7 @@ namespace DeCloud.NodeAgent.Services;
 public class LazysyncDaemon : BackgroundService
 {
     private static readonly TimeSpan CycleInterval = TimeSpan.FromMinutes(5);
-    private static readonly TimeSpan StartupDelay = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan StartupDelay = TimeSpan.FromMinutes(5);
     private const int BlockSizeBytes = 1024 * 1024; // 1 MB
     private const int BlockSizeKb = 1024;
     private const long SparseScanThreshold = 65536; // -S value for qemu-img convert
@@ -143,7 +143,8 @@ public class LazysyncDaemon : BackgroundService
 
         var vms = _vmManager.GetRunningVms()
             .Where(v => v.Spec.ReplicationFactor > 0 &&
-                        v.Spec.VmType == VmType.General)
+                        v.Spec.VmType == VmType.General &&
+                        v.IsFullyReady)  // wait for cloud-init + guest agent
             .ToList();
 
         if (vms.Count == 0) return;
