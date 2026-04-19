@@ -38,8 +38,16 @@ public class QmpClient : IQmpClient
 
         using var doc = JsonDocument.Parse(result.StandardOutput.Trim());
         // virsh --pretty wraps the QMP response in {"return": ...}
+        // Detect QMP-level error and surface as exception so callers can handle it.
+        if (doc.RootElement.TryGetProperty("error", out var err))
+        {
+            var desc = err.TryGetProperty("desc", out var d) ? d.GetString() : "unknown";
+            throw new InvalidOperationException(
+                $"QMP {execute} error for VM {vmId}: {desc}");
+        }
         if (doc.RootElement.TryGetProperty("return", out var ret))
             return ret.Clone();
+
         return doc.RootElement.Clone();
     }
 
@@ -89,17 +97,25 @@ public class QmpClient : IQmpClient
     public async Task<string> DriveBackupIncrementalAsync(
         string vmId, string driveNode, string bitmapName, string targetPath, CancellationToken ct = default)
     {
-        // Start incremental backup block job
-        await SendAsync(vmId, "drive-backup", new
+        // QEMU requires a non-empty job-id for drive-backup.
+        // Without it, QEMU returns "Invalid job ID ''" and creates an empty sparse
+        // file at targetPath before failing — producing all-zero output that
+        // ScanChunksAsync silently treats as "no changed chunks".
+        // job-id contains a hyphen so use Dictionary instead of anonymous object.
+        var jobId = $"ls-{vmId[..8]}-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+
+        await SendAsync(vmId, "drive-backup", new Dictionary<string, object>
         {
-            device = driveNode,
-            target = targetPath,
-            format = "raw",
-            sync = "incremental",
-            bitmap = bitmapName
+            ["job-id"] = jobId,
+            ["device"] = driveNode,
+            ["target"] = targetPath,
+            ["format"] = "raw",
+            ["sync"] = "incremental",
+            ["bitmap"] = bitmapName,
         }, ct);
 
-        // Poll query-block-jobs until job completes (max 10 min)
+        // Poll query-block-jobs by job-id until the job completes (max 10 min).
+        // Matching by job-id is reliable; "device" field varies across QEMU versions.
         var deadline = DateTime.UtcNow.AddMinutes(10);
         while (DateTime.UtcNow < deadline)
         {
@@ -108,7 +124,7 @@ public class QmpClient : IQmpClient
             var running = false;
             foreach (var job in jobs.EnumerateArray())
             {
-                if (job.TryGetProperty("device", out var dev) && dev.GetString() == driveNode)
+                if (job.TryGetProperty("id", out var id) && id.GetString() == jobId)
                 {
                     running = true;
                     if (job.TryGetProperty("status", out var status) &&
