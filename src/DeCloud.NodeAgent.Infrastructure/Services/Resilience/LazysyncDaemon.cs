@@ -202,6 +202,17 @@ public class LazysyncDaemon : BackgroundService
                 {
                     try
                     {
+                        // Bitmap may already exist if this VM was migrated from another node.
+                        // Delete it first to ensure we start clean on this node.
+                        try
+                        {
+                            await _qmpClient.RemoveDirtyBitmapAsync(vm.VmId, driveNode, BitmapName, ct);
+                            _logger.LogDebug("VM {VmId}: Removed existing lazysync bitmap before re-adding", vm.VmId);
+                        }
+                        catch
+                        {
+                            // Not present — that's fine, ignore
+                        }
                         await _qmpClient.AddDirtyBitmapAsync(vm.VmId, driveNode, BitmapName, ct);
                         // BitmapCreated = true is set after the full cycle succeeds (step 8),
                         // so a crash before SaveStateAsync leaves BitmapCreated = false.

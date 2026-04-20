@@ -23,6 +23,9 @@ public interface IQmpClient
     /// <summary>Phase D+1: Add persistent dirty bitmap to the primary drive.</summary>
     Task AddDirtyBitmapAsync(string vmId, string driveNode, string bitmapName, CancellationToken ct = default);
 
+    /// <summary>Phase D+1: Remove a dirty bitmap (e.g. before re-adding on migrated VMs).</summary>
+    Task RemoveDirtyBitmapAsync(string vmId, string driveNode, string bitmapName, CancellationToken ct = default);
+
     /// <summary>Phase D+1: Clear (reset) a dirty bitmap after successful export.</summary>
     Task ClearDirtyBitmapAsync(string vmId, string driveNode, string bitmapName, CancellationToken ct = default);
 

@@ -83,6 +83,15 @@ public class QmpClient : IQmpClient
         _logger.LogDebug("Added dirty bitmap {Name} to {Drive} on VM {VmId}", bitmapName, driveNode, vmId);
     }
 
+    public async Task RemoveDirtyBitmapAsync(string vmId, string driveNode, string bitmapName, CancellationToken ct)
+    {
+        await SendAsync(vmId, "block-dirty-bitmap-remove", new
+        {
+            node = driveNode,
+            name = bitmapName
+        }, ct);
+    }
+
     public async Task ClearDirtyBitmapAsync(
         string vmId, string driveNode, string bitmapName, CancellationToken ct = default)
     {
