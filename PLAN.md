@@ -1,7 +1,7 @@
 # Block Store System VM — Design & Implementation Plan
 
-**Date:** 2026-02-16 (Updated: 2026-03-20)
-**Status:** Phase A–C complete (production-verified 2026-03-20). Phase D next.
+**Date:** 2026-02-16 (Updated: 2026-04-20)
+**Status:** Phase A–D complete (production-verified 2026-04-20). Phase E (split-brain prevention) next — pre-MVP.
 
 ## Implementation Status
 
@@ -10,9 +10,9 @@
 | A — Orchestrator core | ✅ Complete | BlockStoreService, BlockStoreController, labels, eligibility |
 | B — NodeAgent + Go binary | ✅ Complete | cloud-init, blockstore-node, scripts, callback controller |
 | C — Integration | ✅ Production-verified 2026-03-20 | Dashboard live, binary build pipeline stable |
-| D — Lazysync & Migration | 🔲 Next | Items 25–33 below |
+| D — Lazysync & Migration | ✅ Production-verified 2026-04-20 | Items 25–37: lazysync daemon, LazysyncManager, migration planner, source-offline alerting, disk reconstruction, end-to-end test confirmed. Gaps: 31a (settleCycle on-chain), 32 (DHT proximity endpoint), 37 (owner-indexed deletion) |
 | D-fixes — Replication reliability | ✅ Production-verified 2026-04-08 | Overlay-only fix, bitswap peer targeting, concurrency cap, port firewall, retry queue |
-| E — Split-Brain Prevention | 🔲 Follows D | Items 34–41 below |
+| E — Split-Brain Prevention | 🔲 Next (pre-MVP) | Items 34–41: NodeId authority foundation in place from Phase D. Reconciliation service, heartbeat enforcement, lazysync validation not yet built |
 **Depends on:** DHT system VMs (production-verified 2026-02-15)
 **Follows patterns from:** Relay VMs, DHT VMs
 
@@ -1823,9 +1823,21 @@ private List<string> GetInvalidVmsForNode(string nodeId, List<string> reportedRu
 23. Test local LRU GC (eviction under capacity pressure, provider record withdrawal)
 24. Test self-healing (reconciliation redeploy)
 
-### Phase D: Lazysync & Migration
+### Phase D: Lazysync & Migration — ✅ Production-verified 2026-04-20
 
-### Phase D: Lazysync & Migration
+**End-to-end confirmed:** VM created on MSI (Turkey, CGNAT) → versions 1–9 replicated incrementally → MSI shutdown → overlay reconstructed on dedixlabvm (US East) from chunk map → user files preserved, browser terminal and ingress functional post-migration.
+
+**Items implemented beyond the plan (discovered during testing):**
+- **MAC-pinned netplan fix** — migration `bootcmd` overwrites `/etc/netplan/50-cloud-init.yaml` before networkd starts; source node MAC address in the overlay caused `network-online.target` to hang forever on the receiving node
+- **Migration cloud-init minimal config** — `package_update: false`, `package_upgrade: false`, no apt operations to prevent cloud-init config stage blocking
+- **`RemoveDirtyBitmapAsync`** — cleans the overlay-carried `lazysync` bitmap on the receiving node before re-adding; without this, `AddDirtyBitmap` fails every cycle causing fallback to full export
+- **Ingress registered before `WaitForPrivateIpAsync`** — domain live immediately after migration boot completes
+- **Post-migration reseed** — `ConfirmedVersion` reset to 0 + `ReseedVm` command sent to receiving node; re-enters manifest into audit queue and pushes all blocks to new local blockstore
+
+**Items not yet implemented (gaps in Phase D):**
+- Item 31a — `settleCycle()` on-chain billing upgrade (blockCounts, blockSizeKbs, replicationFactors arrays)
+- Item 32 — DHT proximity endpoint `GET /proximity/{cid}`
+- Item 37 — Owner-indexed block deletion (`DELETE /owners/{vmId}`)
 
 25. **ReplicationFactor on VmSpec/VirtualMachine** — add field (default 3), add to
     `CreateVmRequest` (optional, validated: 0/1/3/5), set in `VmService.CreateVmAsync`
@@ -1915,7 +1927,9 @@ private List<string> GetInvalidVmsForNode(string nodeId, List<string> reportedRu
     `LibvirtVmManager.DeleteVmAsync` (call blockstore owner delete),
     `VmLifecycleManager.OnVmDeletedAsync` (call DeleteManifestAsync).
 
-### Phase E: Split-Brain / Zombie VM Prevention
+### Phase E: Split-Brain / Zombie VM Prevention — 🔲 Next (pre-MVP)
+
+**Foundation in place:** `vm.NodeId` is updated atomically during migration (Phase D). The authority mechanism exists; the enforcement layer below is not yet built.
 
 34. **VmReconciliationService** on Node Agent — startup + heartbeat reconciliation loop
 35. **GetVmInfoAsync** endpoint — lightweight VM ownership query for reconciliation
@@ -2087,42 +2101,36 @@ LevelDB is only used for metadata (access times, block index, stats).
 - Self-healing redeploys on VM failure
 - DHT proximity endpoint returns accurate distance and rank estimates
 
-### Phase D (Lazysync & Migration)
-- Lazysync daemon continuously replicates dirty overlay blocks for all running VMs
-- Lazysync cycle completes within configured interval (~5 minutes) under normal load
-- QEMU incremental backup produces crash-consistent dirty block exports without VM pause
-- Confirmed manifest version stays within 2 versions of current (Kademlia scatter keeps up)
-- All chunks in confirmed manifests have ≥N providers in the DHT (verified by audit loop)
-- Blocks scatter across the network via Kademlia XOR proximity — no orchestrator-directed placement
-- When a node goes offline, its VMs are rescheduled to a scheduling-eligible node
-- Migration target selected by scheduling fit + resource headroom (bitswap fetches overlay from scattered providers)
-- VM disk reconstruction from confirmed manifest completes successfully (base image + overlay via bitswap + cloud-init regeneration)
-- Initial overlay seeding of new VMs completes within minutes (not hours)
-- Recovery point objective: ≤10 minutes of data loss under normal conditions
-- Overlay-only replication keeps per-VM storage cost at 1-10% of virtual disk size
-- Self-healing: provider count recovers autonomously when nodes leave/rejoin the network
-- Per-VM replication factor correctly enforced:
+### Phase D (Lazysync & Migration) — ✅ Production-verified 2026-04-20
+- ✅ Lazysync daemon continuously replicates dirty overlay blocks for all running VMs
+- ✅ Lazysync cycle completes within configured interval (~5 minutes) under normal load
+- ✅ QEMU incremental backup produces crash-consistent dirty block exports without VM pause
+- ✅ Confirmed manifest version stays within 2 versions of current (Kademlia scatter keeps up)
+- ✅ All chunks in confirmed manifests have ≥N providers in the DHT (verified by audit loop)
+- ✅ Blocks scatter across the network via Kademlia XOR proximity — no orchestrator-directed placement
+- ✅ When a node goes offline, its VMs are rescheduled to a scheduling-eligible node
+- ✅ Migration target selected by scheduling fit + resource headroom (bitswap fetches overlay from scattered providers)
+- ✅ VM disk reconstruction from confirmed manifest completes successfully (base image + overlay via bitswap + cloud-init regeneration) — confirmed 2026-04-20
+- ✅ Initial overlay seeding of new VMs completes within minutes (not hours)
+- ✅ Recovery point objective: ≤10 minutes of data loss under normal conditions
+- ✅ Overlay-only replication keeps per-VM storage cost at 1-10% of virtual disk size
+- ✅ Self-healing: provider count recovers autonomously when nodes leave/rejoin the network
+- ✅ Per-VM replication factor correctly enforced:
     N=0 → lazysync skipped entirely, VM flagged Ephemeral on dashboard
     N=1 → lazysync runs, confirmedVersion advances when ≥1 provider confirmed
     N=3 → default; confirmedVersion advances when all chunks have ≥3 providers
     N=5 → high availability; confirmedVersion advances when all chunks have ≥5 providers
-- Scheduler rejects nodes without Active BlockStore for VMs with replicationFactor > 0
-- Storage replication cost billed correctly: overlay_gb × replication_factor × storage_rate
-- Source-offline alerting correctly classifies VMs as UNRECOVERABLE / RECOVERING /
+- ✅ Scheduler rejects nodes without Active BlockStore for VMs with replicationFactor > 0
+- ✅ Source-offline alerting correctly classifies VMs as UNRECOVERABLE / RECOVERING /
   MIGRATING / LOST based on confirmedVersion, currentVersion, and replicationFactor
-- `replicationFactor=0` VMs correctly classified as LOST on node failure with no alert
+- ✅ `replicationFactor=0` VMs correctly classified as LOST on node failure with no alert
   (user opted in to ephemeral semantics at creation time)
-- Block-based billing is exact: `blockCount × blockSizeKb / 1024 × replicationFactor × costPerMbPerHour`
-  matches the actual manifest chunk count — no estimation
-- `settleCycle()` atomically collects storage fees and distributes storage pool in one
-  on-chain transaction per billing cycle
-- Storage pool distribution is proportional: `reward = pool × (node.UsedBytes / Σ UsedBytes)`
-  calculated on-chain from raw byte inputs — trustless
-- `StorageRewarded` events emitted per-node per-cycle, fully auditable from chain
-- Block size enforcement: `blockSizeBytes` matches manifest type constant at write time;
-  non-conforming writes rejected by block store binary
-- Model shard chunk counts are manageable: Llama-3 70B Q4 = 640 × 64 MB blocks;
-  manifest fits in memory; DHT provider records scale linearly
+- ⚠️ Storage replication cost billed correctly: framework in place (ManifestRecord has BlockCount/BlockSizeKb), full on-chain `settleCycle()` integration not yet done (item 31a)
+- ❌ Block-based billing exact on-chain: `blockCount × blockSizeKb / 1024 × replicationFactor × costPerMbPerHour` — not wired to `settleCycle()` yet
+- ❌ `settleCycle()` on-chain integration — not yet implemented
+- ❌ Storage pool distribution on-chain — not yet implemented
+- ✅ Block size enforcement: `blockSizeBytes` matches manifest type constant at write time
+- ✅ Model shard chunk counts are manageable: Llama-3 70B Q4 = 640 × 64 MB blocks
 
 ### Phase D-fixes (Replication Reliability) — Production-verified 2026-04-08
 
@@ -2137,6 +2145,41 @@ LevelDB is only used for metadata (access times, block index, stats).
   `retry_fetch` events visible in diag log within one retry cycle (60s)
 - `retry_give_up` rate is 0 under normal cross-region conditions (routing table
   warm after first retry; subsequent retries resolve in <8ms)
+
+### Phase D Migration Fixes — Production-verified 2026-04-20
+
+Additional bugs discovered and fixed during end-to-end migration testing:
+
+**Bug 7 — MAC-pinned netplan caused `network-online.target` hang on receiving node**
+The overlay's `/etc/netplan/50-cloud-init.yaml` contains a `match: macaddress` entry
+bound to the source node's VM MAC address. On the receiving node the VM gets a
+different MAC, so systemd-networkd cannot bring up `enp1s0` and
+`network-online.target` waits forever — freezing boot at the cfg80211/udev stage
+(visible ~t=47s via VNC). Fix: add `bootcmd` to migration cloud-init that overwrites
+the netplan file with a generic DHCP config before networkd starts.
+File: `LibvirtVmManager.cs`.
+
+**Bug 8 — Cloud-init config stage blocked on apt operations during migration boot**
+The overlay's `/etc/cloud/cloud.cfg` enables `package_update` and `package_upgrade`
+by default. Migration user-data had `package_update: false` but was missing
+`package_upgrade: false`, `package_reboot_if_required: false`, `resize_rootfs: false`,
+`runcmd: []`, and `write_files: []`. Cloud-init config stage blocked on apt.
+Fix: add all disable flags to migration cloud-init. File: `LibvirtVmManager.cs`.
+
+**Bug 9 — Dirty bitmap `lazysync` persists in qcow2 metadata through migration**
+The QEMU persistent dirty bitmap is embedded in the overlay qcow2 file metadata.
+When the overlay is reconstructed on the receiving node, the bitmap already exists.
+`AddDirtyBitmapAsync` fails with "Bitmap already exists: lazysync" causing
+`LazysyncDaemon` to fall back to full export every cycle indefinitely.
+Fix: add `RemoveDirtyBitmapAsync` to `IQmpClient` and `QmpClient`; call it before
+`AddDirtyBitmapAsync` in `LazysyncDaemon.SyncVmAsync`, swallowing the not-found
+error if the bitmap is absent. Files: `IQmpClient.cs`, `QmpClient.cs`, `LazysyncDaemon.cs`.
+
+**Bug 10 — Ingress domain not live until after `WaitForPrivateIpAsync` timeout**
+`VmLifecycleManager` registered ingress after `WaitForPrivateIpAsync` completed.
+For migration boots, the IP is assigned quickly but `WaitForPrivateIpAsync` had
+an unnecessary delay. Fix: register ingress before `WaitForPrivateIpAsync` so the
+domain resolves as soon as migration boot completes. File: `VmLifecycleManager.cs`.
 
 ### Production Bug Fixes (2026-04-08)
 
@@ -2190,10 +2233,11 @@ concurrent walks saturated the link and all timed out. Fix: add `fetchSem chan s
 (capacity `GossipSubFetchConcurrency=4`) with blocking `select` and 5-minute wait
 timeout, so goroutines queue rather than drop. File: `main.go`.
 
-### Phase E (Split-Brain Prevention)
-- Zombie VMs destroyed within 60 seconds of node reconnection
-- No split-brain events in production (two instances of same VM never run simultaneously)
-- Lazysync manifest updates from zombie nodes rejected 100%
-- Network fencing (if enabled) isolates zombies within 30 seconds of migration
-- Reconciliation adds < 100ms to heartbeat cycle
-- False positive rate (valid VMs incorrectly destroyed): 0%
+### Phase E (Split-Brain Prevention) — 🔲 Not yet implemented
+**Foundation in place:** `vm.NodeId` updated atomically on migration (Phase D). Enforcement layer not yet built.
+- 🔲 Zombie VMs destroyed within 60 seconds of node reconnection
+- 🔲 No split-brain events in production (two instances of same VM never run simultaneously)
+- 🔲 Lazysync manifest updates from zombie nodes rejected 100%
+- 🔲 Network fencing (if enabled) isolates zombies within 30 seconds of migration
+- 🔲 Reconciliation adds < 100ms to heartbeat cycle
+- 🔲 False positive rate (valid VMs incorrectly destroyed): 0%
