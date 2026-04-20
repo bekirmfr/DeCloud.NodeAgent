@@ -1,7 +1,7 @@
 # Block Store System VM — Design & Implementation Plan
 
 **Date:** 2026-02-16 (Updated: 2026-04-20)
-**Status:** Phase A–E complete. Remaining open items: 31a (settleCycle on-chain billing), 32 (DHT proximity endpoint). Items 39–41 (network fencing, assignment version, integration test) optional.
+**Status:** Phase A–E complete. Item 32 (DHT proximity endpoint) implemented. All core items done. Items 39–41 (network fencing, assignment version, integration test) optional.
 
 ## Implementation Status
 
@@ -10,7 +10,7 @@
 | A — Orchestrator core | ✅ Complete | BlockStoreService, BlockStoreController, labels, eligibility |
 | B — NodeAgent + Go binary | ✅ Complete | cloud-init, blockstore-node, scripts, callback controller |
 | C — Integration | ✅ Production-verified 2026-03-20 | Dashboard live, binary build pipeline stable |
-| D — Lazysync & Migration | ✅ Production-verified 2026-04-20 | Items 25–37: lazysync daemon, LazysyncManager, migration planner, source-offline alerting, disk reconstruction, end-to-end test confirmed. Gaps: 31a (settleCycle on-chain), 32 (DHT proximity endpoint) |
+| D — Lazysync & Migration | ✅ Production-verified 2026-04-20 | Items 25–37: lazysync daemon, LazysyncManager, migration planner, source-offline alerting, disk reconstruction, end-to-end test confirmed. Item 32 (DHT proximity endpoint) implemented. All items complete. |
 | D-fixes — Replication reliability | ✅ Production-verified 2026-04-08 | Overlay-only fix, bitswap peer targeting, concurrency cap, port firewall, retry queue |
 | E — Split-Brain Prevention | ✅ Complete | Items 34–38 done. InvalidVmIds push model + TargetNodeId pre-check + owner block cleanup + manifest POST NodeId fence. Items 39–41 optional. |
 **Depends on:** DHT system VMs (production-verified 2026-02-15)
@@ -1835,7 +1835,6 @@ private List<string> GetInvalidVmsForNode(string nodeId, List<string> reportedRu
 - **Post-migration reseed** — `ConfirmedVersion` reset to 0 + `ReseedVm` command sent to receiving node; re-enters manifest into audit queue and pushes all blocks to new local blockstore
 
 **Items not yet implemented (gaps in Phase D):**
-- Item 31a — `settleCycle()` on-chain billing upgrade (blockCounts, blockSizeKbs, replicationFactors arrays)
 - Item 32 — DHT proximity endpoint `GET /proximity/{cid}`
 
 25. **ReplicationFactor on VmSpec/VirtualMachine** — add field (default 3), add to
@@ -1862,13 +1861,15 @@ private List<string> GetInvalidVmsForNode(string nodeId, List<string> reportedRu
 31. **GossipSub scatter propagation** — block store publishes new CIDs to
     `decloud/blockstore/new-blocks`; receiving nodes evaluate XOR distance + adaptive
     threshold; pull via bitswap if close enough
-31a. **settleCycle() integration** — upgrade `BlockchainService.ExecuteSettlementAsync`
-     to call `settleCycle()` instead of `batchReportUsage()`. Pass per-VM
-     `blockCounts`, `blockSizeKbs`, `replicationFactors` arrays alongside compute
-     amounts. Pass per-node `storageBytes` array from `node.BlockStoreInfo.UsedBytes`.
-     Update `BlockchainService` ABI to include `settleCycle` signature.
-     Update `SettlementService.RecordUsageAsync` to record compute and storage
-     components separately for cycle aggregation.
+31a. ✅ **settleCycle() integration** — `OnChainSettlementService.ProcessBatchChunkAsync`
+     calls `BuildSettleCycleRequestAsync` to assemble per-VM arrays (`blockCounts`,
+     `blockSizeKbs`, `replicationFactors`, `vmIds`) from `ManifestRecord` and per-storage-node
+     arrays (`storageNodeWallets`, `storageBytes`) from all active `BlockStoreInfo` nodes.
+     Routes to `BlockchainService.ExecuteSettleCycleAsync` (calls `settleCycle()`) when VMs
+     are present; falls back to `ExecuteBatchSettlementAsync` (`batchReportUsage`) only for
+     empty batches. `DeCloudEscrow.sol` `_distributionPhase` distributes the storage pool
+     proportionally to node `storageBytes`. ABI loaded from embedded `DeCloudEscrow.abi.json`.
+     `replicationFactor=0` VMs pass 0 — contract computes zero storage billing correctly.
 31b. **GossipSub fetch retry queue** — block store binary maintains an in-memory
      retry queue (`chan cid.Cid`, capacity 500) fed by two failure paths:
      (a) semaphore skip (`bitswap_fetch_skip`) — CID received via GossipSub but all
@@ -2161,10 +2162,9 @@ LevelDB is only used for metadata (access times, block index, stats).
   MIGRATING / LOST based on confirmedVersion, currentVersion, and replicationFactor
 - ✅ `replicationFactor=0` VMs correctly classified as LOST on node failure with no alert
   (user opted in to ephemeral semantics at creation time)
-- ⚠️ Storage replication cost billed correctly: framework in place (ManifestRecord has BlockCount/BlockSizeKb), full on-chain `settleCycle()` integration not yet done (item 31a)
-- ❌ Block-based billing exact on-chain: `blockCount × blockSizeKb / 1024 × replicationFactor × costPerMbPerHour` — not wired to `settleCycle()` yet
-- ❌ `settleCycle()` on-chain integration — not yet implemented
-- ❌ Storage pool distribution on-chain — not yet implemented
+- ✅ Storage replication cost billed correctly: `blockCount × blockSizeKb / 1024 × replicationFactor × costPerMbPerHour` — wired through `settleCycle()` via `OnChainSettlementService`
+- ✅ `settleCycle()` on-chain integration — `BuildSettleCycleRequestAsync` + `ExecuteSettleCycleAsync` + `DeCloudEscrow.sol`
+- ✅ Storage pool distribution on-chain — `_distributionPhase` distributes proportionally to `storageBytes` per node
 - ✅ Block size enforcement: `blockSizeBytes` matches manifest type constant at write time
 - ✅ Model shard chunk counts are manageable: Llama-3 70B Q4 = 640 × 64 MB blocks
 
