@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"crypto/sha256"
+	"math/big"
 	"net/http"
 	"os"
 	"os/signal"
@@ -825,6 +827,70 @@ func startAPIServer(port string, state *NodeState) {
 			"cid":       cidStr,
 			"count":     len(providers),
 			"providers": providers,
+		})
+	})
+
+	// ── GET /proximity/{cid} ─────────────────────────────────────────────────
+	// Kademlia XOR proximity of this DHT node's peer ID to a given CID.
+	// Used by the blockstore binary for neighborhood scan decisions and
+	// diagnostics ("why did/didn't this node store block X?").
+	mux.HandleFunc("/proximity/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+
+		cidStr := strings.TrimPrefix(r.URL.Path, "/proximity/")
+		cidStr = strings.TrimSpace(cidStr)
+		if cidStr == "" {
+			http.Error(w, "missing CID", http.StatusBadRequest)
+			return
+		}
+
+		c, err := cid.Decode(cidStr)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("invalid CID: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		state.mu.RLock()
+		myID := state.host.ID()
+		connectedPeers := state.host.Network().Peers()
+		state.mu.RUnlock()
+
+		// Compute XOR distance: SHA-256(myPeerID) XOR SHA-256(CID multihash).
+		// Matches the Kademlia keyspace metric used internally by go-libp2p-kad-dht.
+		myHash := sha256.Sum256([]byte(myID))
+		cidHash := sha256.Sum256(c.Hash())
+
+		xorBytes := make([]byte, 32)
+		for i := range xorBytes {
+			xorBytes[i] = myHash[i] ^ cidHash[i]
+		}
+		distance := new(big.Int).SetBytes(xorBytes)
+
+		// Count connected peers that are closer to the CID than we are.
+		closerCount := 0
+		for _, p := range connectedPeers {
+			pHash := sha256.Sum256([]byte(p))
+			pXor := make([]byte, 32)
+			for i := range pXor {
+				pXor[i] = pHash[i] ^ cidHash[i]
+			}
+			if new(big.Int).SetBytes(pXor).Cmp(distance) < 0 {
+				closerCount++
+			}
+		}
+
+		const kValue = 20
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"cid":              cidStr,
+			"distance":         fmt.Sprintf("0x%x", distance),
+			"closerKnownPeers": closerCount,
+			"estimatedRank":    closerCount + 1,
+			"kValue":           kValue,
+			"routingTableSize": state.dht.RoutingTable().Size(),
 		})
 	})
 
