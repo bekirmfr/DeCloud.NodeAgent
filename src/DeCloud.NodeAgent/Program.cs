@@ -11,9 +11,11 @@ using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.NodeAgent.Infrastructure.Services.Auth;
 using DeCloud.NodeAgent.Infrastructure.Services.Resilience;
+using DeCloud.NodeAgent.Infrastructure.Services.State;
 using DeCloud.NodeAgent.Services;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -115,6 +117,38 @@ builder.Services.AddSingleton<PortMappingRepository>(sp =>
     var dbPath = Path.Combine(options.VmStoragePath, "port-mappings.db");
     return new PortMappingRepository(dbPath, logger);
 });
+
+// =====================================================
+// Obligation State Repository
+// Stores system VM identity (Ed25519 keys, WireGuard keys,
+// auth tokens) in SQLite so identity survives VM redeploys.
+// SECURITY: DB file is enforced to 0600 permissions at init.
+// =====================================================
+builder.Services.AddSingleton<ObligationStateRepository>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<LibvirtVmManagerOptions>>().Value;
+    var logger = sp.GetRequiredService<ILogger<ObligationStateRepository>>();
+
+    var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+    if (isWindows)
+    {
+        // Windows dev path — obligation state is never used in production there.
+        var tempPath = Path.Combine(Path.GetTempPath(), "decloud-obligation-state-dummy.db");
+        logger.LogWarning("Running on Windows — ObligationStateRepository using temp path");
+        return new ObligationStateRepository(tempPath, logger);
+    }
+
+    var dbPath = Path.Combine(options.VmStoragePath, "obligation-state.db");
+    return new ObligationStateRepository(dbPath, logger);
+});
+
+// =====================================================
+// Obligation State Service
+// Business logic: version-based conflict resolution,
+// role validation, and security logging guardrails.
+// =====================================================
+builder.Services.AddSingleton<IObligationStateService, ObligationStateService>();
+
 
 // =====================================================
 // Smart Port Allocation Services
