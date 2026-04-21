@@ -1,4 +1,4 @@
-using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.AspNetCore.Mvc;
 using System.Net;
