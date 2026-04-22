@@ -8,13 +8,22 @@ public record NodeRegistrationResponse(
     NodePerformanceEvaluation PerformanceEvaluation,
     string ApiKey,
     SchedulingConfig SchedulingConfig,
-    /// <summary>
-    /// Orchestrator's WireGuard public key for relay configuration
-    /// Null if WireGuard is not enabled on orchestrator
-    /// </summary>
     string OrchestratorWireGuardPublicKey,
-    TimeSpan HeartbeatInterval
+    TimeSpan HeartbeatInterval,
+    List<string>? DhtBootstrapPeers,                           // already sent by orchestrator
+    Dictionary<string, ObligationStatePayload>? ObligationStates // new — may be null on older orchestrators
 );
+
+/// <summary>
+/// Mirrors Orchestrator.Models.ObligationStatePayload.
+/// Defined here to avoid a project reference from Core → Orchestrator.
+/// </summary>
+public class ObligationStatePayload
+{
+    public string StateJson { get; init; } = string.Empty;
+    public int Version { get; init; }
+}
+
 
 /// <summary>
 /// Periodic heartbeat sent to orchestrator
@@ -178,6 +187,11 @@ public class NodeRegistration
     /// Node operator pricing (optional). If null, platform defaults are used.
     /// </summary>
     public NodePricing? Pricing { get; set; }
+
+    /// <summary>
+    /// Monotonic version from the orchestrator — used for conflict resolution.
+    /// </summary>
+    public Dictionary<string, int> ObligationStateVersions { get; set; } = new();
 }
 
 public class NodePricing

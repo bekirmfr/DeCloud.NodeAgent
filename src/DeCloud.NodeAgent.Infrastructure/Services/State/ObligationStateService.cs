@@ -1,5 +1,6 @@
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
+using DeCloud.Shared.Models;
 using Microsoft.Extensions.Logging;
 
 namespace DeCloud.NodeAgent.Infrastructure.Services.State;
@@ -128,7 +129,7 @@ public sealed class ObligationStateService : IObligationStateService
     /// Prevents open-ended database lookups from controller inputs.
     /// </summary>
     private static string? ValidateRole(string? role) =>
-        DeCloud.NodeAgent.Core.Models.ObligationRole.Canonicalise(role);
+        ObligationRole.Canonicalise(role);
 
     /// <summary>
     /// Re-enforces 0600 on the SQLite file exactly once per service lifetime.

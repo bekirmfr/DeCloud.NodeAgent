@@ -31,6 +31,7 @@ public partial class OrchestratorClient : IOrchestratorClient
     private readonly ILogger<OrchestratorClient> _logger;
     private readonly IResourceDiscoveryService _resourceDiscovery;
     private readonly INodeStateService _nodeState;
+    private readonly IObligationStateService _obligationState;
     private readonly INodeMetadataService _nodeMetadata;
     private readonly OrchestratorClientOptions _options;
 
@@ -62,6 +63,7 @@ public partial class OrchestratorClient : IOrchestratorClient
         IOptions<OrchestratorClientOptions> options,
         IResourceDiscoveryService resourceDiscovery,
         INodeStateService nodeState,
+        IObligationStateService obligationState,
         INodeMetadataService nodeMetadata,
         ConcurrentQueue<PendingCommand> pendingCommands,
         ILogger<OrchestratorClient> logger)
@@ -73,6 +75,7 @@ public partial class OrchestratorClient : IOrchestratorClient
         _nodeMetadata = nodeMetadata;
         _walletAddress = _options.WalletAddress;
         _nodeState = nodeState;
+        _obligationState = obligationState;
         _pendingCommands = pendingCommands;
         _httpClient.BaseAddress = new Uri(_options.BaseUrl.TrimEnd('/'));
         _httpClient.Timeout = _options.Timeout;
@@ -209,7 +212,10 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             Region = _nodeMetadata.Region,
             Zone = _nodeMetadata.Zone,
             Pricing = _nodeMetadata.Pricing,
-            RegisteredAt = DateTime.UtcNow
+            RegisteredAt = DateTime.UtcNow,
+            // Report which obligation state versions we already have so the
+            // orchestrator only sends states that are newer than our local copy.
+            ObligationStateVersions = await BuildObligationStateVersionsAsync(ct)
         };
 
         // Register with retry logic
@@ -260,6 +266,41 @@ REGISTERED_AT={DateTime.UtcNow:O}";
 
         return RegistrationResult.Failure("Max retries exceeded");
     }
+
+    /// <summary>
+    /// Builds a dictionary of { roleName → storedVersion } from the local SQLite
+    /// store for inclusion in the registration request.
+    /// Allows the orchestrator to skip sending states the node already has.
+    /// </summary>
+    private async Task<Dictionary<string, int>> BuildObligationStateVersionsAsync(
+        CancellationToken ct)
+    {
+        var roles = new[] { "relay", "dht", "blockstore" };
+        var versions = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var role in roles)
+        {
+            try
+            {
+                var version = await _obligationState.GetVersionAsync(role, ct);
+                if (version > 0)
+                    versions[role] = version;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Could not read stored version for obligation role '{Role}' — " +
+                    "orchestrator will resend state for this role",
+                    role);
+            }
+        }
+
+        _logger.LogDebug(
+            "Reporting obligation state versions: {@Versions}", versions);
+
+        return versions;
+    }
+
 
     /// <summary>
     /// Load pending authentication data
@@ -382,6 +423,45 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                     var schedulingConfig = registrationResponse.SchedulingConfig ?? throw new ArgumentNullException(nameof(registrationResponse.SchedulingConfig));
                     _nodeState.UpdateSchedulingConfig(schedulingConfig);
                     _logger.LogInformation($"✓ Scheduling configuration version {schedulingConfig.Version} received and updated");
+
+                    // ── Persist obligation identity states ──────────────────────
+                    // The orchestrator sends states for any role where its version
+                    // exceeds what we reported in ObligationStateVersions.
+                    // SaveStateAsync is idempotent (version-guarded), safe to call
+                    // even if the state was already current.
+                    if (registrationResponse.ObligationStates is { Count: > 0 } states)
+                    {
+                        foreach (var (role, payload) in states)
+                        {
+                            if (string.IsNullOrWhiteSpace(payload.StateJson))
+                            {
+                                _logger.LogWarning(
+                                    "Registration response: empty state JSON for role '{Role}' — skipping",
+                                    role);
+                                continue;
+                            }
+
+                            var written = await _obligationState.SaveStateAsync(
+                                role,
+                                payload.StateJson,
+                                payload.Version,
+                                ct);
+
+                            // Log role + version only — never the state JSON content.
+                            _logger.LogInformation(
+                                written
+                                    ? "✓ Obligation state [{Role}] v{Version} persisted"
+                                    : "  Obligation state [{Role}] v{Version} skipped (already current)",
+                                role, payload.Version);
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogDebug(
+                            "Registration response: no obligation states delivered " +
+                            "(all states current or no obligations assigned)");
+                    }
+
 
                     _logger.LogInformation(
                         "✓ Node registered successfully: {NodeId} | Wallet: {Wallet}",
