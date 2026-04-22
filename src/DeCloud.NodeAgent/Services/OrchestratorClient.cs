@@ -301,6 +301,92 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         return versions;
     }
 
+    /// <summary>
+    /// Pulls the current identity state for <paramref name="role"/> from
+    /// the orchestrator (GET /api/nodes/me/obligations/{role}/state) and
+    /// persists it via IObligationStateService.SaveStateAsync.
+    ///
+    /// Called when the heartbeat response signals ObligationStatesPending.
+    /// Safe to call redundantly — SaveStateAsync is version-guarded and
+    /// idempotent, so a duplicate fetch is always a no-op.
+    /// </summary>
+    private async Task FetchAndSaveStateAsync(string role, CancellationToken ct)
+    {
+        try
+        {
+            _logger.LogInformation(
+                "Fetching updated obligation state for role '{Role}' from orchestrator", role);
+
+            var response = await _httpClient.GetAsync(
+                $"/api/nodes/me/obligations/{role}/state", ct);
+
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                _logger.LogWarning(
+                    "Orchestrator has no state for role '{Role}' — nothing to fetch", role);
+                return;
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "FetchAndSaveStateAsync [{Role}]: orchestrator returned {Status}",
+                    role, (int)response.StatusCode);
+                return;
+            }
+
+            var stateJson = await response.Content.ReadAsStringAsync(ct);
+            if (string.IsNullOrWhiteSpace(stateJson))
+            {
+                _logger.LogWarning(
+                    "FetchAndSaveStateAsync [{Role}]: received empty state JSON", role);
+                return;
+            }
+
+            // Parse the version from the state JSON without loading the full type
+            // hierarchy — avoids a dependency on the concrete state subclass here.
+            int version;
+            try
+            {
+                using var doc = JsonDocument.Parse(stateJson);
+                version = doc.RootElement.TryGetProperty("version", out var vProp)
+                    ? vProp.GetInt32()
+                    : 0;
+            }
+            catch
+            {
+                _logger.LogWarning(
+                    "FetchAndSaveStateAsync [{Role}]: could not parse version from state JSON",
+                    role);
+                return;
+            }
+
+            if (version < 1)
+            {
+                _logger.LogWarning(
+                    "FetchAndSaveStateAsync [{Role}]: state JSON has invalid version {V}",
+                    role, version);
+                return;
+            }
+
+            var written = await _obligationState.SaveStateAsync(role, stateJson, version, ct);
+
+            // Log role + version only — never the state JSON body.
+            _logger.LogInformation(
+                written
+                    ? "✓ Obligation state [{Role}] v{Version} fetched and persisted"
+                    : "  Obligation state [{Role}] v{Version} already current — skipped",
+                role, version);
+        }
+        catch (Exception ex)
+        {
+            // Non-fatal: the VM will retry on next heartbeat cycle.
+            _logger.LogWarning(ex,
+                "FetchAndSaveStateAsync [{Role}]: unexpected error — will retry next cycle", role);
+        }
+    }
+
+
 
     /// <summary>
     /// Load pending authentication data
@@ -543,7 +629,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
 
             // ✅ API key is already in DefaultRequestHeaders.Authorization
 
-            var payload = BuildHeartbeatPayload(heartbeat);
+            var payload = BuildHeartbeatPayload(heartbeat, ct);
 
             _lastHeartbeat = new HeartbeatDto
             {
@@ -607,10 +693,10 @@ REGISTERED_AT={DateTime.UtcNow:O}";
     /// <summary>
     /// Build heartbeat payload matching orchestrator's NodeHeartbeat model
     /// </summary>
-    private object BuildHeartbeatPayload(Heartbeat heartbeat)
+    private async Task<object> BuildHeartbeatPayload(Heartbeat heartbeat, CancellationToken ct)
     {
         // Build payload matching orchestrator's NodeHeartbeat model exactly
-        var payload = new
+        var payload = new 
         {
             nodeId = heartbeat.NodeId,
             metrics = new  // NodeMetrics structure
@@ -671,7 +757,8 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 publicEndpoint = heartbeat.CgnatInfo.PublicEndpoint,
                 tunnelStatus = (int)heartbeat.CgnatInfo.TunnelStatus,  // Send as int
                 lastHandshake = heartbeat.CgnatInfo.LastHandshake?.ToString("O")
-            } : null
+            } : null,
+            obligationStateVersions = await BuildObligationStateVersionsAsync(ct)
         };
 
         return payload;
@@ -784,6 +871,20 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                             IssuedAt = DateTime.UtcNow
                         });
                     }
+                }
+            }
+
+            // ── Obligation state pull ──────────────────────────────────────────
+            // If the orchestrator signals that one or more obligation states are
+            // newer than what we have locally, fetch and persist each one.
+            if (data.TryGetProperty("obligationStatesPending", out var pendingProp)
+                && pendingProp.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var roleProp in pendingProp.EnumerateArray())
+                {
+                    var role = roleProp.GetString();
+                    if (!string.IsNullOrWhiteSpace(role))
+                        await FetchAndSaveStateAsync(role, ct);
                 }
             }
         }

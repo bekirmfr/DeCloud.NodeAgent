@@ -37,6 +37,14 @@ public class Heartbeat
     public List<VmSummary> ActiveVms { get; set; } = new();
     public int SchedulingConfigVersion { get; set; } = 0;
     public CgnatNodeInfo? CgnatInfo { get; set; }
+    /// <summary>
+    /// Versions of obligation identity state currently stored in the node
+    /// agent's SQLite database, keyed by canonical role name.
+    /// Allows the orchestrator to detect stale states without waiting for
+    /// the next registration. Omit or leave empty if all versions are 0.
+    /// </summary>
+    public Dictionary<string, int>? ObligationStateVersions { get; set; }
+
 }
 
 public class HeartbeatDto
