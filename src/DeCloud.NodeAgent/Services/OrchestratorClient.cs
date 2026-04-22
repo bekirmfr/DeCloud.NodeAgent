@@ -629,7 +629,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
 
             // ✅ API key is already in DefaultRequestHeaders.Authorization
 
-            var payload = BuildHeartbeatPayload(heartbeat, ct);
+            var payload = await BuildHeartbeatPayload(heartbeat, ct);
 
             _lastHeartbeat = new HeartbeatDto
             {
