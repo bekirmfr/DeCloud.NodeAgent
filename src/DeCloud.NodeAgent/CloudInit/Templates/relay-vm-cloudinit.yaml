@@ -303,6 +303,92 @@ write_files:
     content: |
       __NOTIFY_NAT_READY__
 
+  # Orchestrator registration polling service.
+  # Replaces the one-shot notify-orchestrator.sh (--retry 3) that gave up permanently
+  # if the orchestrator was offline during installation. This service retries every 30s
+  # until it receives HTTP 200, then exits cleanly — systemd will not restart a clean exit.
+  - path: /etc/systemd/system/decloud-relay-register.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=DeCloud Relay Orchestrator Registration
+      After=decloud-relay-nat-callback.service decloud-relay-api.service
+      Requires=decloud-relay-nat-callback.service
+
+      [Service]
+      Type=simple
+      ExecStart=/usr/local/bin/relay-register-poll.sh
+      Restart=on-failure
+      RestartSec=30s
+      StartLimitInterval=0
+      StandardOutput=journal
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # Registration polling script — loops until orchestrator confirms (HTTP 200).
+  # Auth pattern mirrors dht-bootstrap-poll.sh: HMAC-SHA256(wg_private_key, nodeId:vmId).
+  - path: /usr/local/bin/relay-register-poll.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      ORCHESTRATOR_URL="__ORCHESTRATOR_URL__"
+      NODE_ID="__NODE_ID__"
+      RELAY_VM_ID="__VM_ID__"
+      PUBLIC_KEY="__WIREGUARD_PUBLIC_KEY__"
+      PUBLIC_IP="__PUBLIC_IP__"
+      RELAY_SUBNET="__RELAY_SUBNET__"
+      TUNNEL_IP="10.20.__RELAY_SUBNET__.254"
+      MARKER="/var/lib/decloud/relay-registered"
+      LOG="/var/log/decloud-relay-register.log"
+
+      log() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] relay-register: $*" | tee -a "$LOG"; }
+
+      # Idempotency guard — clean exit so systemd doesn't restart
+      if [ -f "$MARKER" ]; then
+          log "Already registered — exiting"
+          exit 0
+      fi
+
+      WIREGUARD_PRIVATE_KEY=$(cat /etc/wireguard/private.key | tr -d '\n')
+      MESSAGE="${NODE_ID}:${RELAY_VM_ID}"
+      TOKEN=$(echo -n "$MESSAGE" | openssl dgst -sha256 -hmac "$WIREGUARD_PRIVATE_KEY" -binary | base64)
+
+      log "Starting orchestrator registration poll (will retry until success)..."
+
+      while true; do
+          HTTP=$(curl -s -o /tmp/relay-register-resp.json -w "%{http_code}" \
+              -X POST "$ORCHESTRATOR_URL/api/relay/register-callback" \
+              -H "Content-Type: application/json" \
+              -H "X-Relay-Token: $TOKEN" \
+              -d "{
+                  \"nodeId\": \"$NODE_ID\",
+                  \"relayVmId\": \"$RELAY_VM_ID\",
+                  \"wireGuardPublicKey\": \"$PUBLIC_KEY\",
+                  \"wireGuardEndpoint\": \"$PUBLIC_IP:51820\",
+                  \"relaySubnet\": $RELAY_SUBNET,
+                  \"tunnelIp\": \"$TUNNEL_IP\"
+              }" \
+              --max-time 15 2>/dev/null || echo "000")
+
+          if [ "$HTTP" = "200" ]; then
+              log "Registration successful (HTTP 200)"
+              mkdir -p "$(dirname "$MARKER")"
+              echo "Registered at $(date)" > "$MARKER"
+              logger -t decloud-relay "Orchestrator registration successful"
+              exit 0   # Clean exit — systemd will not restart
+          elif [ "$HTTP" = "401" ] || [ "$HTTP" = "403" ]; then
+              log "Authentication failed (HTTP $HTTP) — token misconfiguration, exiting"
+              exit 1   # Auth failures are config errors; systemd restart with backoff
+          else
+              log "Orchestrator unreachable (HTTP ${HTTP:-timeout}) — retrying in 30s"
+              sleep 30
+          fi
+      done
+
   # Dashboard static files (loaded from external templates)
   - path: /opt/decloud-relay/static/dashboard.html
     permissions: '0644'
@@ -396,63 +482,19 @@ runcmd:
       sleep 2
     done
 
-  # Create notify-orchestrator.sh script
-  - |
-    cat > /usr/local/bin/notify-orchestrator.sh <<'EOF'
-    #!/bin/bash
-    ORCHESTRATOR_URL="__ORCHESTRATOR_URL__"
-    NODE_ID="__NODE_ID__"
-    RELAY_VM_ID="__VM_ID__"
-    PUBLIC_KEY="__WIREGUARD_PUBLIC_KEY__"
-    PUBLIC_IP="__PUBLIC_IP__"
-    RELAY_SUBNET="__RELAY_SUBNET__"
-    TUNNEL_IP="10.20.${RELAY_SUBNET}.254"
-    
-    # Read WireGuard private key
-    WIREGUARD_PRIVATE_KEY=$(cat /etc/wireguard/private.key | tr -d '\n')
-
-    # Compute callback token
-    MESSAGE="${NODE_ID}:${RELAY_VM_ID}"
-    TOKEN=$(echo -n "$MESSAGE" | openssl dgst -sha256 -hmac "$WIREGUARD_PRIVATE_KEY" -binary | base64)
-    
-    # Call orchestrator callback endpoint
-    RESPONSE=$(curl -X POST "$ORCHESTRATOR_URL/api/relay/register-callback" \
-      -H "Content-Type: application/json" \
-      -H "X-Relay-Token: $TOKEN" \
-      -d "{
-        \"nodeId\": \"$NODE_ID\",
-        \"relayVmId\": \"$RELAY_VM_ID\",
-        \"wireGuardPublicKey\": \"$PUBLIC_KEY\",
-        \"wireGuardEndpoint\": \"$PUBLIC_IP:51820\",
-        \"relaySubnet\": $RELAY_SUBNET,
-        \"tunnelIp\": \"$TUNNEL_IP\"
-      }" \
-      --max-time 10 \
-      --retry 3 \
-      --retry-delay 5 \
-      -w "\nHTTP_CODE:%{http_code}" \
-      -s \
-      2>&1)
-    
-    HTTP_CODE=$(echo "$RESPONSE" | grep -oP 'HTTP_CODE:\K\d+')
-    
-    if [ "$HTTP_CODE" = "200" ]; then
-      echo "✓ Successfully notified orchestrator - relay subnet $RELAY_SUBNET is now active"
-      logger -t decloud-relay "Orchestrator notified - relay active"
-      exit 0
-    else
-      echo "⚠ Failed to notify orchestrator (HTTP ${HTTP_CODE:-timeout})"
-      logger -t decloud-relay "Orchestrator notification failed"
-      exit 1
-    fi
-    EOF
-    
-  - chmod +x /usr/local/bin/notify-orchestrator.sh
-
-  # Start NAT callback service
+  # Start NAT callback service.
+  # notify-nat-ready.sh (injected via __NOTIFY_NAT_READY__) starts
+  # decloud-relay-register.service on completion instead of calling
+  # the old one-shot notify-orchestrator.sh.
   - systemctl daemon-reload
   - systemctl enable decloud-relay-nat-callback.service
   - systemctl start decloud-relay-nat-callback.service
+  # Pre-enable the registration service so it also starts on reboot
+  # in case it hadn't completed before a restart.
+  - systemctl enable decloud-relay-register
+  # Start the registration service now — systemd will honour After=decloud-relay-nat-callback.service
+  # so it waits for NAT configuration to complete before polling the orchestrator.
+  - systemctl start decloud-relay-register || true
 
   # Configure and start Nginx
   - ln -sf /etc/nginx/sites-available/relay-proxy /etc/nginx/sites-enabled/

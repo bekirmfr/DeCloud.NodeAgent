@@ -170,24 +170,16 @@ if [ "$HTTP_CODE" = "200" ]; then
     log "NAT configuration complete - notifying orchestrator..."
     log "=========================================="
     
-    if [ -f "/usr/local/bin/notify-orchestrator.sh" ]; then
-        log "Executing /usr/local/bin/notify-orchestrator.sh..."
-        
-        # Execute orchestrator notification
-        if /usr/local/bin/notify-orchestrator.sh; then
-            log "✓ Orchestrator notified successfully - relay is now ACTIVE"
-            log "✓ RelayHealthMonitor can now check this relay"
-            logger -t decloud-relay "Relay fully operational - orchestrator notified"
-        else
-            log "⚠ Failed to notify orchestrator (exit code: $?)"
-            log "   Relay is functional but orchestrator may not know yet"
-            log "   RelayHealthMonitor will eventually recover this relay"
-            logger -t decloud-relay "Orchestrator notification failed - health check will recover"
-        fi
+    # Start the persistent registration polling service.
+    # decloud-relay-register.service retries until the orchestrator responds with 200
+    # and exits cleanly on success — resilient to orchestrator downtime during install.
+    log "Starting orchestrator registration service (decloud-relay-register)..."
+    if systemctl start decloud-relay-register 2>/dev/null; then
+        log "✓ Registration service started — will poll until orchestrator confirms"
+        logger -t decloud-relay "Relay registration service started"
     else
-        log "❌ /usr/local/bin/notify-orchestrator.sh not found!"
-        log "   This should not happen - check cloud-init configuration"
-        logger -t decloud-relay "ERROR: notify-orchestrator.sh missing"
+        log "⚠ Could not start registration service — will be started by systemd at boot"
+        logger -t decloud-relay "Registration service start deferred"
     fi
     
     exit 0
