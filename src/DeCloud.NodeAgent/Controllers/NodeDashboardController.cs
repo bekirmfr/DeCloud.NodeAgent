@@ -236,7 +236,9 @@ public class NodeDashboardController : ControllerBase
                     .ToList();
             }
 
-            _obligationsCacheExpiry = DateTime.UtcNow.AddSeconds(30);
+            // AFTER — 10 s matches the heartbeat interval, ensures UI reflects
+            // obligation state changes (Active, Deploying) within one poll cycle.
+            _obligationsCacheExpiry = DateTime.UtcNow.AddSeconds(10);
             return Ok(new { obligations = _cachedObligations });
         }
         catch (Exception ex)

@@ -317,6 +317,31 @@ function renderHardware() {
 // ============================================================
 // VMs
 // ============================================================
+
+/**
+ * Find the system VM that belongs to a given obligation.
+ *
+ * Priority:
+ *   1. Exact match on obligation.vmId — always picks the CURRENT VM,
+ *      even when a same-role VM from a previous deployment is still
+ *      present in the list (e.g. Deleting state with stale Ready services).
+ *   2. Role-type fallback — used when obligations haven't loaded yet
+ *      (orchestrator unreachable) so the card still renders with whatever
+ *      VM is running.
+ *
+ * This is the root fix for Bug 1: without vmId-first lookup the old VM's
+ * services remain visible during a redeploy because role-type matching
+ * returns the first VM of that type regardless of which deployment cycle
+ * it belongs to.
+ */
+function findSysVm(all, roleFn, obl) {
+    if (obl?.vmId) {
+        const byId = all.find(v => v.vmId === obl.vmId);
+        if (byId) return byId;
+    }
+    return all.find(roleFn) ?? null;
+}
+
 function renderVMs() {
     if (!S.vms) return;
     const all = S.vms;
@@ -329,9 +354,14 @@ function renderVMs() {
     const isDht = v => v.spec?.vmType === 6 || v.labels?.role === 'dht';
     const isBs = v => v.spec?.vmType === 8 || v.labels?.role === 'blockstore';
 
-    const relay = all.find(isRelay);
-    const dht = all.find(isDht);
-    const bs = all.find(isBs);
+    // Resolve each obligation once so findSysVm can use the vmId.
+    const relayObl = S.obligations.find(o => o.role === ROLE_FOR_KEY.relay);
+    const dhtObl = S.obligations.find(o => o.role === ROLE_FOR_KEY.dht);
+    const bsObl = S.obligations.find(o => o.role === ROLE_FOR_KEY.bs);
+
+    const relay = findSysVm(all, isRelay, relayObl);
+    const dht = findSysVm(all, isDht, dhtObl);
+    const bs = findSysVm(all, isBs, bsObl);
     const tenants = all.filter(v => !isRelay(v) && !isDht(v) && !isBs(v));
 
     $('vm-count-badge').textContent = all.length;
@@ -498,8 +528,26 @@ function paintSysVm(key, vm) {
     const oblName = obl?.statusName ?? (vm && isRunning(vm) ? 'Active' : 'Unknown');
     const running = vm ? isRunning(vm) : false;
 
-    // Obligation Active but VM not running = unmet obligation
-    const isUnmet = oblStatus === 2 && !running;
+    // Obligation Active but VM genuinely absent or stopped = unmet.
+    //
+    // Bug 2 fix: suppress the "UNMET" false-positive that fires during a
+    // redeploy transition.  The 30-second obligation cache on the node agent
+    // proxy can return a stale Active (status=2) while the new VM is still
+    // Provisioning / Creating / Starting (state ≠ 3 → !running).  Without
+    // this guard the card briefly shows UNMET even though the deployment is
+    // progressing normally.
+    //
+    // We suppress UNMET when the matched VM is in a clearly transitional
+    // state — the VM exists but hasn't reached Running yet, which is
+    // expected during a fresh deployment.  Genuinely unmet obligations
+    // (VM crashed, was force-deleted, etc.) will still be caught because
+    // those VMs are either absent or stuck in Stopped/Failed.
+    //
+    // VmState: 0=Pending,1=Creating,2=Starting,3=Running,4=Paused,
+    //          5=Stopping,6=Stopped,7=Failed,8=NotFound,9=Deleted,10=Migrating
+    const TRANSITIONAL_VM_STATES = new Set([0, 1, 2, 10]); // Pending/Creating/Starting/Migrating
+    const vmIsTransitioning = vm != null && TRANSITIONAL_VM_STATES.has(vm.state);
+    const isUnmet = oblStatus === 2 && !running && !vmIsTransitioning;
 
     // Card border class
     let cardClass = 'sysvm-card';
@@ -560,14 +608,32 @@ function paintSysVm(key, vm) {
     }
     detail.innerHTML = detailHtml;
 
-    // ── Service health chips (only when VM is present) ────────────────────────
+    // ── Service health chips ──────────────────────────────────────────────────
+    //
+    // Bug 1 fix: service chips must only reflect the CURRENT VM's services.
+    // Two guards are applied:
+    //
+    //   1. vmMatchesObligation — if the obligation has a vmId, the resolved
+    //      VM must be the same one.  Without this, role-type lookup could
+    //      return a stale VM from a previous deployment (still in the DB,
+    //      Deleting state, services=Ready) and display its chips alongside
+    //      a Deploying obligation badge.
+    //
+    //   2. oblIsActive — service chips are only meaningful when the
+    //      obligation is Active (the VM has completed cloud-init).  During
+    //      Deploying/Pending the current VM's services are in a transient
+    //      initialisation state that is misleading to show; clear the chips
+    //      so the operator sees a clean slate while the new VM boots.
+    //
+    const vmMatchesObligation = !obl?.vmId || (vm?.vmId === obl.vmId);
+    const oblIsActive = oblStatus === 2;
     let servicesEl = card.querySelector('.svc-chips');
     if (!servicesEl) {
         servicesEl = document.createElement('div');
         servicesEl.className = 'svc-chips';
         card.appendChild(servicesEl);
     }
-    const svcs = vm?.services ?? [];
+    const svcs = (oblIsActive && vmMatchesObligation) ? (vm?.services ?? []) : [];
     if (svcs.length) {
         const readyAll = vm.isFullyReady;
         const readyCount = svcs.filter(s => svcReadiness(s) === 'ready').length;
