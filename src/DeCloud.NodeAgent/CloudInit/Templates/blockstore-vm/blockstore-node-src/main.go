@@ -238,8 +238,6 @@ type Config struct {
 	ListenPort      int
 	APIPort         int
 	AdvertiseIP     string
-	StorageBytes    int64
-	AuthToken       string
 	NodeID          string
 	VMID            string
 	OrchestratorURL string
@@ -251,8 +249,6 @@ func parseConfig() Config {
 		ListenPort:      envInt("BLOCKSTORE_LISTEN_PORT", 5001),
 		APIPort:         envInt("BLOCKSTORE_API_PORT", 5090),
 		AdvertiseIP:     envStr("BLOCKSTORE_ADVERTISE_IP", ""),
-		StorageBytes:    int64(envInt("BLOCKSTORE_STORAGE_BYTES", 0)), // 0 = not set; resolved below
-		AuthToken:       envStr("BLOCKSTORE_AUTH_TOKEN", ""),
 		NodeID:          envStr("BLOCKSTORE_NODE_ID", ""),
 		VMID:            envStr("BLOCKSTORE_VM_ID", ""),
 		OrchestratorURL: envStr("ORCHESTRATOR_URL", ""),

@@ -676,16 +676,13 @@ public class CloudInitTemplateService : ICloudInitTemplateService
 
         _logger.LogInformation(
             "Configured BlockStore variables for VM {VmId}: listenPort={ListenPort}, apiPort={ApiPort}, " +
-            "advertiseIp={AdvIP}, arch={Arch}, binarySize={BinaryKB}KB (gz+b64), " +
-            "storageBytes={StorageBytes}, authToken={HasToken}",
+            "advertiseIp={AdvIP}, arch={Arch}, binarySize={BinaryKB}KB (gz+b64)",
             spec.Id,
             variables.Custom["BLOCKSTORE_LISTEN_PORT"],
             variables.Custom["BLOCKSTORE_API_PORT"],
             variables.Custom["BLOCKSTORE_ADVERTISE_IP"],
             architecture,
-            binaryGzB64.Length / 1024,
-            variables.Custom["BLOCKSTORE_STORAGE_BYTES"],
-            string.IsNullOrEmpty(variables.Custom["BLOCKSTORE_AUTH_TOKEN"]) ? "missing" : "present");
+            binaryGzB64.Length / 1024);
     }
 
     /// <summary>
@@ -891,16 +888,14 @@ public class CloudInitTemplateService : ICloudInitTemplateService
 
         _logger.LogInformation(
             "Configured DHT variables for VM {VmId}: listenPort={ListenPort}, apiPort={ApiPort}, " +
-            "advertiseIp={AdvIP}, arch={Arch}, binarySize={BinaryKB}KB (gz+b64), " +
-            "bootstrapPeers={Peers}, authToken={HasToken}",
+            "advertiseIp={AdvIP}, arch={Arch}, binarySize={BinaryKB}KB (gz+b64), bootstrapPeers={Peers}",
             spec.Id,
             variables.Custom["DHT_LISTEN_PORT"],
             variables.Custom["DHT_API_PORT"],
             variables.Custom.GetValueOrDefault("WG_TUNNEL_IP", ""),
             architecture,
             dhtBinaryGzB64.Length / 1024,
-            string.IsNullOrEmpty(variables.Custom["DHT_BOOTSTRAP_PEERS"]) ? "(none — first node)" : "present",
-            string.IsNullOrEmpty(variables.Custom["DHT_AUTH_TOKEN"]) ? "missing" : "present");
+            string.IsNullOrEmpty(variables.Custom["DHT_BOOTSTRAP_PEERS"]) ? "(none — first node)" : "present");
     }
 
     /// <summary>
