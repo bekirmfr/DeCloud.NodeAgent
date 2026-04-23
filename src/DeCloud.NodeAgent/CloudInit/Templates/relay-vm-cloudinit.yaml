@@ -474,7 +474,14 @@ runcmd:
       sleep 5
     done
     if [ -n "$WG_PRIV" ]; then
-      SUBNET_OCTET=$(echo "$SUBNET" | grep -oE '\.[0-9]+\.' | sed -n '2p' | tr -d '.' || echo "248")
+      # Handle "10.20.248.0/24" → "248", bare "248" → "248", empty → fallback
+      if echo "$SUBNET" | grep -qE '^[0-9]+$'; then
+        SUBNET_OCTET="$SUBNET"
+      else
+        SUBNET_OCTET=$(echo "$SUBNET" | cut -d'.' -f3)
+      fi
+      [ -z "$SUBNET_OCTET" ] && SUBNET_OCTET=$(cat /etc/decloud/relay-subnet 2>/dev/null | tr -d '\n')
+      [ -z "$SUBNET_OCTET" ] && SUBNET_OCTET="248"
       sed -i \
           -e "s|^PrivateKey = .*|PrivateKey = ${WG_PRIV}|" \
           -e "s|^Address = .*|Address = 10.20.${SUBNET_OCTET}.254/24|" \
@@ -496,6 +503,7 @@ runcmd:
       fi
 
       echo "Relay identity updated from obligation state (pubkey: $(printf '%.16s' "$WG_PUB")..., subnet: ${SUBNET_OCTET})"
+    else
       echo "WARNING: NodeAgent obligation state unavailable — using label-baked WG key"
     fi
 
