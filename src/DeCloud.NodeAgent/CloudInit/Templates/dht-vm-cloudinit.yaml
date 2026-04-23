@@ -73,6 +73,7 @@ write_files:
       WG_DESCRIPTION=DHT-__VM_ID__
       WG_PEER_TYPE=system-vm
       WG_PARENT_NODE_ID=__NODE_ID__
+      WG_ROLE=dht
 
   # WireGuard mesh enrollment script
   - path: /usr/local/bin/wg-mesh-enroll.sh

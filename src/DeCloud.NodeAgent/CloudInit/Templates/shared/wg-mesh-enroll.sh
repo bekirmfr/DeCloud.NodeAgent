@@ -81,11 +81,28 @@ if [ -f "/etc/wireguard/${WG_INTERFACE}.conf" ] && wg show "$WG_INTERFACE" &>/de
     fi
 fi
 
-# ==================== Generate Keypair ====================
-PRIVATE_KEY=$(wg genkey)
-PUBLIC_KEY=$(echo "$PRIVATE_KEY" | wg pubkey)
+# ==================== Load or Generate Keypair ====================
+# Query NodeAgent obligation state for a stable WireGuard private key.
+# This ensures the same WG identity survives VM redeployments — peers
+# don't need to re-register when a system VM is replaced.
+PRIVATE_KEY=""
+GATEWAY=$(ip route 2>/dev/null | awk '/default/ {print $3; exit}')
+ROLE="${WG_ROLE:-}"  # set in wg-mesh.env: "dht" or "blockstore"
 
-log "Generated WireGuard keypair (pubkey: ${PUBLIC_KEY:0:16}...)"
+if [ -n "$GATEWAY" ] && [ -n "$ROLE" ]; then
+    STATE=$(curl -sf --max-time 5 \
+        "http://${GATEWAY}:5100/api/obligations/${ROLE}/state" 2>/dev/null || true)
+    PRIVATE_KEY=$(echo "$STATE" | jq -r '.wireGuardPrivateKey // empty' 2>/dev/null || true)
+fi
+
+if [ -n "$PRIVATE_KEY" ]; then
+    PUBLIC_KEY=$(echo "$PRIVATE_KEY" | wg pubkey)
+    log "Using obligation state WireGuard keypair (pubkey: ${PUBLIC_KEY:0:16}...)"
+else
+    PRIVATE_KEY=$(wg genkey)
+    PUBLIC_KEY=$(echo "$PRIVATE_KEY" | wg pubkey)
+    log "Generated new WireGuard keypair (obligation state unavailable)"
+fi
 
 # ==================== Extract IP without CIDR ====================
 # WG_TUNNEL_IP may be "10.20.1.253/24" or "10.20.1.253"

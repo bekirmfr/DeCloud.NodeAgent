@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -331,42 +334,116 @@ func envOrDefault(key, fallback string) string {
 // Identity
 // ═══════════════════════════════════════════════════════════════════
 
-// loadOrCreateIdentity loads a persistent Ed25519 key or generates a new one.
+// loadOrCreateIdentity loads the Ed25519 peer identity.
+// Priority:
+//   1. NodeAgent obligation state (http://gateway:5100/api/obligations/dht/state)
+//      — authoritative source, survives VM redeployments. Cached to disk after fetch.
+//   2. Disk cache — used when NodeAgent is temporarily unreachable (e.g. agent restart).
+//   3. Generate new key — first boot before obligation state is available.
 func loadOrCreateIdentity(dataDir string) (crypto.PrivKey, error) {
 	keyPath := filepath.Join(dataDir, keyFileName)
 
-	data, err := os.ReadFile(keyPath)
-	if err == nil {
-		privKey, err := crypto.UnmarshalPrivateKey(data)
-		if err == nil {
-			log.Printf("Loaded existing identity from %s", keyPath)
-			return privKey, nil
-		}
-		log.Printf("Failed to unmarshal existing key, generating new one: %v", err)
+	// 1. Try NodeAgent obligation state
+	if privKey, err := loadIdentityFromNodeAgent("dht"); err == nil {
+		log.Printf("Loaded DHT identity from NodeAgent obligation state")
+		cacheIdentityToDisk(privKey, keyPath)
+		return privKey, nil
+	} else {
+		log.Printf("NodeAgent obligation state unavailable (%v) — falling back to disk", err)
 	}
 
-	// Generate new Ed25519 key
+	// 2. Disk cache
+	if data, err := os.ReadFile(keyPath); err == nil {
+		if privKey, err := crypto.UnmarshalPrivateKey(data); err == nil {
+			log.Printf("Loaded cached identity from %s", keyPath)
+			return privKey, nil
+		}
+	}
+
+	// 3. Generate new key (first boot)
 	privKey, _, err := crypto.GenerateEd25519Key(rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate Ed25519 key: %w", err)
 	}
+	log.Printf("Generated new Ed25519 identity (obligation state not yet available)")
+	cacheIdentityToDisk(privKey, keyPath)
+	return privKey, nil
+}
 
+// loadIdentityFromNodeAgent fetches the Ed25519 private key from the NodeAgent
+// obligation state endpoint served over virbr0. The key is stored as a
+// base64-encoded 32-byte Ed25519 seed in the state JSON.
+func loadIdentityFromNodeAgent(role string) (crypto.PrivKey, error) {
+	gateway, err := defaultGateway()
+	if err != nil {
+		return nil, fmt.Errorf("no default gateway: %w", err)
+	}
+
+	url := fmt.Sprintf("http://%s:5100/api/obligations/%s/state", gateway, role)
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("NodeAgent request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("NodeAgent returned HTTP %d", resp.StatusCode)
+	}
+
+	var state struct {
+		Ed25519PrivateKeyBase64 string `json:"ed25519PrivateKeyBase64"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
+		return nil, fmt.Errorf("decode state: %w", err)
+	}
+	if state.Ed25519PrivateKeyBase64 == "" {
+		return nil, fmt.Errorf("state missing ed25519PrivateKeyBase64")
+	}
+
+	seed, err := base64.StdEncoding.DecodeString(state.Ed25519PrivateKeyBase64)
+	if err != nil {
+		return nil, fmt.Errorf("decode Ed25519 seed: %w", err)
+	}
+
+	// go-libp2p accepts 32-byte seed or 64-byte expanded key
+	return crypto.UnmarshalEd25519PrivateKey(seed)
+}
+
+// defaultGateway reads the default route from /proc/net/route.
+func defaultGateway() (string, error) {
+	f, err := os.Open("/proc/net/route")
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Scan() // skip header
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 3 && fields[1] == "00000000" {
+			b, err := hex.DecodeString(fields[2])
+			if err != nil || len(b) < 4 {
+				continue
+			}
+			return fmt.Sprintf("%d.%d.%d.%d", b[3], b[2], b[1], b[0]), nil
+		}
+	}
+	return "", fmt.Errorf("default gateway not found")
+}
+
+// cacheIdentityToDisk writes the identity key to disk for resilience.
+func cacheIdentityToDisk(privKey crypto.PrivKey, keyPath string) {
 	keyBytes, err := crypto.MarshalPrivateKey(privKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal key: %w", err)
+		log.Printf("Warning: failed to marshal identity for disk cache: %v", err)
+		return
 	}
-
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
-		return nil, fmt.Errorf("failed to create data dir: %w", err)
-	}
-
+	_ = os.MkdirAll(filepath.Dir(keyPath), 0o700)
 	if err := os.WriteFile(keyPath, keyBytes, 0o600); err != nil {
-		log.Printf("Warning: failed to persist identity key: %v", err)
-	} else {
-		log.Printf("Generated and saved new identity to %s", keyPath)
+		log.Printf("Warning: failed to cache identity to disk: %v", err)
 	}
-
-	return privKey, nil
 }
 
 // ═══════════════════════════════════════════════════════════════════

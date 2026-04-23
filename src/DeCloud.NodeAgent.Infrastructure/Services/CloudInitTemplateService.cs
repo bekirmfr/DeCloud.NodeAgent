@@ -665,19 +665,6 @@ public class CloudInitTemplateService : ICloudInitTemplateService
         variables.Custom["NODE_REGION"] =
             spec.Labels?.GetValueOrDefault("node-region") ?? "default";
 
-        // Auth token for bootstrap-poll → orchestrator authentication
-        // HMAC-SHA256(authToken, nodeId:vmId) — same pattern as DHT
-        variables.Custom["BLOCKSTORE_AUTH_TOKEN"] =
-            spec.Labels?.GetValueOrDefault("blockstore-auth-token") ?? "";
-
-        if (string.IsNullOrEmpty(variables.Custom["BLOCKSTORE_AUTH_TOKEN"]))
-        {
-            _logger.LogWarning(
-                "Block store VM {VmId} has no blockstore-auth-token label — " +
-                "bootstrap poll service will not be able to authenticate with orchestrator",
-                spec.Id);
-        }
-
         // WireGuard mesh enrollment variables (same as DHT — passed from orchestrator labels)
         variables.Custom["WG_RELAY_ENDPOINT"] = spec.Labels?.GetValueOrDefault("wg-relay-endpoint") ?? "";
         variables.Custom["WG_RELAY_PUBKEY"]   = spec.Labels?.GetValueOrDefault("wg-relay-pubkey") ?? "";
@@ -890,21 +877,6 @@ public class CloudInitTemplateService : ICloudInitTemplateService
                 variables.Custom["WG_RELAY_PUBKEY"] is { Length: > 12 } pk ? pk[..12] + "..." : "(empty)",
                 variables.Custom["WG_TUNNEL_IP"],
                 variables.Custom["WG_RELAY_API"]);
-        }
-
-        // Bootstrap poll: orchestrator URL and auth token (relay callback pattern).
-        // The orchestrator passes the auth token via labels when deploying the DHT VM.
-        // The DHT VM uses it to compute HMAC(auth_token, nodeId:vmId) for direct
-        // orchestrator authentication — same pattern as relay's notify-orchestrator.sh
-        // uses HMAC(wireguard_private_key, nodeId:vmId).
-        variables.Custom["DHT_AUTH_TOKEN"] = spec.Labels?.GetValueOrDefault("dht-auth-token") ?? "";
-
-        if (string.IsNullOrEmpty(variables.Custom["DHT_AUTH_TOKEN"]))
-        {
-            _logger.LogWarning(
-                "DHT VM {VmId} has no dht-auth-token label — " +
-                "bootstrap poll service will not be able to authenticate with orchestrator",
-                spec.Id);
         }
 
         // Load architecture-specific DHT binary (gzip+base64 encoded, pre-built via build.sh)

@@ -72,6 +72,7 @@ write_files:
       WG_PARENT_NODE_ID=__NODE_ID__
       WG_DESCRIPTION=BlockStore-__VM_ID__
       WG_PEER_TYPE=system-vm
+      WG_ROLE=blockstore
 
   # WireGuard mesh watchdog — re-enrolls if handshake goes stale
   - path: /usr/local/bin/wg-mesh-watchdog.sh

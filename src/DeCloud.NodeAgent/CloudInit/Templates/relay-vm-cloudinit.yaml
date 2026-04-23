@@ -456,7 +456,33 @@ runcmd:
   - systemctl stop ufw || true
   - systemctl disable ufw || true
   
-  # Start WireGuard via systemd so Wants= dependencies don't cause double-up
+  # Rewrite WireGuard config with identity from NodeAgent obligation state.
+  # Ensures the relay uses its persistent keypair (not the label-baked placeholder)
+  # so CGNAT nodes don't need to re-register when the relay VM is replaced.
+  - |
+    GATEWAY=$(ip route 2>/dev/null | awk '/default/ {print $3; exit}')
+    for i in $(seq 1 24); do
+      STATE=$(curl -sf --max-time 5 \
+          "http://${GATEWAY}:5100/api/obligations/relay/state" 2>/dev/null || true)
+      WG_PRIV=$(echo "$STATE" | jq -r '.wireGuardPrivateKey // empty' 2>/dev/null || true)
+      WG_PUB=$(echo "$STATE"  | jq -r '.wireGuardPublicKey  // empty' 2>/dev/null || true)
+      SUBNET=$(echo "$STATE"  | jq -r '.relaySubnet         // empty' 2>/dev/null || true)
+      [ -n "$WG_PRIV" ] && break
+      sleep 5
+    done
+    if [ -n "$WG_PRIV" ]; then
+      SUBNET_OCTET=$(echo "$SUBNET" | grep -oE '\.[0-9]+\.' | sed -n '2p' | tr -d '.' || echo "248")
+      sed -i \
+          -e "s|^PrivateKey = .*|PrivateKey = ${WG_PRIV}|" \
+          -e "s|^Address = .*|Address = 10.20.${SUBNET_OCTET}.254/24|" \
+          /etc/wireguard/wg-relay-server.conf
+      printf '%s\n' "$WG_PRIV" > /etc/wireguard/private.key
+      printf '%s\n' "$WG_PUB"  > /etc/wireguard/public.key
+      echo "Relay WireGuard config updated from obligation state (pubkey: ${WG_PUB:0:16}...)"
+    else
+      echo "WARNING: NodeAgent obligation state unavailable — using label-baked WG key"
+    fi
+
   - systemctl enable wg-quick@wg-relay-server
   - systemctl start wg-quick@wg-relay-server
 

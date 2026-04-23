@@ -14,12 +14,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -676,30 +678,96 @@ func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
 // Identity
 // ═══════════════════════════════════════════════════════════════════
 
+// loadOrCreateIdentity loads the Ed25519 peer identity.
+// Priority: NodeAgent obligation state → disk cache → generate new.
 func loadOrCreateIdentity(dir string) (crypto.PrivKey, error) {
 	keyPath := filepath.Join(dir, IdentityKeyFile)
-	if data, err := os.ReadFile(keyPath); err == nil {
-		priv, err := crypto.UnmarshalPrivateKey(data)
-		if err != nil {
-			return nil, fmt.Errorf("unmarshal identity key: %w", err)
-		}
-		log.Printf("Loaded persistent identity from %s", keyPath)
+
+	// 1. NodeAgent obligation state — authoritative, survives redeployments
+	if priv, err := loadIdentityFromNodeAgent("blockstore"); err == nil {
+		log.Printf("Loaded BlockStore identity from NodeAgent obligation state")
+		cacheIdentityToDisk(priv, keyPath)
 		return priv, nil
+	} else {
+		log.Printf("NodeAgent obligation state unavailable (%v) — falling back to disk", err)
 	}
 
+	// 2. Disk cache
+	if data, err := os.ReadFile(keyPath); err == nil {
+		if priv, err := crypto.UnmarshalPrivateKey(data); err == nil {
+			log.Printf("Loaded cached identity from %s", keyPath)
+			return priv, nil
+		}
+	}
+
+	// 3. Generate new (first boot)
 	priv, _, err := crypto.GenerateEd25519Key(nil)
 	if err != nil {
 		return nil, fmt.Errorf("generate identity key: %w", err)
 	}
+	log.Printf("Generated new Ed25519 identity (obligation state not yet available)")
+	cacheIdentityToDisk(priv, keyPath)
+	return priv, nil
+}
+
+func loadIdentityFromNodeAgent(role string) (crypto.PrivKey, error) {
+	gw, err := defaultGateway()
+	if err != nil {
+		return nil, fmt.Errorf("no default gateway: %w", err)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://%s:5100/api/obligations/%s/state", gw, role))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	var state struct {
+		Ed25519PrivateKeyBase64 string `json:"ed25519PrivateKeyBase64"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
+		return nil, err
+	}
+	if state.Ed25519PrivateKeyBase64 == "" {
+		return nil, fmt.Errorf("empty ed25519PrivateKeyBase64")
+	}
+	seed, err := base64.StdEncoding.DecodeString(state.Ed25519PrivateKeyBase64)
+	if err != nil {
+		return nil, err
+	}
+	return crypto.UnmarshalEd25519PrivateKey(seed)
+}
+
+func defaultGateway() (string, error) {
+	f, err := os.Open("/proc/net/route")
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Scan()
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 3 && fields[1] == "00000000" {
+			b, err := hex.DecodeString(fields[2])
+			if err != nil || len(b) < 4 {
+				continue
+			}
+			return fmt.Sprintf("%d.%d.%d.%d", b[3], b[2], b[1], b[0]), nil
+		}
+	}
+	return "", fmt.Errorf("default gateway not found")
+}
+
+func cacheIdentityToDisk(priv crypto.PrivKey, keyPath string) {
 	data, err := crypto.MarshalPrivateKey(priv)
 	if err != nil {
-		return nil, fmt.Errorf("marshal identity key: %w", err)
+		return
 	}
-	if err := os.WriteFile(keyPath, data, 0600); err != nil {
-		return nil, fmt.Errorf("write identity key: %w", err)
-	}
-	log.Printf("Generated new Ed25519 identity, saved to %s", keyPath)
-	return priv, nil
+	_ = os.MkdirAll(filepath.Dir(keyPath), 0o700)
+	_ = os.WriteFile(keyPath, data, 0600)
 }
 
 // isIPOnAnyInterface checks if ip is assigned to any local network interface.

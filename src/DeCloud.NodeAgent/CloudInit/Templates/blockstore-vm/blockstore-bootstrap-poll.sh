@@ -30,8 +30,24 @@ log() {
 ORCHESTRATOR_URL="__ORCHESTRATOR_URL__"
 NODE_ID="__BLOCKSTORE_NODE_ID__"
 VM_ID="__VM_ID__"
-AUTH_TOKEN="__BLOCKSTORE_AUTH_TOKEN__"
 API_PORT="__BLOCKSTORE_API_PORT__"
+
+GATEWAY=$(ip route 2>/dev/null | awk '/default/ {print $3; exit}')
+NODE_AGENT="http://${GATEWAY}:5100"
+
+log "Fetching auth token from NodeAgent obligation state..."
+AUTH_TOKEN=""
+for i in $(seq 1 24); do
+    AUTH_TOKEN=$(curl -sf --max-time 5 \
+        "${NODE_AGENT}/api/obligations/blockstore/state" 2>/dev/null \
+        | jq -r '.authToken // empty' 2>/dev/null || true)
+    [ -n "$AUTH_TOKEN" ] && break
+    sleep 5
+done
+if [ -z "$AUTH_TOKEN" ]; then
+    log "ERROR: Could not fetch auth token from NodeAgent after 2 minutes"
+    exit 1
+fi
 
 POLL_INTERVAL_ISOLATED=30    # seconds between polls when no peers
 POLL_INTERVAL_CONNECTED=60  # seconds between polls when connected
