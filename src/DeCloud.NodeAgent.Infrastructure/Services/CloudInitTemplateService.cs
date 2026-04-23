@@ -334,6 +334,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             var dashboardCss = await LoadExternalTemplateAsync("dashboard.css", "dht-vm", ct);
             var dashboardJs = await LoadExternalTemplateAsync("dashboard.js", "dht-vm", ct);
             var wgMeshEnroll = await LoadExternalTemplateAsync("wg-mesh-enroll.sh", "shared", ct);
+            var wgConfigFetch = await LoadExternalTemplateAsync("wg-config-fetch.sh", "shared", ct);
 
             var result = ReplaceWithIndentation(template, "__DHT_HEALTH_CHECK__", healthCheck);
             result = ReplaceWithIndentation(result, "__DHT_NOTIFY_READY__", notifyReady);
@@ -343,6 +344,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             result = ReplaceWithIndentation(result, "__DHT_DASHBOARD_CSS__", dashboardCss);
             result = ReplaceWithIndentation(result, "__DHT_DASHBOARD_JS__", dashboardJs);
             result = ReplaceWithIndentation(result, "__WG_MESH_ENROLL__", wgMeshEnroll);
+            result = ReplaceWithIndentation(result, "__WG_CONFIG_FETCH__", wgConfigFetch);
 
             _logger.LogInformation(
                 "Injected DHT external templates: health-check ({HealthSize} chars), notify-ready ({ReadySize} chars), " +
@@ -823,6 +825,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             var dashboardCss   = await LoadExternalTemplateAsync("dashboard.css",                "blockstore-vm", ct);
             var dashboardJs    = await LoadExternalTemplateAsync("dashboard.js",                 "blockstore-vm", ct);
             var wgMeshEnroll   = await LoadExternalTemplateAsync("wg-mesh-enroll.sh",            "shared",        ct);
+            var wgConfigFetch   = await LoadExternalTemplateAsync("wg-config-fetch.sh",          "shared",        ct);
 
             var result = ReplaceWithIndentation(template, "__BLOCKSTORE_HEALTH_CHECK__",    healthCheck);
             result     = ReplaceWithIndentation(result,   "__BLOCKSTORE_NOTIFY_READY__",    notifyReady);
@@ -832,6 +835,7 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             result     = ReplaceWithIndentation(result,   "__BLOCKSTORE_DASHBOARD_CSS__",   dashboardCss);
             result     = ReplaceWithIndentation(result,   "__BLOCKSTORE_DASHBOARD_JS__",    dashboardJs);
             result     = ReplaceWithIndentation(result,   "__WG_MESH_ENROLL__",             wgMeshEnroll);
+            result     = ReplaceWithIndentation(result,   "__WG_CONFIG_FETCH__",            wgConfigFetch);
 
             _logger.LogInformation(
                 "Injected block store external templates: health-check ({H} chars), " +

@@ -80,6 +80,11 @@ write_files:
     content: |
       __WG_MESH_ENROLL__
 
+  - path: /usr/local/bin/wg-config-fetch.sh
+    permissions: '0755'
+    content: |
+      __WG_CONFIG_FETCH__
+
   # WireGuard mesh watchdog — re-enrolls if handshake goes stale
   - path: /usr/local/bin/wg-mesh-watchdog.sh
     permissions: '0755'
@@ -295,9 +300,14 @@ runcmd:
   - ln -sf /lib/systemd/system/qemu-guest-agent.service /etc/systemd/system/multi-user.target.wants/qemu-guest-agent.service
   - systemctl start qemu-guest-agent || true
 
-  # WireGuard mesh enrollment — must happen before DHT starts
-  # Skip gracefully if no relay was configured at deploy time
-  - bash -c 'set -a && source /etc/decloud/wg-mesh.env && set +a && if [ -n "$WG_RELAY_ENDPOINT" ] && [ -n "$WG_RELAY_PUBKEY" ]; then /usr/local/bin/wg-mesh-enroll.sh; else echo "[wg-mesh] Skipping — no relay configured"; fi'
+  # WireGuard mesh enrollment — polls NodeAgent until relay is assigned.
+  # Handles CGNAT nodes where CgnatInfo may not be available at deploy time.
+  # Also updates DHT_ADVERTISE_IP with the tunnel IP once obtained.
+  - |
+    export DECLOUD_ROLE=dht
+    export NODE_ID=__NODE_ID__
+    export VM_ID=__VM_ID__
+    /usr/local/bin/wg-config-fetch.sh
 
   # Runtime data directory (not created by write_files)
   - mkdir -p /var/lib/decloud-dht
