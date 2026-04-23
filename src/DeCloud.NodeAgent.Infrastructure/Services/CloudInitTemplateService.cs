@@ -656,8 +656,6 @@ public class CloudInitTemplateService : ICloudInitTemplateService
             spec.Labels?.GetValueOrDefault("blockstore-api-port", "5090") ?? "5090";
         variables.Custom["BLOCKSTORE_ADVERTISE_IP"] =
             spec.Labels?.GetValueOrDefault("blockstore-advertise-ip") ?? "";
-        variables.Custom["BLOCKSTORE_STORAGE_BYTES"] =
-            spec.Labels?.GetValueOrDefault("blockstore-storage-bytes") ?? spec.DiskBytes.ToString();
         variables.Custom["BLOCKSTORE_BOOTSTRAP_PEERS"] =
             spec.Labels?.GetValueOrDefault("blockstore-bootstrap-peers") ?? "";
         variables.Custom["BLOCKSTORE_NODE_ID"] =

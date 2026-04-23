@@ -250,13 +250,40 @@ func parseConfig() Config {
 		ListenPort:      envInt("BLOCKSTORE_LISTEN_PORT", 5001),
 		APIPort:         envInt("BLOCKSTORE_API_PORT", 5090),
 		AdvertiseIP:     envStr("BLOCKSTORE_ADVERTISE_IP", ""),
-		StorageBytes:    int64(envInt("BLOCKSTORE_STORAGE_BYTES", 10*1024*1024*1024)),
+		StorageBytes:    int64(envInt("BLOCKSTORE_STORAGE_BYTES", 0)), // 0 = not set; resolved below
 		AuthToken:       envStr("BLOCKSTORE_AUTH_TOKEN", ""),
 		NodeID:          envStr("BLOCKSTORE_NODE_ID", ""),
 		VMID:            envStr("BLOCKSTORE_VM_ID", ""),
 		OrchestratorURL: envStr("ORCHESTRATOR_URL", ""),
 		BootstrapPeers:  splitPeers(envStr("BLOCKSTORE_BOOTSTRAP_PEERS", "")),
 	}
+}
+
+// fetchStorageQuotaFromNodeAgent reads storageQuotaBytes from the NodeAgent
+// obligation state endpoint. This is the authoritative source — it matches
+// the value computed by the orchestrator at obligation creation time (5% of
+// node storage) and survives VM redeployments without label re-injection.
+func fetchStorageQuotaFromNodeAgent() (int64, error) {
+	gw, err := defaultGateway()
+	if err != nil {
+		return 0, fmt.Errorf("no default gateway: %w", err)
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://%s:5100/api/obligations/blockstore/state", gw))
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("NodeAgent returned HTTP %d", resp.StatusCode)
+	}
+	var state struct {
+		StorageQuotaBytes int64 `json:"storageQuotaBytes"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
+		return 0, err
+	}
+	return state.StorageQuotaBytes, nil
 }
 
 func envStr(key, def string) string {
@@ -515,6 +542,21 @@ func main() {
 	log.Println("DeCloud Block Store Node starting...")
 
 	cfg := parseConfig()
+
+	// Resolve storage quota: NodeAgent obligation state → env var → default 10 GB.
+	if quota, err := fetchStorageQuotaFromNodeAgent(); err == nil && quota > 0 {
+		log.Printf("Storage quota from NodeAgent obligation state: %d bytes (%.1f GB)",
+			quota, float64(quota)/(1024*1024*1024))
+		cfg.StorageBytes = quota
+	} else {
+		if err != nil {
+			log.Printf("NodeAgent storage quota unavailable (%v) — using env/default", err)
+		}
+		if cfg.StorageBytes <= 0 {
+			cfg.StorageBytes = 10 * 1024 * 1024 * 1024 // 10 GB default
+			log.Printf("Storage quota defaulting to 10 GB")
+		}
+	}
 	log.Printf("Config: listenPort=%d apiPort=%d storageBytes=%d nodeID=%s vmID=%s",
 		cfg.ListenPort, cfg.APIPort, cfg.StorageBytes, cfg.NodeID, cfg.VMID)
 
