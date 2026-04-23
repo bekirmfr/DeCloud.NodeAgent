@@ -866,6 +866,9 @@ public class CloudInitTemplateService : ICloudInitTemplateService
         variables.Custom["DHT_API_PORT"] = spec.Labels?.GetValueOrDefault("dht-api-port", "5080") ?? "5080";
         variables.Custom["DHT_BOOTSTRAP_PEERS"] = spec.Labels?.GetValueOrDefault("dht-bootstrap-peers") ?? "";
         variables.Custom["DHT_REGION"] = spec.Labels?.GetValueOrDefault("node-region") ?? "default";
+        // dht-advertise-ip is the correct IP at deploy time (WG tunnel when CgnatInfo available,
+        // public IP otherwise). wg-config-fetch.sh overrides this at boot when relay is assigned.
+        variables.Custom["DHT_ADVERTISE_IP"] = spec.Labels?.GetValueOrDefault("dht-advertise-ip") ?? "";
 
         // WireGuard mesh enrollment variables (passed from orchestrator via labels)
         variables.Custom["WG_RELAY_ENDPOINT"] = spec.Labels?.GetValueOrDefault("wg-relay-endpoint") ?? "";

@@ -55,7 +55,7 @@ write_files:
     content: |
       DHT_LISTEN_PORT=__DHT_LISTEN_PORT__
       DHT_API_PORT=__DHT_API_PORT__
-      DHT_ADVERTISE_IP=__WG_TUNNEL_IP__
+      DHT_ADVERTISE_IP=__DHT_ADVERTISE_IP__
       DHT_BOOTSTRAP_PEERS=__DHT_BOOTSTRAP_PEERS__
       DHT_DATA_DIR=/var/lib/decloud-dht
       DECLOUD_NODE_ID=__NODE_ID__
