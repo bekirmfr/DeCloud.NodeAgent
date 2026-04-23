@@ -33,6 +33,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	stded25519 "crypto/ed25519"
 	"strconv"
 	"strings"
 	"sync"
@@ -777,7 +778,12 @@ func loadIdentityFromNodeAgent(role string) (crypto.PrivKey, error) {
 	}
 	seed, err := base64.StdEncoding.DecodeString(state.Ed25519PrivateKeyBase64)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode Ed25519 seed: %w", err)
+	}
+	// obligation state stores a 32-byte seed — expand to 64-byte private key
+	// before passing to go-libp2p which expects the full expanded key.
+	if len(seed) == stded25519.SeedSize {
+		seed = stded25519.NewKeyFromSeed(seed)
 	}
 	return crypto.UnmarshalEd25519PrivateKey(seed)
 }
