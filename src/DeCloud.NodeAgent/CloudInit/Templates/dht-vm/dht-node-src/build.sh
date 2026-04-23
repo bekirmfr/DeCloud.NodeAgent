@@ -123,7 +123,12 @@ echo "Go env: HOME=$HOME GOPATH=$GOPATH GOMODCACHE=$GOMODCACHE GOCACHE=$GOCACHE"
 # =====================================================
 # Source hash (detect stale binaries)
 # =====================================================
-SOURCE_HASH=$(find "$SCRIPT_DIR" -name '*.go' -o -name 'go.mod' -o -name 'go.sum' | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
+SOURCE_HASH=$(find "$SCRIPT_DIR" \
+    -not -path '*/.go-*' \
+    -not -path '*/.gopath/*' \
+    -not -path '*/.gocache/*' \
+    \( -name '*.go' -o -name 'go.mod' -o -name 'go.sum' \) \
+    | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1 || true)
 HASH_FILE="${OUTPUT_DIR}/.dht-node-source.sha256"
 
 echo "Source hash: ${SOURCE_HASH}"
