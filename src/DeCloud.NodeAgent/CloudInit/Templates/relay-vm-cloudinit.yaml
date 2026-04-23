@@ -338,10 +338,13 @@ write_files:
       ORCHESTRATOR_URL="__ORCHESTRATOR_URL__"
       NODE_ID="__NODE_ID__"
       RELAY_VM_ID="__VM_ID__"
-      PUBLIC_KEY="__WIREGUARD_PUBLIC_KEY__"
       PUBLIC_IP="__PUBLIC_IP__"
-      RELAY_SUBNET="__RELAY_SUBNET__"
-      TUNNEL_IP="10.20.__RELAY_SUBNET__.254"
+
+      # Read from files written by runcmd obligation state fetch —
+      # guaranteed to reflect the actual running keypair and subnet.
+      PUBLIC_KEY=$(cat /etc/wireguard/public.key | tr -d '\n')
+      RELAY_SUBNET=$(cat /etc/decloud/relay-subnet | tr -d '\n')
+      TUNNEL_IP="10.20.${RELAY_SUBNET}.254"
       MARKER="/var/lib/decloud/relay-registered"
       LOG="/var/log/decloud-relay-register.log"
 
@@ -478,7 +481,21 @@ runcmd:
           /etc/wireguard/wg-relay-server.conf
       printf '%s\n' "$WG_PRIV" > /etc/wireguard/private.key
       printf '%s\n' "$WG_PUB"  > /etc/wireguard/public.key
-      echo "Relay WireGuard config updated from obligation state (pubkey: ${WG_PUB:0:16}...)"
+
+      # Update relay-subnet file so routes runcmd and relay-register-poll.sh
+      # read the obligation-state subnet, not the label-baked placeholder
+      printf '%s\n' "$SUBNET_OCTET" > /etc/decloud/relay-subnet
+
+      # Patch relay-metadata.json with correct values from obligation state
+      if [ -f /etc/decloud/relay-metadata.json ]; then
+        sed -i \
+            -e "s|\"wireguard_public_key\": \"[^\"]*\"|\"wireguard_public_key\": \"${WG_PUB}\"|" \
+            -e "s|\"relay_subnet\": [0-9]*|\"relay_subnet\": ${SUBNET_OCTET}|" \
+            -e "s|\"tunnel_ip\": \"[^\"]*\"|\"tunnel_ip\": \"10.20.${SUBNET_OCTET}.254\"|" \
+            /etc/decloud/relay-metadata.json
+      fi
+
+      echo "Relay identity updated from obligation state (pubkey: ${WG_PUB:0:16}..., subnet: ${SUBNET_OCTET})"
     else
       echo "WARNING: NodeAgent obligation state unavailable — using label-baked WG key"
     fi
@@ -489,10 +506,10 @@ runcmd:
   # Verify orchestrator peer is configured
   - wg show wg-relay-server | grep -A 5 "__ORCHESTRATOR_PUBLIC_KEY__" || echo "WARNING - Orchestrator peer not found!"
 
-  # Configure routes for relay subnet
+  # Configure routes for relay subnet — read from file updated by obligation state fetch
   - |
-    echo "Configuring routes for relay subnet..."
-    RELAY_SUBNET="__RELAY_SUBNET__"
+    RELAY_SUBNET=$(cat /etc/decloud/relay-subnet 2>/dev/null | tr -d '\n' || echo "__RELAY_SUBNET__")
+    echo "Configuring routes for relay subnet ${RELAY_SUBNET}..."
     ip route add 10.20.${RELAY_SUBNET}.0/24 dev wg-relay-server 2>/dev/null || echo "Route already exists"
     mkdir -p /etc/network
     echo "10.20.${RELAY_SUBNET}.0/24 dev wg-relay-server scope link" >> /etc/network/routes 2>/dev/null || true
