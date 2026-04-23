@@ -238,6 +238,7 @@ type Config struct {
 	ListenPort      int
 	APIPort         int
 	AdvertiseIP     string
+	StorageBytes    int64
 	NodeID          string
 	VMID            string
 	OrchestratorURL string
@@ -249,6 +250,7 @@ func parseConfig() Config {
 		ListenPort:      envInt("BLOCKSTORE_LISTEN_PORT", 5001),
 		APIPort:         envInt("BLOCKSTORE_API_PORT", 5090),
 		AdvertiseIP:     envStr("BLOCKSTORE_ADVERTISE_IP", ""),
+		StorageBytes:    0, // resolved from NodeAgent obligation state in main()
 		NodeID:          envStr("BLOCKSTORE_NODE_ID", ""),
 		VMID:            envStr("BLOCKSTORE_VM_ID", ""),
 		OrchestratorURL: envStr("ORCHESTRATOR_URL", ""),
