@@ -2,6 +2,7 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Org.BouncyCastle.Pqc.Crypto.Lms;
 
 namespace DeCloud.NodeAgent.Infrastructure.Services
 {
@@ -97,9 +98,9 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
 
         public async Task CheckRelayVmNatRulesAsync(CancellationToken ct = default)
         {
-            var relayVms = _vmManager.GetAllVms();
-
-            foreach (var vm in relayVms.Where(v => v.Spec.VmType == VmType.Relay))
+            foreach (var vm in _vmManager.GetAllVms().Where(v =>
+                v.Spec.VmType == VmType.Relay &&
+                v.State == VmState.Running))
             {
                 // Check if we recently verified NAT rules for this VM
                 await _natCheckLock.WaitAsync(ct);
