@@ -787,6 +787,18 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
             
             # Get WireGuard stats
             wg_status = self.get_wireguard_status()
+
+            # Get relay's own WireGuard public key
+            wg_pubkey = ''
+            try:
+                pubkey_result = subprocess.run(
+                    ['wg', 'show', WIREGUARD_INTERFACE, 'public-key'],
+                    capture_output=True, text=True, timeout=5
+                )
+                if pubkey_result.returncode == 0:
+                    wg_pubkey = pubkey_result.stdout.strip()
+            except Exception:
+                pass
             
             self.send_json_response({
                 'relay_id': RELAY_ID,
@@ -802,6 +814,7 @@ class RelayAPIHandler(BaseHTTPRequestHandler):
                 'cpu_percent': cpu_percent,
                 'memory_percent': memory_percent,
                 'wireguard_interface': WIREGUARD_INTERFACE,
+                'wireguard_public_key': wg_pubkey,
                 'cleanup_config': {
                     'enabled': CLEANUP_ENABLED,
                     'interval_seconds': CLEANUP_INTERVAL_SECONDS,
