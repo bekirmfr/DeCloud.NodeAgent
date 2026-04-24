@@ -592,10 +592,17 @@ public class LibvirtVmManager : IVmManager
 
             var vmDir = Path.Combine(_options.VmStoragePath, spec.Id);
             Directory.CreateDirectory(vmDir);
-            // Harden: restrict to root only — VM disk and state files are tenant data.
             if (OperatingSystem.IsLinux())
+            {
+                // 0750 root:kvm — libvirt-qemu (member of kvm group, gid 108) needs
+                // directory execute to traverse and open disk.qcow2. 0700 broke VM
+                // start because QEMU drops to libvirt-qemu before accessing the disk.
+                // Others are still denied — tenant data remains isolated.
+                await _executor.ExecuteAsync("chown", $"root:kvm \"{vmDir}\"", ct);
                 File.SetUnixFileMode(vmDir,
-                    UnixFileMode.UserRead | UnixFileMode.UserExecute | UnixFileMode.UserWrite); // 0700
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+                    UnixFileMode.GroupRead | UnixFileMode.GroupExecute); // 0750
+            }
 
             // =====================================================
             // STEP 1: Prepare base image
