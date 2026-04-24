@@ -291,12 +291,12 @@ func fetchStorageQuotaFromNodeAgent() (int64, error) {
 // obligation state endpoint. This is the authoritative source — the token is
 // NOT injected as an env var label (by design) to avoid exposing it in VM metadata.
 // Retries for up to 2 minutes to handle NodeAgent startup races.
-func fetchAuthTokenFromNodeAgent(apiPort int) string {
-	gateway := defaultGateway()
-	if gateway == "" {
-		return ""
+func fetchAuthTokenFromNodeAgent() (string, error) {
+	gw, err := defaultGateway()
+	if err != nil {
+		return "", fmt.Errorf("no default gateway: %w", err)
 	}
-	url := fmt.Sprintf("http://%s:5100/api/obligations/blockstore/state", gateway)
+	url := fmt.Sprintf("http://%s:5100/api/obligations/blockstore/state", gw)
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	for i := 0; i < 24; i++ {
@@ -308,15 +308,14 @@ func fetchAuthTokenFromNodeAgent(apiPort int) string {
 			if err := json.NewDecoder(resp.Body).Decode(&state); err == nil {
 				resp.Body.Close()
 				if state.AuthToken != "" {
-					return state.AuthToken
+					return state.AuthToken, nil
 				}
 			}
 			resp.Body.Close()
 		}
 		time.Sleep(5 * time.Second)
 	}
-	log.Printf("[warn] could not fetch auth token from NodeAgent after 2 minutes")
-	return ""
+	return "", fmt.Errorf("auth token not available after 2 minutes")
 }
 
 func envStr(key, def string) string {
