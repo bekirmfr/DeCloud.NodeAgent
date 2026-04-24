@@ -1,7 +1,7 @@
 # Block Store System VM — Design & Implementation Plan
 
 **Date:** 2026-02-16 (Updated: 2026-04-20)
-**Status:** Phase A–E complete. Item 32 (DHT proximity endpoint) implemented. All core items done. Items 39–41 (network fencing, assignment version, integration test) optional.
+**Status:** Phase A–E complete. Items 31b, 32 implemented. All core items done. Items 39–41 (network fencing, assignment version, integration test) optional.
 
 ## Implementation Status
 
@@ -11,7 +11,7 @@
 | B — NodeAgent + Go binary | ✅ Complete | cloud-init, blockstore-node, scripts, callback controller |
 | C — Integration | ✅ Production-verified 2026-03-20 | Dashboard live, binary build pipeline stable |
 | D — Lazysync & Migration | ✅ Production-verified 2026-04-20 | Items 25–37: lazysync daemon, LazysyncManager, migration planner, source-offline alerting, disk reconstruction, end-to-end test confirmed. Item 32 (DHT proximity endpoint) implemented. All items complete. |
-| D-fixes — Replication reliability | ✅ Production-verified 2026-04-08 | Overlay-only fix, bitswap peer targeting, concurrency cap, port firewall, retry queue |
+| D-fixes — Replication reliability | ✅ Production-verified 2026-04-08; item 31b implemented 2026-04-24 | Overlay-only fix, bitswap peer targeting, concurrency cap, port firewall, retry queue (startRetryLoop) |
 | E — Split-Brain Prevention | ✅ Complete | Items 34–38 done. InvalidVmIds push model + TargetNodeId pre-check + owner block cleanup + manifest POST NodeId fence. Items 39–41 optional. |
 **Depends on:** DHT system VMs (production-verified 2026-02-15)
 **Follows patterns from:** Relay VMs, DHT VMs
@@ -1870,7 +1870,7 @@ private List<string> GetInvalidVmsForNode(string nodeId, List<string> reportedRu
      empty batches. `DeCloudEscrow.sol` `_distributionPhase` distributes the storage pool
      proportionally to node `storageBytes`. ABI loaded from embedded `DeCloudEscrow.abi.json`.
      `replicationFactor=0` VMs pass 0 — contract computes zero storage billing correctly.
-31b. **GossipSub fetch retry queue** — block store binary maintains an in-memory
+31b. ✅ **GossipSub fetch retry queue** — block store binary maintains an in-memory
      retry queue (`chan cid.Cid`, capacity 500) fed by two failure paths:
      (a) semaphore skip (`bitswap_fetch_skip`) — CID received via GossipSub but all
      concurrent fetch slots were occupied at arrival;
@@ -2177,6 +2177,24 @@ LevelDB is only used for metadata (access times, block index, stats).
 - Blockstores establish direct cross-region libp2p connections on boot; both nodes
   show each other's WireGuard IP in peer list within 60 seconds of startup
 - `bitswapSent` counter correctly reflects blocks served via bitswap
+
+### Phase D-fixes (item 31b — GossipSub Fetch Retry Queue) — Implemented 2026-04-24
+
+Root cause identified via live diagnostic data: freshly booted blockstores (cold DHT
+routing table) receive GossipSub notifications and start bitswap sessions before DHT
+provider records for the new blocks have propagated (~15s race), causing all 7 initial
+fetches to hit the 30s BitswapTimeout. No recovery path existed — bitswap_fetch_fail
+dropped the CID silently; diffAndEnqueue/scheduleCatchup only fires on success; the
+presence-topic catchup is gated by seenPeers and does not re-trigger for known peers.
+
+Fix: `retryQueue chan cid.Cid` (cap 500) + `retryAttempts sync.Map` added to `BlockNode`.
+On `bitswap_fetch_fail` the CID is enqueued. `startRetryLoop` goroutine ticks every 60s
+after a 30s startup delay, drains sequentially (first retry warms DHT cache; subsequent
+retries resolve in <8ms), 60s fetch timeout, max 3 attempts per CID. Exceeded CIDs emit
+`retry_give_up`; DHT neighborhood scan (item 32) covers those.
+New diag events: `retry_fetch`, `retry_fetch_fail`, `retry_give_up`, `retry_queue_full`.
+File: `main.go`. Requires blockstore VM redeployment to take effect.
+
 - GossipSub fetch retry queue recovers blocks that timed out on initial fetch;
   `retry_fetch` events visible in diag log within one retry cycle (60s)
 - `retry_give_up` rate is 0 under normal cross-region conditions (routing table
