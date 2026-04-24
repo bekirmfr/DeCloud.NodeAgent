@@ -136,6 +136,10 @@ public class ImageManager : IImageManager
     {
         var vmDir = Path.Combine(_options.VmStoragePath, vmId);
         Directory.CreateDirectory(vmDir);
+        // Harden: restrict to root only — VM disk and state files are tenant data.
+        if (OperatingSystem.IsLinux())
+            File.SetUnixFileMode(vmDir,
+                UnixFileMode.UserRead | UnixFileMode.UserExecute | UnixFileMode.UserWrite); // 0700
 
         var overlayPath = Path.Combine(vmDir, "disk.qcow2");
         var requestedSizeGb = Math.Max(1, sizeBytes / 1024 / 1024 / 1024);

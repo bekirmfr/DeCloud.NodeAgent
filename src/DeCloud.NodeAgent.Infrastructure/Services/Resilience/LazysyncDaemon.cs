@@ -266,6 +266,24 @@ public class LazysyncDaemon : BackgroundService
                 // QEMU does not until libvirt updates the AppArmor profile via attach-disk.
                 File.WriteAllBytes(tmpPath, Array.Empty<byte>());
 
+                // Set 0600 before chown so there is no window where the file is
+                // root:root 644 (readable by group/other in a 755 directory).
+                File.SetUnixFileMode(tmpPath,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite); // 0600
+
+                // Transfer ownership to the QEMU user so DAC allows it to open the file.
+                // If this fails the file stays root:root 0600 — QEMU will get Permission
+                // denied and the catch block correctly resets BitmapCreated=false.
+                var chownResult = await _executor.ExecuteAsync(
+                    "chown", $"libvirt-qemu:libvirt-qemu \"{tmpPath}\"",
+                    TimeSpan.FromSeconds(5), ct);
+
+                if (!chownResult.Success)
+                    throw new InvalidOperationException(
+                        $"chown libvirt-qemu failed for {tmpPath}: {chownResult.StandardError}");
+
+                await _qmpClient.GrantScratchAppArmorAsync(vm.VmId, tmpPath, ct);
+
                 var attached = false;
                 try
                 {

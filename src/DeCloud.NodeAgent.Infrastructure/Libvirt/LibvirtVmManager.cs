@@ -592,6 +592,10 @@ public class LibvirtVmManager : IVmManager
 
             var vmDir = Path.Combine(_options.VmStoragePath, spec.Id);
             Directory.CreateDirectory(vmDir);
+            // Harden: restrict to root only — VM disk and state files are tenant data.
+            if (OperatingSystem.IsLinux())
+                File.SetUnixFileMode(vmDir,
+                    UnixFileMode.UserRead | UnixFileMode.UserExecute | UnixFileMode.UserWrite); // 0700
 
             // =====================================================
             // STEP 1: Prepare base image
