@@ -394,6 +394,12 @@ type BlockNode struct {
 	// Key: vmId, Value: timer reset channel (send to reschedule, close to cancel).
 	catchupMu    sync.Mutex
 	catchupTimers map[string]chan struct{}
+
+	// Retry queue for failed GossipSub bitswap fetches (cold DHT / race on first fetch).
+	// Drained sequentially every 60s by startRetryLoop. Cap 500 — sized for several
+	// full overlay bursts. Per-CID attempt count capped at 3 via retryAttempts.
+	retryQueue    chan cid.Cid
+	retryAttempts sync.Map // string(cid) → int
 }
 
 // ── Debounced per-VM catchup ─────────────────────────────────────────────────
@@ -613,6 +619,7 @@ func main() {
 	node.loadExistingManifests(ctx)
 	node.connectBootstrapPeers(ctx)
 	go node.reannounceExistingBlocks(ctx)
+	go node.startRetryLoop(ctx)
 
 	if err := node.startGossipSubSubscription(ctx); err != nil {
 		log.Printf("Warning: GossipSub subscription failed: %v", err)
@@ -750,9 +757,10 @@ func setup(ctx context.Context, cfg Config) (*BlockNode, error) {
 		blockSizes:   make(map[string]int64),
 		manifests:    make(map[string]*ResourceManifest),
 		peerSessions: make(map[peer.ID]blockFetcher),
-		diagLog:      newDiagLog(diagLogCap),
+		diagLog:       newDiagLog(diagLogCap),
 		fetchQueue:    make(chan NewBlockAnnouncement, FetchQueueSize),
 		catchupTimers: make(map[string]chan struct{}),
+		retryQueue:    make(chan cid.Cid, 500),
 	}, nil
 }
 
@@ -1070,6 +1078,11 @@ func (n *BlockNode) handleNewBlockAnnouncement(ctx context.Context, ann NewBlock
 			"error":       err.Error(),
 			"duration_ms": fetchMs,
 		})
+		select {
+		case n.retryQueue <- c:
+		default:
+			n.diagLog.Add("retry_queue_full", map[string]interface{}{"cid": cidShort(ann.CID)})
+		}
 		return
 	}
 	n.diagLog.Add("bitswap_fetch", map[string]interface{}{
@@ -1793,6 +1806,86 @@ func (n *BlockNode) loadExistingAccessTimes(ctx context.Context) {
 // ═══════════════════════════════════════════════════════════════════
 // Reannounce existing blocks on startup
 // ═══════════════════════════════════════════════════════════════════
+
+// startRetryLoop drains retryQueue every 60s (after a 30s startup delay for
+// DHT routing table warmup). Sequential processing is intentional: the first
+// retry performs the DHT FindProviders walk; subsequent retries in the same
+// batch hit the warm cache and resolve in milliseconds. Max 3 attempts per CID;
+// gives up with retry_give_up after that.
+func (n *BlockNode) startRetryLoop(ctx context.Context) {
+	const (
+		startupDelay  = 30 * time.Second
+		tickInterval  = 60 * time.Second
+		fetchTimeout  = 60 * time.Second
+		maxAttempts   = 3
+	)
+	select {
+	case <-time.After(startupDelay):
+	case <-ctx.Done():
+		return
+	}
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pending := len(n.retryQueue)
+			for i := 0; i < pending; i++ {
+				select {
+				case c := <-n.retryQueue:
+				default:
+					break
+				}
+				key := c.String()
+				raw, _ := n.retryAttempts.LoadOrStore(key, 0)
+				attempt := raw.(int)
+				if attempt >= maxAttempts {
+					n.retryAttempts.Delete(key)
+					n.diagLog.Add("retry_give_up", map[string]interface{}{"cid": cidShort(key)})
+					log.Printf("retry: giving up on %s after %d attempts", cidShort(key), maxAttempts)
+					continue
+				}
+				n.retryAttempts.Store(key, attempt+1)
+				n.diagLog.Add("retry_fetch", map[string]interface{}{"cid": cidShort(key), "attempt": attempt + 1})
+
+				fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
+				session := n.bsExch.NewSession(fetchCtx)
+				blk, err := session.GetBlock(fetchCtx, c)
+				cancel()
+
+				if err != nil {
+					n.diagLog.Add("retry_fetch_fail", map[string]interface{}{
+						"cid":     cidShort(key),
+						"attempt": attempt + 1,
+						"error":   err.Error(),
+					})
+					// Re-enqueue for the next tick unless we just hit maxAttempts.
+					if attempt+1 < maxAttempts {
+						select {
+						case n.retryQueue <- c:
+						default:
+						}
+					}
+					continue
+				}
+
+				n.retryAttempts.Delete(key)
+				if putErr := n.bstore.Put(ctx, blk); putErr != nil {
+					continue
+				}
+				n.touchBlock(key, int64(len(blk.RawData())))
+				n.mu.Lock()
+				n.bitswapReceived++
+				n.mu.Unlock()
+				_ = n.dhtProvide(ctx, c)
+				n.diagLog.Add("dht_announce", map[string]interface{}{"cid": cidShort(key), "role": "retry_pull"})
+				log.Printf("retry: pulled %s on attempt %d", cidShort(key), attempt+1)
+			}
+		}
+	}
+}
 
 // reannounceExistingBlocks re-publishes DHT provider records for all locally
 // stored blocks after startup. Called after connectBootstrapPeers so the
