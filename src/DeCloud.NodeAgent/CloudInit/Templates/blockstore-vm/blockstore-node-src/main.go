@@ -239,6 +239,7 @@ type Config struct {
 	APIPort         int
 	AdvertiseIP     string
 	StorageBytes    int64
+	AuthToken       string
 	NodeID          string
 	VMID            string
 	OrchestratorURL string
@@ -251,6 +252,7 @@ func parseConfig() Config {
 		APIPort:         envInt("BLOCKSTORE_API_PORT", 5090),
 		AdvertiseIP:     envStr("BLOCKSTORE_ADVERTISE_IP", ""),
 		StorageBytes:    0, // resolved from NodeAgent obligation state in main()
+		AuthToken:       envStr("BLOCKSTORE_AUTH_TOKEN", ""),
 		NodeID:          envStr("BLOCKSTORE_NODE_ID", ""),
 		VMID:            envStr("BLOCKSTORE_VM_ID", ""),
 		OrchestratorURL: envStr("ORCHESTRATOR_URL", ""),
@@ -283,6 +285,38 @@ func fetchStorageQuotaFromNodeAgent() (int64, error) {
 		return 0, err
 	}
 	return state.StorageQuotaBytes, nil
+}
+
+// fetchAuthTokenFromNodeAgent fetches the HMAC auth token from the NodeAgent
+// obligation state endpoint. This is the authoritative source — the token is
+// NOT injected as an env var label (by design) to avoid exposing it in VM metadata.
+// Retries for up to 2 minutes to handle NodeAgent startup races.
+func fetchAuthTokenFromNodeAgent(apiPort int) string {
+	gateway := defaultGateway()
+	if gateway == "" {
+		return ""
+	}
+	url := fmt.Sprintf("http://%s:5100/api/obligations/blockstore/state", gateway)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	for i := 0; i < 24; i++ {
+		resp, err := client.Get(url)
+		if err == nil && resp.StatusCode == 200 {
+			var state struct {
+				AuthToken string `json:"authToken"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&state); err == nil {
+				resp.Body.Close()
+				if state.AuthToken != "" {
+					return state.AuthToken
+				}
+			}
+			resp.Body.Close()
+		}
+		time.Sleep(5 * time.Second)
+	}
+	log.Printf("[warn] could not fetch auth token from NodeAgent after 2 minutes")
+	return ""
 }
 
 func envStr(key, def string) string {
@@ -556,6 +590,14 @@ func main() {
 			log.Printf("Storage quota defaulting to 10 GB")
 		}
 	}
+	// Resolve auth token from NodeAgent obligation state.
+	// Intentionally not injected as an env var label — fetched at runtime like the storage quota.
+	if token, err := fetchAuthTokenFromNodeAgent(); err == nil && token != "" {
+		cfg.AuthToken = token
+	} else if err != nil {
+		log.Printf("NodeAgent auth token unavailable (%v) — orchestrator join will fail auth", err)
+	}
+
 	log.Printf("Config: listenPort=%d apiPort=%d storageBytes=%d nodeID=%s vmID=%s",
 		cfg.ListenPort, cfg.APIPort, cfg.StorageBytes, cfg.NodeID, cfg.VMID)
 
