@@ -145,4 +145,35 @@ public class QmpClient : IQmpClient
         }
         throw new TimeoutException($"drive-backup timed out for VM {vmId}");
     }
+
+    public async Task AttachScratchDiskAsync(string vmId, string path, CancellationToken ct = default)
+    {
+        // --config is intentionally omitted — transient attachment only (lost on VM restart).
+        // libvirt updates the per-VM AppArmor profile at /etc/apparmor.d/libvirt/libvirt-<uuid>.files
+        // to grant this QEMU process rw on exactly `path`, then removes it on detach.
+        var result = await _executor.ExecuteAsync(
+            "virsh",
+            $"attach-disk {vmId} {path} sdb --driver qemu --subdriver raw --type disk --mode readonly",
+            ct);
+
+        if (!result.Success)
+            throw new InvalidOperationException(
+                $"attach-disk failed for VM {vmId}: {result.StandardError}");
+
+        _logger.LogDebug("VM {VmId}: scratch disk attached at {Path}", vmId, path);
+    }
+
+    public async Task DetachScratchDiskAsync(string vmId, string path, CancellationToken ct = default)
+    {
+        var result = await _executor.ExecuteAsync(
+            "virsh",
+            $"detach-disk {vmId} sdb",
+            ct);
+
+        if (!result.Success)
+            _logger.LogWarning("VM {VmId}: detach-disk failed for {Path}: {Err}",
+                vmId, path, result.StandardError);
+        else
+            _logger.LogDebug("VM {VmId}: scratch disk detached", vmId);
+    }
 }

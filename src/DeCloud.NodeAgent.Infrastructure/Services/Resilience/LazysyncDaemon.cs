@@ -176,8 +176,9 @@ public class LazysyncDaemon : BackgroundService
         }
 
         var state = await LoadStateAsync(vm.VmId);
-        // Use VM's storage directory — AppArmor libvirt profiles allow QEMU to
-        // create files there. /tmp/ is denied by the per-VM AppArmor confinement.
+        // Use VM's storage directory. The NodeAgent pre-creates the file here;
+        // AppArmor access is then granted per-VM via transient virsh attach-disk.
+        // /tmp/ is blocked by the per-VM AppArmor confinement regardless.
         var tmpPath = Path.Combine(_vmOptions.VmStoragePath, vm.VmId,
             $"lazysync-tmp-{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}.raw");
 
@@ -260,8 +261,17 @@ public class LazysyncDaemon : BackgroundService
                     return;
                 }
 
+                // Pre-create the file so libvirt can attach it (attach-disk requires the
+                // target file to exist). NodeAgent has the filesystem permission to do this;
+                // QEMU does not until libvirt updates the AppArmor profile via attach-disk.
+                File.WriteAllBytes(tmpPath, Array.Empty<byte>());
+
+                var attached = false;
                 try
                 {
+                    await _qmpClient.AttachScratchDiskAsync(vm.VmId, tmpPath, ct);
+                    attached = true;
+
                     await _qmpClient.DriveBackupIncrementalAsync(
                         vm.VmId, driveNode, BitmapName, tmpPath, ct);
                 }
@@ -272,11 +282,15 @@ public class LazysyncDaemon : BackgroundService
                         vm.VmId);
                     state.BitmapCreated = false;
                     if (File.Exists(tmpPath)) File.Delete(tmpPath);
-                    // Persist the BitmapCreated=false reset so the next cycle uses full export.
-                    // Without this, LoadStateAsync would read BitmapCreated=true from disk and
-                    // retry the failing incremental path indefinitely, never falling back.
                     await SaveStateAsync(vm.VmId, state);
                     return;
+                }
+                finally
+                {
+                    // Only detach if attach succeeded — avoids a spurious virsh error
+                    // when the catch path is entered due to an attach failure.
+                    if (attached)
+                        await _qmpClient.DetachScratchDiskAsync(vm.VmId, tmpPath, ct);
                 }
 
                 overlayOffsets = null; // no whitelist — incremental export is overlay-only
