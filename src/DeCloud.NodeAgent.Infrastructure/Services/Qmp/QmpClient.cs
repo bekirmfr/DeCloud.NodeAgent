@@ -146,34 +146,54 @@ public class QmpClient : IQmpClient
         throw new TimeoutException($"drive-backup timed out for VM {vmId}");
     }
 
-    public async Task AttachScratchDiskAsync(string vmId, string path, CancellationToken ct = default)
+    public async Task GrantScratchAppArmorAsync(string vmId, string path, CancellationToken ct = default)
     {
-        // --config is intentionally omitted — transient attachment only (lost on VM restart).
-        // libvirt updates the per-VM AppArmor profile at /etc/apparmor.d/libvirt/libvirt-<uuid>.files
-        // to grant this QEMU process rw on exactly `path`, then removes it on detach.
+        // libvirt generates /etc/apparmor.d/libvirt/libvirt-<uuid>.files at VM start
+        // and updates it on disk attach/detach. We write the same rule format directly,
+        // then reload the profile — no PCI slot required, scope remains per-VM.
+        var filesProfile = $"/etc/apparmor.d/libvirt/libvirt-{vmId}.files";
+        if (!File.Exists(filesProfile))
+        {
+            _logger.LogDebug("VM {VmId}: AppArmor .files profile not found — skipping grant", vmId);
+            return; // AppArmor not active on this host
+        }
+
+        await File.AppendAllTextAsync(filesProfile, $"  \"{path}\" rw,\n", ct);
+
         var result = await _executor.ExecuteAsync(
-            "virsh",
-            $"attach-disk {vmId} {path} sdb --driver qemu --subdriver raw --type disk --mode readonly",
-            ct);
+            "apparmor_parser",
+            $"-r /etc/apparmor.d/libvirt/libvirt-{vmId}",
+            TimeSpan.FromSeconds(10), ct);
 
         if (!result.Success)
             throw new InvalidOperationException(
-                $"attach-disk failed for VM {vmId}: {result.StandardError}");
+                $"apparmor_parser reload failed for VM {vmId}: {result.StandardError}");
 
-        _logger.LogDebug("VM {VmId}: scratch disk attached at {Path}", vmId, path);
+        _logger.LogDebug("VM {VmId}: AppArmor scratch access granted ({Path})", vmId, path);
     }
 
-    public async Task DetachScratchDiskAsync(string vmId, string path, CancellationToken ct = default)
+    public async Task RevokeScratchAppArmorAsync(string vmId, string path, CancellationToken ct = default)
     {
+        var filesProfile = $"/etc/apparmor.d/libvirt/libvirt-{vmId}.files";
+        if (!File.Exists(filesProfile)) return;
+
+        var rule = $"  \"{path}\" rw,";
+        var lines = await File.ReadAllLinesAsync(filesProfile, ct);
+        var filtered = lines.Where(l => l.TrimEnd() != rule).ToArray();
+
+        if (filtered.Length == lines.Length) return; // rule already absent — nothing to do
+
+        await File.WriteAllLinesAsync(filesProfile, filtered, ct);
+
         var result = await _executor.ExecuteAsync(
-            "virsh",
-            $"detach-disk {vmId} sdb",
-            ct);
+            "apparmor_parser",
+            $"-r /etc/apparmor.d/libvirt/libvirt-{vmId}",
+            TimeSpan.FromSeconds(10), ct);
 
         if (!result.Success)
-            _logger.LogWarning("VM {VmId}: detach-disk failed for {Path}: {Err}",
-                vmId, path, result.StandardError);
+            _logger.LogWarning("VM {VmId}: apparmor_parser reload failed during revoke: {Err}",
+                vmId, result.StandardError);
         else
-            _logger.LogDebug("VM {VmId}: scratch disk detached", vmId);
+            _logger.LogDebug("VM {VmId}: AppArmor scratch access revoked ({Path})", vmId, path);
     }
 }

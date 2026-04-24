@@ -269,7 +269,7 @@ public class LazysyncDaemon : BackgroundService
                 var attached = false;
                 try
                 {
-                    await _qmpClient.AttachScratchDiskAsync(vm.VmId, tmpPath, ct);
+                    await _qmpClient.GrantScratchAppArmorAsync(vm.VmId, tmpPath, ct);
                     attached = true;
 
                     await _qmpClient.DriveBackupIncrementalAsync(
@@ -290,7 +290,7 @@ public class LazysyncDaemon : BackgroundService
                     // Only detach if attach succeeded — avoids a spurious virsh error
                     // when the catch path is entered due to an attach failure.
                     if (attached)
-                        await _qmpClient.DetachScratchDiskAsync(vm.VmId, tmpPath, ct);
+                        await _qmpClient.RevokeScratchAppArmorAsync(vm.VmId, tmpPath, ct);
                 }
 
                 overlayOffsets = null; // no whitelist — incremental export is overlay-only

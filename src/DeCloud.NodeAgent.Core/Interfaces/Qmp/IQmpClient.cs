@@ -38,14 +38,15 @@ public interface IQmpClient
         CancellationToken ct = default);
 
     /// <summary>
-    /// Temporarily attach a file as a secondary disk so libvirt updates the
-    /// per-VM AppArmor profile to permit QEMU access to that path.
+    /// Grant this VM's QEMU process rw access to a scratch file by appending
+    /// a rule to its per-VM AppArmor .files profile and reloading it.
+    /// No-op when AppArmor is not in use (profile file absent).
     /// </summary>
-    Task AttachScratchDiskAsync(string vmId, string path, CancellationToken ct = default);
+    Task GrantScratchAppArmorAsync(string vmId, string path, CancellationToken ct = default);
 
     /// <summary>
-    /// Detach the scratch disk attached by AttachScratchDiskAsync.
-    /// Always called in finally — failure is logged but non-fatal.
+    /// Revoke the scratch file rule added by GrantScratchAppArmorAsync.
+    /// Non-fatal on failure — always called in a finally block.
     /// </summary>
-    Task DetachScratchDiskAsync(string vmId, string path, CancellationToken ct = default);
+    Task RevokeScratchAppArmorAsync(string vmId, string path, CancellationToken ct = default);
 }
