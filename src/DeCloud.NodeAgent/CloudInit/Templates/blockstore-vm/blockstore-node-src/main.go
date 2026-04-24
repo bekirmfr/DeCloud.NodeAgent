@@ -1359,11 +1359,12 @@ func (n *BlockNode) startPresenceTopic(ctx context.Context) {
 		}
 	}()
 
-	// Watch for new peers. On first heartbeat from an unseen peer,
-	// fetch their owner CID lists and pull blocks we're responsible for.
-	// seenPeers prevents re-triggering catchup on repeated heartbeats.
+	// Watch for peers. Re-trigger catchup whenever a peer's API URL changes —
+	// this handles redeploys that preserve the peer ID (same identity.key on
+	// persistent disk) but represent a new VM instance with a fresh owner index.
+	// Repeated heartbeats with the same peerID+URL are de-duplicated by the map.
 	go func() {
-		seenPeers := make(map[string]bool)
+		seenPeerURLs := make(map[string]string) // peerID → last seen APIURL
 		for {
 			msg, err := sub.Next(ctx)
 			if err != nil {
@@ -1376,16 +1377,16 @@ func (n *BlockNode) startPresenceTopic(ctx context.Context) {
 			if err := json.Unmarshal(msg.Data, &hb); err != nil || hb.APIURL == "" {
 				continue
 			}
-			if seenPeers[hb.PeerID] {
+			if seenPeerURLs[hb.PeerID] == hb.APIURL {
 				continue
 			}
-			seenPeers[hb.PeerID] = true
+			seenPeerURLs[hb.PeerID] = hb.APIURL
 			libp2pPeerID, parseErr := peer.Decode(hb.PeerID)
 			if parseErr != nil {
 				log.Printf("Presence: could not parse peer ID %s: %v", hb.PeerID, parseErr)
 				continue
 			}
-			log.Printf("Presence: new peer %s at %s — starting owner catchup",
+			log.Printf("Presence: peer %s at %s — starting owner catchup",
 				cidShort(hb.PeerID), hb.APIURL)
 			go n.performCatchupFromPeer(ctx, hb.APIURL, libp2pPeerID)
 		}
