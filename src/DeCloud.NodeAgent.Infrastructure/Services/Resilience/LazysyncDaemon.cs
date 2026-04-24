@@ -699,7 +699,7 @@ public class LazysyncDaemon : BackgroundService
     private async Task<long> GetDiskVirtualSizeAsync(string diskPath, CancellationToken ct)
     {
         var result = await _executor.ExecuteAsync(
-            "qemu-img", $"info --output=json \"{diskPath}\"",
+            "qemu-img", $"info --force-share --output=json \"{diskPath}\"",
             TimeSpan.FromSeconds(30), ct);
 
         if (!result.Success)
