@@ -176,8 +176,8 @@ public class LazysyncDaemon : BackgroundService
         }
 
         var state = await LoadStateAsync(vm.VmId);
-        // Use VM's storage directory. The NodeAgent pre-creates the file here;
-        // AppArmor access is then granted per-VM via transient virsh attach-disk.
+        // Use VM's storage directory. NodeAgent pre-creates the file here;
+        // AppArmor access is granted per-VM via GrantScratchAppArmorAsync.
         // /tmp/ is blocked by the per-VM AppArmor confinement regardless.
         var tmpPath = Path.Combine(_vmOptions.VmStoragePath, vm.VmId,
             $"lazysync-tmp-{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}.raw");
@@ -261,29 +261,27 @@ public class LazysyncDaemon : BackgroundService
                     return;
                 }
 
-                // Pre-create the file so libvirt can attach it (attach-disk requires the
-                // target file to exist). NodeAgent has the filesystem permission to do this;
-                // QEMU does not until libvirt updates the AppArmor profile via attach-disk.
-                File.WriteAllBytes(tmpPath, Array.Empty<byte>());
+                // Pre-create as a sparse file at the exact virtual disk size.
+                // drive-backup mode=existing requires size match; SetLength uses
+                // ftruncate() — no actual disk space consumed for the sparse region.
+                var virtualSize = await GetDiskVirtualSizeAsync(diskPath, ct);
+                using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write,
+                           FileShare.None, bufferSize: 4096, useAsync: false))
+                    fs.SetLength(virtualSize);
 
-                // Set 0600 before chown so there is no window where the file is
-                // root:root 644 (readable by group/other in a 755 directory).
+                // 0600 before chown so there is no window where the file is
+                // root:root readable by group/other in a world-traversable directory.
                 File.SetUnixFileMode(tmpPath,
-                    UnixFileMode.UserRead | UnixFileMode.UserWrite); // 0600
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite);
 
-                // Transfer ownership to the QEMU user so DAC allows it to open the file.
-                // If this fails the file stays root:root 0600 — QEMU will get Permission
-                // denied and the catch block correctly resets BitmapCreated=false.
                 var chownResult = await _executor.ExecuteAsync(
                     "chown", $"libvirt-qemu:libvirt-qemu \"{tmpPath}\"",
                     TimeSpan.FromSeconds(5), ct);
-
                 if (!chownResult.Success)
                     throw new InvalidOperationException(
                         $"chown libvirt-qemu failed for {tmpPath}: {chownResult.StandardError}");
 
-                await _qmpClient.GrantScratchAppArmorAsync(vm.VmId, tmpPath, ct);
-
+                // Grant this VM's QEMU process rw access via per-VM AppArmor .files profile.
                 var attached = false;
                 try
                 {
@@ -300,13 +298,16 @@ public class LazysyncDaemon : BackgroundService
                         vm.VmId);
                     state.BitmapCreated = false;
                     if (File.Exists(tmpPath)) File.Delete(tmpPath);
+                    // Persist the BitmapCreated=false reset so the next cycle uses full export.
+                    // Without this, LoadStateAsync would read BitmapCreated=true from disk and
+                    // retry the failing incremental path indefinitely, never falling back.
                     await SaveStateAsync(vm.VmId, state);
                     return;
                 }
                 finally
                 {
-                    // Only detach if attach succeeded — avoids a spurious virsh error
-                    // when the catch path is entered due to an attach failure.
+                    // Only revoke if grant succeeded — avoids a spurious apparmor_parser
+                    // error when the catch path is entered due to a grant failure.
                     if (attached)
                         await _qmpClient.RevokeScratchAppArmorAsync(vm.VmId, tmpPath, ct);
                 }
@@ -693,6 +694,19 @@ public class LazysyncDaemon : BackgroundService
 
         // BlockStore VM API port: 5090 (BlockStoreVmSpec.ApiPort)
         return $"http://{blockstoreVm.Spec.IpAddress}:5090";
+    }
+
+    private async Task<long> GetDiskVirtualSizeAsync(string diskPath, CancellationToken ct)
+    {
+        var result = await _executor.ExecuteAsync(
+            "qemu-img", $"info --output=json \"{diskPath}\"",
+            TimeSpan.FromSeconds(30), ct);
+
+        if (!result.Success)
+            throw new Exception($"qemu-img info failed for {diskPath}: {result.StandardError}");
+
+        using var doc = JsonDocument.Parse(result.StandardOutput);
+        return doc.RootElement.GetProperty("virtual-size").GetInt64();
     }
 
     /// <summary>
