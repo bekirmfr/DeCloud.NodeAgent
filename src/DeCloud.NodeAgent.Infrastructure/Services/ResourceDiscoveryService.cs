@@ -879,10 +879,11 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             {
                 var ifaceName = iface.Trim();
 
-                // Skip loopback and common virtual interfaces
+                // Skip loopback and virtual/tunnel interfaces that don't expose sysfs speed
                 if (ifaceName == "lo" || ifaceName.StartsWith("vnet") ||
                     ifaceName.StartsWith("virbr") || ifaceName.StartsWith("docker") ||
-                    ifaceName.StartsWith("br-") || ifaceName.StartsWith("veth"))
+                    ifaceName.StartsWith("br-") || ifaceName.StartsWith("veth") ||
+                    ifaceName.StartsWith("wg-"))   // WireGuard tunnels — no /speed sysfs entry
                     continue;
 
                 // Check if interface is up: read /sys/class/net/<iface>/operstate
