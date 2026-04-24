@@ -1814,10 +1814,10 @@ func (n *BlockNode) loadExistingAccessTimes(ctx context.Context) {
 // gives up with retry_give_up after that.
 func (n *BlockNode) startRetryLoop(ctx context.Context) {
 	const (
-		startupDelay  = 30 * time.Second
-		tickInterval  = 60 * time.Second
-		fetchTimeout  = 60 * time.Second
-		maxAttempts   = 3
+		startupDelay = 30 * time.Second
+		tickInterval = 60 * time.Second
+		fetchTimeout = 60 * time.Second
+		maxAttempts  = 3
 	)
 	select {
 	case <-time.After(startupDelay):
@@ -1833,22 +1833,26 @@ func (n *BlockNode) startRetryLoop(ctx context.Context) {
 		case <-ticker.C:
 			pending := len(n.retryQueue)
 			for i := 0; i < pending; i++ {
+				var c cid.Cid
+				var got bool
 				select {
-				case c := <-n.retryQueue:
+				case c, got = <-n.retryQueue:
 				default:
+				}
+				if !got {
 					break
 				}
 				key := c.String()
 				raw, _ := n.retryAttempts.LoadOrStore(key, 0)
-				attempt := raw.(int)
-				if attempt >= maxAttempts {
+				attempts := raw.(int)
+				if attempts >= maxAttempts {
 					n.retryAttempts.Delete(key)
 					n.diagLog.Add("retry_give_up", map[string]interface{}{"cid": cidShort(key)})
 					log.Printf("retry: giving up on %s after %d attempts", cidShort(key), maxAttempts)
 					continue
 				}
-				n.retryAttempts.Store(key, attempt+1)
-				n.diagLog.Add("retry_fetch", map[string]interface{}{"cid": cidShort(key), "attempt": attempt + 1})
+				n.retryAttempts.Store(key, attempts+1)
+				n.diagLog.Add("retry_fetch", map[string]interface{}{"cid": cidShort(key), "attempt": attempts + 1})
 
 				fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
 				session := n.bsExch.NewSession(fetchCtx)
@@ -1858,11 +1862,10 @@ func (n *BlockNode) startRetryLoop(ctx context.Context) {
 				if err != nil {
 					n.diagLog.Add("retry_fetch_fail", map[string]interface{}{
 						"cid":     cidShort(key),
-						"attempt": attempt + 1,
+						"attempt": attempts + 1,
 						"error":   err.Error(),
 					})
-					// Re-enqueue for the next tick unless we just hit maxAttempts.
-					if attempt+1 < maxAttempts {
+					if attempts+1 < maxAttempts {
 						select {
 						case n.retryQueue <- c:
 						default:
@@ -1881,7 +1884,7 @@ func (n *BlockNode) startRetryLoop(ctx context.Context) {
 				n.mu.Unlock()
 				_ = n.dhtProvide(ctx, c)
 				n.diagLog.Add("dht_announce", map[string]interface{}{"cid": cidShort(key), "role": "retry_pull"})
-				log.Printf("retry: pulled %s on attempt %d", cidShort(key), attempt+1)
+				log.Printf("retry: pulled %s on attempt %d", cidShort(key), attempts+1)
 			}
 		}
 	}
