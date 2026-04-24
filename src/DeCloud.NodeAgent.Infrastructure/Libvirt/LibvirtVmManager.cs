@@ -1089,25 +1089,37 @@ public class LibvirtVmManager : IVmManager
             await _repository.UpdateVmStateAsync(vmId, VmState.Stopping);
         }
 
-        var command = force ? "destroy" : "shutdown";
-        var result = await _executor.ExecuteAsync("virsh", $"{command} {vmId}", ct);
+        // virsh reset/reboot only works on running domains.
+        // For stopped domains (defined but not started), use virsh start instead.
+        var domainIsRunning = _vms.TryGetValue(vmId, out var tracked)
+            && tracked.State == VmState.Running;
 
-        if (result.Success || result.StandardError.Contains("not running") || result.StandardError.Contains("shut off"))
+        CommandResult result;
+        if (!domainIsRunning)
         {
-            if (instance != null)
-            {
-                instance.State = VmState.Stopped;
-                instance.StoppedAt = DateTime.UtcNow;
-
-                // NEW: Persist state change
-                await _repository.UpdateVmStateAsync(vmId, VmState.Stopped);
-            }
-
-            return VmOperationResult.Ok(vmId, VmState.Stopped);
+            _logger.LogInformation(
+                "VM {VmId} is not running — using virsh start instead of reset/reboot", vmId);
+            result = await _executor.ExecuteAsync("virsh", $"start {vmId}", ct);
+        }
+        else
+        {
+            var command = force ? "reset" : "reboot";
+            result = await _executor.ExecuteAsync("virsh", $"{command} {vmId}", ct);
         }
 
-        _logger.LogError("Failed to stop VM {VmId}: {Error}", vmId, result.StandardError);
-        return VmOperationResult.Fail(vmId, result.StandardError, "STOP_FAILED");
+        if (result.Success || result.StandardError.Contains("already active"))
+        {
+            if (_vms.TryGetValue(vmId, out var restarted))
+            {
+                restarted.State = VmState.Starting;
+                restarted.StartedAt = DateTime.UtcNow;
+                // Persist state change
+                await _repository.UpdateVmStateAsync(vmId, VmState.Starting);
+            }
+            return VmOperationResult.Ok(vmId, VmState.Running);
+        }
+        _logger.LogError("Failed to restart VM {VmId}: {Error}", vmId, result.StandardError);
+        return VmOperationResult.Fail(vmId, result.StandardError, "RESTART_FAILED");
     }
 
     public async Task<VmOperationResult> RestartVmAsync(string vmId, bool force = false, CancellationToken ct = default)

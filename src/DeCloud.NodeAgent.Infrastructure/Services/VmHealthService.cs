@@ -64,6 +64,21 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                             var timeSinceLastHeartbeat = DateTime.UtcNow - vm.LastHeartbeat;
                             if (timeSinceLastHeartbeat > TimeSpan.FromMinutes(5))
                             {
+                                // System VMs (Relay, Dht, BlockStore) are managed exclusively
+                                // by orchestrator reconciliation. Attempting local restart
+                                // conflicts with the orchestrator's cleanup state machine and
+                                // causes virsh reset failures on stopped domains.
+                                // Mark Failed so the orchestrator detects and reacts via heartbeat.
+                                if (vm.Spec.VmType is VmType.Relay or VmType.Dht or VmType.BlockStore)
+                                {
+                                    _logger.LogInformation(
+                                        "System VM {VmId} ({VmType}) missed heartbeat for {ElapsedMinutes:F1}m " +
+                                        "— skipping local restart, orchestrator reconciliation will redeploy",
+                                        vm.VmId, vm.Spec.VmType, timeSinceLastHeartbeat.TotalMinutes);
+                                    vm.State = VmState.Failed;
+                                    continue;
+                                }
+
                                 _logger.LogWarning(
                                     "VM {VmId} has not sent heartbeat for {ElapsedMinutes} minutes. Restarting VM.",
                                     vm.VmId, timeSinceLastHeartbeat.TotalMinutes);
