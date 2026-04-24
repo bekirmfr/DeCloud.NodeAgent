@@ -121,6 +121,7 @@ public class QmpClient : IQmpClient
             ["format"] = "raw",
             ["sync"] = "incremental",
             ["bitmap"] = bitmapName,
+            ["mode"] = "existing",  // file is pre-created by NodeAgent; skip bdrv_create()
         }, ct);
 
         // Poll query-block-jobs by job-id until the job completes (max 10 min).
