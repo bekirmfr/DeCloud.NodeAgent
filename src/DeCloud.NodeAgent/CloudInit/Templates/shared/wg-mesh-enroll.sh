@@ -93,6 +93,23 @@ if [ -n "$GATEWAY" ] && [ -n "$ROLE" ]; then
     STATE=$(curl -sf --max-time 5 \
         "http://${GATEWAY}:5100/api/obligations/${ROLE}/state" 2>/dev/null || true)
     PRIVATE_KEY=$(echo "$STATE" | jq -r '.wireGuardPrivateKey // empty' 2>/dev/null || true)
+
+    # Fetch live relay connection config from NodeAgent — overrides stale wg-mesh.env values.
+    # The NodeAgent derives these from live CgnatInfo (heartbeat from orchestrator),
+    # so they always reflect the currently assigned relay — no subnet math needed here.
+    WG_CONFIG=$(curl -sf --max-time 5 \
+        "http://${GATEWAY}:5100/api/obligations/${ROLE}/wg-config" 2>/dev/null || true)
+
+    if [ -n "$WG_CONFIG" ] && echo "$WG_CONFIG" | jq -e '.relayEndpoint' >/dev/null 2>&1; then
+        WG_RELAY_ENDPOINT=$(echo "$WG_CONFIG" | jq -r '.relayEndpoint // empty')
+        WG_RELAY_PUBKEY=$(echo "$WG_CONFIG"   | jq -r '.relayPublicKey // empty')
+        WG_RELAY_API=$(echo "$WG_CONFIG"      | jq -r '.relayApiUrl // empty')
+        FRESH_TUNNEL_IP=$(echo "$WG_CONFIG"   | jq -r '.tunnelIp // empty')
+        [ -n "$FRESH_TUNNEL_IP" ] && WG_TUNNEL_IP="$FRESH_TUNNEL_IP"
+        log "Using live relay config from NodeAgent: endpoint=${WG_RELAY_ENDPOINT}, api=${WG_RELAY_API}, tunnel=${WG_TUNNEL_IP}"
+    else
+        log "NodeAgent wg-config not available — using baked-in wg-mesh.env values"
+    fi
 fi
 
 if [ -n "$PRIVATE_KEY" ]; then

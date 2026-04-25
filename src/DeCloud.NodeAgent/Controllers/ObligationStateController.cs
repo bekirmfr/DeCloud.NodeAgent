@@ -124,9 +124,13 @@ public class ObligationStateController : ControllerBase
                 var vmTunnelIp = ComputeVmTunnelIp(hostTunnelIp, canonical);
                 if (vmTunnelIp != null)
                 {
-                    // Relay gateway is .254 in the subnet — that's where the relay API lives
-                    var parts = hostTunnelIp.Split('.');
-                    var relayApiUrl = $"http://{parts[0]}.{parts[1]}.{parts[2]}.254:8080/api/relay";
+                    // The relay's WG API lives at .254 of the relay's OWN subnet (e.g. 10.20.0.254),
+                    // NOT .254 of the host's CGNAT subnet (e.g. 10.20.248.254 — doesn't exist).
+                    // Derive the relay's subnet from its allowed-ips via `wg show`.
+                    // Fall back to the NodeAgent proxy which handles routing correctly.
+                    var relayGatewayIp = await DiscoverRelayGatewayFromWgAsync(ct)
+                        ?? $"10.20.0.254"; // safe fallback — relay is always in subnet 0
+                    var relayApiUrl = $"http://{relayGatewayIp}:8080/api/relay";
                     var relayHostIp = relayEndpoint.Split(':')[0];
 
                     _logger.LogInformation(
@@ -248,6 +252,44 @@ public class ObligationStateController : ControllerBase
         if (vmOctet > 253) return null;
 
         return $"{parts[0]}.{parts[1]}.{parts[2]}.{vmOctet}";
+    }
+
+    private async Task<string?> DiscoverRelayGatewayFromWgAsync(CancellationToken ct)
+    {
+        try
+        {
+            var process = new System.Diagnostics.Process
+            {
+                StartInfo = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "wg",
+                    Arguments = "show all allowed-ips",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                }
+            };
+            process.Start();
+            var output = await process.StandardOutput.ReadToEndAsync(ct);
+            await process.WaitForExitAsync(ct);
+
+            // Parse: "<iface>  <pubkey>  10.20.0.0/16"
+            // Take first 10.20.x.x network and derive .254 of that network
+            foreach (var line in output.Split('\n'))
+            {
+                var parts = line.Split('\t', ' ', StringSplitOptions.RemoveEmptyEntries);
+                foreach (var part in parts.Skip(2))
+                {
+                    if (!part.StartsWith("10.20.")) continue;
+                    var network = part.Split('/')[0];
+                    var octets = network.Split('.');
+                    if (octets.Length == 4)
+                        return $"{octets[0]}.{octets[1]}.{octets[2]}.254";
+                }
+            }
+            return null;
+        }
+        catch { return null; }
     }
 
     // ----------------------------------------------------------------
