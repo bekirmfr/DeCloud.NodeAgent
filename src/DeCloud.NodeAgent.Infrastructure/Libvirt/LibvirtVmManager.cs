@@ -1133,14 +1133,30 @@ public class LibvirtVmManager : IVmManager
     {
         if (!_initialized) await InitializeAsync(ct);
         _logger.LogInformation("Restarting VM {VmId} (force={Force})", vmId, force);
-        var command = force ? "reset" : "reboot";
-        var result = await _executor.ExecuteAsync("virsh", $"{command} {vmId}", ct);
-        if (result.Success)
+        // virsh reset/reboot only works on running domains.
+        // For stopped domains (defined but not started), use virsh start instead.
+        var domainIsRunning = _vms.TryGetValue(vmId, out var tracked)
+            && tracked.State == VmState.Running;
+
+        CommandResult result;
+        if (!domainIsRunning)
         {
-            if (_vms.TryGetValue(vmId, out var instance))
+            _logger.LogInformation(
+                "VM {VmId} is not running — using virsh start instead of reset/reboot", vmId);
+            result = await _executor.ExecuteAsync("virsh", $"start {vmId}", ct);
+        }
+        else
+        {
+            var command = force ? "reset" : "reboot";
+            result = await _executor.ExecuteAsync("virsh", $"{command} {vmId}", ct);
+        }
+
+        if (result.Success || result.StandardError.Contains("already active"))
+        {
+            if (_vms.TryGetValue(vmId, out var restarted))
             {
-                instance.State = VmState.Starting;
-                instance.StartedAt = DateTime.UtcNow;
+                restarted.State = VmState.Starting;
+                restarted.StartedAt = DateTime.UtcNow;
                 // Persist state change
                 await _repository.UpdateVmStateAsync(vmId, VmState.Starting);
             }
