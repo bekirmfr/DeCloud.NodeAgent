@@ -318,6 +318,25 @@ public class SystemVmObligationDto
     public string? LastError { get; set; }
     public string? DeployedAt { get; set; }
     public string? ActiveAt { get; set; }
+
+    /// <summary>
+    /// Binary version the VM is actively running (from /diagnostics heartbeat).
+    /// Null until the first post-boot diagnostics cycle completes.
+    /// </summary>
+    public string? RunningBinaryVersion { get; set; }
+
+    /// <summary>
+    /// Latest binary/template hash on disk on the node agent.
+    /// Differs from RunningBinaryVersion when a binary update is staged but
+    /// the VM has not yet been redeployed.
+    /// </summary>
+    public string? CurrentBinaryVersion { get; set; }
+
+    /// <summary>
+    /// Monotonic identity-state version (WireGuard / Ed25519 keys).
+    /// 0 means the orchestrator has not yet generated state for this obligation.
+    /// </summary>
+    public int StateVersion { get; set; }
 }
 
 /// <summary>

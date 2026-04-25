@@ -4,6 +4,7 @@ using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
@@ -27,6 +28,7 @@ public class NodeDashboardController : ControllerBase
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly VmRepository _vmRepository;
     private readonly PortMappingRepository _portMappingRepository;
+    private readonly IObligationStateService _obligationStateService;
     private readonly ILogger<NodeDashboardController> _logger;
 
     // Cached ingress base domain — fetched once from orchestrator, TTL 5 minutes
@@ -58,6 +60,7 @@ public class NodeDashboardController : ControllerBase
         VmRepository vmRepository,
         PortMappingRepository portMappingRepository,
         IHttpClientFactory httpClientFactory,
+        IObligationStateService obligationStateService,
         ILogger<NodeDashboardController> logger)
     {
         _executor = executor;
@@ -69,6 +72,7 @@ public class NodeDashboardController : ControllerBase
         _httpClientFactory = httpClientFactory;
         _vmRepository = vmRepository;
         _portMappingRepository = portMappingRepository;
+        _obligationStateService = obligationStateService;
         _logger = logger;
     }
 
@@ -189,6 +193,67 @@ public class NodeDashboardController : ControllerBase
     }
 
     // ==========================================================================
+    // Obligation state helpers
+    // ==========================================================================
+
+    /// <summary>
+    /// Private-material fields present in every obligation state blob.
+    /// These are NEVER surfaced through the dashboard API.
+    ///
+    /// SECURITY: If new private fields are added to RelayObligationState,
+    /// DhtObligationState, or BlockStoreObligationState in the future,
+    /// they must also be added to this set.
+    /// </summary>
+    private static readonly HashSet<string> _sensitiveStateKeys =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "WireGuardPrivateKey",
+            "Ed25519PrivateKeyBase64",
+            "AuthToken",
+        };
+
+    /// <summary>
+    /// Parses raw obligation state JSON from the local SQLite store and returns
+    /// a sanitised key/value dictionary with all private-material fields removed.
+    ///
+    /// Returns null when:
+    ///   - json is null or whitespace (state not yet generated)
+    ///   - JSON cannot be parsed (should never happen in practice)
+    ///
+    /// Callers treat null as "no state data available" and omit the field
+    /// from the HTTP response so the dashboard handles it gracefully.
+    /// </summary>
+    private static Dictionary<string, object?>? SanitiseStateJson(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var prop in doc.RootElement.EnumerateObject())
+            {
+                if (_sensitiveStateKeys.Contains(prop.Name)) continue;
+                dict[prop.Name] = prop.Value.ValueKind switch
+                {
+                    JsonValueKind.String => prop.Value.GetString(),
+                    JsonValueKind.Number => prop.Value.TryGetInt64(out var l)
+                                                ? (object)l
+                                                : prop.Value.GetDouble(),
+                    JsonValueKind.True   => true,
+                    JsonValueKind.False  => false,
+                    JsonValueKind.Null   => null,
+                    _                   => prop.Value.GetRawText(),
+                };
+            }
+            return dict.Count > 0 ? dict : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    // ==========================================================================
     // GET /api/dashboard/obligations
     // Fetches SystemVmObligations for this node from the orchestrator.
     // Returns which system VM roles are obligated and their fulfilment status.
@@ -220,8 +285,28 @@ public class NodeDashboardController : ControllerBase
 
             if (result != null)
             {
-                _cachedObligations = result
-                    .Select(o => (object)new
+                var enriched = new List<object>(result.Count);
+                foreach (var o in result)
+                {
+                    // Map role int to the canonical string used by IObligationStateService / SQLite.
+                    // SystemVmRole enum: Dht=0, Relay=1, BlockStore=2, Ingress=3.
+                    // Ingress has no identity state yet — roleCanonical stays null and stateData is omitted.
+                    var roleCanonical = o.Role switch
+                    {
+                        0 => "dht",
+                        1 => "relay",
+                        2 => "blockstore",
+                        _ => null
+                    };
+
+                    Dictionary<string, object?>? stateData = null;
+                    if (roleCanonical is not null)
+                    {
+                        var stateJson = await _obligationStateService.GetStateJsonAsync(roleCanonical, ct);
+                        stateData = SanitiseStateJson(stateJson);
+                    }
+
+                    enriched.Add((object)new
                     {
                         role = o.Role,
                         roleName = o.RoleName,
@@ -231,9 +316,14 @@ public class NodeDashboardController : ControllerBase
                         failureCount = o.FailureCount,
                         lastError = o.LastError,
                         deployedAt = o.DeployedAt,
-                        activeAt = o.ActiveAt
-                    })
-                    .ToList();
+                        activeAt = o.ActiveAt,
+                        runningBinaryVersion = o.RunningBinaryVersion,
+                        currentBinaryVersion = o.CurrentBinaryVersion,
+                        stateVersion = o.StateVersion,
+                        stateData,
+                    });
+                }
+                _cachedObligations = enriched;
             }
 
             // AFTER — 10 s matches the heartbeat interval, ensures UI reflects
