@@ -518,7 +518,9 @@ public class SystemVmStartupService : BackgroundService
             // net-destroy is best-effort — ignore failure (bridge may not exist)
 
             var startResult = await _executor.ExecuteAsync("virsh", "net-start default", ct);
-            if (startResult.Success)
+            var alreadyActive = startResult.StandardError.Contains("already active");
+
+            if (startResult.Success || alreadyActive)
                 _logger.LogInformation("✓ libvirt default network started");
             else
                 _logger.LogWarning(
