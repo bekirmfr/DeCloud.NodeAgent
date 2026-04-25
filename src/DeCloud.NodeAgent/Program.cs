@@ -515,17 +515,63 @@ public class SystemVmStartupService : BackgroundService
                 "SystemVmStartupService: libvirt default network inactive — resetting and starting");
 
             await _executor.ExecuteAsync("virsh", "net-destroy default", ct);
-            // net-destroy is best-effort — ignore failure (bridge may not exist)
+            // net-destroy is best-effort — ignore failure if already inactive
 
             var startResult = await _executor.ExecuteAsync("virsh", "net-start default", ct);
-            var alreadyActive = startResult.StandardError.Contains("already active");
 
-            if (startResult.Success || alreadyActive)
+            // "already active" — nothing to do
+            if (startResult.Success || startResult.StandardError.Contains("already active"))
+            {
                 _logger.LogInformation("✓ libvirt default network started");
-            else
+                return;
+            }
+
+            // "already in use by interface virbr0" — virbr0 exists and VMs are connected
+            // to it. The network is functionally active; only libvirt's internal state is
+            // inconsistent. Touching virbr0 would disconnect running VMs — never do that.
+            // The VMs we want to start will fail here, but that's the correct outcome:
+            // fall through and let the orchestrator redeploy them on next reconciliation.
+            if (startResult.StandardError.Contains("already in use by interface virbr0"))
+            {
+                // virbr0 bridge exists but libvirt considers the network inactive.
+                // This is a libvirtd state inconsistency after WSL/host restart.
+                // The only safe fix is restarting libvirtd — it will re-attach all
+                // existing tap interfaces (vnet*) to virbr0, restoring full connectivity
+                // for running VMs AND allowing stopped VMs to start.
                 _logger.LogWarning(
-                    "Could not start libvirt default network: {Error} — VM starts may fail",
-                    startResult.StandardError);
+                    "SystemVmStartupService: virbr0 exists but libvirt state is inconsistent — " +
+                    "restarting libvirtd to recover. Running VMs will reconnect automatically.");
+
+                var restart = await _executor.ExecuteAsync(
+                    "systemctl", "restart libvirtd", ct);
+
+                if (!restart.Success)
+                {
+                    _logger.LogWarning(
+                        "Could not restart libvirtd: {Error} — stopped system VMs will be " +
+                        "redeployed by orchestrator reconciliation",
+                        restart.StandardError);
+                    return;
+                }
+
+                // Give libvirtd time to restore tap interface attachments
+                await Task.Delay(TimeSpan.FromSeconds(5), ct);
+
+                var retryResult = await _executor.ExecuteAsync("virsh", "net-start default", ct);
+                if (retryResult.Success || retryResult.StandardError.Contains("already active"))
+                    _logger.LogInformation(
+                        "✓ libvirt default network started after libvirtd restart");
+                else
+                    _logger.LogWarning(
+                        "Could not start libvirt default network after libvirtd restart: {Error}",
+                        retryResult.StandardError);
+
+                return;
+            }
+
+            _logger.LogWarning(
+                "Could not start libvirt default network: {Error} — VM starts may fail",
+                startResult.StandardError);
         }
         catch (Exception ex)
         {
