@@ -606,6 +606,56 @@ function paintSysVm(key, vm) {
     if (obl?.failureCount > 0 && obl.lastError) {
         detailHtml += `<div style="font-size:0.68rem;color:var(--danger);margin-top:0.2rem;font-family:var(--mono)">${esc(obl.lastError).slice(0, 80)}</div>`;
     }
+
+    // Binary version row — shows the running binary hash, with a pending-update
+    // indicator (warning colour) when currentBinaryVersion differs.
+    if (obl?.runningBinaryVersion || obl?.currentBinaryVersion) {
+        const runVer = obl.runningBinaryVersion ? obl.runningBinaryVersion.slice(0, 8) : '—';
+        const curVer = obl.currentBinaryVersion ? obl.currentBinaryVersion.slice(0, 8) : '—';
+        const updatePending = obl.runningBinaryVersion && obl.currentBinaryVersion
+            && obl.runningBinaryVersion !== obl.currentBinaryVersion;
+        if (updatePending) {
+            detailHtml += `<div style="font-size:0.68rem;color:var(--warning);margin-top:0.25rem;font-family:var(--mono)">`
+                + `bin: ${runVer} → ${curVer} <span style="opacity:0.75">↑ update pending</span></div>`;
+        } else {
+            detailHtml += `<div style="font-size:0.68rem;color:var(--text-muted);margin-top:0.25rem;font-family:var(--mono)">`
+                + `bin: ${runVer}</div>`;
+        }
+    }
+
+    // State version row — only shown once the orchestrator has generated identity state.
+    if (obl?.stateVersion > 0) {
+        detailHtml += `<div style="font-size:0.65rem;color:var(--text-muted);margin-top:0.1rem;font-family:var(--mono)">`
+            + `state v${obl.stateVersion}</div>`;
+    }
+
+    // State data key-value panel — sanitised public fields only (private keys
+    // are stripped server-side). 'version' / 'updatedAt' are suppressed here.
+    if (obl?.stateData && typeof obl.stateData === 'object') {
+        const SUPPRESS = new Set(['version', 'updatedAt']);
+        const rows = Object.entries(obl.stateData)
+            .filter(([k]) => !SUPPRESS.has(k))
+            .map(([k, v]) => {
+                const display = (k === 'storageQuotaBytes' && typeof v === 'number')
+                    ? fmtBytes(v)
+                    : String(v ?? '—');
+                const truncated = display.length > 44 ? display.slice(0, 41) + '…' : display;
+                return `<div style="display:flex;gap:0.5rem;font-size:0.65rem;`
+                    + `font-family:var(--mono);line-height:1.6;min-width:0">`
+                    + `<span style="color:var(--text-muted);min-width:6rem;`
+                    + `flex-shrink:0;overflow:hidden;text-overflow:ellipsis">${esc(k)}</span>`
+                    + `<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"`
+                    + ` title="${esc(display)}">${esc(truncated)}</span>`
+                    + `</div>`;
+            }).join('');
+
+        if (rows) {
+            detailHtml += `<div style="margin-top:0.4rem;padding:0.3rem 0.45rem;`
+                + `background:rgba(255,255,255,0.04);border-radius:4px;`
+                + `border:1px solid rgba(255,255,255,0.06)">${rows}</div>`;
+        }
+    }
+
     detail.innerHTML = detailHtml;
 
     // ── Service health chips ──────────────────────────────────────────────────
@@ -1282,6 +1332,7 @@ const EXPORT_ENDPOINTS = [
     { key: 'summary', label: 'Node Summary', url: '/api/dashboard/summary' },
     { key: 'snapshot', label: 'Resource Snapshot', url: '/api/node/snapshot' },
     { key: 'vms', label: 'Virtual Machines', url: '/api/vms' },
+    { key: 'obligations', label: 'Obligations', url: '/api/dashboard/obligations' },
     { key: 'network', label: 'Network Topology', url: '/api/dashboard/network' },
     { key: 'ports', label: 'Listening Ports', url: '/api/dashboard/ports' },
     { key: 'firewall', label: 'Firewall & IPTables', url: '/api/dashboard/firewall' },
