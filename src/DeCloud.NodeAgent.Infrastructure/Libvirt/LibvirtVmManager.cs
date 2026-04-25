@@ -46,6 +46,8 @@ public class LibvirtVmManager : IVmManager
     // Track our VMs in memory
     private readonly Dictionary<string, VmInstance> _vms = new();
     private readonly SemaphoreSlim _lock = new(1, 1);
+    // Serializes qemu-nbd operations — nbd0 is a system-wide resource.
+    private static readonly SemaphoreSlim _nbdLock = new(1, 1);
     private int _nextVncPort;
     private uint _nextVsockCid = 3; // CID 0=hypervisor, 1=reserved, 2=host, 3+=guests
     private bool _initialized = false;
@@ -691,6 +693,11 @@ public class LibvirtVmManager : IVmManager
 
                     _logger.LogInformation(
                         "VM {VmId}: overlay reconstruction complete", spec.Id);
+
+                    // Clear dirty journal state from abrupt source node shutdown.
+                    // Without this, the kernel aborts the EXT4 journal on the
+                    // receiving node and remounts the filesystem read-only mid-boot.
+                    await RunFsckOnOverlayAsync(diskPath, ct);
                 }
             }
             catch (Exception ex)
@@ -905,6 +912,75 @@ public class LibvirtVmManager : IVmManager
         finally
         {
             _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Runs fsck.ext4 on the reconstructed overlay before first boot.
+    /// Clears dirty journal state caused by abrupt source node shutdown,
+    /// preventing EXT4 journal abort and read-only remount during migration boot.
+    /// Non-fatal — logs warning and continues if fsck cannot run.
+    /// </summary>
+    private async Task RunFsckOnOverlayAsync(string diskPath, CancellationToken ct)
+    {
+        const string NbdDevice = "/dev/nbd0";
+        const string NbdPartition = "/dev/nbd0p1";
+
+        await _nbdLock.WaitAsync(ct);
+        try
+        {
+            await _executor.ExecuteAsync("modprobe", "nbd max_part=8", ct);
+
+            var connect = await _executor.ExecuteAsync(
+                "qemu-nbd",
+                $"--connect={NbdDevice} \"{diskPath}\"",
+                TimeSpan.FromSeconds(30),
+                ct);
+
+            if (!connect.Success)
+            {
+                _logger.LogWarning(
+                    "VM overlay fsck: could not connect {Disk} via qemu-nbd — skipping: {Error}",
+                    diskPath, connect.StandardError);
+                return;
+            }
+
+            try
+            {
+                // Allow the kernel time to read the partition table
+                await Task.Delay(500, ct);
+
+                _logger.LogInformation(
+                    "VM overlay fsck: running fsck.ext4 on {Partition}", NbdPartition);
+
+                var fsck = await _executor.ExecuteAsync(
+                    "fsck.ext4",
+                    $"-fy {NbdPartition}",
+                    TimeSpan.FromMinutes(10),
+                    ct);
+
+                // ExitCode 0 = clean, 1 = errors corrected — both are success.
+                // ExitCode 2+ = uncorrected errors or operational failure.
+                if (fsck.ExitCode <= 1)
+                    _logger.LogInformation(
+                        "VM overlay fsck: complete (exitCode={ExitCode})", fsck.ExitCode);
+                else
+                    _logger.LogWarning(
+                        "VM overlay fsck: exitCode={ExitCode} — {Error}",
+                        fsck.ExitCode, fsck.StandardError);
+            }
+            finally
+            {
+                await _executor.ExecuteAsync(
+                    "qemu-nbd",
+                    $"--disconnect {NbdDevice}",
+                    TimeSpan.FromSeconds(30),
+                    ct);
+            }
+        }
+        finally
+        {
+            _nbdLock.Release();
         }
     }
 
