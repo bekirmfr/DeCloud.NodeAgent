@@ -2,6 +2,7 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.Qmp;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Interfaces.UserNetwork;
+using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Core.Settings;
 using DeCloud.NodeAgent.Infrastructure.Docker;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
@@ -251,6 +252,10 @@ builder.Services.AddHostedService<VmHealthService>();
 // Initialize VM Manager on startup to load VMs from database
 builder.Services.AddHostedService<VmManagerInitializationService>();
 
+// Restart any system VMs (Relay, DHT, BlockStore) that are shut off after a node restart.
+// Must run after VmManagerInitializationService so the VM list is populated.
+builder.Services.AddHostedService<SystemVmStartupService>();
+
 // Reconcile port forwarding rules on startup (Smart Port Allocation)
 builder.Services.AddHostedService<PortForwardingReconciliationService>();
 
@@ -443,6 +448,101 @@ public class VmManagerInitializationService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to initialize VM Manager");
+        }
+    }
+}
+
+// =====================================================
+// System VM Startup Service
+// =====================================================
+/// <summary>
+/// One-shot startup service that restarts system VMs (Relay, DHT, BlockStore)
+/// found in Stopped or Failed state after a node restart.
+///
+/// System VMs are long-lived: their disks, cloud-init done marker, WireGuard config,
+/// and service binaries all survive a host reboot. There is no need to redeploy —
+/// a virsh start is sufficient. The VM's services (DHT binary, blockstore binary)
+/// start automatically via systemd inside the guest.
+///
+/// Runs once after VmManagerInitializationService so the VM list is populated,
+/// and before the first heartbeat so the orchestrator sees Running state immediately.
+/// </summary>
+public class SystemVmStartupService : BackgroundService
+{
+    private readonly IVmManager _vmManager;
+    private readonly ILogger<SystemVmStartupService> _logger;
+
+    private static readonly HashSet<VmType> SystemVmTypes =
+    [
+        VmType.Relay,
+        VmType.Dht,
+        VmType.BlockStore
+    ];
+
+    public SystemVmStartupService(
+        IVmManager vmManager,
+        ILogger<SystemVmStartupService> logger)
+    {
+        _vmManager = vmManager;
+        _logger = logger;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        // Wait for VmManagerInitializationService to complete (it has a 60s timeout).
+        // A fixed delay is sufficient — if libvirt isn't ready in 90s, neither are we.
+        await Task.Delay(TimeSpan.FromSeconds(90), ct);
+
+        if (ct.IsCancellationRequested) return;
+
+        _logger.LogInformation("SystemVmStartupService: scanning for stopped system VMs...");
+
+        var vms = _vmManager.GetAllVms()
+            .Where(v => SystemVmTypes.Contains(v.Spec.VmType)
+                     && v.State is VmState.Stopped or VmState.Failed)
+            .ToList();
+
+        if (vms.Count == 0)
+        {
+            _logger.LogInformation("SystemVmStartupService: no stopped system VMs found");
+            return;
+        }
+
+        _logger.LogInformation(
+            "SystemVmStartupService: found {Count} stopped system VM(s) — attempting restart",
+            vms.Count);
+
+        foreach (var vm in vms)
+        {
+            try
+            {
+                _logger.LogInformation(
+                    "Starting system VM {VmId} ({VmType}) after node restart",
+                    vm.VmId, vm.Spec.VmType);
+
+                var result = await _vmManager.StartVmAsync(vm.VmId, ct);
+
+                if (result.Success)
+                {
+                    _logger.LogInformation(
+                        "✓ System VM {VmId} ({VmType}) started — services will re-register via heartbeat",
+                        vm.VmId, vm.Spec.VmType);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "✗ System VM {VmId} ({VmType}) failed to start: {Error} — " +
+                        "orchestrator reconciliation will redeploy",
+                        vm.VmId, vm.Spec.VmType, result.ErrorMessage);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Exception starting system VM {VmId} ({VmType}) — " +
+                    "orchestrator reconciliation will redeploy",
+                    vm.VmId, vm.Spec.VmType);
+            }
         }
     }
 }
