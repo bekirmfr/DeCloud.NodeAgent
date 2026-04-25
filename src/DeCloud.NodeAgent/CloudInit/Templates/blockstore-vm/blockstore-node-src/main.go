@@ -1904,22 +1904,28 @@ func (n *BlockNode) reannounceExistingBlocks(ctx context.Context) {
 		return
 	}
 
+	queue := make(chan cid.Cid, GossipSubFetchWorkers)
+	var wg sync.WaitGroup
+	for i := 0; i < GossipSubFetchWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for c := range queue {
+				_ = n.dht.Provide(ctx, c, true)
+			}
+		}()
+	}
 	count := 0
 	for c := range ch {
 		if ctx.Err() != nil {
-			return
+			break
 		}
-		// Re-announce to DHT so orchestrator audit can find this provider
-		announceCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		_ = n.dht.Provide(announceCtx, c, true)
-		cancel()
-
+		queue <- c
 		count++
-		if count%100 == 0 {
-			log.Printf("reannounce: %d blocks re-announced to DHT", count)
-		}
 	}
-	log.Printf("reannounce: complete — %d blocks re-announced to DHT + GossipSub", count)
+	close(queue)
+	wg.Wait()
+	log.Printf("reannounce: complete — %d blocks re-announced to DHT", count)
 
 	n.mu.Lock()
 	n.diag.ReannounceCount++
