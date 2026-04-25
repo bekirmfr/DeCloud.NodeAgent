@@ -470,6 +470,7 @@ public class VmManagerInitializationService : BackgroundService
 public class SystemVmStartupService : BackgroundService
 {
     private readonly IVmManager _vmManager;
+    private readonly ICommandExecutor _executor;
     private readonly ILogger<SystemVmStartupService> _logger;
 
     private static readonly HashSet<VmType> SystemVmTypes =
@@ -481,10 +482,44 @@ public class SystemVmStartupService : BackgroundService
 
     public SystemVmStartupService(
         IVmManager vmManager,
+        ICommandExecutor executor,
         ILogger<SystemVmStartupService> logger)
     {
         _vmManager = vmManager;
+        _executor = executor;
         _logger = logger;
+    }
+
+    private async Task EnsureLibvirtNetworkActiveAsync(CancellationToken ct)
+    {
+        try
+        {
+            // Check if default network is active
+            var infoResult = await _executor.ExecuteAsync("virsh", "net-info default", ct);
+            if (infoResult.Success && infoResult.StandardOutput.Contains("Active:") &&
+                !infoResult.StandardOutput.Contains("Active:           yes"))
+            {
+                _logger.LogInformation(
+                    "SystemVmStartupService: libvirt default network inactive — starting it");
+                var startResult = await _executor.ExecuteAsync("virsh", "net-start default", ct);
+                if (startResult.Success)
+                    _logger.LogInformation(
+                        "✓ libvirt default network started");
+                else
+                    _logger.LogWarning(
+                        "Could not start libvirt default network: {Error} — VM starts may fail",
+                        startResult.StandardError);
+            }
+            else
+            {
+                _logger.LogDebug("SystemVmStartupService: libvirt default network already active");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "SystemVmStartupService: could not check/start libvirt network — VM starts may fail");
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -496,6 +531,11 @@ public class SystemVmStartupService : BackgroundService
         if (ct.IsCancellationRequested) return;
 
         _logger.LogInformation("SystemVmStartupService: scanning for stopped system VMs...");
+
+        // Ensure the libvirt default network is active before starting VMs.
+        // After a host/WSL restart the network is defined but not started, causing
+        // every virsh start to fail with "network 'default' is not active".
+        await EnsureLibvirtNetworkActiveAsync(ct);
 
         var vms = _vmManager.GetAllVms()
             .Where(v => SystemVmTypes.Contains(v.Spec.VmType)
