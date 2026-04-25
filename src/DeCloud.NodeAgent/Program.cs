@@ -572,6 +572,22 @@ public class SystemVmStartupService : BackgroundService
                 reattached);
     }
 
+    private static bool IsWsl()
+    {
+        try
+        {
+            if (File.Exists("/proc/version"))
+            {
+                var version = File.ReadAllText("/proc/version");
+                if (version.Contains("microsoft", StringComparison.OrdinalIgnoreCase) ||
+                    version.Contains("WSL", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return File.Exists("/dev/dxg");
+        }
+        catch { return false; }
+    }
+
     private async Task EnsureLibvirtNetworkActiveAsync(CancellationToken ct)
     {
         try
@@ -641,12 +657,47 @@ public class SystemVmStartupService : BackgroundService
 
                 var retryResult = await _executor.ExecuteAsync("virsh", "net-start default", ct);
                 if (retryResult.Success || retryResult.StandardError.Contains("already active"))
+                {
                     _logger.LogInformation(
                         "✓ libvirt default network started after libvirtd restart");
+                    return;
+                }
+
+                // libvirtd restarted but virbr0 still exists as a stale kernel artifact.
+                // On WSL, kernel interfaces survive daemon restarts and must be torn down
+                // manually. On bare-metal Linux, libvirtd restart properly reclaims virbr0
+                // — if it still fails here something else is wrong, don't touch the bridge.
+                if (retryResult.StandardError.Contains("already in use by interface virbr0")
+                    && IsWsl())
+                {
+                    _logger.LogInformation(
+                        "SystemVmStartupService: stale virbr0 persists after libvirtd restart " +
+                        "(WSL environment) — removing and doing final net-start");
+
+                    await _executor.ExecuteAsync("ip", "link set virbr0 down", ct);
+                    await _executor.ExecuteAsync("ip", "link delete virbr0", ct);
+
+                    var finalResult = await _executor.ExecuteAsync("virsh", "net-start default", ct);
+                    if (finalResult.Success || finalResult.StandardError.Contains("already active"))
+                        _logger.LogInformation(
+                            "✓ libvirt default network started after stale virbr0 removal");
+                    else
+                        _logger.LogWarning(
+                            "Could not start libvirt default network after stale virbr0 removal: {Error}",
+                            finalResult.StandardError);
+                }
+                else if (retryResult.StandardError.Contains("already in use by interface virbr0"))
+                {
+                    _logger.LogWarning(
+                        "SystemVmStartupService: virbr0 conflict after libvirtd restart on " +
+                        "bare-metal — not touching bridge. Manual libvirtd investigation required.");
+                }
                 else
+                {
                     _logger.LogWarning(
                         "Could not start libvirt default network after libvirtd restart: {Error}",
                         retryResult.StandardError);
+                }
 
                 return;
             }
