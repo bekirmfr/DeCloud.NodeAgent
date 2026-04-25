@@ -490,6 +490,88 @@ public class SystemVmStartupService : BackgroundService
         _logger = logger;
     }
 
+    /// <summary>
+    /// For every running VM, verifies its tap interface (vnet*) is attached to virbr0.
+    /// After a libvirtd restart or virbr0 recreation the tap interfaces may be orphaned —
+    /// the QEMU process is alive but the bridge attachment is lost, breaking all traffic.
+    /// Re-attaching is a non-destructive kernel operation: no VM restart required.
+    /// </summary>
+    private async Task ReattachOrphanedTapInterfacesAsync(CancellationToken ct)
+    {
+        var runningVms = _vmManager.GetAllVms()
+            .Where(v => v.State == VmState.Running)
+            .ToList();
+
+        if (runningVms.Count == 0) return;
+
+        var reattached = 0;
+
+        foreach (var vm in runningVms)
+        {
+            try
+            {
+                // Get the tap interface name for this VM
+                var iflist = await _executor.ExecuteAsync(
+                    "virsh", $"domiflist {vm.VmId}", ct);
+
+                if (!iflist.Success) continue;
+
+                // Parse: "vnet5   network   default   virtio   52:54:00:xx:xx:xx"
+                var tapIface = iflist.StandardOutput
+                    .Split('\n')
+                    .Skip(2)
+                    .Select(l => l.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                    .Where(cols => cols.Length >= 3 && cols[2] == "default")
+                    .Select(cols => cols[0])
+                    .FirstOrDefault();
+
+                if (string.IsNullOrEmpty(tapIface)) continue;
+
+                // Check if the tap is already attached to virbr0
+                var linkCheck = await _executor.ExecuteAsync(
+                    "ip", $"link show {tapIface}", ct);
+
+                if (!linkCheck.Success) continue;
+
+                // "master virbr0" in ip link show means it's attached
+                if (linkCheck.StandardOutput.Contains("master virbr0")) continue;
+
+                // Tap exists but has no master — re-attach it
+                _logger.LogWarning(
+                    "SystemVmStartupService: tap interface {Tap} for VM {VmId} is detached " +
+                    "from virbr0 — re-attaching",
+                    tapIface, vm.VmId);
+
+                var attach = await _executor.ExecuteAsync(
+                    "ip", $"link set {tapIface} master virbr0", ct);
+
+                if (attach.Success)
+                {
+                    reattached++;
+                    _logger.LogInformation(
+                        "✓ Re-attached {Tap} to virbr0 for VM {VmId} ({Name})",
+                        tapIface, vm.VmId, vm.Name);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Failed to re-attach {Tap} for VM {VmId}: {Error}",
+                        tapIface, vm.VmId, attach.StandardError);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Error checking tap interface for VM {VmId}", vm.VmId);
+            }
+        }
+
+        if (reattached > 0)
+            _logger.LogInformation(
+                "SystemVmStartupService: re-attached {Count} orphaned tap interface(s) to virbr0",
+                reattached);
+    }
+
     private async Task EnsureLibvirtNetworkActiveAsync(CancellationToken ct)
     {
         try
@@ -594,6 +676,7 @@ public class SystemVmStartupService : BackgroundService
         // After a host/WSL restart the network is defined but not started, causing
         // every virsh start to fail with "network 'default' is not active".
         await EnsureLibvirtNetworkActiveAsync(ct);
+        await ReattachOrphanedTapInterfacesAsync(ct);
 
         var vms = _vmManager.GetAllVms()
             .Where(v => SystemVmTypes.Contains(v.Spec.VmType)
