@@ -255,15 +255,31 @@ public class LibvirtVmManager : IVmManager
             foreach (var vmId in missingVms)
             {
                 var vm = _vms[vmId];
-                // Skip VMs that are being created - they legitimately aren't in libvirt yet
-                // Also skip already Stopped/Failed VMs
-                if (vm.State != VmState.Stopped && vm.State != VmState.Failed && vm.State != VmState.Creating)
-                {
-                    _logger.LogWarning("VM {VmId} missing from libvirt - marking as failed", vmId);
-                    vm.State = VmState.Failed;
 
-                    // Update database
+                if (vm.State == VmState.Creating)
+                {
+                    // Domain creation in flight — legitimately not in libvirt yet
+                    continue;
+                }
+
+                if (vm.State != VmState.Stopped && vm.State != VmState.Failed)
+                {
+                    // Domain existed but disappeared — mark Failed
+                    _logger.LogWarning("VM {VmId} missing from libvirt — marking as Failed", vmId);
+                    vm.State = VmState.Failed;
                     await _repository.UpdateVmStateAsync(vmId, VmState.Failed);
+                }
+                else
+                {
+                    // VM is Failed or Stopped AND has no libvirt domain — ghost entry.
+                    // Either the domain was never created (deployment failed before virsh define)
+                    // or it was deleted outside the node agent. Remove it from tracking
+                    // and SQLite so it stops polluting decloud vm list and VmHealthService.
+                    _logger.LogInformation(
+                        "Removing ghost VM {VmId} (state: {State}) — no libvirt domain exists",
+                        vmId, vm.State);
+                    _vms.Remove(vmId);
+                    await _repository.DeleteVmAsync(vmId);
                 }
             }
         }
