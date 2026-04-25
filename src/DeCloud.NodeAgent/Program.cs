@@ -494,26 +494,36 @@ public class SystemVmStartupService : BackgroundService
     {
         try
         {
-            // Check if default network is active
             var infoResult = await _executor.ExecuteAsync("virsh", "net-info default", ct);
-            if (infoResult.Success && infoResult.StandardOutput.Contains("Active:") &&
-                !infoResult.StandardOutput.Contains("Active:           yes"))
+            if (!infoResult.Success)
             {
-                _logger.LogInformation(
-                    "SystemVmStartupService: libvirt default network inactive — starting it");
-                var startResult = await _executor.ExecuteAsync("virsh", "net-start default", ct);
-                if (startResult.Success)
-                    _logger.LogInformation(
-                        "✓ libvirt default network started");
-                else
-                    _logger.LogWarning(
-                        "Could not start libvirt default network: {Error} — VM starts may fail",
-                        startResult.StandardError);
+                _logger.LogWarning(
+                    "SystemVmStartupService: could not query libvirt default network — VM starts may fail");
+                return;
             }
-            else
+
+            if (infoResult.StandardOutput.Contains("Active:           yes"))
             {
                 _logger.LogDebug("SystemVmStartupService: libvirt default network already active");
+                return;
             }
+
+            // Network is inactive. The virbr0 bridge may still exist from before the
+            // restart, causing net-start to fail with "already in use by interface virbr0".
+            // Force-destroy the stale state first, then start clean.
+            _logger.LogInformation(
+                "SystemVmStartupService: libvirt default network inactive — resetting and starting");
+
+            await _executor.ExecuteAsync("virsh", "net-destroy default", ct);
+            // net-destroy is best-effort — ignore failure (bridge may not exist)
+
+            var startResult = await _executor.ExecuteAsync("virsh", "net-start default", ct);
+            if (startResult.Success)
+                _logger.LogInformation("✓ libvirt default network started");
+            else
+                _logger.LogWarning(
+                    "Could not start libvirt default network: {Error} — VM starts may fail",
+                    startResult.StandardError);
         }
         catch (Exception ex)
         {
