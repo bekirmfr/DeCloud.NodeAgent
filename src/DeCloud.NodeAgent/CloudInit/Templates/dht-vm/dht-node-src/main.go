@@ -588,13 +588,15 @@ func retryBootstrap(ctx context.Context, h host.Host, cfg Config, state *NodeSta
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			currentPeers := len(h.Network().Peers())
-			if currentPeers > 0 {
-				continue // already connected, no retry needed
+			// Check Kademlia routing table, not raw peer count.
+			// Blockstores dial into DHT VMs as libp2p peers, so
+			// h.Network().Peers() > 0 even when the routing table is
+			// empty and dht.Provide() calls are all failing.
+			if state.dht.RoutingTable().Size() > 0 {
+				continue // routing table healthy, no retry needed
 			}
 
-			log.Println("No connected peers — attempting peer discovery...")
-
+			log.Println("Routing table empty — attempting peer discovery...")
 			// Log retry attempt
 			state.mu.Lock()
 			state.diag.BootstrapAttempts++
@@ -618,8 +620,7 @@ func retryBootstrap(ctx context.Context, h host.Host, cfg Config, state *NodeSta
 			}
 
 			// Check if we successfully connected after retry
-			newPeerCount := len(h.Network().Peers())
-			if newPeerCount > 0 {
+			if state.dht.RoutingTable().Size() > 0 {
 				state.mu.Lock()
 				state.diag.BootstrapSuccess++
 				state.diag.LastBootstrapAt = time.Now()

@@ -108,7 +108,9 @@ if [ -n "$GATEWAY" ] && [ -n "$ROLE" ]; then
         [ -n "$FRESH_TUNNEL_IP" ] && WG_TUNNEL_IP="$FRESH_TUNNEL_IP"
         log "Using live relay config from NodeAgent: endpoint=${WG_RELAY_ENDPOINT}, api=${WG_RELAY_API}, tunnel=${WG_TUNNEL_IP}"
     else
-        log "NodeAgent wg-config not available — using baked-in wg-mesh.env values"
+        log "NodeAgent wg-config not available — retrying..."
+        sleep 5
+        continue
     fi
 fi
 
