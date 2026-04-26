@@ -2,6 +2,7 @@
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using System.Net.Sockets;
 
 namespace DeCloud.NodeAgent.Infrastructure.Services.SystemVm;
 
@@ -269,19 +270,70 @@ public class SystemVmStartupService : BackgroundService
         // (internal services never started — QEMU alive, systemd dead inside).
         // This happens when a VM survives a WSL/host restart with broken internal state.
         // virsh reset is a hard power-cycle at the QEMU level — no guest cooperation needed.
-        var zombieVms = _vmManager.GetAllVms()
+        // Zombie VMs: Running in libvirt but internally dead (QEMU alive, systemd services dead).
+        // They survived the host/WSL restart with broken internal state.
+        // Detection: StartedAt is old (pre-dates this NodeAgent boot) AND guest agent is not responding.
+        // At T+90s, any VM started in the current boot has StartedAt < 2min ago.
+        // Zombie VMs have StartedAt from hours ago (original start time, preserved in DB).
+        // Note: we cannot rely on LastHeartbeat == DateTime.MinValue because VmRepository
+        // maps LastHeartbeat from LastUpdated, so it is always non-MinValue after DB load.
+        var candidateZombies = _vmManager.GetAllVms()
             .Where(v => SystemVmTypes.Contains(v.Spec.VmType)
                      && v.State == VmState.Running
-                     && v.LastHeartbeat == DateTime.MinValue
                      && v.StartedAt.HasValue
-                     && (DateTime.UtcNow - v.StartedAt.Value).TotalMinutes > 5)
+                     && (DateTime.UtcNow - v.StartedAt.Value).TotalMinutes > 10)
             .ToList();
+
+        var zombieVms = new List<VmInstance>();
+        using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+
+        foreach (var candidate in candidateZombies)
+        {
+            var ip = candidate.Spec.IpAddress;
+            if (string.IsNullOrEmpty(ip))
+            {
+                _logger.LogDebug(
+                    "SystemVmStartupService: VM {VmId} ({VmType}) has no IP — skipping zombie check",
+                    candidate.VmId, candidate.Spec.VmType);
+                continue;
+            }
+
+            // Check if the service inside the VM is alive by hitting its nginx health endpoint.
+            // A running VM will have nginx listening on port 80 — connection refused or timeout
+            // means systemd and the decloud service are dead (zombie state).
+            try
+            {
+                var response = await httpClient.GetAsync(
+                    $"http://{ip}/health", ct);
+
+                _logger.LogDebug(
+                    "SystemVmStartupService: VM {VmId} ({VmType}) health check returned {Status} — not a zombie",
+                    candidate.VmId, candidate.Spec.VmType, (int)response.StatusCode);
+            }
+            catch (HttpRequestException ex) when (
+                ex.InnerException is SocketException se &&
+                se.SocketErrorCode == SocketError.ConnectionRefused)
+            {
+                // Connection refused = nginx is not running = systemd/services are dead
+                _logger.LogDebug(
+                    "SystemVmStartupService: VM {VmId} ({VmType}) port 80 refused — zombie confirmed",
+                    candidate.VmId, candidate.Spec.VmType);
+                zombieVms.Add(candidate);
+            }
+            catch (Exception ex)
+            {
+                // Timeout or other error — be conservative, don't hard reset
+                _logger.LogDebug(ex,
+                    "SystemVmStartupService: VM {VmId} ({VmType}) health check inconclusive — skipping",
+                    candidate.VmId, candidate.Spec.VmType);
+            }
+        }
 
         foreach (var vm in zombieVms)
         {
             _logger.LogWarning(
-                "SystemVmStartupService: system VM {VmId} ({VmType}) is running but has never " +
-                "sent a heartbeat (zombie state — internal services dead). Hard resetting via virsh reset.",
+                "SystemVmStartupService: system VM {VmId} ({VmType}) is running but guest agent " +
+                "is not responding (zombie — internal services dead). Hard resetting.",
                 vm.VmId, vm.Spec.VmType);
 
             // virsh destroy + start = clean hard power cycle. No guest cooperation needed.
