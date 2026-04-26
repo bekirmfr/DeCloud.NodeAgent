@@ -63,14 +63,13 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                         {
                             var timeSinceLastHeartbeat = DateTime.UtcNow - vm.LastHeartbeat;
 
-                            // LastHeartbeat is seeded from DB's LastUpdated column on startup —
-                            // it is always stale immediately after a node restart. Skip the check
-                            // for VMs that started (or were confirmed running) recently; they have
-                            // not had time to register a fresh heartbeat yet.
-                            var recentlyStarted = vm.StartedAt.HasValue
-                                && DateTime.UtcNow - vm.StartedAt.Value < TimeSpan.FromMinutes(5);
-
-                            if (!recentlyStarted && timeSinceLastHeartbeat > TimeSpan.FromMinutes(5))
+                            // LastHeartbeat is only meaningful once the VM's internal services
+                            // have passed their readiness checks (IsFullyReady). Before that,
+                            // LastHeartbeat is seeded from the DB's LastUpdated column — a
+                            // pre-shutdown timestamp — and staleness is expected and normal.
+                            // Checking it before IsFullyReady produces false Failed signals on
+                            // every node restart.
+                            if (vm.IsFullyReady && timeSinceLastHeartbeat > TimeSpan.FromMinutes(5))
                             {
                                 // System VMs (Relay, Dht, BlockStore) are managed exclusively
                                 // by orchestrator reconciliation. Attempting local restart
