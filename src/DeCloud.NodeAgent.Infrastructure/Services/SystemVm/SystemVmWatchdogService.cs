@@ -54,6 +54,9 @@ public class SystemVmWatchdogService : BackgroundService
         // Include Failed VMs: a VM can be Failed in agent state but still physically
         // running in libvirt (e.g. orphaned tap after restart). Reattaching the tap
         // is non-destructive and restores network without a VM restart.
+        // Include Failed-state VMs: tap reattachment is non-destructive and safe
+        // regardless of agent-side state. A Failed VM with an orphaned tap has no
+        // network and cannot self-heal without the bridge being restored first.
         var runningVms = _vmManager.GetAllVms()
             .Where(v => v.State is VmState.Running or VmState.Failed)
             .ToList();
@@ -274,7 +277,7 @@ public class SystemVmWatchdogService : BackgroundService
         // recover before probing them. Without this delay, health checks fire while
         // the bridge attachment is still propagating and timeout erroneously.
         if (_vmManager.GetAllVms().Any(v => SystemVmTypes.Contains(v.Spec.VmType)
-                                         && v.State == VmState.Running))
+                                         && v.State is VmState.Running or VmState.Failed))
         {
             _logger.LogDebug(
                 "SystemVmStartupService: waiting 30s for VM networking to stabilize before zombie check");
@@ -287,10 +290,13 @@ public class SystemVmWatchdogService : BackgroundService
         // Relay is excluded from zombie hard-reset: its recovery requires NAT rule
         // reconciliation and WireGuard peer re-enrollment which a hard reset cannot
         // preserve. If the relay is unhealthy, orchestrator reconciliation redeployes it.
+        // Include Failed-state VMs: VmHealthService may have marked them Failed before
+        // the watchdog fired, but they are still physically running in libvirt.
+        // A Failed system VM with a dead guest agent is a zombie and must be hard-reset.
         var candidateZombies = _vmManager.GetAllVms()
             .Where(v => SystemVmTypes.Contains(v.Spec.VmType)
                      && v.Spec.VmType != VmType.Relay
-                     && v.State == VmState.Running
+                     && v.State is VmState.Running or VmState.Failed
                      && !string.IsNullOrEmpty(v.Spec.IpAddress))
             .ToList();
 

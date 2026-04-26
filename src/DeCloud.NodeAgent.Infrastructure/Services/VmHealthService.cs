@@ -61,30 +61,19 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
 
                         if (vm.State != VmState.Failed)
                         {
-                            var timeSinceLastHeartbeat = DateTime.UtcNow - vm.LastHeartbeat;
+                            // System VMs are managed exclusively by orchestrator reconciliation.
+                            // Their health authority is the orchestrator, which has its own
+                            // heartbeat freshness check and grace period. Local heartbeat-based
+                            // marking is unreliable for system VMs: LastHeartbeat depends on
+                            // qemu-guest-agent, which may not respond after network isolation
+                            // or guest OS issues, producing permanent false positives.
+                            // The watchdog's zombie check handles local recovery instead.
+                            if (vm.Spec.VmType is VmType.Relay or VmType.Dht or VmType.BlockStore)
+                                continue;
 
-                            // LastHeartbeat is only meaningful once the VM's internal services
-                            // have passed their readiness checks (IsFullyReady). Before that,
-                            // LastHeartbeat is seeded from the DB's LastUpdated column — a
-                            // pre-shutdown timestamp — and staleness is expected and normal.
-                            // Checking it before IsFullyReady produces false Failed signals on
-                            // every node restart.
+                            var timeSinceLastHeartbeat = DateTime.UtcNow - vm.LastHeartbeat;
                             if (vm.IsFullyReady && timeSinceLastHeartbeat > TimeSpan.FromMinutes(5))
                             {
-                                // System VMs (Relay, Dht, BlockStore) are managed exclusively
-                                // by orchestrator reconciliation. Attempting local restart
-                                // conflicts with the orchestrator's cleanup state machine and
-                                // causes virsh reset failures on stopped domains.
-                                // Mark Failed so the orchestrator detects and reacts via heartbeat.
-                                if (vm.Spec.VmType is VmType.Relay or VmType.Dht or VmType.BlockStore)
-                                {
-                                    _logger.LogInformation(
-                                        "System VM {VmId} ({VmType}) missed heartbeat for {ElapsedMinutes:F1}m " +
-                                        "— skipping local restart, orchestrator reconciliation will redeploy",
-                                        vm.VmId, vm.Spec.VmType, timeSinceLastHeartbeat.TotalMinutes);
-                                    vm.State = VmState.Failed;
-                                    continue;
-                                }
 
                                 _logger.LogWarning(
                                     "VM {VmId} has not sent heartbeat for {ElapsedMinutes} minutes. Restarting VM.",
