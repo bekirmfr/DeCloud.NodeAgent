@@ -141,6 +141,22 @@ def load_peer_metadata():
         logger.error(f"Error loading peer metadata: {e}")
         peer_metadata = {}
 
+def restore_peer_registration_times():
+    """Stamp existing WireGuard peers so cleanup grace period applies after restart."""
+    try:
+        result = subprocess.run(
+            ['wg', 'show', WIREGUARD_INTERFACE, 'dump'],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode != 0:
+            return
+        for line in result.stdout.strip().split('\n')[1:]:
+            fields = line.split('\t')
+            if fields and fields[0]:
+                record_peer_registration(fields[0])
+        logger.info(f"Stamped registration times for existing WireGuard peers")
+    except Exception as e:
+        logger.error(f"restore_peer_registration_times error: {e}")
 
 def save_peer_metadata():
     """Save peer metadata registry to persistent JSON file"""
@@ -1915,6 +1931,7 @@ def main():
     # Load persistent registries
     load_peer_registry()
     load_peer_metadata()
+    restore_peer_registration_times()
     
     if not os.path.exists(STATIC_DIR):
         logger.error(f"Static directory not found: {STATIC_DIR}")
