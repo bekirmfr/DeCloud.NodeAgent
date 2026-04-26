@@ -254,7 +254,7 @@ builder.Services.AddHostedService<VmManagerInitializationService>();
 
 // Restart any system VMs (Relay, DHT, BlockStore) that are shut off after a node restart.
 // Must run after VmManagerInitializationService so the VM list is populated.
-builder.Services.AddHostedService<SystemVmStartupService>();
+builder.Services.AddHostedService<SystemVmWatchdogService>();
 
 // Reconcile port forwarding rules on startup (Smart Port Allocation)
 builder.Services.AddHostedService<PortForwardingReconciliationService>();

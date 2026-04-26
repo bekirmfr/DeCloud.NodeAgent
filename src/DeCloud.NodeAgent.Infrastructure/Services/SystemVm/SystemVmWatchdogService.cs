@@ -7,8 +7,10 @@ using System.Net.Sockets;
 namespace DeCloud.NodeAgent.Infrastructure.Services.SystemVm;
 
 /// <summary>
-/// One-shot startup service that restarts system VMs (Relay, DHT, BlockStore)
-/// found in Stopped or Failed state after a node restart.
+/// Startup service that restarts system VMs (Relay, DHT, BlockStore)
+/// found in Stopped or Failed state after a node restart, then runs a
+/// periodic bridge health check to re-attach any tap interfaces that
+/// detach from virbr0 mid-run (e.g. from a rapid simultaneous VM restart race).
 ///
 /// System VMs are long-lived: their disks, cloud-init done marker, WireGuard config,
 /// and service binaries all survive a host reboot. There is no need to redeploy —
@@ -18,11 +20,11 @@ namespace DeCloud.NodeAgent.Infrastructure.Services.SystemVm;
 /// Runs once after VmManagerInitializationService so the VM list is populated,
 /// and before the first heartbeat so the orchestrator sees Running state immediately.
 /// </summary>
-public class SystemVmStartupService : BackgroundService
+public class SystemVmWatchdogService : BackgroundService
 {
     private readonly IVmManager _vmManager;
     private readonly ICommandExecutor _executor;
-    private readonly ILogger<SystemVmStartupService> _logger;
+    private readonly ILogger<SystemVmWatchdogService> _logger;
 
     private static readonly HashSet<VmType> SystemVmTypes =
     [
@@ -31,10 +33,10 @@ public class SystemVmStartupService : BackgroundService
         VmType.BlockStore
     ];
 
-    public SystemVmStartupService(
+    public SystemVmWatchdogService(
         IVmManager vmManager,
         ICommandExecutor executor,
-        ILogger<SystemVmStartupService> logger)
+        ILogger<SystemVmWatchdogService> logger)
     {
         _vmManager = vmManager;
         _executor = executor;
@@ -250,14 +252,13 @@ public class SystemVmStartupService : BackgroundService
         }
     }
 
-    protected override async Task ExecuteAsync(CancellationToken ct)
+    /// <summary>
+    /// One-shot startup sequence: ensure libvirt network is active, reattach orphaned
+    /// tap interfaces, check for zombies, and start any stopped system VMs.
+    /// Extracted from ExecuteAsync so early returns don't bypass the periodic loop.
+    /// </summary>
+    private async Task RunStartupSequenceAsync(CancellationToken ct)
     {
-        // Wait for VmManagerInitializationService to complete (it has a 60s timeout).
-        // A fixed delay is sufficient — if libvirt isn't ready in 90s, neither are we.
-        await Task.Delay(TimeSpan.FromSeconds(90), ct);
-
-        if (ct.IsCancellationRequested) return;
-
         _logger.LogInformation("SystemVmStartupService: scanning for stopped system VMs...");
 
         // Ensure the libvirt default network is active before starting VMs.
@@ -280,7 +281,6 @@ public class SystemVmStartupService : BackgroundService
         // Health check all running system VMs. Any that don't respond on port 80
         // (connection refused) are zombies — QEMU alive but systemd/services dead.
         // Timeout = inconclusive, skip conservatively.
-        // This handles both WSL restart survivors and any other failure mode.
         var candidateZombies = _vmManager.GetAllVms()
             .Where(v => SystemVmTypes.Contains(v.Spec.VmType)
                      && v.State == VmState.Running
@@ -394,6 +394,36 @@ public class SystemVmStartupService : BackgroundService
                     "Exception starting system VM {VmId} ({VmType}) — " +
                     "orchestrator reconciliation will redeploy",
                     vm.VmId, vm.Spec.VmType);
+            }
+        }
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        // Wait for VmManagerInitializationService to complete (it has a 60s timeout).
+        // A fixed delay is sufficient — if libvirt isn't ready in 90s, neither are we.
+        await Task.Delay(TimeSpan.FromSeconds(90), ct);
+
+        if (ct.IsCancellationRequested) return;
+
+        await RunStartupSequenceAsync(ct);
+
+        // Periodic bridge health check — runs every 5 minutes for the lifetime of the
+        // service. Catches tap interfaces that detach from virbr0 mid-run without
+        // requiring a node agent restart (e.g. rapid simultaneous VM restart race).
+        while (!ct.IsCancellationRequested)
+        {
+            await Task.Delay(TimeSpan.FromMinutes(5), ct);
+            if (ct.IsCancellationRequested) break;
+
+            try
+            {
+                await ReattachOrphanedTapInterfacesAsync(ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex,
+                    "SystemVmStartupService: error during periodic tap bridge check");
             }
         }
     }
