@@ -625,7 +625,7 @@ func retryBootstrap(ctx context.Context, h host.Host, cfg Config, state *NodeSta
 				state.diag.BootstrapSuccess++
 				state.diag.LastBootstrapAt = time.Now()
 				state.diagLog.Add("bootstrap_success", map[string]interface{}{
-					"peers": newPeerCount,
+					"peers": len(h.Network().Peers()),
 				})
 				state.mu.Unlock()
 			}
