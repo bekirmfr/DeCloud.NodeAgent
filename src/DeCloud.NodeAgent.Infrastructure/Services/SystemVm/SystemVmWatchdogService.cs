@@ -281,8 +281,12 @@ public class SystemVmWatchdogService : BackgroundService
         // Health check all running system VMs. Any that don't respond on port 80
         // (connection refused) are zombies — QEMU alive but systemd/services dead.
         // Timeout = inconclusive, skip conservatively.
+        // Relay is excluded from zombie hard-reset: its recovery requires NAT rule
+        // reconciliation and WireGuard peer re-enrollment which a hard reset cannot
+        // preserve. If the relay is unhealthy, orchestrator reconciliation redeployes it.
         var candidateZombies = _vmManager.GetAllVms()
             .Where(v => SystemVmTypes.Contains(v.Spec.VmType)
+                     && v.Spec.VmType != VmType.Relay
                      && v.State == VmState.Running
                      && !string.IsNullOrEmpty(v.Spec.IpAddress))
             .ToList();
