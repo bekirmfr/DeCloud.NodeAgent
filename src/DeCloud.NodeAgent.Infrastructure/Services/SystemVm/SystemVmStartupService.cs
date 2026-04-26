@@ -266,22 +266,25 @@ public class SystemVmStartupService : BackgroundService
         await EnsureLibvirtNetworkActiveAsync(ct);
         await ReattachOrphanedTapInterfacesAsync(ct);
 
-        // Detect zombie system VMs: Running in libvirt but LastHeartbeat is MinValue
-        // (internal services never started — QEMU alive, systemd dead inside).
-        // This happens when a VM survives a WSL/host restart with broken internal state.
-        // virsh reset is a hard power-cycle at the QEMU level — no guest cooperation needed.
-        // Zombie VMs: Running in libvirt but internally dead (QEMU alive, systemd services dead).
-        // They survived the host/WSL restart with broken internal state.
-        // Detection: StartedAt is old (pre-dates this NodeAgent boot) AND guest agent is not responding.
-        // At T+90s, any VM started in the current boot has StartedAt < 2min ago.
-        // Zombie VMs have StartedAt from hours ago (original start time, preserved in DB).
-        // Note: we cannot rely on LastHeartbeat == DateTime.MinValue because VmRepository
-        // maps LastHeartbeat from LastUpdated, so it is always non-MinValue after DB load.
+        // After re-attaching tap interfaces, give the VMs' network stacks time to
+        // recover before probing them. Without this delay, health checks fire while
+        // the bridge attachment is still propagating and timeout erroneously.
+        if (_vmManager.GetAllVms().Any(v => SystemVmTypes.Contains(v.Spec.VmType)
+                                         && v.State == VmState.Running))
+        {
+            _logger.LogDebug(
+                "SystemVmStartupService: waiting 30s for VM networking to stabilize before zombie check");
+            await Task.Delay(TimeSpan.FromSeconds(30), ct);
+        }
+
+        // Health check all running system VMs. Any that don't respond on port 80
+        // (connection refused) are zombies — QEMU alive but systemd/services dead.
+        // Timeout = inconclusive, skip conservatively.
+        // This handles both WSL restart survivors and any other failure mode.
         var candidateZombies = _vmManager.GetAllVms()
             .Where(v => SystemVmTypes.Contains(v.Spec.VmType)
                      && v.State == VmState.Running
-                     && v.StartedAt.HasValue
-                     && (DateTime.UtcNow - v.StartedAt.Value).TotalMinutes > 10)
+                     && !string.IsNullOrEmpty(v.Spec.IpAddress))
             .ToList();
 
         var zombieVms = new List<VmInstance>();
@@ -289,22 +292,12 @@ public class SystemVmStartupService : BackgroundService
 
         foreach (var candidate in candidateZombies)
         {
-            var ip = candidate.Spec.IpAddress;
-            if (string.IsNullOrEmpty(ip))
-            {
-                _logger.LogDebug(
-                    "SystemVmStartupService: VM {VmId} ({VmType}) has no IP — skipping zombie check",
-                    candidate.VmId, candidate.Spec.VmType);
-                continue;
-            }
-
-            // Check if the service inside the VM is alive by hitting its nginx health endpoint.
-            // A running VM will have nginx listening on port 80 — connection refused or timeout
-            // means systemd and the decloud service are dead (zombie state).
+            // Check if nginx is listening on port 80 — connection refused means
+            // systemd and the decloud service are dead inside the VM (zombie state).
             try
             {
                 var response = await httpClient.GetAsync(
-                    $"http://{ip}/health", ct);
+                    $"http://{candidate.Spec.IpAddress}/health", ct);
 
                 _logger.LogDebug(
                     "SystemVmStartupService: VM {VmId} ({VmType}) health check returned {Status} — not a zombie",
