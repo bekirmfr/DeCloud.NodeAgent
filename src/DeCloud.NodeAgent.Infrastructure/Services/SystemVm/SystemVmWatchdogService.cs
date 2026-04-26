@@ -51,8 +51,11 @@ public class SystemVmWatchdogService : BackgroundService
     /// </summary>
     private async Task ReattachOrphanedTapInterfacesAsync(CancellationToken ct)
     {
+        // Include Failed VMs: a VM can be Failed in agent state but still physically
+        // running in libvirt (e.g. orphaned tap after restart). Reattaching the tap
+        // is non-destructive and restores network without a VM restart.
         var runningVms = _vmManager.GetAllVms()
-            .Where(v => v.State == VmState.Running)
+            .Where(v => v.State is VmState.Running or VmState.Failed)
             .ToList();
 
         if (runningVms.Count == 0) return;
