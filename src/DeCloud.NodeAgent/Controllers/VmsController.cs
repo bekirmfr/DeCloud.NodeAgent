@@ -125,6 +125,30 @@ public class VmsController : ControllerBase
     }
 
     /// <summary>
+    /// Hard reboot a VM via virsh destroy + start.
+    /// Works regardless of guest agent or ACPI support.
+    /// Used by CLI to recover zombie VMs where virsh reboot/reset won't work.
+    /// </summary>
+    [HttpPost("{vmId}/hard-reboot")]
+    public async Task<ActionResult<VmOperationResult>> HardReboot(string vmId, CancellationToken ct)
+    {
+        var vm = _vmManager.GetAllVms().FirstOrDefault(v => v.VmId == vmId);
+        if (vm == null)
+            return NotFound(new { error = $"VM {vmId} not found" });
+
+        _logger.LogInformation("Hard reboot requested for VM {VmId} via CLI", vmId);
+
+        // RestartVmAsync(force: true) issues virsh destroy + start internally.
+        // This is a hard power cycle — no guest cooperation needed.
+        var result = await _vmManager.RestartVmAsync(vmId, force: true, ct);
+
+        if (result.Success)
+            return Ok(result);
+
+        return StatusCode(500, result);
+    }
+
+    /// <summary>
     /// Get resource usage for a VM
     /// </summary>
     [HttpGet("{vmId}/usage")]

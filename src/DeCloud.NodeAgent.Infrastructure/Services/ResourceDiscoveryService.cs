@@ -1069,10 +1069,10 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
         return runtimeArch switch
         {
-            System.Runtime.InteropServices.Architecture.X64 => "x86_64",
-            System.Runtime.InteropServices.Architecture.Arm64 => "aarch64",
-            System.Runtime.InteropServices.Architecture.X86 => "i686",
-            System.Runtime.InteropServices.Architecture.Arm => "armv7l",
+            Architecture.X64 => "x86_64",
+            Architecture.Arm64 => "aarch64",
+            Architecture.X86 => "i686",
+            Architecture.Arm => "armv7l",
             _ => "unknown"
         };
     }
@@ -1298,6 +1298,26 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         }
 
         return trimmed;
+    }
+
+    /// <summary>
+    /// Synchronous WSL detection — safe to call from static or non-async contexts.
+    /// Reads /proc/version and checks for /dev/dxg.
+    /// </summary>
+    public static bool IsWsl()
+    {
+        try
+        {
+            if (File.Exists("/proc/version"))
+            {
+                var version = File.ReadAllText("/proc/version");
+                if (version.Contains("microsoft", StringComparison.OrdinalIgnoreCase) ||
+                    version.Contains("WSL", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return File.Exists("/dev/dxg");
+        }
+        catch { return false; }
     }
 
     /// <summary>

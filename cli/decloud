@@ -1119,6 +1119,136 @@ _vm_cleanup_all() {
     log_success "Cleanup complete: $success VM(s) processed, $failed failed"
 }
 
+cmd_vm_reboot() {
+    local vmId="${1:-}"
+    [[ -z "$vmId" ]] && { log_error "Usage: decloud vm reboot <vm-id>"; exit $EXIT_USAGE; }
+
+    log_info "Hard rebooting VM $vmId (virsh destroy + start)..."
+    local response http_code
+    response=$(curl -s -w "\n%{http_code}" \
+        -X POST "${NODE_AGENT_URL}/api/vms/${vmId}/hard-reboot" \
+        -H "X-API-Key: $(get_api_key)" 2>/dev/null)
+    http_code=$(echo "$response" | tail -1)
+    body=$(echo "$response" | head -n -1)
+
+    if [[ "$http_code" == "200" ]]; then
+        log_success "VM $vmId hard rebooted — services will restart in ~3 minutes"
+    else
+        log_error "Hard reboot failed (HTTP $http_code)"
+        echo "$body" | jq -r '.error // .' 2>/dev/null || echo "$body"
+        exit $EXIT_ERROR
+    fi
+}
+
+cmd_vm_diagnose_system() {
+    echo ""
+    echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}  System VM Diagnostics${NC}"
+    echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+
+    local api_key; api_key=$(get_api_key)
+
+    # ── Obligations ──────────────────────────────────────────────────────────
+    echo -e "${BOLD}Obligations:${NC}"
+    local obligations
+    obligations=$(curl -sf --max-time 5 \
+        -H "X-API-Key: $api_key" \
+        "${NODE_AGENT_URL}/api/obligations" 2>/dev/null || echo "")
+
+    if [[ -z "$obligations" ]]; then
+        log_error "  Could not reach NodeAgent obligation endpoint"
+    else
+        echo "$obligations" | jq -r '
+            .obligations[] |
+            "  \(.roleName)\t Status: \(.statusName)\t VM: \(.vmId[0:8])..."
+        ' 2>/dev/null || echo "$obligations"
+    fi
+
+    echo ""
+
+    # ── VM states ─────────────────────────────────────────────────────────────
+    echo -e "${BOLD}System VM States:${NC}"
+    local vms
+    vms=$(curl -sf --max-time 5 \
+        -H "X-API-Key: $api_key" \
+        "${NODE_AGENT_URL}/api/vms" 2>/dev/null || echo "")
+
+    if [[ -n "$vms" ]]; then
+        echo "$vms" | jq -r '
+            .[] | select(.spec.vmType == 6 or .spec.vmType == 7 or .spec.vmType == 8) |
+            "  \(.name)\t state=\(.state)\t heartbeat=\(.lastHeartbeat)"
+        ' 2>/dev/null || true
+    fi
+
+    echo ""
+
+    # ── WireGuard mesh ────────────────────────────────────────────────────────
+    echo -e "${BOLD}WireGuard Relay Tunnel (host):${NC}"
+    if wg show wg-relay &>/dev/null 2>&1; then
+        local handshake_ago
+        handshake_ago=$(wg show wg-relay latest-handshakes 2>/dev/null | awk '{print $2}')
+        local now; now=$(date +%s)
+        if [[ -n "$handshake_ago" && "$handshake_ago" != "0" ]]; then
+            local age=$(( now - handshake_ago ))
+            if (( age < 150 )); then
+                log_success "  wg-relay: handshake ${age}s ago ✓"
+            else
+                log_warn "  wg-relay: handshake ${age}s ago (stale — expected <150s)"
+            fi
+        else
+            log_error "  wg-relay: no handshake yet"
+        fi
+    else
+        log_error "  wg-relay interface not found"
+    fi
+
+    echo ""
+
+    # ── libvirt network ───────────────────────────────────────────────────────
+    echo -e "${BOLD}libvirt Network:${NC}"
+    if virsh net-info default &>/dev/null 2>&1; then
+        local net_active
+        net_active=$(virsh net-info default 2>/dev/null | grep "Active:" | awk '{print $2}')
+        if [[ "$net_active" == "yes" ]]; then
+            log_success "  libvirt default network: active ✓"
+        else
+            log_error "  libvirt default network: INACTIVE"
+        fi
+    else
+        log_error "  Could not query libvirt default network"
+    fi
+
+    echo ""
+
+    # ── System VM health endpoints ────────────────────────────────────────────
+    echo -e "${BOLD}VM Service Health (via NodeAgent proxy):${NC}"
+    if [[ -n "$vms" ]]; then
+        echo "$vms" | jq -r '
+            .[] | select(.spec.vmType == 6 or .spec.vmType == 7 or .spec.vmType == 8) |
+            "\(.vmId) \(.name) \(.spec.ipAddress // "")"
+        ' 2>/dev/null | while read -r vmid name ip; do
+            if [[ -z "$ip" ]]; then
+                echo -e "  $name: ${YELLOW}no IP assigned${NC}"
+                continue
+            fi
+            local code
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 \
+                -H "X-API-Key: $api_key" \
+                "${NODE_AGENT_URL}/api/proxy/${vmid}/80/health" 2>/dev/null || echo "ERR")
+            if [[ "$code" == "200" ]]; then
+                log_success "  $name ($ip): HTTP 200 ✓"
+            else
+                log_error "  $name ($ip): HTTP $code"
+            fi
+        done
+    fi
+
+    echo ""
+    echo -e "${BOLD}Tip:${NC} to hard reboot a zombie VM: ${BOLD}sudo decloud vm reboot <vm-id>${NC}"
+    echo ""
+}
+
 # ============================================================================
 # SERVICE MANAGEMENT COMMANDS
 # ============================================================================
@@ -1682,6 +1812,8 @@ ${BOLD}ORCHESTRATOR DIAGNOSTICS:${NC}
 ${BOLD}VM MANAGEMENT:${NC}
     vm list                 List all VMs on this node
     vm info <vm-id>         Display detailed VM information
+    vm reboot <id>          Hard reboot VM (virsh destroy+start, no guest needed)
+    vm diagnose-system      Check system VM health: WG mesh, relay, services
     vm cleanup <vm-id>      Clean up a specific VM
     vm cleanup --all        Clean up all VMs (requires confirmation)
       --dry-run               Preview without executing
@@ -1861,12 +1993,22 @@ main() {
             fi
             local vm_cmd="$1"; shift
             case "$vm_cmd" in
-                list|ls)               cmd_vm_list    "$@" ;;
-                info|show)             cmd_vm_info    "$@" ;;
-                cleanup|clean|delete|rm) cmd_vm_cleanup "$@" ;;
+                list|ls)               cmd_vm_list              "$@" ;;
+                info|show)             cmd_vm_info              "$@" ;;
+                cleanup|clean|delete|rm) cmd_vm_cleanup         "$@" ;;
+                reboot|hard-reboot)    cmd_vm_reboot            "$@" ;;
+                diagnose-system|sysdiag) cmd_vm_diagnose_system "$@" ;;
                 *)
-                    log_error "Unknown VM command: $vm_cmd"
-                    echo "Valid: list, info, cleanup"
+                    log_error "Unknown VM subcommand: $vm_cmd"
+                    echo ""
+                    echo "VM subcommands:"
+                    echo "  list                    List all VMs on this node"
+                    echo "  info <vm-id>            Show details for a specific VM"
+                    echo "  cleanup <vm-id>         Destroy and remove a VM and its data"
+                    echo "  reboot <vm-id>          Hard reboot a VM (virsh destroy+start)"
+                    echo "                          Use when virsh reboot/ACPI is unresponsive"
+                    echo "  diagnose-system         Check system VM health (WG mesh, libvirt,"
+                    echo "                          DHT/BlockStore services, relay connectivity)"
                     exit $EXIT_USAGE
                     ;;
             esac
