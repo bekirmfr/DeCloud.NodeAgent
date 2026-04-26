@@ -119,13 +119,20 @@ while true; do
     CONNECTED=$(echo "$HEALTH" | jq -r '.connectedPeers // 0' 2>/dev/null) || CONNECTED=0
 
     if [ "$CONNECTED" -gt 0 ] && [ "$INITIAL_POLL_DONE" = "true" ]; then
-        # We have peers and already did the initial join — back off to maintenance polling
-        if [ "$CONSECUTIVE_FAILURES" -gt 0 ]; then
-            log "Connected to $CONNECTED peer(s) — resuming maintenance polling"
-            CONSECUTIVE_FAILURES=0
+        # Back off only if the Kademlia routing table is populated.
+        # connectedPeers includes blockstores that dial into us — they are not
+        # routing table participants. If routingTable.size == 0 we have no DHT
+        # peers and must re-poll the orchestrator to reconnect.
+        ROUTING_SIZE=$(echo "$HEALTH" | jq -r '.routingTable // 0' 2>/dev/null) || ROUTING_SIZE=0
+        if [ "$ROUTING_SIZE" -gt 0 ]; then
+            if [ "$CONSECUTIVE_FAILURES" -gt 0 ]; then
+                log "Connected to $CONNECTED peer(s), routingTable=$ROUTING_SIZE — resuming maintenance polling"
+                CONSECUTIVE_FAILURES=0
+            fi
+            sleep "$POLL_INTERVAL_CONNECTED"
+            continue
         fi
-        sleep "$POLL_INTERVAL_CONNECTED"
-        continue
+        log "routingTable empty (size=0) despite $CONNECTED connected peer(s) — re-polling orchestrator for DHT bootstrap peers"
     fi
 
     if [ "$CONNECTED" -gt 0 ]; then
