@@ -97,6 +97,12 @@ const (
 	// Fixed pool prevents goroutine explosion on large overlay bursts.
 	GossipSubFetchWorkers = 4
 
+	// ReannounceWorkers is separate from GossipSubFetchWorkers.
+	// DHT provides are lightweight Kademlia round-trips (no data transfer),
+	// so more concurrency is appropriate. Under relay stress, dhtProvide()
+	// naturally slows down — workers self-throttle via blocking calls.
+	const ReannounceWorkers = 16
+
 	// Buffered announcement queue fed by the GossipSub receive loop.
 	// Sized to absorb a full large overlay burst without dropping.
 	FetchQueueSize = 2000
@@ -1906,12 +1912,12 @@ func (n *BlockNode) reannounceExistingBlocks(ctx context.Context) {
 
 	queue := make(chan cid.Cid, GossipSubFetchWorkers)
 	var wg sync.WaitGroup
-	for i := 0; i < GossipSubFetchWorkers; i++ {
+	for i := 0; i < ReannounceWorkers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for c := range queue {
-				_ = n.dht.Provide(ctx, c, true)
+				_ = n.dhtProvide(ctx, c)
 			}
 		}()
 	}

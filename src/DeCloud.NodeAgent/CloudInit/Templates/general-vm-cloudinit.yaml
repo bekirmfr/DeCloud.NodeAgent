@@ -198,9 +198,10 @@ runcmd:
   - systemctl start decloud-agent
   - echo "DeCloud Attestation Agent started" | systemd-cat -t decloud-agent
 
-  # Start welcome page service
-  - systemctl daemon-reload
-  - systemctl enable --now welcome
+  # Start welcome page service (direct symlink - systemctl enable unreliable on Debian 12,
+  # consistent with qemu-guest-agent pattern)
+  - ln -sf /etc/systemd/system/welcome.service /etc/systemd/system/multi-user.target.wants/welcome.service
+  - systemctl start welcome
 
   # Reload SSH to apply CA key and principals config (SIGHUP — no port downtime)
   - systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
