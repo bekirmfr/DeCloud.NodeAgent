@@ -59,7 +59,7 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                     foreach (var vm in vms)  // continue existing loop
                     {
 
-                        if (vm.State != VmState.Running && vm.State != VmState.Failed)
+                        if (vm.State != VmState.Failed)
                         {
                             var timeSinceLastHeartbeat = DateTime.UtcNow - vm.LastHeartbeat;
                             if (timeSinceLastHeartbeat > TimeSpan.FromMinutes(5))

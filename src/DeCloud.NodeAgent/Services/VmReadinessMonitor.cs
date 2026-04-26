@@ -58,11 +58,11 @@ public class VmReadinessMonitor : BackgroundService
     private async Task CheckAllVmsAsync(CancellationToken ct)
     {
         var allVms = _vmManager.GetAllVms();
+
+        // Service readiness checks — only for VMs not yet fully ready.
         var runningVms = allVms
             .Where(vm => vm.State == VmState.Running && vm.Services.Count > 0 && !vm.IsFullyReady)
             .ToList();
-
-        if (runningVms.Count == 0) return;
 
         foreach (var vm in runningVms)
         {
@@ -73,6 +73,28 @@ public class VmReadinessMonitor : BackgroundService
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogWarning(ex, "Failed to check readiness for VM {VmId}", vm.VmId);
+            }
+        }
+
+        // Guest-agent liveness ping for fully-ready VMs.
+        // VmHealthService detects zombies via vm.LastHeartbeat — without this,
+        // LastHeartbeat stays frozen at creation time and the zombie threshold
+        // fires immediately for every long-running VM once the Running exemption
+        // is removed. A successful ping is the authoritative liveness signal.
+        var fullyReadyVms = allVms
+            .Where(vm => vm.State == VmState.Running && vm.IsFullyReady)
+            .ToList();
+
+        foreach (var vm in fullyReadyVms)
+        {
+            try
+            {
+                if (await IsGuestAgentReady(vm.VmId, ct))
+                    vm.LastHeartbeat = DateTime.UtcNow;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Failed to ping guest agent for VM {VmId}", vm.VmId);
             }
         }
     }
