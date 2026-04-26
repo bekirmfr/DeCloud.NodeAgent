@@ -101,7 +101,7 @@ const (
 	// DHT provides are lightweight Kademlia round-trips (no data transfer),
 	// so more concurrency is appropriate. Under relay stress, dhtProvide()
 	// naturally slows down — workers self-throttle via blocking calls.
-	const ReannounceWorkers = 16
+	ReannounceWorkers = 16
 
 	// Buffered announcement queue fed by the GossipSub receive loop.
 	// Sized to absorb a full large overlay burst without dropping.
