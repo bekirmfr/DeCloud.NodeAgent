@@ -212,11 +212,24 @@ public class LibvirtVmManager : IVmManager
                     var vm = _vms[vmId];
                     if (vm.State != actualState)
                     {
-                        _logger.LogInformation("VM {VmId} state changed: {OldState} -> {NewState}",
-                            vmId, vm.State, actualState);
-                        vm.State = actualState;
-
-                        isDirty = true;
+                        // Never overwrite a health-service Failed with Running from libvirt.
+                        // Failed means "QEMU alive but internal services dead" — a condition
+                        // libvirt cannot detect. Reconciliation only clears Failed when libvirt
+                        // reports a genuine state change (Stopped/Starting) indicating the VM
+                        // has actually been destroyed or restarted.
+                        if (vm.State == VmState.Failed && actualState == VmState.Running)
+                        {
+                            _logger.LogDebug(
+                                "VM {VmId} is Failed (health check) but libvirt reports Running — preserving Failed",
+                                vmId);
+                        }
+                        else
+                        {
+                            _logger.LogInformation("VM {VmId} state changed: {OldState} -> {NewState}",
+                                vmId, vm.State, actualState);
+                            vm.State = actualState;
+                            isDirty = true;
+                        }
                     }
 
                     // Resolve IP for running VMs that are missing one
