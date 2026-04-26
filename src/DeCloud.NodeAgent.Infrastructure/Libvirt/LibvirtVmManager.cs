@@ -2112,12 +2112,7 @@ public class LibvirtVmManager : IVmManager
                     // contains the source node's MAC address which causes network-online.target
                     // to hang forever on the receiving node (different MAC).
                     "  - \"printf 'network:\\\\n  version: 2\\\\n  ethernets:\\\\n    enp1s0:\\\\n      dhcp4: true\\\\n' > /etc/netplan/50-cloud-init.yaml\"\n" +
-                    "  - systemctl start qemu-guest-agent 2>/dev/null || true\n" +
-                    "network:\n" +
-                    "  version: 2\n" +
-                    "  ethernets:\n" +
-                    "    enp1s0:\n" +
-                    "      dhcp4: true\n";
+                    "  - systemctl start qemu-guest-agent 2>/dev/null || true\n";
                 _logger.LogInformation(
                     "VM {VmId}: migration — using minimal cloud-init to preserve overlay state",
                     spec.Id);
