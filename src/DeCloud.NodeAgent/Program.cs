@@ -12,7 +12,7 @@ using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.NodeAgent.Infrastructure.Services.Auth;
 using DeCloud.NodeAgent.Infrastructure.Services.Resilience;
 using DeCloud.NodeAgent.Infrastructure.Services.State;
-using DeCloud.NodeAgent.Infrastructure.Services.System;
+using DeCloud.NodeAgent.Infrastructure.Services.SystemVm;
 using DeCloud.NodeAgent.Services;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;

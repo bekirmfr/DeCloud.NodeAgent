@@ -3,7 +3,7 @@ using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
-namespace DeCloud.NodeAgent.Infrastructure.Services.System;
+namespace DeCloud.NodeAgent.Infrastructure.Services.SystemVm;
 
 /// <summary>
 /// One-shot startup service that restarts system VMs (Relay, DHT, BlockStore)
