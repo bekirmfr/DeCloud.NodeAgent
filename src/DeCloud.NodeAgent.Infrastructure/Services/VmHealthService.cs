@@ -62,7 +62,15 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                         if (vm.State != VmState.Failed)
                         {
                             var timeSinceLastHeartbeat = DateTime.UtcNow - vm.LastHeartbeat;
-                            if (timeSinceLastHeartbeat > TimeSpan.FromMinutes(5))
+
+                            // LastHeartbeat is seeded from DB's LastUpdated column on startup —
+                            // it is always stale immediately after a node restart. Skip the check
+                            // for VMs that started (or were confirmed running) recently; they have
+                            // not had time to register a fresh heartbeat yet.
+                            var recentlyStarted = vm.StartedAt.HasValue
+                                && DateTime.UtcNow - vm.StartedAt.Value < TimeSpan.FromMinutes(5);
+
+                            if (!recentlyStarted && timeSinceLastHeartbeat > TimeSpan.FromMinutes(5))
                             {
                                 // System VMs (Relay, Dht, BlockStore) are managed exclusively
                                 // by orchestrator reconciliation. Attempting local restart
