@@ -230,6 +230,16 @@ write_files:
       findtime = 60
       logpath = /var/log/nginx/error.log
 
+  # Ensure wg-quick@wg-relay-server restarts on failure at boot time.
+  # WireGuardWatchdogThread in relay-api.py handles mid-run failures,
+  # but systemd must handle the case where wg-quick fails before relay-api.py starts.
+  - path: /etc/systemd/system/wg-quick@wg-relay-server.service.d/restart.conf
+    permissions: '0644'
+    content: |
+      [Service]
+      Restart=on-failure
+      RestartSec=10
+
   # Relay management API systemd service
   - path: /etc/systemd/system/decloud-relay-api.service
     permissions: '0644'
