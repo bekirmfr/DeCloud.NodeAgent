@@ -3,6 +3,7 @@
 
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
+using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using Microsoft.Extensions.Options;
@@ -17,6 +18,8 @@ public class HeartbeatService : BackgroundService
     private readonly IOrchestratorClient _orchestratorClient;
     private readonly INodeStateService _nodeState;
     private readonly INodeMetadataService _nodeMetadata;
+    private readonly IObligationStateService _obligationState;
+    private readonly IRealityProjection _realityProjection;
     private readonly HeartbeatOptions _options;
     private readonly ILogger<HeartbeatService> _logger;
     private Heartbeat? _lastHeartbeat = null;
@@ -28,6 +31,8 @@ public class HeartbeatService : BackgroundService
         IOrchestratorClient orchestratorClient,
         INodeStateService nodeState,
         INodeMetadataService nodeMetadata,
+        IObligationStateService obligationState,
+        IRealityProjection realityProjection,
         IOptions<HeartbeatOptions> options,
         ILogger<HeartbeatService> logger)
     {
@@ -37,6 +42,8 @@ public class HeartbeatService : BackgroundService
         _orchestratorClient = orchestratorClient;
         _nodeState = nodeState;
         _nodeMetadata = nodeMetadata;
+        _obligationState = obligationState;
+        _realityProjection = realityProjection;
         _options = options.Value;
         _logger = logger;
     }
@@ -236,9 +243,10 @@ public class HeartbeatService : BackgroundService
                 Timestamp = DateTime.UtcNow,
                 Status = _nodeState.Status,
                 Resources = snapshot,
-                ActiveVms = vmSummaries,  // Now includes VncPort, MacAddress, EncryptedPassword
+                ActiveVms = vmSummaries,
                 SchedulingConfigVersion = _nodeState.SchedulingConfig?.Version ?? 0,
-                CgnatInfo = cgnatInfo
+                CgnatInfo = cgnatInfo,
+                ObligationHealth = await BuildObligationHealthAsync(ct),
             };
 
             // Send heartbeat - OrchestratorClient will transform to API format
@@ -266,6 +274,49 @@ public class HeartbeatService : BackgroundService
             _logger.LogError(ex, "Error sending heartbeat");
         }
     }
+
+    /// <summary>
+    /// Build the per-role health snapshot for inclusion in the heartbeat.
+    ///
+    /// Iterates the node's local obligation list (P3 SQLite table) and projects
+    /// each role through <see cref="IRealityProjection"/>. The result is keyed
+    /// by canonical role name; values are <see cref="Reality"/> enum names
+    /// (the orchestrator deserialises but does not consume them in P4).
+    ///
+    /// Returns null when:
+    ///   - The node has no obligations (nothing to report).
+    ///   - An exception occurred reading the obligation table or computing
+    ///     reality. Better to send no signal than a stale or inconsistent one.
+    ///
+    /// Called once per heartbeat cycle (every 30s).
+    /// </summary>
+    private async Task<Dictionary<string, string>?> BuildObligationHealthAsync(
+        CancellationToken ct)
+    {
+        try
+        {
+            var obligations = await _obligationState.GetObligationsAsync(ct);
+            if (obligations.Count == 0)
+                return null;
+
+            var health = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var obligation in obligations)
+            {
+                var snapshot = _realityProjection.Project(obligation.Role);
+                health[obligation.Role] = snapshot.State.ToString();
+            }
+
+            return health;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Could not build obligation health snapshot — heartbeat " +
+                "will omit the field this cycle");
+            return null;
+        }
+    }
+
     /// <summary>
     /// Check if a Burstable VM needs quota applied
     /// </summary>

@@ -758,7 +758,8 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 tunnelStatus = (int)heartbeat.CgnatInfo.TunnelStatus,  // Send as int
                 lastHandshake = heartbeat.CgnatInfo.LastHandshake?.ToString("O")
             } : null,
-            obligationStateVersions = await BuildObligationStateVersionsAsync(ct)
+            obligationStateVersions = await BuildObligationStateVersionsAsync(ct),
+            obligationHealth = heartbeat.ObligationHealth
         };
 
         return payload;

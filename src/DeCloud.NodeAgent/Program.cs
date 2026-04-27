@@ -1,6 +1,7 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.Qmp;
 using DeCloud.NodeAgent.Core.Interfaces.State;
+using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Interfaces.UserNetwork;
 using DeCloud.NodeAgent.Core.Settings;
 using DeCloud.NodeAgent.Infrastructure.Docker;
@@ -149,7 +150,7 @@ builder.Services.AddSingleton<ObligationStateRepository>(sp =>
 // role validation, and security logging guardrails.
 // =====================================================
 builder.Services.AddSingleton<IObligationStateService, ObligationStateService>();
-
+builder.Services.AddSingleton<IRealityProjection, RealityProjection>();
 
 // =====================================================
 // Smart Port Allocation Services

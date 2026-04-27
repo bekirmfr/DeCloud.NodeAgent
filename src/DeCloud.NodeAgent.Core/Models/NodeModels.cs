@@ -44,7 +44,14 @@ public class Heartbeat
     /// the next registration. Omit or leave empty if all versions are 0.
     /// </summary>
     public Dictionary<string, int>? ObligationStateVersions { get; set; }
-
+    /// <summary>
+    /// Per-role coarse reality classification ("None" | "Healthy" |
+    /// "Unhealthy"), keyed by canonical role name.
+    /// Populated in HeartbeatService from IRealityProjection over the
+    /// obligation list. Sent verbatim on the wire. Null when the node has
+    /// no obligations or when the build helper failed.
+    /// </summary>
+    public Dictionary<string, string>? ObligationHealth { get; set; }
 }
 
 public class HeartbeatDto
