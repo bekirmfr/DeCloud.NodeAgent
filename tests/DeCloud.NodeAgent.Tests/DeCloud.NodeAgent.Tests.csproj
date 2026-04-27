@@ -18,6 +18,10 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\DeCloud.NodeAgent.Core\DeCloud.NodeAgent.Core.csproj" />
     <ProjectReference Include="..\..\src\DeCloud.NodeAgent.Infrastructure\DeCloud.NodeAgent.Infrastructure.csproj" />
+    <!--
+      DeCloud.Shared flows transitively through Core.
+      No explicit reference needed here.
+    -->
   </ItemGroup>
 
 </Project>

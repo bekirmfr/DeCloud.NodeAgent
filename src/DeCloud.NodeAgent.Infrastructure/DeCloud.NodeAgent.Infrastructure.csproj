@@ -8,7 +8,17 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\DeCloud.NodeAgent.Core\DeCloud.NodeAgent.Core.csproj" />
+    <ProjectReference Include="../DeCloud.NodeAgent.Core/DeCloud.NodeAgent.Core.csproj" />
+    <!--
+      DeCloud.Shared is transitively available via DeCloud.NodeAgent.Core.
+      The explicit reference below is NOT required for compilation — transitive
+      references flow through ProjectReference chains in .NET SDK projects.
+
+      Add it explicitly only if Infrastructure needs to reference Shared types
+      that are NOT already exposed through Core's public API, or if you want
+      explicit build-graph visibility in the solution explorer.
+    -->
+    <!-- <ProjectReference Include="../DeCloud.Shared/DeCloud.Shared.csproj" /> -->
   </ItemGroup>
 
   <ItemGroup>
@@ -18,8 +28,5 @@
     <PackageReference Include="Microsoft.Extensions.Options" Version="8.0.0" />
     <PackageReference Include="Nethereum.Signer" Version="5.0.0" />
   </ItemGroup>
-	<ItemGroup>
-		<Compile Include="../Shared/**/*.cs" Link="Shared/%(RecursiveDir)%(Filename)%(Extension)" />
-	</ItemGroup>
 
 </Project>

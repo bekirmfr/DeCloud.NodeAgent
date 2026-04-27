@@ -8,32 +8,36 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\DeCloud.NodeAgent.Core\DeCloud.NodeAgent.Core.csproj" />
-    <ProjectReference Include="..\DeCloud.NodeAgent.Infrastructure\DeCloud.NodeAgent.Infrastructure.csproj" />
+    <ProjectReference Include="../DeCloud.NodeAgent.Core/DeCloud.NodeAgent.Core.csproj" />
+    <ProjectReference Include="../DeCloud.NodeAgent.Infrastructure/DeCloud.NodeAgent.Infrastructure.csproj" />
+    <!--
+      DeCloud.Shared flows transitively through Core → Shared.
+      No explicit reference needed here.
+    -->
   </ItemGroup>
 
-	<ItemGroup>
-		<!-- Include all cloud-init templates in build output -->
-		<None Update="CloudInit\Templates\**\*">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-		</None>
-		<!-- Exclude Go source from default Content item group (Web SDK auto-includes) -->
-		<Content Remove="CloudInit\Templates\dht-vm\dht-node-src\**" />
-		<!-- Include Go source in build/publish output so the binary can be built at runtime if missing -->
-		<None Include="CloudInit\Templates\dht-vm\dht-node-src\**">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-		</None>
-	</ItemGroup>
+  <ItemGroup>
+    <!-- Include all cloud-init templates in build output -->
+    <None Update="CloudInit\Templates\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+    <!-- Exclude Go source from default Content item group (Web SDK auto-includes) -->
+    <Content Remove="CloudInit\Templates\dht-vm\dht-node-src\**" />
+    <!-- Include Go source in build/publish output so the binary can be built at runtime if missing -->
+    <None Include="CloudInit\Templates\dht-vm\dht-node-src\**">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
 
-	<ItemGroup>
-		<None Include="../../cli/**/*" Link="cli/%(RecursiveDir)%(Filename)%(Extension)" />
-	</ItemGroup>
+  <ItemGroup>
+    <None Include="../../cli/**/*" Link="cli/%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
 
-	<ItemGroup>
-		<None Include="../../releases/**/*" Link="releases/%(RecursiveDir)%(Filename)%(Extension)" />
-	</ItemGroup>
+  <ItemGroup>
+    <None Include="../../releases/**/*" Link="releases/%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
@@ -42,9 +46,5 @@
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.5.0" />
     <PackageReference Include="System.Net.Http.Json" Version="10.0.1" />
   </ItemGroup>
-
-	<ItemGroup>
-		<Compile Include="../Shared/**/*.cs" Link="Shared/%(RecursiveDir)%(Filename)%(Extension)" />
-	</ItemGroup>
 
 </Project>
