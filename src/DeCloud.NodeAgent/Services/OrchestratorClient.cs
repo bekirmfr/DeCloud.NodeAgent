@@ -220,7 +220,8 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             RegisteredAt = DateTime.UtcNow,
             // Report which obligation state versions we already have so the
             // orchestrator only sends states that are newer than our local copy.
-            ObligationStateVersions = await BuildObligationStateVersionsAsync(ct)
+            ObligationStateVersions = await BuildObligationStateVersionsAsync(ct),
+            SystemTemplateVersions = await BuildSystemTemplateVersionsAsync(ct)
         };
 
         // Register with retry logic

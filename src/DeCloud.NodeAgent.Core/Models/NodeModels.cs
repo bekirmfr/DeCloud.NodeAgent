@@ -230,6 +230,14 @@ public class NodeRegistration
     /// Monotonic version from the orchestrator — used for conflict resolution.
     /// </summary>
     public Dictionary<string, int> ObligationStateVersions { get; set; } = new();
+
+    /// <summary>
+    /// Revisions of system templates currently stored in the node agent's
+    /// SQLite database, keyed by canonical role name.
+    /// Allows the orchestrator to skip sending templates already current on the node.
+    /// Absent or zero-valued entries mean no template stored for that role.
+    /// </summary>
+    public Dictionary<string, int> SystemTemplateVersions { get; set; } = new();
 }
 
 public class NodePricing
