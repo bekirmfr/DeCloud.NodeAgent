@@ -1,5 +1,8 @@
+using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Core.Models.State;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
+using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Infrastructure.Persistence;
 
@@ -8,24 +11,33 @@ namespace DeCloud.NodeAgent.Infrastructure.Persistence;
 // ============================================================
 
 /// <summary>
-/// SQLite-backed store for system VM obligation identity state.
+/// SQLite-backed store for system VM obligation data on the node agent.
 ///
 /// Opens its own connection to <c>obligation-state.db</c> in the same
 /// <c>VmStoragePath</c> directory as <c>vms.db</c> and <c>port-mappings.db</c>.
 ///
-/// Schema (single table, role is the primary key):
+/// Two tables (a third — <c>system_template</c> — is added in P9):
+///
 /// <code>
 /// CREATE TABLE obligation_state (
-///     role        TEXT PRIMARY KEY,
-///     state_json  TEXT NOT NULL,
-///     version     INTEGER NOT NULL,
+///     role        TEXT PRIMARY KEY,   -- "relay" | "dht" | "blockstore"
+///     state_json  TEXT NOT NULL,      -- Identity blob (private keys etc.)
+///     version     INTEGER NOT NULL,   -- Monotonic, orchestrator-assigned
+///     updated_at  TEXT NOT NULL
+/// );
+///
+/// CREATE TABLE obligation (
+///     role        TEXT PRIMARY KEY,   -- "relay" | "dht" | "blockstore"
+///     deps_json   TEXT NOT NULL,      -- JSON array of dep role names
 ///     updated_at  TEXT NOT NULL
 /// );
 /// </code>
 ///
-/// SECURITY: The SQLite file stores private keys. File permissions are enforced
-/// to 0600 (owner read/write only) at initialisation on Linux. The full
-/// state_json is never written to application logs — only role and version.
+/// SECURITY: The <c>obligation_state</c> table stores private keys. File
+/// permissions are enforced to 0600 (owner read/write only) at initialisation
+/// on Linux. The full state_json is never written to application logs — only
+/// role and version. The <c>obligation</c> table is non-sensitive (just role
+/// names + dep lists) but lives in the same file under the same permissions.
 /// </summary>
 public sealed class ObligationStateRepository : IDisposable
 {
@@ -35,6 +47,14 @@ public sealed class ObligationStateRepository : IDisposable
     // One writer at a time — SQLite WAL mode does not change this requirement
     // for a single-process writer.
     private readonly SemaphoreSlim _lock = new(1, 1);
+
+    // JSON options used for deps_json serialisation. PropertyNamingPolicy is
+    // not relevant for arrays of strings, but we set defaults explicitly to
+    // avoid surprises if the schema evolves.
+    private static readonly JsonSerializerOptions _jsonOptions = new()
+    {
+        WriteIndented = false,
+    };
 
     // Exposed so callers can verify the path at startup.
     public string DatabasePath { get; }
@@ -68,9 +88,9 @@ public sealed class ObligationStateRepository : IDisposable
             "✓ ObligationStateRepository initialised at {Path}", databasePath);
     }
 
-    // ----------------------------------------------------------------
+    // ════════════════════════════════════════════════════════════════════
     // Schema
-    // ----------------------------------------------------------------
+    // ════════════════════════════════════════════════════════════════════
 
     private void InitialiseSchema()
     {
@@ -81,14 +101,20 @@ public sealed class ObligationStateRepository : IDisposable
                 state_json  TEXT NOT NULL,
                 version     INTEGER NOT NULL,
                 updated_at  TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS obligation (
+                role        TEXT PRIMARY KEY,
+                deps_json   TEXT NOT NULL,
+                updated_at  TEXT NOT NULL
             );";
         cmd.ExecuteNonQuery();
-        _logger.LogDebug("obligation_state table ready");
+        _logger.LogDebug("obligation_state and obligation tables ready");
     }
 
-    // ----------------------------------------------------------------
-    // CRUD
-    // ----------------------------------------------------------------
+    // ════════════════════════════════════════════════════════════════════
+    // Identity state CRUD
+    // ════════════════════════════════════════════════════════════════════
 
     /// <summary>
     /// Upsert state for <paramref name="role"/>.
@@ -202,9 +228,114 @@ public sealed class ObligationStateRepository : IDisposable
         }
     }
 
-    // ----------------------------------------------------------------
+    // ════════════════════════════════════════════════════════════════════
+    // Obligations CRUD
+    // ════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Replace the entire obligation set atomically. Wipes the table and
+    /// inserts the new entries inside a single SQLite transaction — the
+    /// post-state is exactly <paramref name="obligations"/> or unchanged.
+    ///
+    /// Caller responsibility: <paramref name="obligations"/> entries must
+    /// already be canonicalised (lower-case role names, valid deps).
+    /// <see cref="ObligationStateService.SaveObligationsAsync"/> performs
+    /// that sanitisation before invoking this method.
+    /// </summary>
+    public async Task ReplaceObligationsAsync(
+        IReadOnlyList<ObligationDescriptor> obligations,
+        CancellationToken ct = default)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            using var tx = _connection.BeginTransaction();
+
+            using (var del = _connection.CreateCommand())
+            {
+                del.Transaction = tx;
+                del.CommandText = "DELETE FROM obligation;";
+                await del.ExecuteNonQueryAsync(ct);
+            }
+
+            foreach (var o in obligations)
+            {
+                using var ins = _connection.CreateCommand();
+                ins.Transaction = tx;
+                ins.CommandText = @"
+                    INSERT INTO obligation (role, deps_json, updated_at)
+                    VALUES (@role, @deps_json, @updated_at);";
+                ins.Parameters.AddWithValue("@role", o.Role);
+                ins.Parameters.AddWithValue(
+                    "@deps_json",
+                    JsonSerializer.Serialize(o.Deps, _jsonOptions));
+                ins.Parameters.AddWithValue("@updated_at", o.UpdatedAt.ToString("O"));
+                await ins.ExecuteNonQueryAsync(ct);
+            }
+
+            tx.Commit();
+
+            _logger.LogDebug(
+                "Obligation table replaced — {Count} entries", obligations.Count);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Read all obligations from the table. Returns an empty list if the
+    /// table is empty (never <c>null</c>). Order is unspecified — the matrix
+    /// does not depend on it.
+    /// </summary>
+    public async Task<IReadOnlyList<ObligationDescriptor>> GetObligationsAsync(
+        CancellationToken ct = default)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT role, deps_json, updated_at FROM obligation;";
+
+            using var reader = await cmd.ExecuteReaderAsync(ct);
+            var results = new List<ObligationDescriptor>();
+
+            while (await reader.ReadAsync(ct))
+            {
+                var role = reader.GetString(0);
+                var depsJson = reader.GetString(1);
+                var updatedAtStr = reader.GetString(2);
+
+                var deps = JsonSerializer.Deserialize<List<string>>(depsJson, _jsonOptions)
+                           ?? new List<string>();
+
+                if (!DateTime.TryParse(updatedAtStr, null,
+                        System.Globalization.DateTimeStyles.RoundtripKind,
+                        out var updatedAt))
+                {
+                    updatedAt = DateTime.UtcNow;
+                }
+
+                results.Add(new ObligationDescriptor
+                {
+                    Role = role,
+                    Deps = deps,
+                    UpdatedAt = updatedAt,
+                });
+            }
+
+            return results;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
     // Internal helpers
-    // ----------------------------------------------------------------
+    // ════════════════════════════════════════════════════════════════════
 
     /// <summary>
     /// Read stored version without acquiring the lock.
@@ -240,7 +371,7 @@ public sealed class ObligationStateRepository : IDisposable
             }
             // For new files, the OS inherits from the umask; we fix it after creation
             // inside InitialiseSchema → the first PRAGMA triggers file creation.
-            // A second call is made from ObligationStateService.EnsureFilePermissionsAsync().
+            // A second call is made from ObligationStateService.EnsureFilePermissionsOnce().
         }
         catch (Exception ex)
         {

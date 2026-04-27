@@ -1,8 +1,10 @@
-﻿namespace DeCloud.NodeAgent.Core.Models.Reality;
+﻿using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
+
+namespace DeCloud.NodeAgent.Core.Models.Reality;
 
 /// <summary>
 /// Coarse-grained state of a system VM role on this node, as observed by
-/// <see cref="DeCloud.NodeAgent.Core.Interfaces.State.IRealityProjection"/>.
+/// <see cref="Interfaces.SystemVm.IRealityProjection"/>.
 ///
 /// This is the matrix's <c>reality</c> axis (see SYSTEM_VM_DESIGN.md §5.2).
 /// It deliberately collapses the underlying <see cref="VmState"/> into three
@@ -46,7 +48,7 @@ public enum Reality
 /// <summary>
 /// A point-in-time projection of a single role's reality on this node.
 ///
-/// Returned by <see cref="DeCloud.NodeAgent.Core.Interfaces.State.IRealityProjection.Project"/>.
+/// Returned by <see cref="IRealityProjection.Project"/>.
 /// Consumed by the reconciliation matrix (P5) as one of its three input axes.
 /// </summary>
 public sealed record RealitySnapshot
