@@ -8,10 +8,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../DeCloud.Shared/DeCloud.Shared.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
     <PackageReference Include="SSH.NET" Version="2025.1.0" />
   </ItemGroup>
@@ -19,6 +15,10 @@
   <ItemGroup>
     <Folder Include="Constants\" />
     <Folder Include="Interfaces\Auth\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\Decloud.Shared\DeCloud.Shared.csproj" />
   </ItemGroup>
 
 </Project>

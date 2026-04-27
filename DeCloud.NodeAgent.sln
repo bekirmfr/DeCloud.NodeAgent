@@ -1,7 +1,7 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 17
-VisualStudioVersion = 17.0.31903.59
+# Visual Studio Version 18
+VisualStudioVersion = 18.3.11426.168 d18.3
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DeCloud.NodeAgent", "src\DeCloud.NodeAgent\DeCloud.NodeAgent.csproj", "{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
 EndProject
@@ -11,9 +11,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DeCloud.NodeAgent.Infrastru
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DeCloud.NodeAgent.Tests", "tests\DeCloud.NodeAgent.Tests\DeCloud.NodeAgent.Tests.csproj", "{D4E5F6A7-B8C9-0123-DEF0-234567890123}"
 EndProject
-Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{827E0CD3-B72D-47B6-A68D-7590B98EB39B}"
-EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DeCloud.Shared", "src\DeCloud.Shared\DeCloud.Shared.csproj", "{33BAEB53-1761-4EFA-BAD5-2913911D792F}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DeCloud.Shared", "..\Decloud.Shared\DeCloud.Shared.csproj", "{F1F2DDAC-B8BB-6651-CB02-F570F3434BB8}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -73,23 +71,20 @@ Global
 		{D4E5F6A7-B8C9-0123-DEF0-234567890123}.Release|x64.Build.0 = Release|Any CPU
 		{D4E5F6A7-B8C9-0123-DEF0-234567890123}.Release|x86.ActiveCfg = Release|Any CPU
 		{D4E5F6A7-B8C9-0123-DEF0-234567890123}.Release|x86.Build.0 = Release|Any CPU
-		{33BAEB53-1761-4EFA-BAD5-2913911D792F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{33BAEB53-1761-4EFA-BAD5-2913911D792F}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{33BAEB53-1761-4EFA-BAD5-2913911D792F}.Debug|x64.ActiveCfg = Debug|Any CPU
-		{33BAEB53-1761-4EFA-BAD5-2913911D792F}.Debug|x64.Build.0 = Debug|Any CPU
-		{33BAEB53-1761-4EFA-BAD5-2913911D792F}.Debug|x86.ActiveCfg = Debug|Any CPU
-		{33BAEB53-1761-4EFA-BAD5-2913911D792F}.Debug|x86.Build.0 = Debug|Any CPU
-		{33BAEB53-1761-4EFA-BAD5-2913911D792F}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{33BAEB53-1761-4EFA-BAD5-2913911D792F}.Release|Any CPU.Build.0 = Release|Any CPU
-		{33BAEB53-1761-4EFA-BAD5-2913911D792F}.Release|x64.ActiveCfg = Release|Any CPU
-		{33BAEB53-1761-4EFA-BAD5-2913911D792F}.Release|x64.Build.0 = Release|Any CPU
-		{33BAEB53-1761-4EFA-BAD5-2913911D792F}.Release|x86.ActiveCfg = Release|Any CPU
-		{33BAEB53-1761-4EFA-BAD5-2913911D792F}.Release|x86.Build.0 = Release|Any CPU
+		{F1F2DDAC-B8BB-6651-CB02-F570F3434BB8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F1F2DDAC-B8BB-6651-CB02-F570F3434BB8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F1F2DDAC-B8BB-6651-CB02-F570F3434BB8}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{F1F2DDAC-B8BB-6651-CB02-F570F3434BB8}.Debug|x64.Build.0 = Debug|Any CPU
+		{F1F2DDAC-B8BB-6651-CB02-F570F3434BB8}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{F1F2DDAC-B8BB-6651-CB02-F570F3434BB8}.Debug|x86.Build.0 = Debug|Any CPU
+		{F1F2DDAC-B8BB-6651-CB02-F570F3434BB8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F1F2DDAC-B8BB-6651-CB02-F570F3434BB8}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F1F2DDAC-B8BB-6651-CB02-F570F3434BB8}.Release|x64.ActiveCfg = Release|Any CPU
+		{F1F2DDAC-B8BB-6651-CB02-F570F3434BB8}.Release|x64.Build.0 = Release|Any CPU
+		{F1F2DDAC-B8BB-6651-CB02-F570F3434BB8}.Release|x86.ActiveCfg = Release|Any CPU
+		{F1F2DDAC-B8BB-6651-CB02-F570F3434BB8}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
-	EndGlobalSection
-	GlobalSection(NestedProjects) = preSolution
-		{33BAEB53-1761-4EFA-BAD5-2913911D792F} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal

@@ -15,6 +15,7 @@ using DeCloud.NodeAgent.Infrastructure.Services.Resilience;
 using DeCloud.NodeAgent.Infrastructure.Services.State;
 using DeCloud.NodeAgent.Infrastructure.Services.SystemVm;
 using DeCloud.NodeAgent.Services;
+using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
@@ -77,6 +78,13 @@ builder.Services.AddHttpClient("VmProxy", client =>
 {
     AllowAutoRedirect = false,
     UseCookies = false
+});
+
+// Large artifact downloads (binaries up to several hundred MB).
+builder.Services.AddHttpClient("ArtifactDownload", client =>
+{
+    client.Timeout = TimeSpan.FromMinutes(10);
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("DeCloud-NodeAgent/1.0");
 });
 
 // =====================================================
@@ -142,6 +150,31 @@ builder.Services.AddSingleton<ObligationStateRepository>(sp =>
 
     var dbPath = Path.Combine(options.VmStoragePath, "obligation-state.db");
     return new ObligationStateRepository(dbPath, logger);
+});
+
+// =====================================================
+// Artifact Cache Service
+// Caches template artifacts (binaries, scripts, configs)
+// locally. Serves over virbr0 to VMs at cloud-init time.
+// SECURITY: only HTTPS source URLs; SHA256 verified on download.
+// =====================================================
+builder.Services.AddSingleton<IArtifactCacheService>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<LibvirtVmManagerOptions>>().Value;
+    var logger = sp.GetRequiredService<ILogger<ArtifactCacheService>>();
+
+    var httpClient = new HttpClient
+    {
+        Timeout = TimeSpan.FromMinutes(10),
+    };
+    httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("DeCloud-NodeAgent/1.0");
+
+    var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+    var cacheDir = isWindows
+        ? Path.Combine(Path.GetTempPath(), "decloud-artifact-cache")
+        : Path.Combine(options.VmStoragePath, "artifact-cache");
+
+    return new ArtifactCacheService(cacheDir, httpClient, logger);
 });
 
 // =====================================================

@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../DeCloud.NodeAgent.Core/DeCloud.NodeAgent.Core.csproj" />
+    <ProjectReference Include="..\..\..\Decloud.Shared\DeCloud.Shared.csproj" />
     <!--
       DeCloud.Shared is transitively available via DeCloud.NodeAgent.Core.
       The explicit reference below is NOT required for compilation — transitive
