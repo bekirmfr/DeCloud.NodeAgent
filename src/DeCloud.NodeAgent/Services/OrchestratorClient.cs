@@ -4,12 +4,14 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.Shared.Models;
 using Microsoft.Extensions.Options;
 using Orchestrator.Models;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Xml.Linq;
 
@@ -32,6 +34,7 @@ public partial class OrchestratorClient : IOrchestratorClient
     private readonly IResourceDiscoveryService _resourceDiscovery;
     private readonly INodeStateService _nodeState;
     private readonly IObligationStateService _obligationState;
+    private readonly IArtifactCacheService _artifactCache;
     private readonly INodeMetadataService _nodeMetadata;
     private readonly OrchestratorClientOptions _options;
 
@@ -64,6 +67,7 @@ public partial class OrchestratorClient : IOrchestratorClient
         IResourceDiscoveryService resourceDiscovery,
         INodeStateService nodeState,
         IObligationStateService obligationState,
+        IArtifactCacheService artifactCache,
         INodeMetadataService nodeMetadata,
         ConcurrentQueue<PendingCommand> pendingCommands,
         ILogger<OrchestratorClient> logger)
@@ -76,6 +80,7 @@ public partial class OrchestratorClient : IOrchestratorClient
         _walletAddress = _options.WalletAddress;
         _nodeState = nodeState;
         _obligationState = obligationState;
+        _artifactCache = artifactCache;
         _pendingCommands = pendingCommands;
         _httpClient.BaseAddress = new Uri(_options.BaseUrl.TrimEnd('/'));
         _httpClient.Timeout = _options.Timeout;
@@ -302,6 +307,58 @@ REGISTERED_AT={DateTime.UtcNow:O}";
     }
 
     /// <summary>
+    /// Deserialise the system template JSON and prefetch all artifacts
+    /// appropriate for this node's architecture.
+    /// Errors are logged but do not fail registration.
+    /// </summary>
+    private async Task TriggerArtifactPrefetchAsync(
+        string role, string templateJson, CancellationToken ct)
+    {
+        try
+        {
+            var template = System.Text.Json.JsonSerializer.Deserialize<SystemVmTemplate>(
+                templateJson,
+                new System.Text.Json.JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+
+            if (template?.Artifacts is not { Count: > 0 })
+            {
+                _logger.LogDebug("System template [{Role}]: no artifacts to prefetch", role);
+                return;
+            }
+
+            var arch = RuntimeInformation.ProcessArchitecture == Architecture.Arm64
+                ? "arm64" : "amd64";
+
+            _logger.LogInformation(
+                "System template [{Role}]: prefetching {Count} artifact(s) for {Arch}",
+                role, template.Artifacts.Count, arch);
+
+            await _artifactCache.PrefetchAsync(template.Artifacts, arch, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "System template [{Role}]: artifact prefetch failed — " +
+                "will retry when template is re-pulled on next heartbeat",
+                role);
+        }
+    }
+
+    /// <summary>
+    /// Build a { role → storedRevision } map from the local SQLite store for
+    /// inclusion in the heartbeat. Parallel to BuildObligationStateVersionsAsync.
+    /// </summary>
+    private async Task<Dictionary<string, int>?> BuildSystemTemplateVersionsAsync(
+        CancellationToken ct)
+    {
+        var revisions = await _obligationState.GetSystemTemplateRevisionsAsync(ct);
+        return revisions.Count > 0 ? revisions : null;
+    }
+
+    /// <summary>
     /// Pulls the current identity state for <paramref name="role"/> from
     /// the orchestrator (GET /api/nodes/me/obligations/{role}/state) and
     /// persists it via IObligationStateService.SaveStateAsync.
@@ -386,7 +443,59 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         }
     }
 
+    /// <summary>
+    /// Pull the current system template for <paramref name="role"/> from the
+    /// orchestrator (GET /api/nodes/me/system-templates/{role}) and persist
+    /// via SaveSystemTemplateAsync + artifact prefetch.
+    /// Parallel to FetchAndSaveStateAsync for identity state.
+    /// </summary>
+    private async Task FetchAndSaveSystemTemplateAsync(string role, CancellationToken ct)
+    {
+        try
+        {
+            _logger.LogInformation("Fetching updated system template for role '{Role}'", role);
 
+            var response = await _httpClient.GetAsync(
+                $"/api/nodes/me/system-templates/{role}", ct);
+
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                _logger.LogDebug("Orchestrator has no system template for '{Role}' yet", role);
+                return;
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("FetchAndSaveSystemTemplateAsync [{Role}]: {Status}",
+                    role, (int)response.StatusCode);
+                return;
+            }
+
+            var json = await response.Content.ReadAsStringAsync(ct);
+            var payload = System.Text.Json.JsonSerializer.Deserialize<SystemVmTemplatePayload>(
+                json,
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+            if (payload is null || string.IsNullOrWhiteSpace(payload.TemplateJson))
+            {
+                _logger.LogWarning("FetchAndSaveSystemTemplateAsync [{Role}]: empty payload", role);
+                return;
+            }
+
+            var written = await _obligationState.SaveSystemTemplateAsync(
+                role, payload.TemplateJson, payload.Revision, ct);
+
+            if (written)
+            {
+                _logger.LogInformation("✓ System template [{Role}] r{Revision} updated", role, payload.Revision);
+                await TriggerArtifactPrefetchAsync(role, payload.TemplateJson, ct);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "FetchAndSaveSystemTemplateAsync [{Role}]: failed", role);
+        }
+    }
 
     /// <summary>
     /// Load pending authentication data
@@ -548,6 +657,43 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                             "(all states current or no obligations assigned)");
                     }
 
+                    // ── Persist system templates ─────────────────────────────────
+                    // Parallel to ObligationStates above. Save each template to SQLite
+                    // and trigger artifact prefetch so binaries are cached before deploy.
+                    if (registrationResponse.SystemTemplates is { Count: > 0 } systemTemplates)
+                    {
+                        foreach (var (role, payload) in systemTemplates)
+                        {
+                            if (string.IsNullOrWhiteSpace(payload.TemplateJson))
+                            {
+                                _logger.LogWarning(
+                                    "Registration: empty template JSON for role '{Role}' — skipping",
+                                    role);
+                                continue;
+                            }
+
+                            var written = await _obligationState.SaveSystemTemplateAsync(
+                                role,
+                                payload.TemplateJson,
+                                payload.Revision,
+                                ct);
+
+                            _logger.LogInformation(
+                                written
+                                    ? "✓ System template [{Role}] r{Revision} persisted"
+                                    : "  System template [{Role}] r{Revision} already current",
+                                role, payload.Revision);
+
+                            if (written)
+                                await TriggerArtifactPrefetchAsync(role, payload.TemplateJson, ct);
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogDebug(
+                            "Registration response: no system templates delivered " +
+                            "(all templates current or none seeded yet)");
+                    }
 
                     _logger.LogInformation(
                         "✓ Node registered successfully: {NodeId} | Wallet: {Wallet}",
@@ -759,7 +905,8 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 lastHandshake = heartbeat.CgnatInfo.LastHandshake?.ToString("O")
             } : null,
             obligationStateVersions = await BuildObligationStateVersionsAsync(ct),
-            obligationHealth = heartbeat.ObligationHealth
+            obligationHealth = heartbeat.ObligationHealth,
+            systemTemplateVersions = await BuildSystemTemplateVersionsAsync(ct)
         };
 
         return payload;
@@ -886,6 +1033,20 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                     var role = roleProp.GetString();
                     if (!string.IsNullOrWhiteSpace(role))
                         await FetchAndSaveStateAsync(role, ct);
+                }
+            }
+
+            // Pull system templates signalled as stale by the orchestrator.
+            if (data.TryGetProperty("systemTemplatesPending", out var pendingTemplates) &&
+                pendingTemplates.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var roleEl in pendingTemplates.EnumerateArray())
+                {
+                    var role = roleEl.GetString();
+                    if (!string.IsNullOrEmpty(role))
+                    {
+                        _ = Task.Run(() => FetchAndSaveSystemTemplateAsync(role, ct), ct);
+                    }
                 }
             }
         }

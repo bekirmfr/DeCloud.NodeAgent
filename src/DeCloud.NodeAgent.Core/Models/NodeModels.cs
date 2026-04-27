@@ -1,4 +1,5 @@
 using DeCloud.NodeAgent.Core.Interfaces.State;
+using DeCloud.Shared.Models;
 using Orchestrator.Models;
 
 namespace DeCloud.NodeAgent.Core.Models;
@@ -10,9 +11,21 @@ public record NodeRegistrationResponse(
     SchedulingConfig SchedulingConfig,
     string OrchestratorWireGuardPublicKey,
     TimeSpan HeartbeatInterval,
-    List<string>? DhtBootstrapPeers,                           // already sent by orchestrator
-    Dictionary<string, ObligationStatePayload>? ObligationStates // new — may be null on older orchestrators
+    List<string>? DhtBootstrapPeers,
+    /// <summary>
+    /// Identity state payloads keyed by canonical role name.
+    /// Contains only roles where orchestrator version > node-reported version.
+    /// Null or empty = all identity states current on the node.
+    /// </summary>
+    Dictionary<string, ObligationStatePayload>? ObligationStates,
+    /// <summary>
+    /// System template payloads keyed by canonical role name.
+    /// Contains only roles where orchestrator revision > node-reported revision.
+    /// Null or empty = all templates current on the node (or none seeded yet).
+    /// </summary>
+    Dictionary<string, SystemVmTemplatePayload>? SystemTemplates = null
 );
+
 
 /// <summary>
 /// Mirrors Orchestrator.Models.ObligationStatePayload.
@@ -26,7 +39,7 @@ public class ObligationStatePayload
 
 
 /// <summary>
-/// Periodic heartbeat sent to orchestrator
+/// Periodic heartbeat sent to orchestrator.
 /// </summary>
 public class Heartbeat
 {
@@ -37,22 +50,32 @@ public class Heartbeat
     public List<VmSummary> ActiveVms { get; set; } = new();
     public int SchedulingConfigVersion { get; set; } = 0;
     public CgnatNodeInfo? CgnatInfo { get; set; }
+
     /// <summary>
     /// Versions of obligation identity state currently stored in the node
     /// agent's SQLite database, keyed by canonical role name.
     /// Allows the orchestrator to detect stale states without waiting for
-    /// the next registration. Omit or leave empty if all versions are 0.
+    /// the next registration.
     /// </summary>
     public Dictionary<string, int>? ObligationStateVersions { get; set; }
+
     /// <summary>
-    /// Per-role coarse reality classification ("None" | "Healthy" |
-    /// "Unhealthy"), keyed by canonical role name.
-    /// Populated in HeartbeatService from IRealityProjection over the
-    /// obligation list. Sent verbatim on the wire. Null when the node has
-    /// no obligations or when the build helper failed.
+    /// Per-role coarse reality classification ("None" | "Healthy" | "Unhealthy"),
+    /// keyed by canonical role name. Populated in HeartbeatService from
+    /// IRealityProjection over the obligation list (P4).
     /// </summary>
     public Dictionary<string, string>? ObligationHealth { get; set; }
+
+    /// <summary>
+    /// Revisions of system templates currently stored in the node agent's
+    /// SQLite <c>system_template</c> table, keyed by canonical role name.
+    /// Allows the orchestrator to detect and push template updates without
+    /// waiting for the next registration.
+    /// Absent or zero values mean the node has no template for that role.
+    /// </summary>
+    public Dictionary<string, int>? SystemTemplateVersions { get; set; }
 }
+
 
 public class HeartbeatDto
 {

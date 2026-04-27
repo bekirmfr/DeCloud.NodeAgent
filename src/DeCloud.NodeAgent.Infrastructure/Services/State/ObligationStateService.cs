@@ -7,32 +7,23 @@ using Microsoft.Extensions.Logging;
 
 namespace DeCloud.NodeAgent.Infrastructure.Services.State;
 
-// ============================================================
-// Placement: src/DeCloud.NodeAgent.Infrastructure/Services/State/ObligationStateService.cs
-// ============================================================
-
 /// <summary>
 /// Implements <see cref="IObligationStateService"/> on top of
 /// <see cref="ObligationStateRepository"/>.
 ///
 /// Responsibilities:
 ///   • Validate and canonicalise role names before hitting the repository.
-///   • Enforce version-based conflict resolution for identity state
-///     (incoming &gt; stored → write).
-///   • Filter pushed obligation lists through canonicalisation and warn on
-///     unknown role names rather than letting them reach SQL.
-///   • Ensure DB file permissions remain 0600 after the first write (covers
-///     the case where SQLite created the file after
-///     <c>EnforceFilePermissions</c> ran in the repository constructor).
-///   • Never log the state JSON content — only role and version numbers.
+///   • Enforce version/revision-based conflict resolution.
+///   • Filter pushed obligation lists through canonicalisation.
+///   • Ensure DB file permissions remain 0600 after the first write.
+///   • Never log the state or template JSON content.
 /// </summary>
 public sealed class ObligationStateService : IObligationStateService
 {
     private readonly ObligationStateRepository _repository;
     private readonly ILogger<ObligationStateService> _logger;
 
-    // Track whether we've done the post-creation permission check.
-    private int _permissionCheckDone = 0; // 0 = not done, 1 = done
+    private int _permissionCheckDone = 0;
 
     public ObligationStateService(
         ObligationStateRepository repository,
@@ -56,32 +47,22 @@ public sealed class ObligationStateService : IObligationStateService
         var canonical = ValidateRole(role);
         if (canonical is null)
         {
-            _logger.LogWarning("SaveStateAsync called with unknown role '{Role}' — ignored", role);
+            _logger.LogWarning("SaveStateAsync: unknown role '{Role}' — ignored", role);
             return false;
         }
-
         if (string.IsNullOrWhiteSpace(stateJson))
         {
-            _logger.LogWarning(
-                "SaveStateAsync [{Role}] called with empty stateJson — ignored", canonical);
+            _logger.LogWarning("SaveStateAsync [{Role}]: empty stateJson — ignored", canonical);
             return false;
         }
-
         if (incomingVersion < 1)
         {
-            _logger.LogWarning(
-                "SaveStateAsync [{Role}] called with invalid version {Version} — ignored",
-                canonical, incomingVersion);
+            _logger.LogWarning("SaveStateAsync [{Role}]: invalid version {V} — ignored", canonical, incomingVersion);
             return false;
         }
 
         var written = await _repository.UpsertAsync(canonical, stateJson, incomingVersion, ct);
-
-        // After the first successful write the DB file definitely exists.
-        // Re-enforce 0600 once in case SQLite created it after the constructor ran.
-        if (written)
-            EnsureFilePermissionsOnce();
-
+        if (written) EnsureFilePermissionsOnce();
         return written;
     }
 
@@ -89,12 +70,7 @@ public sealed class ObligationStateService : IObligationStateService
     public async Task<string?> GetStateJsonAsync(string role, CancellationToken ct = default)
     {
         var canonical = ValidateRole(role);
-        if (canonical is null)
-        {
-            _logger.LogWarning("GetStateJsonAsync called with unknown role '{Role}'", role);
-            return null;
-        }
-
+        if (canonical is null) { _logger.LogWarning("GetStateJsonAsync: unknown role '{Role}'", role); return null; }
         return await _repository.GetStateJsonAsync(canonical, ct);
     }
 
@@ -102,12 +78,7 @@ public sealed class ObligationStateService : IObligationStateService
     public async Task<int> GetVersionAsync(string role, CancellationToken ct = default)
     {
         var canonical = ValidateRole(role);
-        if (canonical is null)
-        {
-            _logger.LogWarning("GetVersionAsync called with unknown role '{Role}'", role);
-            return 0;
-        }
-
+        if (canonical is null) { _logger.LogWarning("GetVersionAsync: unknown role '{Role}'", role); return 0; }
         return await _repository.GetVersionAsync(canonical, ct);
     }
 
@@ -115,12 +86,7 @@ public sealed class ObligationStateService : IObligationStateService
     public async Task DeleteStateAsync(string role, CancellationToken ct = default)
     {
         var canonical = ValidateRole(role);
-        if (canonical is null)
-        {
-            _logger.LogWarning("DeleteStateAsync called with unknown role '{Role}'", role);
-            return;
-        }
-
+        if (canonical is null) { _logger.LogWarning("DeleteStateAsync: unknown role '{Role}'", role); return; }
         await _repository.DeleteAsync(canonical, ct);
     }
 
@@ -133,103 +99,137 @@ public sealed class ObligationStateService : IObligationStateService
         IReadOnlyList<ObligationDescriptor> obligations,
         CancellationToken ct = default)
     {
-        // Canonicalise + filter unknown roles before hitting the repository.
-        // The repository's own role validation is a defence-in-depth layer;
-        // this layer handles the "Warning" logging cleanly.
         var sanitised = new List<ObligationDescriptor>(obligations.Count);
         foreach (var o in obligations)
         {
             var canonical = ValidateRole(o.Role);
             if (canonical is null)
             {
-                _logger.LogWarning(
-                    "SaveObligationsAsync: dropping obligation with unknown role '{Role}'",
-                    o.Role);
+                _logger.LogWarning("SaveObligationsAsync: dropping unknown role '{Role}'", o.Role);
                 continue;
             }
 
-            // Sanitise dep names too — preserve the descriptor shape but
-            // filter out unknown ones with a warning. IntentComputation also
-            // tolerates unknown deps, so this is belt-and-braces.
             var sanitisedDeps = new List<string>(o.Deps.Count);
             foreach (var dep in o.Deps)
             {
                 var depCanonical = ValidateRole(dep);
                 if (depCanonical is null)
                 {
-                    _logger.LogWarning(
-                        "SaveObligationsAsync [{Role}]: dropping unknown dependency '{Dep}'",
-                        canonical, dep);
+                    _logger.LogWarning("SaveObligationsAsync [{Role}]: dropping unknown dep '{Dep}'", canonical, dep);
                     continue;
                 }
                 sanitisedDeps.Add(depCanonical);
             }
 
-            sanitised.Add(new ObligationDescriptor
-            {
-                Role = canonical,
-                Deps = sanitisedDeps,
-                UpdatedAt = o.UpdatedAt,
-            });
+            sanitised.Add(new ObligationDescriptor { Role = canonical, Deps = sanitisedDeps, UpdatedAt = o.UpdatedAt });
         }
 
         await _repository.ReplaceObligationsAsync(sanitised, ct);
-
-        _logger.LogInformation(
-            "Obligations replaced — {Count} entries: [{Roles}]",
-            sanitised.Count,
-            string.Join(", ", sanitised.Select(o => o.Role)));
+        _logger.LogInformation("Obligations replaced — {Count} entries: [{Roles}]",
+            sanitised.Count, string.Join(", ", sanitised.Select(o => o.Role)));
     }
 
     /// <inheritdoc/>
     public async Task<IReadOnlyList<ObligationDescriptor>> GetObligationsAsync(
         CancellationToken ct = default)
+        => await _repository.GetObligationsAsync(ct);
+
+    // ════════════════════════════════════════════════════════════════════
+    // System templates
+    // ════════════════════════════════════════════════════════════════════
+
+    /// <inheritdoc/>
+    public async Task<bool> SaveSystemTemplateAsync(
+        string role,
+        string templateJson,
+        int incomingRevision,
+        CancellationToken ct = default)
     {
-        return await _repository.GetObligationsAsync(ct);
+        var canonical = ValidateRole(role);
+        if (canonical is null)
+        {
+            _logger.LogWarning("SaveSystemTemplateAsync: unknown role '{Role}' — ignored", role);
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(templateJson))
+        {
+            _logger.LogWarning("SaveSystemTemplateAsync [{Role}]: empty templateJson — ignored", canonical);
+            return false;
+        }
+        if (incomingRevision < 1)
+        {
+            _logger.LogWarning("SaveSystemTemplateAsync [{Role}]: invalid revision {R} — ignored", canonical, incomingRevision);
+            return false;
+        }
+
+        return await _repository.UpsertSystemTemplateAsync(canonical, templateJson, incomingRevision, ct);
+    }
+
+    /// <inheritdoc/>
+    public async Task<string?> GetSystemTemplateJsonAsync(string role, CancellationToken ct = default)
+    {
+        var canonical = ValidateRole(role);
+        if (canonical is null) return null;
+        return await _repository.GetSystemTemplateJsonAsync(canonical, ct);
+    }
+
+    /// <inheritdoc/>
+    public async Task<int> GetSystemTemplateRevisionAsync(string role, CancellationToken ct = default)
+    {
+        var canonical = ValidateRole(role);
+        if (canonical is null) return 0;
+        return await _repository.GetSystemTemplateRevisionAsync(canonical, ct);
+    }
+
+    /// <inheritdoc/>
+    public async Task<Dictionary<string, int>> GetSystemTemplateRevisionsAsync(
+        CancellationToken ct = default)
+    {
+        var roles = new[] { ObligationRole.Relay, ObligationRole.Dht, ObligationRole.BlockStore };
+        var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var role in roles)
+        {
+            try
+            {
+                var revision = await _repository.GetSystemTemplateRevisionAsync(role, ct);
+                if (revision > 0)
+                    result[role] = revision;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Could not read system template revision for role '{Role}' — reporting 0",
+                    role);
+            }
+        }
+
+        return result;
     }
 
     // ════════════════════════════════════════════════════════════════════
     // Private helpers
     // ════════════════════════════════════════════════════════════════════
 
-    /// <summary>
-    /// Validates and canonicalises <paramref name="role"/>.
-    /// Returns the lower-case canonical name, or <c>null</c> if unrecognised.
-    /// Prevents open-ended database lookups from controller inputs.
-    /// </summary>
-    private static string? ValidateRole(string? role) =>
-        ObligationRole.Canonicalise(role);
+    private static string? ValidateRole(string? role) => ObligationRole.Canonicalise(role);
 
-    /// <summary>
-    /// Re-enforces 0600 on the SQLite file exactly once per service lifetime.
-    /// Idempotent — safe to call from multiple threads; the Interlocked compare-exchange
-    /// guarantees only one thread runs the check.
-    /// </summary>
     private void EnsureFilePermissionsOnce()
     {
-        if (Interlocked.CompareExchange(ref _permissionCheckDone, 1, 0) != 0)
-            return;
-
-        if (OperatingSystem.IsWindows())
-            return;
+        if (Interlocked.CompareExchange(ref _permissionCheckDone, 1, 0) != 0) return;
+        if (OperatingSystem.IsWindows()) return;
 
         try
         {
             var path = _repository.DatabasePath;
             if (File.Exists(path))
             {
-                File.SetUnixFileMode(path,
-                    UnixFileMode.UserRead | UnixFileMode.UserWrite);
-
-                _logger.LogDebug(
-                    "Confirmed 0600 permissions on obligation-state.db at {Path}", path);
+                File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                _logger.LogDebug("Confirmed 0600 permissions on obligation-state.db at {Path}", path);
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex,
-                "Could not enforce 0600 permissions on obligation-state.db — " +
-                "the file may be readable by other OS users");
+            _logger.LogWarning(ex, "Could not enforce 0600 on obligation-state.db — may be world-readable");
         }
     }
 }
