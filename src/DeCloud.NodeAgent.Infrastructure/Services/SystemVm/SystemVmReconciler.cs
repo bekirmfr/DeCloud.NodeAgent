@@ -1,12 +1,16 @@
-﻿using DeCloud.NodeAgent.Core.Interfaces.State;
+﻿using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Core.Models.Reality;
 using DeCloud.NodeAgent.Core.Models.State;
 using DeCloud.NodeAgent.Core.Models.SystemVm;
+using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using System.Runtime.InteropServices;
+using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Infrastructure.Services.SystemVm;
 
@@ -29,8 +33,7 @@ public enum MatrixAction
 
 /// <summary>
 /// The outcome of one matrix cell evaluation: what to do and a human-readable
-/// explanation of why. Used for shadow-mode logging and, in P6, for structured
-/// audit trails.
+/// explanation of why.
 /// </summary>
 public sealed record MatrixDecision(MatrixAction Action, string Reason);
 
@@ -40,55 +43,54 @@ public sealed record MatrixDecision(MatrixAction Action, string Reason);
 /// Node-side system VM reconciliation loop (SYSTEM_VM_DESIGN.md §5).
 ///
 /// Every <see cref="ReconcileInterval"/> this service evaluates the three-axis
-/// reconciliation matrix for each of the three canonical system VM roles
-/// (relay, dht, blockstore):
+/// reconciliation matrix for each of the three canonical system VM roles:
 ///
 /// <code>
 ///   (intent, reality, pending) → MatrixAction
 /// </code>
 ///
-/// <b>P5 — shadow mode.</b> The matrix runs fully but <b>does not act</b>.
-/// Decisions are logged at <c>Information</c> level with a <c>[SHADOW]</c>
-/// prefix so operators can verify they match expectations before P6 cuts over.
-/// Steady-state <c>Wait</c> decisions are logged at <c>Debug</c> to avoid noise.
+/// <b>P6 — fully live.</b>
 ///
-/// The week-long soak in shadow mode is the safety gate before P6. Every
-/// WARNING-level discrepancy during the soak should be triaged and explained.
-/// Once all decisions match orchestrator behaviour and no unexpected events
-/// appear, P6 is safe to ship.
+/// <b>IssueDelete:</b> calls <see cref="IVmManager.DeleteVmAsync"/> directly.
+/// Fully autonomous — no orchestrator contact required.
 ///
-/// <b>P6 upgrade path.</b> Replace the shadow-mode logging block in
-/// <see cref="RunCycleAsync"/> with actual command issuance. The <see cref="Decide"/>
-/// method and the <see cref="MatrixDecision"/> model stay unchanged — only the
-/// consumer of the decision changes.
+/// <b>IssueCreate:</b> reads the system template from local SQLite
+/// (<see cref="IObligationStateService.GetSystemTemplateJsonAsync"/>), verifies
+/// all artifacts are cached (<see cref="IArtifactCacheService"/>), builds a
+/// <see cref="VmSpec"/> and calls <see cref="IVmManager.CreateVmAsync"/> directly.
+/// Cloud-init identity state is NOT injected here — system VMs query
+/// <c>http://192.168.122.1:5100/api/obligations/{role}/state</c> at boot time
+/// (SYSTEM_VM_DESIGN.md §4.8). LibvirtVmManager handles <c>__NODE_ID__</c>,
+/// <c>__ORCHESTRATOR_URL__</c>, <c>__HOSTNAME__</c>, <c>__TIMESTAMP__</c>
+/// substitution from its own node metadata — the reconciler only needs to
+/// substitute artifact URL variables.
+///
+/// <b>Orchestrator cooperation:</b> the orchestrator's
+/// <c>SystemVmReconciliationService</c> is disabled in P7 (after soak).
+/// Until P7 ships, both systems run concurrently — the node handles deletes,
+/// the orchestrator handles the gaps until templates are seeded in P10.
+/// This causes no conflict: the orchestrator's <c>VerifyActiveAsync</c> sees
+/// a missing VM and re-deploys — which is exactly correct after a node-driven
+/// delete. The node's reconciler skips Create when no template is available.
 /// </summary>
 public sealed class SystemVmReconciler : BackgroundService
 {
     // ── Constants ───────────────────────────────────────────────────────
 
-    /// <summary>How often the matrix runs. 30s matches the heartbeat interval.</summary>
     private static readonly TimeSpan ReconcileInterval = TimeSpan.FromSeconds(30);
-
-    /// <summary>
-    /// How long before an outstanding command is declared timed-out and swept.
-    /// 20 minutes covers cold-cache cloud-init (artifact download + binary extraction).
-    /// </summary>
     private static readonly TimeSpan CommandTimeout = TimeSpan.FromMinutes(20);
-
-    /// <summary>
-    /// Startup delay before the first cycle. Gives <c>VmManagerInitializationService</c>
-    /// time to populate the in-memory VM list from libvirt before we project reality.
-    /// </summary>
     private static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(10);
 
-    /// <summary>
-    /// The complete set of roles this reconciler is responsible for.
-    /// Iterating this set (rather than the obligation list alone) ensures the matrix
-    /// also evaluates <c>intent=no</c> cells — catching stray VMs for roles the node
-    /// is no longer obligated to run.
-    /// </summary>
     private static readonly IReadOnlyList<string> CanonicalRoles =
         [ObligationRole.Relay, ObligationRole.Dht, ObligationRole.BlockStore];
+
+    private static readonly JsonSerializerOptions JsonOpts = new()
+    {
+        PropertyNameCaseInsensitive = true,
+    };
+
+    // virbr0 bridge IP from which VMs fetch artifacts and identity.
+    private const string ArtifactBaseUrl = "http://192.168.122.1:5100/api/artifacts";
 
     // ── Dependencies ────────────────────────────────────────────────────
 
@@ -96,21 +98,28 @@ public sealed class SystemVmReconciler : BackgroundService
     private readonly IIntentComputation _intent;
     private readonly IRealityProjection _reality;
     private readonly IOutstandingCommands _outstanding;
+    private readonly IVmManager _vmManager;
+    private readonly IArtifactCacheService _artifactCache;
+    private readonly VmRepository _repository;
     private readonly ILogger<SystemVmReconciler> _logger;
-
-    // ── Constructor ─────────────────────────────────────────────────────
 
     public SystemVmReconciler(
         IObligationStateService obligationState,
         IIntentComputation intent,
         IRealityProjection reality,
         IOutstandingCommands outstanding,
+        IVmManager vmManager,
+        IArtifactCacheService artifactCache,
+        VmRepository repository,
         ILogger<SystemVmReconciler> logger)
     {
         _obligationState = obligationState;
         _intent = intent;
         _reality = reality;
         _outstanding = outstanding;
+        _vmManager = vmManager;
+        _artifactCache = artifactCache;
+        _repository = repository;
         _logger = logger;
     }
 
@@ -119,11 +128,8 @@ public sealed class SystemVmReconciler : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
         _logger.LogInformation(
-            "SystemVmReconciler starting in SHADOW mode — decisions will be logged " +
-            "but not acted upon. Shadow soak target: ≥1 week with no unexpected " +
-            "WARNING-level discrepancies before P6 cutover.");
+            "SystemVmReconciler started — Delete and Create are LIVE.");
 
-        // Short delay so the VM manager can populate its in-memory list from libvirt.
         await Task.Delay(StartupDelay, ct);
 
         while (!ct.IsCancellationRequested)
@@ -138,7 +144,8 @@ public sealed class SystemVmReconciler : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "SystemVmReconciler: unhandled exception in cycle — will retry");
+                _logger.LogError(ex,
+                    "SystemVmReconciler: unhandled exception in cycle — will retry");
             }
 
             await Task.Delay(ReconcileInterval, ct);
@@ -149,143 +156,455 @@ public sealed class SystemVmReconciler : BackgroundService
 
     // ── Cycle ────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// One full evaluation of the matrix across all canonical roles.
-    /// Shadow mode: logs decisions, does not act.
-    /// </summary>
     private async Task RunCycleAsync(CancellationToken ct)
     {
-        // Fetch the obligation list once per cycle — all role evaluations
-        // share the same snapshot so intent decisions are consistent.
         var obligations = await _obligationState.GetObligationsAsync(ct);
 
         foreach (var role in CanonicalRoles)
         {
             try
             {
-                EvaluateRole(role, obligations);
+                await EvaluateRoleAsync(role, obligations, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex,
-                    "SystemVmReconciler: exception evaluating role '{Role}' — skipping this role this cycle",
+                    "SystemVmReconciler: exception evaluating role '{Role}' — skipping this cycle",
                     role);
             }
         }
 
-        // Sweep commands that have been outstanding longer than CommandTimeout.
-        // These are not failures per se — the ack may have been missed after a
-        // restart. Sweeping returns the slot to None so the next cycle re-evaluates
-        // from current reality. The libvirt duplicate-name guard makes re-issue safe.
         var swept = _outstanding.SweepExpired(CommandTimeout);
         if (swept > 0)
         {
             _logger.LogWarning(
                 "SystemVmReconciler: swept {Count} timed-out outstanding commands — " +
-                "next cycle will re-evaluate those roles from current reality",
+                "next cycle re-evaluates from current reality",
                 swept);
         }
     }
 
     // ── Per-role evaluation ──────────────────────────────────────────────
 
-    private void EvaluateRole(string role, IReadOnlyList<ObligationDescriptor> obligations)
+    private async Task EvaluateRoleAsync(
+        string role,
+        IReadOnlyList<ObligationDescriptor> obligations,
+        CancellationToken ct)
     {
-        // ── Axis 1: Intent ──────────────────────────────────────────────
         var intent = _intent.Compute(role, obligations);
-
-        // ── Axis 2: Reality ─────────────────────────────────────────────
         var reality = _reality.Project(role);
-
-        // ── Axis 3: Pending ─────────────────────────────────────────────
         var hasPending = _outstanding.TryGet(role, out var pending);
-        OutstandingCommand? pendingOrNull = hasPending ? pending : null;
+        var pendingOrNull = hasPending ? pending : null;
 
-        // ── Decision ────────────────────────────────────────────────────
         var decision = Decide(intent, reality, pendingOrNull);
-
-        // ── Shadow-mode logging ──────────────────────────────────────────
-        // Steady-state Waits are Debug (every 30s per role × 3 = 90 log lines/min
-        // at Info is too noisy for production). Action decisions are Info —
-        // these are the signal the soak week is looking for.
 
         var pendingDesc = pendingOrNull is null
             ? "none"
             : $"{pendingOrNull.Kind}:{pendingOrNull.CommandId[..8]}";
 
-        if (decision.Action == MatrixAction.Wait)
+        switch (decision.Action)
         {
-            _logger.LogDebug(
-                "[SHADOW] [{Role}] intent={Want}/{Deps} reality={Reality} pending={Pending} → Wait — {Reason}",
-                role,
-                intent.WantDeployed ? "yes" : "no",
-                intent.DepsMet ? "depsMet" : "!depsMet",
-                reality.State,
-                pendingDesc,
-                decision.Reason);
+            case MatrixAction.Wait:
+                _logger.LogDebug(
+                    "[{Role}] intent={Want}/{Deps} reality={Reality} pending={Pending} → Wait — {Reason}",
+                    role,
+                    intent.WantDeployed ? "yes" : "no",
+                    intent.DepsMet ? "depsMet" : "!depsMet",
+                    reality.State, pendingDesc, decision.Reason);
+                break;
+
+            case MatrixAction.IssueDelete:
+                _logger.LogInformation(
+                    "[{Role}] intent={Want}/{Deps} reality={Reality}({VmState}) pending={Pending} → Delete {VmId} — {Reason}",
+                    role,
+                    intent.WantDeployed ? "yes" : "no",
+                    intent.DepsMet ? "depsMet" : "!depsMet",
+                    reality.State, reality.VmState?.ToString() ?? "-",
+                    pendingDesc, reality.VmId, decision.Reason);
+                await ActDeleteAsync(role, reality.VmId!, ct);
+                break;
+
+            case MatrixAction.IssueCreate:
+                _logger.LogInformation(
+                    "[{Role}] intent={Want}/{Deps} reality={Reality} pending={Pending} → Create — {Reason}",
+                    role,
+                    intent.WantDeployed ? "yes" : "no",
+                    intent.DepsMet ? "depsMet" : "!depsMet",
+                    reality.State, pendingDesc, decision.Reason);
+                await ActCreateAsync(role, ct);
+                break;
         }
-        else
+    }
+
+    // ── Delete action ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Performs a live system VM deletion. Sets the outstanding-command entry
+    /// before calling so concurrent readers see the correct state. Clears it
+    /// in <c>finally</c> so the next cycle always gets a fresh evaluation.
+    ///
+    /// On success: next cycle projects <see cref="Reality.None"/> and, if the
+    /// obligation still exists, the orchestrator's reconcile loop (or the node's
+    /// reconciler post-P10 seeding) deploys a replacement.
+    ///
+    /// On failure: next cycle projects <see cref="Reality.Unhealthy"/> → matrix
+    /// issues another Delete. libvirt delete is idempotent for non-existent domains.
+    ///
+    /// Note on NAT cleanup: relay VM iptables rules are swept within ~60s by
+    /// <c>VmHealthService.CleanStaleRelayNatIfNotRelayNodeAsync</c>.
+    /// </summary>
+    private async Task ActDeleteAsync(string role, string vmId, CancellationToken ct)
+    {
+        var commandId = Guid.NewGuid().ToString();
+
+        _outstanding.Set(role, new OutstandingCommand
         {
-            // IssueCreate or IssueDelete — log at Information so it's
-            // visible without enabling Debug on the whole namespace.
+            CommandId = commandId,
+            Kind = OutstandingCommandKind.Delete,
+            VmId = vmId,
+            IssuedAt = DateTime.UtcNow,
+        });
+
+        try
+        {
+            var result = await _vmManager.DeleteVmAsync(vmId, ct);
+
+            if (result.Success)
+            {
+                _logger.LogInformation(
+                    "SystemVmReconciler [{Role}]: VM {VmId} deleted successfully",
+                    role, vmId);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "SystemVmReconciler [{Role}]: delete VM {VmId} returned failure — {Error}. " +
+                    "Will retry on next cycle.",
+                    role, vmId, result.ErrorMessage);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex,
+                "SystemVmReconciler [{Role}]: delete VM {VmId} threw — will retry on next cycle",
+                role, vmId);
+        }
+        finally
+        {
+            _outstanding.Clear(role);
+        }
+    }
+
+    // ── Create action ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Performs a live system VM creation using the locally-cached system template.
+    ///
+    /// Steps:
+    ///   1. Fetch template JSON from SQLite — skip if absent (P10 hasn't seeded yet).
+    ///   2. Deserialise to <see cref="SystemVmTemplate"/>.
+    ///   3. Verify artifacts are cached; prefetch any that are missing.
+    ///      Skip if any critical (Binary) artifact is still missing after prefetch.
+    ///   4. Build the cloud-init UserData by substituting artifact URL/SHA256 variables
+    ///      in the template content. LibvirtVmManager handles all other variables
+    ///      (__NODE_ID__, __ORCHESTRATOR_URL__, __HOSTNAME__, __TIMESTAMP__) from its
+    ///      own node metadata at ISO-creation time.
+    ///   5. Build <see cref="VmSpec"/> from the template resource spec.
+    ///   6. Register an outstanding command before dispatching.
+    ///   7. Call <see cref="IVmManager.CreateVmAsync"/>.
+    ///   8. On success: look up the newly created <see cref="VmInstance"/>,
+    ///      set <see cref="VmInstance.Services"/> from the template declarations,
+    ///      persist via <see cref="VmRepository"/>.
+    ///   9. Clear the outstanding command in <c>finally</c>.
+    /// </summary>
+    private async Task ActCreateAsync(string role, CancellationToken ct)
+    {
+        // ── 1. Fetch template ───────────────────────────────────────────
+        var templateJson = await _obligationState.GetSystemTemplateJsonAsync(role, ct);
+        if (templateJson is null)
+        {
             _logger.LogInformation(
-                "[SHADOW] [{Role}] intent={Want}/{Deps} reality={Reality}({VmState}) pending={Pending} → WOULD {Action} — {Reason}",
-                role,
-                intent.WantDeployed ? "yes" : "no",
-                intent.DepsMet ? "depsMet" : "!depsMet",
-                reality.State,
-                reality.VmState?.ToString() ?? "-",
-                pendingDesc,
-                decision.Action,
-                decision.Reason);
+                "SystemVmReconciler [{Role}]: no system template in SQLite — " +
+                "orchestrator hasn't seeded it yet (P10). Skipping Create this cycle.",
+                role);
+            return;
         }
+
+        // ── 2. Deserialise ──────────────────────────────────────────────
+        SystemVmTemplate template;
+        try
+        {
+            template = JsonSerializer.Deserialize<SystemVmTemplate>(templateJson, JsonOpts)
+                       ?? throw new InvalidOperationException("Deserialised to null");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "SystemVmReconciler [{Role}]: failed to deserialise system template — " +
+                "template JSON may be corrupt. Skipping Create.",
+                role);
+            return;
+        }
+
+        // ── 3. Verify / prefetch artifacts ──────────────────────────────
+        var arch = RuntimeInformation.ProcessArchitecture == Architecture.Arm64
+            ? "arm64" : "amd64";
+
+        if (template.Artifacts.Count > 0)
+        {
+            await _artifactCache.PrefetchAsync(template.Artifacts, arch, ct);
+
+            // Verify every architecture-appropriate binary is cached.
+            // A missing binary means the VM will fail to start — better to skip
+            // and retry next cycle than to deploy a broken VM.
+            var missingBinary = false;
+            foreach (var artifact in template.Artifacts)
+            {
+                if (artifact.Type != ArtifactType.Binary) continue;
+                if (artifact.Architecture is not null &&
+                    !string.Equals(artifact.Architecture, arch, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var cached = await _artifactCache.GetLocalPathAsync(artifact.Sha256, ct);
+                if (cached is null)
+                {
+                    _logger.LogWarning(
+                        "SystemVmReconciler [{Role}]: binary artifact '{Name}' ({Sha256}) " +
+                        "not in cache after prefetch — skipping Create this cycle.",
+                        role, artifact.Name, artifact.Sha256[..12]);
+                    missingBinary = true;
+                }
+            }
+
+            if (missingBinary) return;
+        }
+
+        // ── 4. Substitute artifact variables in cloud-init ──────────────
+        var cloudInit = SubstituteArtifactVariables(
+            template.CloudInitContent, template.Artifacts, arch);
+
+        // ── 5. Build VmSpec ─────────────────────────────────────────────
+        var vmId = Guid.NewGuid().ToString();
+        var vmName = $"{role}-{vmId[..8]}";
+
+        var vmType = role switch
+        {
+            ObligationRole.Relay => VmType.Relay,
+            ObligationRole.Dht => VmType.Dht,
+            ObligationRole.BlockStore => VmType.BlockStore,
+            _ => throw new ArgumentException($"Unknown role: {role}")
+        };
+
+        var vmSpec = new VmSpec
+        {
+            Id = vmId,
+            Name = vmName,
+            VmType = vmType,
+            VirtualCpuCores = template.VirtualCpuCores > 0 ? template.VirtualCpuCores : 1,
+            MemoryBytes = template.MemoryBytes > 0
+                                  ? template.MemoryBytes
+                                  : 512L * 1024 * 1024,
+            DiskBytes = template.DiskBytes > 0
+                                  ? template.DiskBytes
+                                  : 2L * 1024 * 1024 * 1024,
+            BaseImageUrl = template.BaseImageUrl,
+            BaseImageHash = template.BaseImageHash,
+            CloudInitUserData = cloudInit,
+            ReplicationFactor = 0,  // system VMs are never replicated
+            Labels = new Dictionary<string, string>
+            {
+                // Carried into LibvirtVmManager's variable substitution pipeline
+                // as spec.Labels["node-arch"] for ResolveArtifactVariables.
+                ["node-arch"] = arch,
+                ["system-vm-role"] = role,
+                ["system-vm-revision"] = template.Revision.ToString(),
+            }
+        };
+
+        // ── 6. Register outstanding command ─────────────────────────────
+        var commandId = Guid.NewGuid().ToString();
+        _outstanding.Set(role, new OutstandingCommand
+        {
+            CommandId = commandId,
+            Kind = OutstandingCommandKind.Create,
+            VmId = vmId,
+            IssuedAt = DateTime.UtcNow,
+        });
+
+        // ── 7–9. Create VM, set services, clear outstanding ─────────────
+        try
+        {
+            var result = await _vmManager.CreateVmAsync(vmSpec, password: null, ct);
+
+            if (!result.Success)
+            {
+                _logger.LogError(
+                    "SystemVmReconciler [{Role}]: CreateVm failed — {Error}. " +
+                    "Will retry on next cycle.",
+                    role, result.ErrorMessage);
+                return;
+            }
+
+            _logger.LogInformation(
+                "SystemVmReconciler [{Role}]: VM {VmId} created successfully",
+                role, vmId);
+
+            // ── 8. Post-set services so VmReadinessMonitor knows what to probe ──
+            if (template.Services.Count > 0)
+            {
+                await SetVmServicesAsync(vmId, template.Services, ct);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex,
+                "SystemVmReconciler [{Role}]: CreateVm threw — will retry on next cycle",
+                role);
+        }
+        finally
+        {
+            // Always clear. Next cycle evaluates from fresh reality projection.
+            // Create succeeded → reality = Running (eventually) → Healthy.
+            // Create failed   → reality = None → matrix issues Create again.
+            _outstanding.Clear(role);
+        }
+    }
+
+    // ── Service post-set ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// After a successful CreateVm, look up the newly created
+    /// <see cref="VmInstance"/>, build its service readiness list from the
+    /// template declarations, and persist via <see cref="VmRepository"/>.
+    ///
+    /// This mirrors <c>CommandProcessorService.HandleCreateVmAsync</c>'s
+    /// <c>ParseServiceDefinitions</c> + <c>SaveVmAsync</c> pattern.
+    /// Without this, VmReadinessMonitor has no services to probe and the VM
+    /// can never reach <see cref="ServiceReadiness.Ready"/>.
+    /// </summary>
+    private async Task SetVmServicesAsync(
+        string vmId,
+        IReadOnlyList<SystemVmServiceDeclaration> declarations,
+        CancellationToken ct)
+    {
+        try
+        {
+            var vm = _vmManager.GetAllVms().FirstOrDefault(v => v.VmId == vmId);
+            if (vm is null)
+            {
+                _logger.LogWarning(
+                    "SystemVmReconciler: VM {VmId} not found in VmManager after create — " +
+                    "services not registered; VmReadinessMonitor will use defaults",
+                    vmId);
+                return;
+            }
+
+            vm.Services = declarations.Select(d => new VmServiceStatus
+            {
+                Name = d.Name,
+                Port = d.Port,
+                Protocol = d.Protocol,
+                CheckType = Enum.TryParse<CheckType>(d.CheckType, ignoreCase: true, out var ct2)
+                                  ? ct2 : CheckType.CloudInitDone,
+                HttpPath = d.HttpPath,
+                TimeoutSeconds = d.TimeoutSeconds,
+                Status = ServiceReadiness.Pending,
+            }).ToList();
+
+            await _repository.SaveVmAsync(vm);
+
+            _logger.LogDebug(
+                "SystemVmReconciler: registered {Count} service checks for VM {VmId}",
+                vm.Services.Count, vmId);
+        }
+        catch (Exception ex)
+        {
+            // Non-fatal — VmReadinessMonitor has fallback logic for VMs
+            // with no service declarations.
+            _logger.LogWarning(ex,
+                "SystemVmReconciler: failed to set services for VM {VmId} — " +
+                "readiness probing may be delayed",
+                vmId);
+        }
+    }
+
+    // ── Artifact variable substitution ───────────────────────────────────
+
+    /// <summary>
+    /// Replace <c>${ARTIFACT_URL:name}</c> and <c>${ARTIFACT_SHA256:name}</c>
+    /// placeholders in the cloud-init template with the local artifact cache
+    /// URLs and SHA256 digests, filtered by architecture.
+    ///
+    /// All artifact URLs resolve to the local node-agent cache endpoint:
+    /// <c>http://192.168.122.1:5100/api/artifacts/{sha256}</c>
+    ///
+    /// The VM never sees the upstream SourceUrl — it always fetches from the
+    /// local cache, which the node agent has pre-verified.
+    /// </summary>
+    private static string SubstituteArtifactVariables(
+        string cloudInitContent,
+        IReadOnlyList<TemplateArtifact> artifacts,
+        string nodeArch)
+    {
+        if (artifacts.Count == 0) return cloudInitContent;
+
+        var result = cloudInitContent;
+
+        foreach (var artifact in artifacts)
+        {
+            // Skip arch-specific artifacts that don't match this node.
+            if (artifact.Architecture is not null &&
+                !string.Equals(artifact.Architecture, nodeArch,
+                    StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var urlKey = $"${{ARTIFACT_URL:{artifact.Name}}}";
+            var sha256Key = $"${{ARTIFACT_SHA256:{artifact.Name}}}";
+            var localUrl = $"{ArtifactBaseUrl}/{artifact.Sha256}";
+
+            result = result
+                .Replace(urlKey, localUrl, StringComparison.Ordinal)
+                .Replace(sha256Key, artifact.Sha256, StringComparison.Ordinal);
+        }
+
+        return result;
     }
 
     // ── Matrix decision function ─────────────────────────────────────────
 
     /// <summary>
-    /// The reconciliation matrix. Pure function — no I/O, no side effects.
-    ///
-    /// Full truth table:
+    /// The reconciliation matrix. Pure static function — no I/O, no side effects.
     ///
     /// <code>
     /// intent.WantDeployed=false
-    ///   reality=None,      pending=*         → Wait       (no obligation, no VM — converged)
-    ///   reality≠None,      pending=Delete    → Wait       (stray VM, delete in flight)
-    ///   reality≠None,      pending≠Delete    → IssueDelete (stray VM — obligation removed)
+    ///   reality=None,      pending=*         → Wait       (converged)
+    ///   reality≠None,      pending=Delete    → Wait       (delete in flight)
+    ///   reality≠None,      pending≠Delete    → IssueDelete (stray VM)
     ///
     /// intent.WantDeployed=true
-    ///   reality=Healthy,   pending=*         → Wait       (converged — running and ready)
-    ///   reality=None,      pending=Create    → Wait       (create in flight — wait)
-    ///   reality=None,      pending=Delete    → Wait       (delete in flight — will create next)
-    ///   reality=None,      pending=null, !depsMet → Wait  (obligation active, waiting on deps)
+    ///   reality=Healthy,   pending=*         → Wait       (converged)
+    ///   reality=None,      pending=Create    → Wait       (create in flight)
+    ///   reality=None,      pending=Delete    → Wait       (delete in flight — create next)
+    ///   reality=None,      pending=null, !depsMet → Wait  (waiting on deps)
     ///   reality=None,      pending=null, depsMet  → IssueCreate
     ///   reality=Unhealthy, pending=Delete    → Wait       (delete in flight)
-    ///   reality=Unhealthy, pending=Create    → Wait       (create in flight, not yet converged)
-    ///   reality=Unhealthy, pending=null      → IssueDelete (unhealthy — delete for redeploy)
+    ///   reality=Unhealthy, pending=Create    → Wait       (create in flight, not converged yet)
+    ///   reality=Unhealthy, pending=null      → IssueDelete (delete for redeploy)
     /// </code>
-    ///
-    /// Note on Unhealthy+Create: the VM exists but isn't Healthy yet (still
-    /// booting, cloud-init running, services not ready). This is the expected
-    /// transient state after a Create. Wait until it converges to Healthy or
-    /// the command expires (sweeper), which will then produce Unhealthy+null.
-    ///
-    /// Note on Healthy+pending: a command is in flight but the VM is already
-    /// Healthy. Could be a stale Create ack that arrived late, or a Delete that
-    /// hasn't happened yet. Log at Warning in the caller — this is unexpected.
-    /// Conservative: Wait and let the sweeper clear the stale entry.
     /// </summary>
     private static MatrixDecision Decide(
         Intent intent,
         RealitySnapshot reality,
         OutstandingCommand? pending)
     {
-        // ── No obligation for this role ──────────────────────────────────
         if (!intent.WantDeployed)
         {
             if (reality.State == Reality.None)
-                return new(MatrixAction.Wait,
-                    "no obligation, no VM — converged");
+                return new(MatrixAction.Wait, "no obligation, no VM — converged");
 
             if (pending?.Kind == OutstandingCommandKind.Delete)
                 return new(MatrixAction.Wait,
@@ -295,19 +614,12 @@ public sealed class SystemVmReconciler : BackgroundService
                 $"no obligation but VM {reality.VmId} exists ({reality.VmState}) — deleting stray");
         }
 
-        // ── Obligation exists — want a healthy VM ────────────────────────
         switch (reality.State)
         {
             case Reality.Healthy:
-                // Steady state. Log at caller as Debug.
                 if (pending is not null)
-                {
-                    // Unexpected — VM is Healthy but there's a command in flight.
-                    // This can happen if a Delete was issued just as the VM finished booting,
-                    // or if a Create ack arrived late. Conservative: Wait; sweeper will clear.
                     return new(MatrixAction.Wait,
-                        $"VM healthy but {pending.Kind} command {pending.CommandId[..8]} still outstanding — waiting for sweep or ack");
-                }
+                        $"VM healthy but {pending.Kind} command {pending.CommandId[..8]} still outstanding — waiting for sweep");
                 return new(MatrixAction.Wait, "converged — VM running and fully ready");
 
             case Reality.None:
@@ -317,11 +629,12 @@ public sealed class SystemVmReconciler : BackgroundService
                 if (pending?.Kind == OutstandingCommandKind.Delete)
                     return new(MatrixAction.Wait, "no VM, delete in flight — will create next cycle when clear");
 
-                // No pending command. May or may not create depending on deps.
                 if (!intent.DepsMet)
-                    return new(MatrixAction.Wait, "obligation active, no VM, dependencies not yet Healthy");
+                    return new(MatrixAction.Wait,
+                        "obligation active, no VM, dependencies not yet Healthy");
 
-                return new(MatrixAction.IssueCreate, "obligation active, no VM, deps met — creating");
+                return new(MatrixAction.IssueCreate,
+                    "obligation active, no VM, deps met — creating");
 
             case Reality.Unhealthy:
                 if (pending?.Kind == OutstandingCommandKind.Delete)
@@ -329,13 +642,12 @@ public sealed class SystemVmReconciler : BackgroundService
 
                 if (pending?.Kind == OutstandingCommandKind.Create)
                     return new(MatrixAction.Wait,
-                        $"VM {reality.VmId} exists but not Healthy yet ({reality.VmState}) — create in flight, waiting to converge");
+                        $"VM {reality.VmId} not Healthy yet ({reality.VmState}) — create in flight, waiting to converge");
 
                 return new(MatrixAction.IssueDelete,
                     $"VM {reality.VmId} unhealthy ({reality.VmState}) — deleting for redeploy");
 
             default:
-                // Should not be reachable — Reality only has three values.
                 return new(MatrixAction.Wait,
                     $"unhandled reality state {reality.State} — conservative wait");
         }
