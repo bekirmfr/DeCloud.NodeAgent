@@ -13,16 +13,24 @@ namespace DeCloud.NodeAgent.Infrastructure.Services;
 /// Default implementation of <see cref="IArtifactCacheService"/>.
 ///
 /// Stores artifacts as flat files in <c>{cacheDir}/{sha256}</c>. In-progress
-/// downloads land at <c>{cacheDir}/{sha256}.tmp</c> so a crash mid-download
-/// never leaves a corrupt completed-looking entry.
+/// HTTPS downloads land at <c>{cacheDir}/{sha256}.tmp</c> so a crash
+/// mid-download never leaves a corrupt entry.
 ///
-/// Thread safety: multiple concurrent calls for the same SHA256 are
-/// de-duplicated via a per-SHA256 <see cref="SemaphoreSlim"/>. Calls for
-/// different SHA256 values proceed in parallel.
+/// Supports two source schemes:
 ///
-/// Logging discipline: Info on first download; Debug on cache-hit (hot path,
-/// every VM prefetch would be noisy at Info); Warning on SHA256 mismatch,
-/// download failure, or verify-and-purge.
+/// <b>HTTPS:</b> Downloads from the author-controlled URL, verifies SHA256,
+/// stores atomically. Per-SHA256 semaphore de-duplicates concurrent downloads.
+///
+/// <b>data: URI:</b> Decodes the base64 payload inline (no network call),
+/// verifies SHA256, stores atomically. Because the bytes are already present
+/// in the artifact descriptor, this is always instantaneous.
+///
+/// Thread safety: concurrent calls for the same SHA256 are de-duplicated
+/// via per-SHA256 <see cref="SemaphoreSlim"/>. Different SHA256 values
+/// proceed in parallel.
+///
+/// Logging discipline: Info on first write; Debug on cache-hit; Warning on
+/// SHA256 mismatch, download failure, or corrupt-file purge.
 /// </summary>
 public sealed class ArtifactCacheService : IArtifactCacheService
 {
@@ -30,22 +38,17 @@ public sealed class ArtifactCacheService : IArtifactCacheService
     private readonly HttpClient _httpClient;
     private readonly ILogger<ArtifactCacheService> _logger;
 
-    // Per-SHA256 semaphores prevent concurrent downloads of the same artifact.
-    // The outer lock protects the dictionary; inner semaphores protect individual downloads.
-    private readonly Dictionary<string, SemaphoreSlim> _downloadLocks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, SemaphoreSlim> _locks = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _dictLock = new(1, 1);
-
-    // Named HttpClient registered in Program.cs with a 10-minute timeout for large binary downloads.
-    private const string HttpClientName = "ArtifactDownload";
 
     public ArtifactCacheService(
         string cacheDir,
         HttpClient httpClient,
         ILogger<ArtifactCacheService> logger)
     {
-        _cacheDir         = cacheDir;
+        _cacheDir   = cacheDir;
         _httpClient = httpClient;
-        _logger           = logger;
+        _logger     = logger;
 
         EnsureCacheDirectory();
     }
@@ -78,19 +81,23 @@ public sealed class ArtifactCacheService : IArtifactCacheService
             return finalPath;
         }
 
-        // Acquire per-SHA256 lock to prevent concurrent downloads.
+        // Acquire per-SHA256 lock to prevent concurrent duplicate work.
         var sem = await GetOrCreateLockAsync(sha256, ct);
         await sem.WaitAsync(ct);
         try
         {
-            // Re-check after acquiring — another thread may have completed the download.
+            // Re-check after lock — another caller may have completed the work.
             if (File.Exists(finalPath) && await VerifyFileAsync(finalPath, sha256, ct))
             {
                 _logger.LogDebug("ArtifactCache: hit {Sha256} (post-lock)", sha256[..12]);
                 return finalPath;
             }
 
-            await DownloadAndVerifyAsync(sha256, sourceUrl, finalPath, ct);
+            if (IsDataUri(sourceUrl))
+                await StoreFromDataUriAsync(sha256, sourceUrl, finalPath, ct);
+            else
+                await DownloadAndVerifyAsync(sha256, sourceUrl, finalPath, ct);
+
             return finalPath;
         }
         finally
@@ -107,9 +114,9 @@ public sealed class ArtifactCacheService : IArtifactCacheService
     {
         foreach (var artifact in artifacts)
         {
-            // Skip arch-specific artifacts for other architectures.
             if (artifact.Architecture is not null &&
-                !string.Equals(artifact.Architecture, nodeArchitecture, StringComparison.OrdinalIgnoreCase))
+                !string.Equals(artifact.Architecture, nodeArchitecture,
+                    StringComparison.OrdinalIgnoreCase))
             {
                 _logger.LogDebug(
                     "ArtifactCache: skipping {Name} (arch={Arch}, node={NodeArch})",
@@ -129,8 +136,6 @@ public sealed class ArtifactCacheService : IArtifactCacheService
             }
             catch (Exception ex)
             {
-                // One artifact failing must not abort the rest of the prefetch.
-                // The reconciler checks all artifacts are cached before dispatching Create.
                 _logger.LogWarning(ex,
                     "ArtifactCache: prefetch failed for {Name} ({Sha256}) — will retry on next template update",
                     artifact.Name, artifact.Sha256[..12]);
@@ -144,8 +149,7 @@ public sealed class ArtifactCacheService : IArtifactCacheService
         ValidateSha256(sha256);
         var path = CachePath(sha256);
 
-        if (!File.Exists(path))
-            return false;
+        if (!File.Exists(path)) return false;
 
         var ok = await VerifyFileAsync(path, sha256, ct);
         if (!ok)
@@ -163,12 +167,9 @@ public sealed class ArtifactCacheService : IArtifactCacheService
     public Task<bool> PurgeAsync(string sha256, CancellationToken ct = default)
     {
         ValidateSha256(sha256);
-        var path = CachePath(sha256);
-        var deleted = TryDeleteFile(path);
-
+        var deleted = TryDeleteFile(CachePath(sha256));
         if (deleted)
             _logger.LogInformation("ArtifactCache: purged {Sha256}", sha256[..12]);
-
         return Task.FromResult(deleted);
     }
 
@@ -186,13 +187,13 @@ public sealed class ArtifactCacheService : IArtifactCacheService
         if (totalBytes <= maxCacheBytes)
         {
             _logger.LogDebug(
-                "ArtifactCache: {TotalMb:F0} MB in cache, under {MaxMb:F0} MB limit — no pruning needed",
+                "ArtifactCache: {TotalMb:F0} MB under {MaxMb:F0} MB limit — no pruning",
                 totalBytes / 1_048_576.0, maxCacheBytes / 1_048_576.0);
             return;
         }
 
         _logger.LogInformation(
-            "ArtifactCache: {TotalMb:F0} MB exceeds {MaxMb:F0} MB limit — pruning LRU artifacts",
+            "ArtifactCache: {TotalMb:F0} MB exceeds {MaxMb:F0} MB limit — pruning LRU",
             totalBytes / 1_048_576.0, maxCacheBytes / 1_048_576.0);
 
         foreach (var file in files)
@@ -204,12 +205,91 @@ public sealed class ArtifactCacheService : IArtifactCacheService
             if (TryDeleteFile(file.FullName))
             {
                 totalBytes -= size;
-                _logger.LogDebug("ArtifactCache: pruned {FileName} ({Kb:F0} KB)", file.Name, size / 1024.0);
+                _logger.LogDebug("ArtifactCache: pruned {FileName} ({Kb:F0} KB)",
+                    file.Name, size / 1024.0);
             }
         }
     }
 
-    // ── Download and verify ──────────────────────────────────────────────
+    // ── Inline (data: URI) storage ───────────────────────────────────────
+
+    /// <summary>
+    /// Decode a <c>data:</c> URI and store the bytes as a cached artifact.
+    ///
+    /// Format: <c>data:{mediaType};base64,{base64payload}</c>
+    ///
+    /// Verifies SHA256 of the decoded bytes before writing to the final path.
+    /// Atomic: bytes land in a temp file, verified, then renamed.
+    ///
+    /// No network call — the bytes are already present in the URI.
+    /// Inline artifacts are instantaneous to "download".
+    /// </summary>
+    private async Task StoreFromDataUriAsync(
+        string sha256,
+        string dataUri,
+        string finalPath,
+        CancellationToken ct)
+    {
+        _logger.LogInformation(
+            "ArtifactCache: storing inline attachment {Sha256}",
+            sha256[..12]);
+
+        // Parse: data:{mediaType};base64,{payload}
+        // The base64 payload starts after the first comma.
+        var commaIndex = dataUri.IndexOf(',');
+        if (commaIndex < 0)
+            throw new ArgumentException(
+                $"Malformed data: URI for artifact {sha256[..12]} — no comma separator.");
+
+        var header = dataUri[..commaIndex];
+        if (!header.Contains(";base64", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException(
+                $"data: URI for artifact {sha256[..12]} must use base64 encoding " +
+                "(e.g., data:text/x-sh;base64,...).");
+
+        var base64Payload = dataUri[(commaIndex + 1)..].Trim();
+
+        byte[] bytes;
+        try
+        {
+            bytes = Convert.FromBase64String(base64Payload);
+        }
+        catch (FormatException ex)
+        {
+            throw new ArgumentException(
+                $"data: URI for artifact {sha256[..12]} contains invalid base64.", ex);
+        }
+
+        // Verify SHA256 of decoded bytes.
+        var actualHash = Convert.ToHexString(
+            SHA256.HashData(bytes)).ToLowerInvariant();
+
+        if (!string.Equals(actualHash, sha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"ArtifactCache: SHA256 mismatch for inline artifact. " +
+                $"Expected {sha256[..12]}, got {actualHash[..12]}. " +
+                "The data: URI bytes do not match the declared Sha256.");
+
+        // Atomic write: temp → rename.
+        var tmpPath = finalPath + ".tmp";
+        try
+        {
+            await File.WriteAllBytesAsync(tmpPath, bytes, ct);
+            File.Move(tmpPath, finalPath, overwrite: true);
+            EnforceFilePermissions(finalPath);
+
+            _logger.LogInformation(
+                "ArtifactCache: stored inline attachment {Sha256} ({Kb:F0} KB)",
+                sha256[..12], bytes.Length / 1024.0);
+        }
+        catch
+        {
+            TryDeleteFile(tmpPath);
+            throw;
+        }
+    }
+
+    // ── HTTPS download ───────────────────────────────────────────────────
 
     private async Task DownloadAndVerifyAsync(
         string sha256,
@@ -223,16 +303,13 @@ public sealed class ArtifactCacheService : IArtifactCacheService
             "ArtifactCache: downloading {Sha256} from {Url}",
             sha256[..12], sourceUrl);
 
-        var client = _httpClient;
-
         try
         {
-            using var response = await client.GetAsync(sourceUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+            using var response = await _httpClient.GetAsync(
+                sourceUrl, HttpCompletionOption.ResponseHeadersRead, ct);
             response.EnsureSuccessStatusCode();
 
             using var downloadStream = await response.Content.ReadAsStreamAsync(ct);
-
-            // Write to temp file while computing SHA256 in one streaming pass.
             using var sha = SHA256.Create();
             using var cryptoStream = new CryptoStream(downloadStream, sha, CryptoStreamMode.Read);
             using var fileStream = new FileStream(
@@ -241,8 +318,6 @@ public sealed class ArtifactCacheService : IArtifactCacheService
 
             await cryptoStream.CopyToAsync(fileStream, ct);
             await fileStream.FlushAsync(ct);
-
-            // Finalize the hash — required before reading sha.Hash.
             cryptoStream.FlushFinalBlock();
 
             var actualHash = Convert.ToHexString(sha.Hash!).ToLowerInvariant();
@@ -251,9 +326,9 @@ public sealed class ArtifactCacheService : IArtifactCacheService
             {
                 TryDeleteFile(tmpPath);
                 throw new InvalidOperationException(
-                    $"ArtifactCache: SHA256 mismatch for artifact from {sourceUrl}. " +
+                    $"ArtifactCache: SHA256 mismatch for {sourceUrl}. " +
                     $"Expected {sha256[..12]}, got {actualHash[..12]}. " +
-                    "The artifact at the source URL may have been tampered with or replaced.");
+                    "The artifact at the source URL may have been tampered with.");
             }
         }
         catch (Exception ex) when (ex is not InvalidOperationException && ex is not OperationCanceledException)
@@ -262,10 +337,7 @@ public sealed class ArtifactCacheService : IArtifactCacheService
             throw;
         }
 
-        // Atomic rename: temp → final.
         File.Move(tmpPath, finalPath, overwrite: true);
-
-        // Harden file permissions on Linux.
         EnforceFilePermissions(finalPath);
 
         _logger.LogInformation(
@@ -278,22 +350,21 @@ public sealed class ArtifactCacheService : IArtifactCacheService
     private string CachePath(string sha256) =>
         Path.Combine(_cacheDir, sha256.ToLowerInvariant());
 
-    private static async Task<bool> VerifyFileAsync(string path, string expectedSha256, CancellationToken ct)
+    private static async Task<bool> VerifyFileAsync(
+        string path, string expectedSha256, CancellationToken ct)
     {
         try
         {
             using var sha = SHA256.Create();
-            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, useAsync: true);
+            using var stream = new FileStream(
+                path, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, useAsync: true);
             var hash = await sha.ComputeHashAsync(stream, ct);
             return string.Equals(
                 Convert.ToHexString(hash).ToLowerInvariant(),
                 expectedSha256.ToLowerInvariant(),
                 StringComparison.Ordinal);
         }
-        catch
-        {
-            return false;
-        }
+        catch { return false; }
     }
 
     private async Task<SemaphoreSlim> GetOrCreateLockAsync(string sha256, CancellationToken ct)
@@ -301,17 +372,14 @@ public sealed class ArtifactCacheService : IArtifactCacheService
         await _dictLock.WaitAsync(ct);
         try
         {
-            if (!_downloadLocks.TryGetValue(sha256, out var sem))
+            if (!_locks.TryGetValue(sha256, out var sem))
             {
                 sem = new SemaphoreSlim(1, 1);
-                _downloadLocks[sha256] = sem;
+                _locks[sha256] = sem;
             }
             return sem;
         }
-        finally
-        {
-            _dictLock.Release();
-        }
+        finally { _dictLock.Release(); }
     }
 
     private void EnsureCacheDirectory()
@@ -321,20 +389,14 @@ public sealed class ArtifactCacheService : IArtifactCacheService
             Directory.CreateDirectory(_cacheDir);
             _logger.LogInformation("ArtifactCache: created cache directory at {Dir}", _cacheDir);
         }
-
         EnforceDirectoryPermissions(_cacheDir);
     }
 
     private static void EnforceFilePermissions(string path)
     {
         if (OperatingSystem.IsWindows()) return;
-        try
-        {
-            File.SetUnixFileMode(path,
-                UnixFileMode.UserRead | UnixFileMode.UserWrite |
-                UnixFileMode.GroupRead);
-        }
-        catch { /* Non-fatal — log at call site if needed */ }
+        try { File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead); }
+        catch { }
     }
 
     private static void EnforceDirectoryPermissions(string path)
@@ -346,7 +408,7 @@ public sealed class ArtifactCacheService : IArtifactCacheService
                 UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
                 UnixFileMode.GroupRead | UnixFileMode.GroupExecute);
         }
-        catch { /* Non-fatal */ }
+        catch { }
     }
 
     private static bool TryDeleteFile(string path)
@@ -359,13 +421,30 @@ public sealed class ArtifactCacheService : IArtifactCacheService
 
     private static void ValidateSha256(string sha256)
     {
-        if (sha256.Length != 64 || !sha256.All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
-            throw new ArgumentException($"Invalid SHA256: must be 64 lowercase hex characters. Got: '{sha256}'", nameof(sha256));
+        if (sha256.Length != 64 ||
+            !sha256.All(c =>
+                (c >= '0' && c <= '9') ||
+                (c >= 'a' && c <= 'f') ||
+                (c >= 'A' && c <= 'F')))
+            throw new ArgumentException(
+                $"Invalid SHA256: must be 64 hex characters. Got: '{sha256}'",
+                nameof(sha256));
     }
 
     private static void ValidateSourceUrl(string sourceUrl)
     {
+        if (IsDataUri(sourceUrl))
+        {
+            // data: URIs are allowed — validated at decode time.
+            return;
+        }
+
         if (!Uri.TryCreate(sourceUrl, UriKind.Absolute, out var uri) || uri.Scheme != "https")
-            throw new ArgumentException($"Invalid source URL: only HTTPS is accepted. Got: '{sourceUrl}'", nameof(sourceUrl));
+            throw new ArgumentException(
+                $"Invalid source URL: only HTTPS or data: URIs are accepted. Got: '{sourceUrl}'",
+                nameof(sourceUrl));
     }
+
+    private static bool IsDataUri(string url) =>
+        url.StartsWith("data:", StringComparison.OrdinalIgnoreCase);
 }
