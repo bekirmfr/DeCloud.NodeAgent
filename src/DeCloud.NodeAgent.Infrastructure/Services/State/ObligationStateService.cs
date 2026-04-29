@@ -186,10 +186,9 @@ public sealed class ObligationStateService : IObligationStateService
     public async Task<Dictionary<string, int>> GetSystemTemplateRevisionsAsync(
         CancellationToken ct = default)
     {
-        var roles = new[] { ObligationRole.Relay, ObligationRole.Dht, ObligationRole.BlockStore };
         var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var role in roles)
+        foreach (var role in ObligationRole.All)
         {
             try
             {
