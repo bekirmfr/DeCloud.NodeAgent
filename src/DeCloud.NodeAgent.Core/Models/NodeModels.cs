@@ -4,6 +4,16 @@ using Orchestrator.Models;
 
 namespace DeCloud.NodeAgent.Core.Models;
 
+/// <summary>
+/// Wire DTO for a single obligation received in the registration response.
+/// Mirrors <c>Orchestrator.Models.ObligationDescriptorPayload</c>.
+/// </summary>
+public class NodeObligationDescriptorDto
+{
+    public string Role { get; init; } = string.Empty;
+    public List<string> Deps { get; init; } = [];
+}
+
 public record NodeRegistrationResponse(
     string NodeId,
     NodePerformanceEvaluation PerformanceEvaluation,
@@ -23,7 +33,8 @@ public record NodeRegistrationResponse(
     /// Contains only roles where orchestrator revision > node-reported revision.
     /// Null or empty = all templates current on the node (or none seeded yet).
     /// </summary>
-    Dictionary<string, SystemVmTemplatePayload>? SystemTemplates = null
+    Dictionary<string, SystemVmTemplatePayload>? SystemTemplates = null,
+    List<NodeObligationDescriptorDto>? Obligations = null
 );
 
 

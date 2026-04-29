@@ -4,17 +4,15 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Core.Models.State;
 using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Options;
 using Orchestrator.Models;
 using System.Collections.Concurrent;
 using System.Net;
-using System.Net.NetworkInformation;
 using System.Reflection;
-using System.Runtime.InteropServices;
 using System.Text.Json;
-using System.Xml.Linq;
 
 namespace DeCloud.NodeAgent.Services;
 
@@ -699,6 +697,33 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                         _logger.LogDebug(
                             "Registration response: no system templates delivered " +
                             "(all templates current or none seeded yet)");
+                    }
+
+                    // ── Persist obligation descriptors ───────────────────────────
+                    // The obligation table is the matrix's intent source. Without it,
+                    // IntentComputation.Compute() always returns Intent.None and the
+                    // reconciler never issues Create.
+                    if (registrationResponse.Obligations is { Count: > 0 } obligations)
+                    {
+                        var descriptors = obligations
+                            .Where(o => !string.IsNullOrWhiteSpace(o.Role))
+                            .Select(o => new ObligationDescriptor
+                            {
+                                Role = o.Role,
+                                Deps = o.Deps ?? [],
+                            })
+                            .ToList();
+
+                        await _obligationState.SaveObligationsAsync(descriptors, ct);
+                        _logger.LogInformation(
+                        "✓ Obligations persisted: [{Roles}]",
+                        string.Join(", ", descriptors.Select(d => d.Role)));
+                    }
+                    else
+                    {
+                        _logger.LogDebug(
+                        "Registration response: no obligations delivered — " +
+                        "node has no system VM obligations or orchestrator is pre-P9");
                     }
 
                     _logger.LogInformation(
