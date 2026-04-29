@@ -239,7 +239,11 @@ public sealed class ObligationStateRepository : IDisposable
     /// revision was higher); <c>false</c> if skipped (equal or lower).
     /// </summary>
     public async Task<bool> UpsertSystemTemplateAsync(
-        string role, string templateJson, int revision, CancellationToken ct = default)
+        string role,
+        string templateJson,
+        int revision,
+        string? templateId = null,
+        CancellationToken ct = default)
     {
         await _lock.WaitAsync(ct);
         try
@@ -253,15 +257,17 @@ public sealed class ObligationStateRepository : IDisposable
 
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = @"
-                INSERT INTO system_template (role, template_json, revision, updated_at)
-                VALUES (@role, @json, @revision, @at)
-                ON CONFLICT(role) DO UPDATE SET
-                    template_json = excluded.template_json,
-                    revision      = excluded.revision,
-                    updated_at    = excluded.updated_at;";
+    INSERT INTO system_template (role, template_json, revision, template_id, updated_at)
+    VALUES (@role, @json, @revision, @templateId, @at)
+    ON CONFLICT(role) DO UPDATE SET
+        template_json = excluded.template_json,
+        revision      = excluded.revision,
+        template_id   = excluded.template_id,
+        updated_at    = excluded.updated_at;";
             cmd.Parameters.AddWithValue("@role", role);
             cmd.Parameters.AddWithValue("@json", templateJson);
             cmd.Parameters.AddWithValue("@revision", revision);
+            cmd.Parameters.AddWithValue("@templateId", (object?)templateId ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@at", DateTime.UtcNow.ToString("O"));
             await cmd.ExecuteNonQueryAsync(ct);
 

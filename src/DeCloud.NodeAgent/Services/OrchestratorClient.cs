@@ -484,7 +484,11 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             }
 
             var written = await _obligationState.SaveSystemTemplateAsync(
-                role, payload.TemplateJson, payload.Revision, ct);
+                role,
+                payload.TemplateJson,
+                payload.Revision,
+                string.IsNullOrEmpty(payload.TemplateId) ? null : payload.TemplateId,
+                ct);
 
             if (written)
             {
@@ -677,6 +681,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                                 role,
                                 payload.TemplateJson,
                                 payload.Revision,
+                                string.IsNullOrEmpty(payload.TemplateId) ? null : payload.TemplateId,
                                 ct);
 
                             _logger.LogInformation(

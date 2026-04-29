@@ -143,6 +143,7 @@ public sealed class ObligationStateService : IObligationStateService
         string role,
         string templateJson,
         int incomingRevision,
+        string? templateId = null,
         CancellationToken ct = default)
     {
         var canonical = ValidateRole(role);
@@ -162,7 +163,7 @@ public sealed class ObligationStateService : IObligationStateService
             return false;
         }
 
-        return await _repository.UpsertSystemTemplateAsync(canonical, templateJson, incomingRevision, ct);
+        return await _repository.UpsertSystemTemplateAsync(canonical, templateJson, incomingRevision, templateId, ct);
     }
 
     /// <inheritdoc/>

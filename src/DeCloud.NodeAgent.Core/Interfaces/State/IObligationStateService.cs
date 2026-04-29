@@ -101,6 +101,7 @@ public interface IObligationStateService
         string role,
         string templateJson,
         int incomingRevision,
+        string? templateId = null,
         CancellationToken ct = default);
 
     /// <summary>
