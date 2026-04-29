@@ -14,21 +14,34 @@ namespace DeCloud.NodeAgent.Controllers;
 ///
 /// SECURITY MODEL
 /// ──────────────
-/// Primary boundary:  virbr0 is not routable externally; only VMs on this
-///                    node's libvirt network can reach 192.168.122.1:5100.
+/// Layer 1 — Network boundary:
+///   virbr0 is not routable externally. Only VMs on this node's libvirt
+///   network can reach 192.168.122.1:5100.
 ///
-/// Defense-in-depth:  Every request is validated against the virbr0 subnet
-///                    (192.168.122.0/24) at the controller level. If a
-///                    misconfigured firewall rule temporarily opens port 5100
-///                    externally, the controller still refuses to serve keys.
+/// Layer 2 — Subnet check (all endpoints):
+///   Every request is validated against the virbr0 subnet (192.168.122.0/24).
+///   Rejects requests if a misconfigured firewall rule temporarily exposes
+///   port 5100 externally.
 ///
-/// No authentication token is required — the network boundary is the auth.
+/// Layer 3 — Caller-IP-to-role binding (/state endpoint only):
+///   The /state endpoint requires that the caller's IP matches the IP of the
+///   system VM currently assigned to that role. This prevents a tenant VM on
+///   the same virbr0 bridge from calling GET /dht/state to exfiltrate the
+///   DHT node's Ed25519 private key.
+///
+///   Enforcement:
+///     - VM found and IP known and matches → 200
+///     - VM found and IP known and differs → 403 (log Warning)
+///     - VM found but IP not yet resolvable → allow + log Warning
+///       (first-boot timing window; DHCP lease still being acquired)
+///     - No VM found for role → allow + log Warning
+///       (state not yet delivered; GetStateJsonAsync returns 404 anyway)
 ///
 /// LOGGING DISCIPLINE
 /// ──────────────────
 /// State JSON is never written to logs. Only role name, version, and the
 /// caller's IP address are logged, and only at DEBUG level on success.
-/// A 404 or a blocked-IP attempt is logged at WARNING.
+/// A 404, subnet block, or role-binding block is logged at WARNING.
 ///
 /// ROUTES
 /// ──────
@@ -314,6 +327,7 @@ public class ObligationStateController : ControllerBase
     [ProducesResponseType(404)]
     public async Task<IActionResult> GetState(string role, CancellationToken ct)
     {
+        // Layer 2: subnet check
         if (!EnforceVirbr0(out var callerIp))
             return StatusCode(403, "Forbidden: obligation state is only accessible from the VM bridge network.");
 
@@ -324,6 +338,11 @@ public class ObligationStateController : ControllerBase
                 "GetState: unknown role '{Role}' from {Ip}", role, callerIp);
             return BadRequest($"Unknown role '{role}'. Valid values: relay, dht, blockstore.");
         }
+
+        // Layer 3: caller-IP-to-role binding — only the assigned system VM may read its own keys
+        if (!await EnforceRoleBinding(canonical, callerIp, ct))
+            return StatusCode(403,
+                $"Forbidden: caller IP {callerIp} is not the assigned {canonical} VM on this node.");
 
         var stateJson = await _obligationState.GetStateJsonAsync(canonical, ct);
 
@@ -387,6 +406,75 @@ public class ObligationStateController : ControllerBase
     // ----------------------------------------------------------------
     // Private helpers
     // ----------------------------------------------------------------
+
+    /// <summary>
+    /// Layer 3 enforcement: verifies the caller's IP matches the IP of the
+    /// system VM currently assigned to <paramref name="role"/> on this node.
+    ///
+    /// Allow-with-warning cases (all narrow timing windows or harmless states):
+    ///   - No VM in memory for role  → state will 404 anyway; allow
+    ///   - VM found, IP not in spec  → DHCP fallback tried; if still null, allow
+    ///   - VM found, IP not in DHCP  → cloud-init first-boot window; allow
+    /// </summary>
+    private async Task<bool> EnforceRoleBinding(
+        string role, string callerIp, CancellationToken ct)
+    {
+        var expectedType = RoleToVmType(role);
+        if (expectedType is null)
+            return true;
+
+        var systemVm = _vmManager.GetAllVms()
+            .FirstOrDefault(v =>
+                v.Spec.VmType == expectedType &&
+                v.State is VmState.Running or VmState.Starting or VmState.Creating);
+
+        if (systemVm is null)
+        {
+            _logger.LogWarning(
+                "GetState [{Role}]: no system VM in memory for role binding — " +
+                "allowing {Ip} (state will 404 if not yet delivered)",
+                role, callerIp);
+            return true;
+        }
+
+        // Prefer cached IP on spec; fall back to live DHCP query
+        var assignedIp = systemVm.Spec.IpAddress;
+        if (string.IsNullOrWhiteSpace(assignedIp))
+            assignedIp = await _vmManager.GetVmIpAddressAsync(systemVm.VmId, ct);
+
+        if (string.IsNullOrWhiteSpace(assignedIp))
+        {
+            _logger.LogWarning(
+                "GetState [{Role}]: system VM {VmId} IP not yet resolvable — " +
+                "allowing {Ip} (first-boot timing window)",
+                role, systemVm.VmId[..8], callerIp);
+            return true;
+        }
+
+        var assignedBare = assignedIp.Split('/')[0].Trim();
+        if (!string.Equals(assignedBare, callerIp, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning(
+                "GetState [{Role}]: REJECTED — caller {CallerIp} does not match " +
+                "assigned VM {VmId} IP {AssignedIp}. Possible tenant VM exfil attempt.",
+                role, callerIp, systemVm.VmId[..8], assignedBare);
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Maps an obligation role name to the corresponding <see cref="VmType"/>.
+    /// Returns null for unrecognised roles.
+    /// </summary>
+    private static VmType? RoleToVmType(string role) => role switch
+    {
+        ObligationRole.Relay => VmType.Relay,
+        ObligationRole.Dht => VmType.Dht,
+        ObligationRole.BlockStore => VmType.BlockStore,
+        _ => null,
+    };
 
     /// <summary>
     /// Validates that the caller's remote IP is within the virbr0 subnet
