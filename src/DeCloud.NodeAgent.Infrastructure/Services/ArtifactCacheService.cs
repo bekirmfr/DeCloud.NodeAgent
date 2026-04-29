@@ -318,7 +318,6 @@ public sealed class ArtifactCacheService : IArtifactCacheService
 
             await cryptoStream.CopyToAsync(fileStream, ct);
             await fileStream.FlushAsync(ct);
-            cryptoStream.FlushFinalBlock();
 
             var actualHash = Convert.ToHexString(sha.Hash!).ToLowerInvariant();
 
