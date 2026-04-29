@@ -17,4 +17,8 @@
     <Folder Include="Interfaces\Auth\" />
   </ItemGroup>
 
+	<ItemGroup>
+		<ProjectReference Include="..\..\..\Decloud.Shared\DeCloud.Shared.csproj" />
+	</ItemGroup>
+
 </Project>
