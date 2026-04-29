@@ -352,11 +352,11 @@ REGISTERED_AT={DateTime.UtcNow:O}";
     /// Build a { role → storedRevision } map from the local SQLite store for
     /// inclusion in the heartbeat. Parallel to BuildObligationStateVersionsAsync.
     /// </summary>
-    private async Task<Dictionary<string, int>?> BuildSystemTemplateVersionsAsync(
-        CancellationToken ct)
+    private async Task<Dictionary<string, int>> BuildSystemTemplateVersionsAsync(CancellationToken ct)
     {
         var revisions = await _obligationState.GetSystemTemplateRevisionsAsync(ct);
-        return revisions.Count > 0 ? revisions : null;
+        _logger.LogDebug("Reporting system template revisions: {@Revisions}", revisions);
+        return revisions; // always non-null; empty = no templates stored yet
     }
 
     /// <summary>
