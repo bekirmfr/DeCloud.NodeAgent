@@ -88,6 +88,7 @@ public sealed class ObligationStateRepository : IDisposable
                 role          TEXT PRIMARY KEY,
                 template_json TEXT NOT NULL,
                 revision      INTEGER NOT NULL,
+                template_id   TEXT,
                 updated_at    TEXT NOT NULL
             );";
         cmd.ExecuteNonQuery();
