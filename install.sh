@@ -2046,6 +2046,32 @@ download_node_agent() {
     log_success "Code downloaded (commit: $COMMIT)"
 }
 
+download_shared_library() {
+    if [ "$SKIP_DOWNLOAD" = true ]; then
+        log_warn "Skipping DeCloud.Shared download (--skip-download)"
+        return
+    fi
+    log_step "Downloading DeCloud.Shared..."
+
+    local shared_dir="$INSTALL_DIR/Decloud.Shared"
+    local shared_url="https://github.com/bekirmfr/DeCloud.Shared.git"
+
+    if [ -d "$shared_dir/.git" ]; then
+        log_info "Updating DeCloud.Shared..."
+        git -C "$shared_dir" pull --quiet origin main 2>/dev/null \
+            || git -C "$shared_dir" pull --quiet origin master 2>/dev/null \
+            || log_warn "DeCloud.Shared pull failed — using existing checkout"
+    else
+        rm -rf "$shared_dir"
+        cd "$INSTALL_DIR"
+        git clone --depth 1 "$shared_url" Decloud.Shared --quiet
+    fi
+
+    local commit
+    commit=$(git -C "$shared_dir" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    log_success "DeCloud.Shared ready (commit: $commit)"
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # System VM cleanup — destroy VMs whose binary changed during update
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2708,6 +2734,7 @@ main() {
     # Application
     create_directories
     download_node_agent
+    download_shared_library
     
     # Install CLI from downloaded repo
     install_walletconnect_cli
