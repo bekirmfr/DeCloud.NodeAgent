@@ -187,7 +187,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         var info = new CpuInfo { Flags = new List<string>() };
 
         // Detect architecture
-        info.Architecture = DetectArchitecture();
+        info.Architecture = GetArchitecture();
         _logger.LogInformation("Detected CPU architecture: {Architecture}", info.Architecture);
 
         try
@@ -271,7 +271,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         var info = new CpuInfo { Flags = new List<string>() };
 
         // Detect architecture first
-        info.Architecture = DetectArchitecture();
+        info.Architecture = GetArchitecture();
         _logger.LogInformation("Detected CPU architecture: {Architecture}", info.Architecture);
 
         var cpuinfoResult = await _executor.ExecuteAsync("cat", "/proc/cpuinfo", ct);
@@ -1062,7 +1062,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     /// Detect CPU architecture using platform APIs
     /// Returns: x86_64, aarch64, arm64, etc.
     /// </summary>
-    private string DetectArchitecture()
+    public static string GetArchitecture()
     {
         // Use .NET's built-in architecture detection
         var runtimeArch = RuntimeInformation.ProcessArchitecture;
@@ -1076,6 +1076,12 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             _ => "unknown"
         };
     }
+
+    public static string GetArchitectureNormalised() => GetArchitecture() switch
+    {
+        "aarch64" or "arm64" => "arm64",
+        _ => "amd64"
+    };
 
     public async Task<ResourceSnapshot> GetCurrentSnapshotAsync(CancellationToken ct = default)
     {

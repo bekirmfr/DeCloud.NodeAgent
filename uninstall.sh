@@ -271,6 +271,7 @@ remove_binaries() {
     rm -f /usr/local/bin/decloud-relay-nat
     rm -rf /usr/local/share/doc/decloud
     rm -f /etc/profile.d/golang.sh
+    rm -rf /usr/local/go 
     log_success "Binaries removed"
 }
 

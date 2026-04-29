@@ -302,9 +302,6 @@ builder.Services.AddHostedService<VmReadinessMonitor>();
 // Auto-start GPU proxy daemon on non-IOMMU nodes with GPUs
 builder.Services.AddHostedService<GpuProxyStartupService>();
 
-// Build missing Go binaries (DHT node, Block Store node) proactively on startup
-builder.Services.AddHostedService<GoBinaryBuildStartupService>();
-
 // Lazysync daemon — continuous overlay disk replication to local BlockStore VM
 builder.Services.AddSingleton<IQmpClient, QmpClient>();
 builder.Services.AddHttpClient<LazysyncDaemon>()

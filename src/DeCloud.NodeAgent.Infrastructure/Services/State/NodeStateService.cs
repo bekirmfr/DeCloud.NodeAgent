@@ -1,18 +1,5 @@
-// =====================================================================
-// NodeStateService - Fixed Implementation
-// =====================================================================
-// File: src/DeCloud.NodeAgent.Infrastructure/Services/State/NodeStateService.cs
-//
-// FIXES:
-// 1. IsDiscoveryComplete now tracks actual discovery, not auth state
-// 2. Added SetDiscoveryComplete() method for ResourceDiscoveryService to call
-// 3. WaitForDiscoveryAsync now works correctly
-// =====================================================================
-
-using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
-using DeCloud.Shared;
 using Microsoft.Extensions.Logging;
 using Orchestrator.Models;
 

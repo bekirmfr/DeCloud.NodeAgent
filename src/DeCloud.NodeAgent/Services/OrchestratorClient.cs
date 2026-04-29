@@ -4,6 +4,7 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Options;
 using Orchestrator.Models;
@@ -330,8 +331,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 return;
             }
 
-            var arch = RuntimeInformation.ProcessArchitecture == Architecture.Arm64
-                ? "arm64" : "amd64";
+            var arch = ResourceDiscoveryService.GetArchitectureNormalised();
 
             _logger.LogInformation(
                 "System template [{Role}]: prefetching {Count} artifact(s) for {Arch}",

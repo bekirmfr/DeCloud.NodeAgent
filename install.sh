@@ -573,74 +573,6 @@ install_dotnet() {
     return 0
 }
 
-install_go() {
-    log_step "Installing Go (for DHT node binary build)..."
-
-    local GO_REQUIRED_MAJOR=1
-    local GO_REQUIRED_MINOR=23
-
-    # Check if already installed with sufficient version
-    if command -v go &> /dev/null; then
-        local GO_VERSION=$(go version 2>/dev/null | grep -oP 'go\K[0-9]+\.[0-9]+')
-        local GO_MAJOR=$(echo "$GO_VERSION" | cut -d. -f1)
-        local GO_MINOR=$(echo "$GO_VERSION" | cut -d. -f2)
-
-        if [ "$GO_MAJOR" -ge "$GO_REQUIRED_MAJOR" ] && [ "$GO_MINOR" -ge "$GO_REQUIRED_MINOR" ]; then
-            log_success "Go already installed: $(go version 2>/dev/null)"
-            return 0
-        else
-            log_warn "Go $GO_VERSION found, but need ${GO_REQUIRED_MAJOR}.${GO_REQUIRED_MINOR}+"
-            log_info "Upgrading Go..."
-        fi
-    fi
-
-    # Determine architecture
-    local ARCH=$(uname -m)
-    local GO_ARCH="amd64"
-    if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
-        GO_ARCH="arm64"
-    fi
-
-    # Download and install latest Go 1.23.x
-    local GO_VERSION="1.23.7"
-    local GO_TAR="go${GO_VERSION}.linux-${GO_ARCH}.tar.gz"
-    local GO_URL="https://go.dev/dl/${GO_TAR}"
-
-    log_info "Downloading Go ${GO_VERSION} for ${GO_ARCH}..."
-
-    if ! wget -q "$GO_URL" -O "/tmp/${GO_TAR}" 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
-        log_error "Failed to download Go from ${GO_URL}"
-        return 1
-    fi
-
-    # Remove old Go installation if present
-    rm -rf /usr/local/go
-
-    # Extract to /usr/local
-    if ! tar -C /usr/local -xzf "/tmp/${GO_TAR}" 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
-        log_error "Failed to extract Go archive"
-        rm -f "/tmp/${GO_TAR}"
-        return 1
-    fi
-
-    rm -f "/tmp/${GO_TAR}"
-
-    # Ensure Go is in PATH
-    if ! grep -q '/usr/local/go/bin' /etc/profile.d/golang.sh 2>/dev/null; then
-        echo 'export PATH=$PATH:/usr/local/go/bin' > /etc/profile.d/golang.sh
-    fi
-    export PATH=$PATH:/usr/local/go/bin
-
-    # Verify
-    if ! command -v go &> /dev/null; then
-        log_error "Go command not found after installation"
-        return 1
-    fi
-
-    log_success "Go installed: $(go version 2>/dev/null)"
-    return 0
-}
-
 install_libvirt() {
     log_step "Installing libvirt/KVM and virtualization tools..."
     
@@ -2100,39 +2032,6 @@ download_node_agent() {
         systemctl stop decloud-node-agent 2>/dev/null || true
         sleep 2
     fi
-    
-    # Preserve DHT binary build cache across reinstalls.
-    # build.sh has hash-based idempotency but the cache files live inside
-    # the repo directory which gets deleted on re-clone.
-    local DHT_CACHE_DIR="/tmp/decloud-dht-build-cache"
-    local DHT_TEMPLATE_DIR="$INSTALL_DIR/DeCloud.NodeAgent/src/DeCloud.NodeAgent/CloudInit/Templates/dht-vm"
-    
-    if [ -d "$DHT_TEMPLATE_DIR" ]; then
-        mkdir -p "$DHT_CACHE_DIR"
-        # Back up hash file and pre-built binaries
-        cp -f "$DHT_TEMPLATE_DIR"/dht-node-*.gz.b64 "$DHT_CACHE_DIR/" 2>/dev/null || true
-        log_info "Preserved DHT build cache"
-    fi
-
-    # Preserve BlockStore binary build cache across reinstalls (same pattern as DHT).
-    local BLOCKSTORE_CACHE_DIR="/tmp/decloud-blockstore-build-cache"
-    local BLOCKSTORE_TEMPLATE_DIR="$INSTALL_DIR/DeCloud.NodeAgent/src/DeCloud.NodeAgent/CloudInit/Templates/blockstore-vm"
-
-    if [ -d "$BLOCKSTORE_TEMPLATE_DIR" ]; then
-        mkdir -p "$BLOCKSTORE_CACHE_DIR"
-        cp -f "$BLOCKSTORE_TEMPLATE_DIR"/blockstore-node-*.gz.b64 "$BLOCKSTORE_CACHE_DIR/" 2>/dev/null || true        log_info "Preserved BlockStore build cache"
-    fi
-    
-    # Save current binary source hashes before deleting the repo.
-    # Used after rebuild to detect which system VM binaries changed so
-    # install.sh can destroy stale VMs and trigger redeployment with the new binary.
-    if [ "$UPDATE_MODE" = true ]; then
-        local BS_HASH="$BLOCKSTORE_TEMPLATE_DIR/.blockstore-node-source.sha256"
-        local DHT_HASH="$DHT_TEMPLATE_DIR/.dht-node-source.sha256"
-        [ -f "$BS_HASH" ]  && cp "$BS_HASH"  /tmp/decloud-blockstore-old-hash || rm -f /tmp/decloud-blockstore-old-hash
-        [ -f "$DHT_HASH" ] && cp "$DHT_HASH" /tmp/decloud-dht-old-hash        || rm -f /tmp/decloud-dht-old-hash
-        log_info "Saved binary hashes for post-build change detection"
-    fi
 
     if [ -d "$INSTALL_DIR/DeCloud.NodeAgent" ]; then
         rm -rf "$INSTALL_DIR/DeCloud.NodeAgent"
@@ -2144,102 +2043,7 @@ download_node_agent() {
     cd DeCloud.NodeAgent
     COMMIT=$(git rev-parse --short HEAD)
     
-    # Restore DHT build cache — only restore binaries as fallback, NOT the hash file.
-    # Restoring the hash file would trick build.sh into skipping a rebuild even when
-    # source has changed (new commits). build.sh will recompute the hash from fresh
-    # source and rebuild if needed; cached binaries are used only if build fails.
-    local NEW_DHT_TEMPLATE_DIR="$INSTALL_DIR/DeCloud.NodeAgent/src/DeCloud.NodeAgent/CloudInit/Templates/dht-vm"
-    if [ -d "$DHT_CACHE_DIR" ] && [ -d "$NEW_DHT_TEMPLATE_DIR" ]; then
-        cp -f "$DHT_CACHE_DIR"/dht-node-*.gz.b64 "$NEW_DHT_TEMPLATE_DIR/" 2>/dev/null || true
-        rm -rf "$DHT_CACHE_DIR"
-        log_info "Restored DHT binary cache (hash file not restored — forces rebuild check)"
-    fi
-
-    # Restore BlockStore build cache — only restore binaries as fallback, NOT the hash file.
-    # Same reasoning as DHT: restoring the hash would prevent detection of source changes.
-    local NEW_BLOCKSTORE_TEMPLATE_DIR="$INSTALL_DIR/DeCloud.NodeAgent/src/DeCloud.NodeAgent/CloudInit/Templates/blockstore-vm"
-    if [ -d "$BLOCKSTORE_CACHE_DIR" ] && [ -d "$NEW_BLOCKSTORE_TEMPLATE_DIR" ]; then
-        cp -f "$BLOCKSTORE_CACHE_DIR"/blockstore-node-*.gz.b64 "$NEW_BLOCKSTORE_TEMPLATE_DIR/" 2>/dev/null || true
-        rm -rf "$BLOCKSTORE_CACHE_DIR"
-        log_info "Restored BlockStore binary cache (hash file not restored — forces rebuild check)"
-    fi
-    
     log_success "Code downloaded (commit: $COMMIT)"
-}
-
-build_dht_binary() {
-    log_step "Building DHT node binary from source..."
-
-    local DHT_SRC="$INSTALL_DIR/DeCloud.NodeAgent/src/DeCloud.NodeAgent/CloudInit/Templates/dht-vm/dht-node-src"
-    local BUILD_SCRIPT="$DHT_SRC/build.sh"
-
-    if [ ! -f "$BUILD_SCRIPT" ]; then
-        log_warn "DHT build script not found at $BUILD_SCRIPT — skipping"
-        log_info "Pre-compiled binaries in the repo will be used instead"
-        return 0
-    fi
-
-    # Detect host architecture to only build what's needed
-    local HOST_ARCH
-    HOST_ARCH=$(uname -m)
-    case "$HOST_ARCH" in
-        x86_64|amd64) HOST_ARCH="amd64" ;;
-        aarch64|arm64) HOST_ARCH="arm64" ;;
-        *)
-            log_warn "Unknown architecture $HOST_ARCH — building both"
-            HOST_ARCH=""
-            ;;
-    esac
-
-    log_info "Building DHT binary for ${HOST_ARCH:-all architectures}..."
-
-    # Always remove the hash file before building so build.sh recomputes
-    # the source hash and detects stale binaries from previous installs.
-    rm -f "$(dirname "$BUILD_SCRIPT")/../.dht-node-source.sha256"
-
-    if bash "$BUILD_SCRIPT" $HOST_ARCH 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
-        log_success "DHT binary built from source (hash-checked)"
-    else
-        log_warn "DHT binary build failed — pre-compiled binaries will be used"
-        log_info "This is not fatal; the existing .gz.b64 files will still work"
-    fi
-}
-
-build_blockstore_binary() {
-    log_step "Building Block Store node binary from source..."
-
-    local BLOCKSTORE_SRC="$INSTALL_DIR/DeCloud.NodeAgent/src/DeCloud.NodeAgent/CloudInit/Templates/blockstore-vm/blockstore-node-src"
-    local BUILD_SCRIPT="$BLOCKSTORE_SRC/build.sh"
-
-    if [ ! -f "$BUILD_SCRIPT" ]; then
-        log_warn "BlockStore build script not found at $BUILD_SCRIPT — skipping"
-        log_info "Pre-compiled binaries in the repo will be used instead"
-        return 0
-    fi
-
-    # Detect host architecture to only build what's needed
-    local HOST_ARCH
-    HOST_ARCH=$(uname -m)
-    case "$HOST_ARCH" in
-        x86_64|amd64) HOST_ARCH="amd64" ;;
-        aarch64|arm64) HOST_ARCH="arm64" ;;
-        *)
-            log_warn "Unknown architecture $HOST_ARCH — building both"
-            HOST_ARCH=""
-            ;;
-    esac
-
-        log_info "Building BlockStore binary for ${HOST_ARCH:-all architectures}..."
-
-    # Always remove the hash file before building so build.sh detects stale binaries.
-    rm -f "$(dirname "$BUILD_SCRIPT")/../.blockstore-node-source.sha256"
-
-    if bash "$BUILD_SCRIPT" $HOST_ARCH 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
-        log_success "BlockStore binary built from source (hash-checked)"
-    else
-        log_warn "BlockStore binary build failed — pre-compiled binaries will be used"
-        log_info "This is not fatal; the existing .gz.b64 files will still work"
-    fi
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2291,46 +2095,6 @@ destroy_system_vms() {
     virsh destroy  "$vm_id"                      2>/dev/null || true
     virsh undefine "$vm_id" --remove-all-storage 2>/dev/null || true
     log_success "  $vm_id destroyed"
-}
-
-# Compare pre-build and post-build source hashes to detect binary changes.
-# Destroys affected system VMs so the reconciliation loop re-deploys them
-# with the new binary when the NodeAgent restarts.
-cleanup_stale_system_vms() {
-    [ "$UPDATE_MODE" = true ] || return 0
-
-    local TEMPLATE_BASE="$INSTALL_DIR/DeCloud.NodeAgent/src/DeCloud.NodeAgent/CloudInit/Templates"
-
-    local OLD_BS NEW_BS OLD_DHT NEW_DHT
-    OLD_BS=$(cat  /tmp/decloud-blockstore-old-hash 2>/dev/null || echo "")
-    NEW_BS=$(cat  "$TEMPLATE_BASE/blockstore-vm/.blockstore-node-source.sha256" 2>/dev/null || echo "")
-    OLD_DHT=$(cat /tmp/decloud-dht-old-hash        2>/dev/null || echo "")
-    NEW_DHT=$(cat "$TEMPLATE_BASE/dht-vm/.dht-node-source.sha256"              2>/dev/null || echo "")
-
-    rm -f /tmp/decloud-blockstore-old-hash /tmp/decloud-dht-old-hash
-    # Also clean up any saved VM IDs not consumed by destroy_system_vms
-    rm -f /tmp/decloud-blockstore-vm-id /tmp/decloud-dht-vm-id
-
-    local any_change=false
-
-    if [ -n "$OLD_BS" ] && [ -n "$NEW_BS" ] && [ "$OLD_BS" != "$NEW_BS" ]; then
-        log_info "BlockStore binary changed (${OLD_BS:0:12}… → ${NEW_BS:0:12}…)"
-        destroy_system_vms "blockstore"
-        any_change=true
-    elif [ -n "$NEW_BS" ]; then
-        log_info "BlockStore binary unchanged — skipping VM cleanup"
-    fi
-
-    if [ -n "$OLD_DHT" ] && [ -n "$NEW_DHT" ] && [ "$OLD_DHT" != "$NEW_DHT" ]; then
-        log_info "DHT binary changed (${OLD_DHT:0:12}… → ${NEW_DHT:0:12}…)"
-        destroy_system_vms "dht"
-        any_change=true
-    elif [ -n "$NEW_DHT" ]; then
-        log_info "DHT binary unchanged — skipping VM cleanup"
-    fi
-
-    [ "$any_change" = true ] && \
-        log_success "Stale system VMs destroyed — reconciliation will redeploy on NodeAgent start" || true
 }
 
 build_node_agent() {
@@ -2918,7 +2682,6 @@ main() {
     # Install dependencies
     install_base_dependencies
     install_dotnet
-    install_go
     install_libvirt
 
     # GPU: detect mode, container runtime, and CUDA toolkit
@@ -2952,10 +2715,7 @@ main() {
     install_decloud_docs
     install_relay_nat_support
 
-    build_dht_binary
-    build_blockstore_binary
     build_gpu_proxy
-    cleanup_stale_system_vms
     build_node_agent
     create_configuration
     create_systemd_service

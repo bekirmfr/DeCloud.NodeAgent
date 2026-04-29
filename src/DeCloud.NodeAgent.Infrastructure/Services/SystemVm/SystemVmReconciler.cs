@@ -351,8 +351,7 @@ public sealed class SystemVmReconciler : BackgroundService
         }
 
         // ── 3. Verify / prefetch artifacts ──────────────────────────────
-        var arch = RuntimeInformation.ProcessArchitecture == Architecture.Arm64
-            ? "arm64" : "amd64";
+        var arch = ResourceDiscoveryService.GetArchitectureNormalised();
 
         if (template.Artifacts.Count > 0)
         {
