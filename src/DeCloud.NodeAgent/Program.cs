@@ -290,6 +290,17 @@ builder.Services.AddHostedService<VmManagerInitializationService>();
 // Must run after VmManagerInitializationService so the VM list is populated.
 builder.Services.AddHostedService<SystemVmWatchdogService>();
 
+// =====================================================
+// system vm reconciler (node-side matrix — p6)
+// runs create / delete decisions every 30 s using the
+// (intent, reality, pending) matrix from system_vm_resilience_design.md.
+// must run after systemvmwatchdogservice so virbr0 is active before
+// the first create is dispatched.
+// =====================================================
+builder.Services.AddSingleton<IIntentComputation, IntentComputation>();
+builder.Services.AddSingleton<IOutstandingCommands, OutstandingCommands>();
+builder.Services.AddHostedService<SystemVmReconciler>();
+
 // Reconcile port forwarding rules on startup (Smart Port Allocation)
 builder.Services.AddHostedService<PortForwardingReconciliationService>();
 

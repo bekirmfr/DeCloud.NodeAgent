@@ -9,7 +9,6 @@ using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using System.Runtime.InteropServices;
 using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Infrastructure.Services.SystemVm;
