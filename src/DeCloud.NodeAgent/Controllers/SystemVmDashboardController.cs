@@ -1,6 +1,7 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.AspNetCore.Mvc;
+using Org.BouncyCastle.Utilities;
 
 namespace DeCloud.NodeAgent.Controllers;
 
@@ -153,9 +154,17 @@ public class SystemVmDashboardController : ControllerBase
             {
                 var proxyBase = $"/api/system-vms/{role}/proxy";
                 var html = await response.Content.ReadAsStringAsync(ct);
+
+                // Inject <base> tag — all relative URLs (static assets, JS API
+                // calls) resolve through this proxy regardless of trailing slash.
+                html = html.Replace("<head>", $"<head>\n    <base href=\"{proxyBase}/\">");
+
+                // Strip leading slash from static refs so they become relative
+                // and are resolved by the <base> tag rather than the root.
                 html = html
-                    .Replace("href=\"/static/", $"href=\"{proxyBase}/static/")
-                    .Replace("src=\"/static/", $"src=\"{proxyBase}/static/");
+                    .Replace("href=\"/static/", "href=\"static/")
+                    .Replace("src=\"/static/", "src=\"static/");
+
                 var bytes = System.Text.Encoding.UTF8.GetBytes(html);
                 Response.Headers["Content-Length"] = bytes.Length.ToString();
                 await Response.Body.WriteAsync(bytes, ct);
