@@ -131,6 +131,8 @@ public class SystemVmDashboardController : ControllerBase
             // ── 5. Stream response back ─────────────────────────────────
             Response.StatusCode = (int)response.StatusCode;
 
+            var contentType = response.Content.Headers.ContentType?.MediaType ?? "";
+
             foreach (var header in response.Headers)
             {
                 if (!HopByHopHeaders.Contains(header.Key))
@@ -139,11 +141,30 @@ public class SystemVmDashboardController : ControllerBase
 
             foreach (var header in response.Content.Headers)
             {
-                if (!HopByHopHeaders.Contains(header.Key))
+                if (!HopByHopHeaders.Contains(header.Key) &&
+                    !header.Key.Equals("Content-Length", StringComparison.OrdinalIgnoreCase))
                     Response.Headers[header.Key] = header.Value.ToArray();
             }
 
-            await response.Content.CopyToAsync(Response.Body, ct);
+            // HTML responses: rewrite absolute asset URLs so the browser
+            // routes /static/* back through this proxy instead of hitting
+            // the node agent root (where those paths don't exist).
+            if (contentType.Contains("text/html", StringComparison.OrdinalIgnoreCase))
+            {
+                var proxyBase = $"/api/system-vms/{role}/proxy";
+                var html = await response.Content.ReadAsStringAsync(ct);
+                html = html
+                    .Replace("href=\"/static/", $"href=\"{proxyBase}/static/")
+                    .Replace("src=\"/static/", $"src=\"{proxyBase}/static/");
+                var bytes = System.Text.Encoding.UTF8.GetBytes(html);
+                Response.Headers["Content-Length"] = bytes.Length.ToString();
+                await Response.Body.WriteAsync(bytes, ct);
+            }
+            else
+            {
+                await response.Content.CopyToAsync(Response.Body, ct);
+            }
+
             return new EmptyResult();
         }
         catch (TaskCanceledException)
