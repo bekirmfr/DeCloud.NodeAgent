@@ -37,7 +37,7 @@ clean_old_rules() {
     fi
     
     # Remove NAT POSTROUTING rules for relay VMs
-    local old_postrouting=$(iptables -t nat -L POSTROUTING -n --line-numbers | grep -E "(51820|8080).*192.168.122" | awk '{print $1}' | sort -rn)
+    local old_postrouting=$(iptables -t nat -L POSTROUTING -n --line-numbers | grep "192\.168\.122" | grep -E "dpt:(51820|8080)" | awk '{print $1}' | sort -rn)
     if [ -n "$old_postrouting" ]; then
         for line in $old_postrouting; do
             log "  Removing old POSTROUTING rule (line $line)"
@@ -101,8 +101,8 @@ clean_stale_rules() {
 
     # Remove POSTROUTING MASQUERADE rules for OTHER IPs
     local old_postrouting=$(iptables -t nat -L POSTROUTING -n --line-numbers \
-        | grep -E "(51820|8080).*192\.168\.122" \
-        | grep -v "$current_ip" | awk '{print $1}' | sort -rn)
+    | grep "192\.168\.122" | grep -E "dpt:(51820|8080)" \
+    | grep -v "$current_ip" | awk '{print $1}' | sort -rn)
     if [ -n "$old_postrouting" ]; then
         for line in $old_postrouting; do
             log "  Removing stale POSTROUTING rule (line $line)"
