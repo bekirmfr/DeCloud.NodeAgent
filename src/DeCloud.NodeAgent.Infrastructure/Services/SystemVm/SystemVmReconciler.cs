@@ -436,6 +436,36 @@ public sealed class SystemVmReconciler : BackgroundService
             }
         };
 
+        // ── Inject role-specific labels from obligation state ──────────
+        // The relay subnet lives in obligation state, not the template.
+        // Without it, __RELAY_SUBNET__ substitutes as "0" in cloud-init.
+        if (role == ObligationRole.Relay)
+        {
+            try
+            {
+                var relayStateJson = await _obligationState.GetStateJsonAsync(ObligationRole.Relay, ct);
+                if (relayStateJson is not null)
+                {
+                    using var doc = JsonDocument.Parse(relayStateJson);
+                    if (doc.RootElement.TryGetProperty("relaySubnet", out var subnetEl))
+                    {
+                        var subnetRaw = subnetEl.GetString() ?? "";
+                        // Normalise "10.20.248.0/24" → "248", "248" → "248"
+                        var subnetOctet = subnetRaw.Contains('.')
+                            ? subnetRaw.Split('.').ElementAtOrDefault(2) ?? "0"
+                            : subnetRaw;
+                        vmSpec.Labels["relay-subnet"] = subnetOctet;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "SystemVmReconciler [relay]: could not read relay subnet from obligation state — " +
+                    "runcmd will patch it at boot time");
+            }
+        }
+
         // ── 6. Register outstanding command ─────────────────────────────
         var commandId = Guid.NewGuid().ToString();
         _outstanding.Set(role, new OutstandingCommand
