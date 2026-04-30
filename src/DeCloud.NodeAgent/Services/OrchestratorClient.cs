@@ -903,6 +903,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 vmId = v.VmId,
                 name = v.Name,
                 state = v.State.ToString(),
+                vmType = v.VmType.ToString(),
                 ownerId = v.OwnerId ?? "unknown",
                 isIpAssigned = v.IsIpAssigned,
                 ipAddress = v.IpAddress,

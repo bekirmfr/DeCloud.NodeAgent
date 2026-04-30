@@ -160,6 +160,7 @@ public class VmSummary
     public string VmId { get; set; } = string.Empty;
     public string? Name { get; set; }
     public VmState State { get; set; }
+    public VmType VmType { get; set; }
     public string? OwnerId { get; set; } = string.Empty;
     public int VirtualCpuCores { get; set; }
     public int QualityTier { get; set; }
