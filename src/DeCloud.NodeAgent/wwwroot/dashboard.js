@@ -581,15 +581,23 @@ function paintSysVm(key, vm) {
         || labels['dht-advertise-ip']
         || labels['blockstore-advertise-ip'];
 
+    // System VM dashboards are always accessed through the node agent proxy.
+    // resolveVmUrl() uses ingress subdomains which system VMs don't have.
+    const ROLE_SLUG = { 0: 'dht', 1: 'relay', 2: 'blockstore' };
+    const roleSlug = obl ? ROLE_SLUG[obl.role] : null;
+
     let detailHtml = '';
     if (ip) {
         let dashLink = '';
         if (running) {
-            const resolved = resolveVmUrl(vm);
+            const resolved = roleSlug
+                ? { url: `/api/system-vms/${roleSlug}/proxy/`, source: 'proxy' }
+                : resolveVmUrl(vm);
             if (resolved) {
-                const title = resolved.source === 'direct' ? 'Direct IP — may not be reachable outside this host' : resolved.url;
+                const title = resolved.source === 'proxy' ? `Via node agent proxy — ${resolved.url}` :
+                    resolved.source === 'direct' ? 'Direct IP — may not be reachable outside this host' : resolved.url;
                 const color = resolved.source === 'direct' ? 'var(--text-muted)' : 'var(--primary)';
-                const label = resolved.source === 'direct' ? 'Open (direct) →' : 'Open →';
+                const label = resolved.source === 'direct' ?
                 dashLink = ` &nbsp;<a href="${resolved.url}" target="_blank" style="font-size:0.7rem;color:${color}" title="${title}">${label}</a>`;
             }
         }
