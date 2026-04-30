@@ -597,7 +597,7 @@ function paintSysVm(key, vm) {
                 const title = resolved.source === 'proxy' ? `Via node agent proxy — ${resolved.url}` :
                     resolved.source === 'direct' ? 'Direct IP — may not be reachable outside this host' : resolved.url;
                 const color = resolved.source === 'direct' ? 'var(--text-muted)' : 'var(--primary)';
-                const label = resolved.source === 'direct' ?
+                const label = resolved.source === 'direct' ? 'Open (direct) →' : 'Open →';
                 dashLink = ` &nbsp;<a href="${resolved.url}" target="_blank" style="font-size:0.7rem;color:${color}" title="${title}">${label}</a>`;
             }
         }
