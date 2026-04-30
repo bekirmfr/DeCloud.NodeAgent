@@ -199,6 +199,19 @@ public sealed class SystemVmReconciler : BackgroundService
         var hasPending = _outstanding.TryGet(role, out var pending);
         var pendingOrNull = hasPending ? pending : null;
 
+        // If an outstanding Create has fulfilled (VM reached Healthy), clear it
+        // so the matrix sees the converged state rather than "command in flight".
+        // This is the normal success path; sweep handles the timeout path.
+        if (pendingOrNull?.Kind == OutstandingCommandKind.Create &&
+            reality.State == Reality.Healthy)
+        {
+            _outstanding.Clear(role);
+            _logger.LogInformation(
+                "SystemVmReconciler [{Role}]: VM {VmId} reached Healthy — create converged",
+                role, reality.VmId);
+            pendingOrNull = null;
+        }
+
         var decision = Decide(intent, reality, pendingOrNull);
 
         var pendingDesc = pendingOrNull is null
@@ -433,7 +446,13 @@ public sealed class SystemVmReconciler : BackgroundService
             IssuedAt = DateTime.UtcNow,
         });
 
-        // ── 7–9. Create VM, set services, clear outstanding ─────────────
+        // ── 7–8. Create VM, set services ────────────────────────────────
+        // Outstanding command is intentionally NOT cleared on success.
+        // It remains live until the next cycle observes reality=Healthy
+        // (cleared in EvaluateRoleAsync before Decide) or until the
+        // 20-minute CommandTimeout sweep expires it.
+        // This prevents the matrix from seeing pending=none + reality=Unhealthy
+        // (VM booting through cloud-init) and issuing a premature Delete.
         try
         {
             var result = await _vmManager.CreateVmAsync(vmSpec, password: null, ct);
@@ -444,6 +463,9 @@ public sealed class SystemVmReconciler : BackgroundService
                     "SystemVmReconciler [{Role}]: CreateVm failed — {Error}. " +
                     "Will retry on next cycle.",
                     role, result.ErrorMessage);
+
+                // Clear on failure — reality stays None so the next cycle retries.
+                _outstanding.Clear(role);
                 return;
             }
 
@@ -451,7 +473,7 @@ public sealed class SystemVmReconciler : BackgroundService
                 "SystemVmReconciler [{Role}]: VM {VmId} created successfully",
                 role, vmId);
 
-            // ── 8. Post-set services so VmReadinessMonitor knows what to probe ──
+            // ── Post-set services so VmReadinessMonitor knows what to probe ──
             if (template.Services.Count > 0)
             {
                 await SetVmServicesAsync(vmId, template.Services, ct);
@@ -462,12 +484,7 @@ public sealed class SystemVmReconciler : BackgroundService
             _logger.LogError(ex,
                 "SystemVmReconciler [{Role}]: CreateVm threw — will retry on next cycle",
                 role);
-        }
-        finally
-        {
-            // Always clear. Next cycle evaluates from fresh reality projection.
-            // Create succeeded → reality = Running (eventually) → Healthy.
-            // Create failed   → reality = None → matrix issues Create again.
+            // Clear on exception — reality stays None so the next cycle retries.
             _outstanding.Clear(role);
         }
     }
