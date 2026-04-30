@@ -2010,7 +2010,7 @@ public class LibvirtVmManager : IVmManager
                 _logger.LogInformation(
                     "VM {VmId}: Using custom cloud-init UserData from orchestrator ({Bytes} bytes)",
                     spec.Id, spec.CloudInitUserData.Length);
-                
+
                 // IMPORTANT: Custom UserData from orchestrator needs to be merged with
                 // base configuration (hostname, password, SSH keys, etc.)
                 cloudInitYaml = MergeCustomUserDataWithBaseConfig(
@@ -2020,7 +2020,24 @@ public class LibvirtVmManager : IVmManager
                     passwordBlock,
                     hasPassword,
                     password ?? "");
-                
+
+                // Add base variables not populated by type-specific blocks above.
+                variables["__VM_ID__"] = spec.Id;
+                variables["__VM_NAME__"] = spec.Name;
+                variables["__HOSTNAME__"] = spec.Name;
+
+                // Apply the full variables dictionary to the merged cloud-init content.
+                // MergeCustomUserDataWithBaseConfig handles structural merging only —
+                // it does not substitute __PLACEHOLDER__ variables. Without this pass:
+                //   • __ORCHESTRATOR_IP__ / __ORCHESTRATOR_PORT__ stay literal
+                //     → wg-quick fails immediately with "No such device"
+                //   • __RELAY_SUBNET__ / __VM_NAME__ stay literal in final_message
+                //   • __ORCHESTRATOR_PUBLIC_KEY__ stays literal in [Peer] block
+                foreach (var (placeholder, value) in variables)
+                {
+                    cloudInitYaml = cloudInitYaml.Replace(placeholder, value);
+                }
+
                 _logger.LogInformation(
                     "VM {VmId}: Merged custom UserData with base configuration",
                     spec.Id);
@@ -3236,269 +3253,6 @@ public class LibvirtVmManager : IVmManager
         }
     }
 
-    /// <summary>
-    /// Initialize with architecture detection
-    /// </summary>
-    private async Task InitializeArchitectureAsync(CancellationToken ct)
-    {
-        try
-        {
-            var inventory = _nodeMetadata.Inventory;
-            if (inventory?.Cpu != null && !string.IsNullOrEmpty(inventory.Cpu.Architecture))
-            {
-                _hostArchitecture = inventory.Cpu.Architecture;
-                _logger.LogInformation("Detected host architecture: {Architecture}", _hostArchitecture);
-            }
-            else
-            {
-                _logger.LogWarning("Could not detect architecture from inventory, using default: x86_64");
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to detect architecture, using default: x86_64");
-        }
-
-        // Detect KVM availability — /dev/kvm exists only when the kernel module is loaded
-        // and the hypervisor exposes hardware virtualization to this guest.
-        _kvmAvailable = File.Exists("/dev/kvm");
-        _logger.LogInformation(
-            "KVM available: {KvmAvailable} — domain type will be '{DomainType}', cpu mode '{CpuMode}'",
-            _kvmAvailable,
-            _kvmAvailable ? "kvm" : "qemu",
-            _kvmAvailable ? "host-passthrough" : "host-model");
-    }
-
-    /// <summary>
-    /// Generate architecture-aware libvirt XML
-    /// </summary>
-    private string GenerateLibvirtXmlMultiArch(VmSpec spec, string diskPath, string? cloudInitIso, int vncPort)
-    {
-        // Get architecture configuration
-        var archConfig = ArchitectureHelper.GetHostArchConfig(_hostArchitecture);
-
-        _logger.LogInformation(
-            "Generating VM XML for {Architecture} architecture: emulator={Emulator}, machine={Machine}",
-            archConfig.Architecture,
-            archConfig.QemuEmulator,
-            archConfig.MachineType);
-
-        // ========================================
-        // CPU SHARES CALCULATION
-        // ========================================
-        var config = _nodeState.SchedulingConfig;
-        
-        // Defensive: Ensure tier exists in config, fallback to Standard if not
-        if (!config.Tiers.TryGetValue(spec.QualityTier, out var tierConfig))
-        {
-            _logger.LogWarning(
-                "VM {VmId}: Tier {Tier} not found in scheduling config, falling back to Standard tier",
-                spec.Id, spec.QualityTier);
-            tierConfig = config.Tiers[QualityTier.Standard];
-        }
-        
-        var pointsPerVCpu = config.BaselineOvercommitRatio *
-                           (config.BaselineOvercommitRatio / tierConfig.CpuOvercommitRatio);
-
-        spec.ComputePointCost = (int)(spec.VirtualCpuCores * pointsPerVCpu);
-        var cpuShares = spec.ComputePointCost * 1000;
-        cpuShares = Math.Min(262144, cpuShares);
-        cpuShares = Math.Max(1000, cpuShares);
-
-        // ========================================
-        // TIER-SPECIFIC CPU CONFIGURATION
-        // ========================================
-        var cpuTune = spec.QualityTier switch
-        {
-            QualityTier.Guaranteed => $@"
-              <cputune>
-                <shares>{cpuShares}</shares>
-                <period>100000</period>
-                <quota>-1</quota>
-              </cputune>",
-
-            QualityTier.Standard => $@"
-              <cputune>
-                <shares>{cpuShares}</shares>
-              </cputune>",
-
-            _ => $@"
-              <cputune>
-                <shares>{cpuShares}</shares>
-              </cputune>"
-        };
-
-        // ========================================
-        // ARCHITECTURE-SPECIFIC CONFIGURATION
-        // ========================================
-
-        // ARM64-specific: UEFI firmware for proper boot
-        var osSection = archConfig.Architecture == "aarch64"
-            ? $@"
-              <os>
-                <type arch='aarch64' machine='{archConfig.MachineType}'>hvm</type>
-                <loader readonly='yes' type='pflash'>/usr/share/AAVMF/AAVMF_CODE.fd</loader>
-                <boot dev='hd'/>
-              </os>"
-            : $@"
-              <os>
-                <type arch='x86_64' machine='{archConfig.MachineType}'>hvm</type>
-                <boot dev='hd'/>
-              </os>";
-
-        // ARM64 uses virtio for optimal performance
-        var diskBus = archConfig.Architecture == "aarch64" ? "virtio" : "virtio";
-
-        // Cloud-init disk (optional)
-        var cloudInitDisk = !string.IsNullOrEmpty(cloudInitIso)
-            ? $@"
-            <disk type='file' device='cdrom'>
-              <driver name='qemu' type='raw'/>
-              <source file='{cloudInitIso}'/>
-              <target dev='sda' bus='sata'/>
-              <readonly/>
-            </disk>"
-            : "";
-
-        // ========================================
-        // BANDWIDTH QoS (libvirt rate limiting)
-        // ========================================
-        var bandwidthXml = spec.BandwidthTier switch
-        {
-            BandwidthTier.Basic =>
-                @"
-                  <bandwidth>
-                    <inbound average='1250' peak='2500' burst='1250'/>
-                    <outbound average='1250' peak='2500' burst='1250'/>
-                  </bandwidth>",
-            BandwidthTier.Standard =>
-                @"
-                  <bandwidth>
-                    <inbound average='6250' peak='12500' burst='6250'/>
-                    <outbound average='6250' peak='12500' burst='6250'/>
-                  </bandwidth>",
-            BandwidthTier.Performance =>
-                @"
-                  <bandwidth>
-                    <inbound average='25000' peak='50000' burst='25000'/>
-                    <outbound average='25000' peak='50000' burst='25000'/>
-                  </bandwidth>",
-            _ => ""
-        };
-
-        // ========================================
-        // GPU PASSTHROUGH (VFIO)
-        // ========================================
-        var gpuPassthroughXml = string.Empty;
-        var hasGpuPassthrough = !string.IsNullOrEmpty(spec.GpuPciAddress);
-
-        if (hasGpuPassthrough)
-        {
-            gpuPassthroughXml = GenerateGpuPassthroughXml(spec.GpuPciAddress!);
-            if (string.IsNullOrEmpty(gpuPassthroughXml))
-            {
-                _logger.LogWarning(
-                    "VM {VmId}: GPU PCI address '{PciAddr}' could not be parsed, skipping GPU passthrough",
-                    spec.Id, spec.GpuPciAddress);
-                hasGpuPassthrough = false;
-            }
-        }
-
-        var iommuFeature = hasGpuPassthrough
-            ? @"
-                <ioapic driver='qemu'/>"
-            : "";
-
-        // ========================================
-        // VSOCK (GPU proxy communication channel)
-        // ========================================
-        var vsockXml = spec.VsockCid.HasValue
-            ? $@"
-                <vsock model='virtio'>
-                  <cid auto='no' value='{spec.VsockCid.Value}'/>
-                </vsock>"
-            : "";
-
-        // ========================================
-        // 9P SHARED FS — GPU proxy shim delivery
-        // ========================================
-        // Delivers the CUDA shim .so from host dir to guest via virtio-9p.
-        // 9p is built into QEMU — no external daemon, works on all distros.
-        var sharedFsXml = spec.GpuMode == GpuMode.Proxied
-            ? $@"
-                <filesystem type='mount' accessmode='passthrough'>
-                  <driver type='path' wrpolicy='immediate'/>
-                  <source dir='/usr/local/lib/decloud-gpu-shim'/>
-                  <target dir='decloud-shim'/>
-                </filesystem>"
-            : "";
-
-        // ========================================
-        // COMPLETE LIBVIRT XML
-        // ========================================
-        var kvmAvailable = File.Exists("/dev/kvm");
-        var domainType = kvmAvailable ? "kvm" : "qemu";
-        var cpuMode = kvmAvailable ? "host-passthrough" : "host-model";
-        _logger.LogInformation(
-            "VM {VmId}: KVM={KvmAvailable}, domain type='{DomainType}', cpu mode='{CpuMode}'",
-            spec.Id, kvmAvailable, domainType, cpuMode);
-
-        return $@"
-            <domain type='{domainType}'>
-              <name>{spec.Id}</name>
-              <uuid>{spec.Id}</uuid>
-              <memory unit='bytes'>{spec.MemoryBytes}</memory>
-              <vcpu placement='static'>{spec.VirtualCpuCores}</vcpu>
-              {cpuTune}
-              {osSection}
-              <features>
-                <acpi/>
-                <apic/>{iommuFeature}
-              </features>
-              <cpu mode='{cpuMode}' check='none'{(hasGpuPassthrough ? " migratable='off'" : "")}/>
-              <clock offset='utc'>
-                <timer name='rtc' tickpolicy='catchup'/>
-                <timer name='pit' tickpolicy='delay'/>
-                <timer name='hpet' present='no'/>
-              </clock>
-              <on_poweroff>destroy</on_poweroff>
-              <on_reboot>restart</on_reboot>
-              <on_crash>destroy</on_crash>
-              <devices>
-                <emulator>{archConfig.QemuEmulator}</emulator>
-                <disk type='file' device='disk'>
-                  <driver name='qemu' type='qcow2'/>
-                  <source file='{diskPath}'/>
-                  <target dev='vda' bus='{diskBus}'/>
-                  <address type='pci' domain='0x0000' bus='0x00' slot='0x04' function='0x0'/>
-                </disk>
-                {cloudInitDisk}
-                <interface type='network'>
-                  <source network='default'/>
-                  <model type='virtio'/>{bandwidthXml}
-                </interface>
-                <serial type='pty'>
-                  <target port='0'/>
-                </serial>
-                <console type='pty'>
-                  <target type='serial' port='0'/>
-                </console>
-                <graphics type='vnc' port='{vncPort}' autoport='no' listen='0.0.0.0'>
-                  <listen type='address' address='0.0.0.0'/>
-                </graphics>
-                <video>
-                  <model type='virtio' heads='1'/>
-                </video>
-                <rng model='virtio'>
-                  <backend model='random'>/dev/urandom</backend>
-                </rng>{gpuPassthroughXml}{vsockXml}{sharedFsXml}
-                <channel type='unix'>
-                  <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.Id}.org.qemu.guest_agent.0'/>
-                  <target type='virtio' name='org.qemu.guest_agent.0'/>
-                </channel>
-              </devices>
-            </domain>";
-    }
     /// <summary>
     /// Notify the local BlockStore VM to delete all blocks owned by this VM.
     /// Best-effort — failure is logged but does not block VM deletion.
