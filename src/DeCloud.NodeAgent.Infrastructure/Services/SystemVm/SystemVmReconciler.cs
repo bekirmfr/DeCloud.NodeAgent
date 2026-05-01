@@ -640,7 +640,7 @@ public sealed class SystemVmReconciler : BackgroundService
     ///   reality=None,      pending=null, !depsMet → Wait  (waiting on deps)
     ///   reality=None,      pending=null, depsMet  → IssueCreate
     ///   reality=Unhealthy, pending=Delete    → Wait       (delete in flight)
-    ///   reality=Unhealthy, pending=Create    → IssueDelete (effectivePending=null — Create converged)
+    ///   reality=Unhealthy, pending=Create    → Wait       (booting — shielded until CommandTimeout)
     ///   reality=Unhealthy, pending=null      → IssueDelete (delete for redeploy)
     /// </code>
     /// </summary>
@@ -705,7 +705,13 @@ public sealed class SystemVmReconciler : BackgroundService
 
             case Reality.Unhealthy:
                 if (effectivePending?.Kind == OutstandingCommandKind.Delete)
-                    return new(MatrixAction.Wait, $"VM {reality.VmId} unhealthy, delete in flight");
+                    return new(MatrixAction.Wait,
+                        $"VM {reality.VmId} unhealthy, delete in flight");
+
+                if (effectivePending?.Kind == OutstandingCommandKind.Create)
+                    return new(MatrixAction.Wait,
+                        $"VM {reality.VmId} booting ({reality.VmState}) — create in flight, " +
+                        $"waiting up to {CommandTimeout.TotalMinutes:F0}min for services to start");
 
                 return new(MatrixAction.IssueDelete,
                     $"VM {reality.VmId} unhealthy ({reality.VmState}) — deleting for redeploy");
