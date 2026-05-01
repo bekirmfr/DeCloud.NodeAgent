@@ -1806,12 +1806,12 @@ private List<string> GetInvalidVmsForNode(string nodeId, List<string> reportedRu
 ### Phase B: NodeAgent — VM Template & Binary
 
 11. **VmType.BlockStore** — Add to enum
-12. **blockstore-vm-cloudinit.yaml** — Cloud-init template
-13. **blockstore-node Go binary** — Core storage engine with DAG/manifest support, GossipSub subscription for `decloud/blockstore/new-blocks`, adaptive XOR threshold pull logic
-14. **blockstore-bootstrap-poll.sh** — Orchestrator peer discovery
-15. **blockstore-notify-ready.sh** — Callback to NodeAgent
-16. **blockstore-health-check.sh** — Health monitoring
-17. **blockstore-dashboard.py** — Status dashboard
+12. **blockstore-vm-cloudinit.yaml** — Cloud-init template (migrated to artifact-pull model — see SYSTEM_VM_RESILIENCE_DESIGN.md P10)
+13. **blockstore-node Go binary** — Core storage engine with DAG/manifest support, GossipSub subscription; now built by CI in DeCloud.Builds and distributed via artifact cache (not bundled in NodeAgent) ✅
+14. **blockstore-bootstrap-poll.sh** — Orchestrator peer discovery; now distributed as inline data: URI artifact ✅
+15. **blockstore-notify-ready.sh** — Callback to NodeAgent; now distributed as inline data: URI artifact ✅
+16. **blockstore-health-check.sh** — Health monitoring; now distributed as inline data: URI artifact ✅
+17. **blockstore-dashboard.py** — Status dashboard; now distributed as inline data: URI artifact ✅
 18. **BlockStoreCallbackController.cs** — NodeAgent callback endpoint
 19. **CommandProcessorService** — Handle VmType.BlockStore in CreateVm
 
