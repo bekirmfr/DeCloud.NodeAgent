@@ -199,16 +199,22 @@ public sealed class SystemVmReconciler : BackgroundService
         var hasPending = _outstanding.TryGet(role, out var pending);
         var pendingOrNull = hasPending ? pending : null;
 
-        // If an outstanding Create has fulfilled (VM reached Healthy), clear it
-        // so the matrix sees the converged state rather than "command in flight".
-        // This is the normal success path; sweep handles the timeout path.
+        // Clear a pending Create as soon as the VM exists — reality != None means
+        // the Create converged (VM registered in libvirt), regardless of health.
+        // Whether the VM is Healthy or Unhealthy is for Decide() to act on.
+        //
+        // Previously only cleared on Healthy, which caused a 20-minute wait when:
+        //   - VM appeared as Unhealthy (cloud-init still running)
+        //   - User deleted the VM before it reached Healthy
+        //   - reality dropped back to None with pending=Create still set
         if (pendingOrNull?.Kind == OutstandingCommandKind.Create &&
-            reality.State == Reality.Healthy)
+            reality.State != Reality.None)
         {
             _outstanding.Clear(role);
             _logger.LogInformation(
-                "SystemVmReconciler [{Role}]: VM {VmId} reached Healthy — create converged",
-                role, reality.VmId);
+                "SystemVmReconciler [{Role}]: VM {VmId} appeared ({RealityState}) — " +
+                "create converged, pending cleared",
+                role, reality.VmId, reality.State);
             pendingOrNull = null;
         }
 
@@ -238,31 +244,6 @@ public sealed class SystemVmReconciler : BackgroundService
                 pendingOrNull = null;
                 // Fall through — Decide() issues Delete this cycle
             }
-        }
-
-        // If a Create was issued, the VM ID is known, but the VM no longer exists —
-        // the VM was deleted externally while the Create was still pending
-        // (user cleanup, virsh destroy, operator intervention, etc.).
-        //
-        // Why this is safe: CreateVmAsync clears the pending on failure/exception.
-        // A still-live pending with VmId set means CreateVmAsync returned success,
-        // so the VM was registered in libvirt and is now gone — not still being created.
-        //
-        // Age guard: skips the narrow window between step 6 (pending set with VmId,
-        // before libvirt has defined the domain) and libvirt confirming the domain.
-        // After one ReconcileInterval the VM would be visible if libvirt had it.
-        if (pendingOrNull?.Kind == OutstandingCommandKind.Create &&
-            !string.IsNullOrEmpty(pendingOrNull.VmId) &&
-            reality.State == Reality.None &&
-            (DateTime.UtcNow - pendingOrNull.IssuedAt) > ReconcileInterval)
-        {
-            _outstanding.Clear(role);
-            _logger.LogWarning(
-                "SystemVmReconciler [{Role}]: VM {VmId} was deleted while Create was " +
-                "in flight — clearing pending to allow immediate redeploy",
-                role, pendingOrNull.VmId);
-            pendingOrNull = null;
-            // Fall through — Decide() sees (intent=yes, reality=None, pending=None) → Create
         }
 
         var decision = Decide(intent, reality, pendingOrNull);
