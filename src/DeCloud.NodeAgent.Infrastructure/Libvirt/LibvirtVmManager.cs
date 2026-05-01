@@ -1891,6 +1891,7 @@ public class LibvirtVmManager : IVmManager
                                ?? "default";
                 var publicIp = spec.Labels?.GetValueOrDefault("node-public-ip")
                             ?? _nodeMetadata.PublicIp
+                            ?? _nodeMetadata.Inventory?.Network?.PublicIp
                             ?? "";
 
                 if (File.Exists(orchestratorPubKeyPath))
