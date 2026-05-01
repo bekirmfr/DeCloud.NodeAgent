@@ -119,7 +119,9 @@ public class WgMeshEnrollController : ControllerBase
         try
         {
             var client = _httpClientFactory.CreateClient();
-            client.Timeout = TimeSpan.FromSeconds(10);
+            // 3s: fast-fail when relay tunnel isn't up yet (CGNAT timing race).
+            // wg-mesh-enroll.sh retries via Strategy 2 using the public relay API.
+            client.Timeout = TimeSpan.FromSeconds(3);
 
             var payload = new
             {

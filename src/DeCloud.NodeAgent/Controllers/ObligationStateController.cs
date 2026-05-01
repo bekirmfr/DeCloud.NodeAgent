@@ -141,10 +141,15 @@ public class ObligationStateController : ControllerBase
                     // NOT .254 of the host's CGNAT subnet (e.g. 10.20.248.254 — doesn't exist).
                     // Derive the relay's subnet from its allowed-ips via `wg show`.
                     // Fall back to the NodeAgent proxy which handles routing correctly.
-                    var relayGatewayIp = await DiscoverRelayGatewayFromWgAsync(ct)
-                        ?? $"10.20.0.254"; // safe fallback — relay is always in subnet 0
-                    var relayApiUrl = $"http://{relayGatewayIp}:8080/api/relay";
                     var relayHostIp = relayEndpoint.Split(':')[0];
+                    // Use the relay's public IP (port 8080 is NAT-forwarded) so
+                    // wg-mesh-enroll.sh Strategy 2 can reach the relay API even
+                    // before the host's wg-relay tunnel has an active handshake.
+                    // The tunnel gateway (10.20.x.254) is not reachable at enrollment
+                    // time if the host's WireGuard handshake hasn't completed yet.
+                    var relayApiUrl = $"http://{relayHostIp}:8080/api/relay";
+                    var relayGatewayIp = await DiscoverRelayGatewayFromWgAsync(ct)
+                        ?? $"10.20.0.254";
 
                     _logger.LogInformation(
                         "GetWgConfig [{Role}] → CGNAT path: endpoint={Endpoint}, tunnel={Tunnel}. Caller: {Ip}",
