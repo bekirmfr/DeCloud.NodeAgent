@@ -199,51 +199,19 @@ public sealed class SystemVmReconciler : BackgroundService
         var hasPending = _outstanding.TryGet(role, out var pending);
         var pendingOrNull = hasPending ? pending : null;
 
-        // Clear a pending Create as soon as the VM exists — reality != None means
-        // the Create converged (VM registered in libvirt), regardless of health.
-        // Whether the VM is Healthy or Unhealthy is for Decide() to act on.
-        //
-        // Previously only cleared on Healthy, which caused a 20-minute wait when:
-        //   - VM appeared as Unhealthy (cloud-init still running)
-        //   - User deleted the VM before it reached Healthy
-        //   - reality dropped back to None with pending=Create still set
+        // VM created (VmId set = CreateVmAsync succeeded) but never appeared in
+        // libvirt. 3 minutes is enough for any host — clear and retry.
         if (pendingOrNull?.Kind == OutstandingCommandKind.Create &&
-            reality.State != Reality.None)
+            !string.IsNullOrEmpty(pendingOrNull.VmId) &&
+            reality.State == Reality.None &&
+            (DateTime.UtcNow - pendingOrNull.IssuedAt) > TimeSpan.FromMinutes(3))
         {
             _outstanding.Clear(role);
-            _logger.LogInformation(
-                "SystemVmReconciler [{Role}]: VM {VmId} appeared ({RealityState}) — " +
-                "create converged, pending cleared",
-                role, reality.VmId, reality.State);
+            _logger.LogWarning(
+                "SystemVmReconciler [{Role}]: VM {VmId} never appeared in libvirt " +
+                "after 3 minutes — clearing pending to retry.",
+                role, pendingOrNull.VmId);
             pendingOrNull = null;
-        }
-
-        // If an outstanding Create was issued against a stale template revision
-        // and the VM has already appeared (reality=Unhealthy), the Create is
-        // definitively done but produced a wrong VM. Clear the pending command
-        // immediately — Decide() will see (intent=yes, reality=Unhealthy, pending=None)
-        // and issue Delete this cycle, then Create with the new template next cycle.
-        //
-        // Safety: we only clear when reality=Unhealthy (VM exists). When reality=None
-        // the old VM is still being created — clearing now would cause a second
-        // concurrent Create, which libvirt's duplicate-name guard blocks but wastes
-        // a cycle. We wait for the VM to appear instead.
-        if (pendingOrNull?.Kind == OutstandingCommandKind.Create &&
-            reality.State == Reality.Unhealthy &&
-            pendingOrNull.TemplateRevision > 0)
-        {
-            var currentRevision = await _obligationState.GetSystemTemplateRevisionAsync(role, ct);
-            if (pendingOrNull.TemplateRevision < currentRevision)
-            {
-                _outstanding.Clear(role);
-                _logger.LogWarning(
-                    "SystemVmReconciler [{Role}]: Create was issued for template r{Old} but " +
-                    "current template is r{New} — stale VM is Unhealthy, clearing pending to " +
-                    "begin immediate Delete→Create with new template",
-                    role, pendingOrNull.TemplateRevision, currentRevision);
-                pendingOrNull = null;
-                // Fall through — Decide() issues Delete this cycle
-            }
         }
 
         var decision = Decide(intent, reality, pendingOrNull);
@@ -672,21 +640,32 @@ public sealed class SystemVmReconciler : BackgroundService
     ///   reality=None,      pending=null, !depsMet → Wait  (waiting on deps)
     ///   reality=None,      pending=null, depsMet  → IssueCreate
     ///   reality=Unhealthy, pending=Delete    → Wait       (delete in flight)
-    ///   reality=Unhealthy, pending=Create    → Wait       (create in flight, not converged yet)
+    ///   reality=Unhealthy, pending=Create    → IssueDelete (effectivePending=null — Create converged)
     ///   reality=Unhealthy, pending=null      → IssueDelete (delete for redeploy)
     /// </code>
     /// </summary>
     private static MatrixDecision Decide(
-        Intent intent,
-        RealitySnapshot reality,
-        OutstandingCommand? pending)
+    Intent intent,
+    RealitySnapshot reality,
+    OutstandingCommand? pending)
     {
+        // Treat a pending Create as resolved the moment the VM exists.
+        // The Create's job was to bring reality from None to something.
+        // Whether that something is Healthy or Unhealthy is irrelevant to
+        // the pending — it's the matrix's next decision.
+        var effectivePending = pending;
+        if (pending?.Kind == OutstandingCommandKind.Create &&
+            reality.State != Reality.None)
+        {
+            effectivePending = null;
+        }
+
         if (!intent.WantDeployed)
         {
             if (reality.State == Reality.None)
                 return new(MatrixAction.Wait, "no obligation, no VM — converged");
 
-            if (pending?.Kind == OutstandingCommandKind.Delete)
+            if (effectivePending?.Kind == OutstandingCommandKind.Delete)
                 return new(MatrixAction.Wait,
                     $"no obligation, stray VM {reality.VmId}, delete already in flight");
 
@@ -697,17 +676,16 @@ public sealed class SystemVmReconciler : BackgroundService
         switch (reality.State)
         {
             case Reality.Healthy:
-                if (pending is not null)
-                    return new(MatrixAction.Wait,
-                        $"VM healthy but {pending.Kind} command {pending.CommandId[..8]} still outstanding — waiting for sweep");
                 return new(MatrixAction.Wait, "converged — VM running and fully ready");
 
             case Reality.None:
-                if (pending?.Kind == OutstandingCommandKind.Create)
-                    return new(MatrixAction.Wait, "no VM yet, create in flight");
+                if (effectivePending?.Kind == OutstandingCommandKind.Create)
+                    return new(MatrixAction.Wait,
+                        $"create in flight since {effectivePending.IssuedAt:HH:mm:ss}");
 
-                if (pending?.Kind == OutstandingCommandKind.Delete)
-                    return new(MatrixAction.Wait, "no VM, delete in flight — will create next cycle when clear");
+                if (effectivePending?.Kind == OutstandingCommandKind.Delete)
+                    return new(MatrixAction.Wait,
+                        "delete in flight — will create next cycle when clear");
 
                 if (!intent.DepsMet)
                     return new(MatrixAction.Wait,
@@ -717,12 +695,8 @@ public sealed class SystemVmReconciler : BackgroundService
                     "obligation active, no VM, deps met — creating");
 
             case Reality.Unhealthy:
-                if (pending?.Kind == OutstandingCommandKind.Delete)
+                if (effectivePending?.Kind == OutstandingCommandKind.Delete)
                     return new(MatrixAction.Wait, $"VM {reality.VmId} unhealthy, delete in flight");
-
-                if (pending?.Kind == OutstandingCommandKind.Create)
-                    return new(MatrixAction.Wait,
-                        $"VM {reality.VmId} not Healthy yet ({reality.VmState}) — create in flight, waiting to converge");
 
                 return new(MatrixAction.IssueDelete,
                     $"VM {reality.VmId} unhealthy ({reality.VmState}) — deleting for redeploy");
