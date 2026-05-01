@@ -649,13 +649,22 @@ public sealed class SystemVmReconciler : BackgroundService
     RealitySnapshot reality,
     OutstandingCommand? pending)
     {
-        // Treat a pending Create as resolved the moment the VM exists.
-        // The Create's job was to bring reality from None to something.
-        // Whether that something is Healthy or Unhealthy is irrelevant to
-        // the pending — it's the matrix's next decision.
+        // A pending Create shields a booting VM from premature deletion
+        // as long as the domain exists in libvirt (reality != None).
+        // reality=Unhealthy during cloud-init is expected and normal.
+        //
+        // Shield is lifted when:
+        //   - reality=Healthy → converged normally, pending no longer needed
+        //   - reality=None    → domain gone (user deleted it, or create failed)
+        //                       handled by the 3-min pre-check above
+        //   - pending expired → SweepExpired (CommandTimeout=20min) cleared it;
+        //                       next cycle sees pending=null + reality=Unhealthy → Delete
+        //
+        // This keeps one timeout in the system (CommandTimeout) rather than
+        // introducing a separate BootGracePeriod constant.
         var effectivePending = pending;
         if (pending?.Kind == OutstandingCommandKind.Create &&
-            reality.State != Reality.None)
+            reality.State == Reality.Healthy)
         {
             effectivePending = null;
         }
