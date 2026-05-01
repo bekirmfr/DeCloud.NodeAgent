@@ -197,7 +197,11 @@ public class ObligationStateController : ControllerBase
 
                 return Ok(new
                 {
-                    relayEndpoint = $"192.168.122.1:51820", // NodeAgent proxy handles enrollment
+                    // Use the relay VM's direct virbr0 IP — co-located VMs on the
+                    // same bridge can reach it directly. 192.168.122.1 (host bridge)
+                    // is not the relay and has nothing listening on UDP 51820.
+                    // Peer registration uses the NodeAgent proxy separately.
+                    relayEndpoint = $"{relayVmIp}:51820",
                     relayPublicKey = relayPubKey,
                     relayApiUrl = $"http://{relayVmIp}:8080/api/relay",
                     tunnelIp = $"{vmTunnelIp}/24"
