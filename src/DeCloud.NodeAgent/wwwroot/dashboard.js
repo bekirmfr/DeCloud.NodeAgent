@@ -567,9 +567,9 @@ function paintSysVm(key, vm) {
         badgeHtml = `<span class="obl-badge deploying">Deploying</span>`;
     } else if (oblStatus === 0) {
         badgeHtml = `<span class="obl-badge pending">Pending</span>`;
-    } else if (oblStatus === 3 || obl.failureCount > 0) {
-        const errTip = obl.lastError ? esc(obl.lastError).slice(0, 120) : '';
-        badgeHtml = `<span class="obl-badge failed" title="${errTip}">Failed (${obl.failureCount}x)</span>`;
+    } else if (oblStatus === 3 || (obl?.failureCount ?? 0) > 0) {
+        const errTip = obl?.lastError ? esc(obl.lastError).slice(0, 120) : '';
+        badgeHtml = `<span class="obl-badge failed" title="${errTip}">Failed (${obl?.failureCount ?? 0}x)</span>`;
     } else {
         badgeHtml = `<span class="obl-badge ${oblName.toLowerCase()}">${oblName}</span>`;
     }
@@ -691,7 +691,7 @@ function paintSysVm(key, vm) {
         servicesEl.className = 'svc-chips';
         card.appendChild(servicesEl);
     }
-    const svcs = (oblIsActive && vmMatchesObligation) ? (vm?.services ?? []) : [];
+    const svcs = (running && vmMatchesObligation) ? (vm?.services ?? []) : [];
     if (svcs.length) {
         const readyAll = vm.isFullyReady;
         const readyCount = svcs.filter(s => svcReadiness(s) === 'ready').length;
