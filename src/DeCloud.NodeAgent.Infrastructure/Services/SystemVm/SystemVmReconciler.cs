@@ -65,7 +65,7 @@ public sealed record MatrixDecision(MatrixAction Action, string Reason);
 /// substitute artifact URL variables.
 ///
 /// <b>Orchestrator cooperation:</b> the orchestrator's
-/// <c>SystemVmReconciliationService</c> is disabled in P7 (after soak).
+/// <c>SystemVmReconciliationService</c> is disabled.
 /// Until P7 ships, both systems run concurrently — the node handles deletes,
 /// the orchestrator handles the gaps until templates are seeded in P10.
 /// This causes no conflict: the orchestrator's <c>VerifyActiveAsync</c> sees
