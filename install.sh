@@ -1975,27 +1975,12 @@ create_directories() {
     log_success "Directories created"
 }
 
-# TODO(future): Switch from build-from-source to download-prebuilt binaries.
-#
-# Current flow:  git clone repo → dotnet publish → ~5 min build on every install
-# Target flow:   curl GitHub Releases asset → extract → done in ~30 seconds
-#
-# What this requires before switching:
-#   1. GitHub Actions release workflow that publishes compiled tarballs
-#      (linux-amd64, linux-arm64) on every git tag push.
-#   2. A versioned download URL in this script, e.g.:
-#        RELEASE_URL="https://github.com/bekirmfr/DeCloud.NodeAgent/releases/latest/download"
-#        curl -fsSL "$RELEASE_URL/decloud-node-agent-linux-${ARCH}.tar.gz" | tar -xz -C "$INSTALL_DIR/publish"
-#   3. Removal of the dotnet SDK install step (install_dotnet) from main()
-#      — nodes would no longer need the SDK, only the runtime.
-#   4. DHT + BlockStore + GPU proxy binaries bundled into the same tarball
-#      so the individual build steps (build_dht_binary, build_blockstore_binary,
-#      build_gpu_proxy) can also be removed.
-#
-# Benefits: no build toolchain required on nodes, faster installs, reproducible
-# binaries, eliminates compile-time failures in production environments.
-#
-# Tracked: see GitHub Releases workflow discussion.
+# Future improvement: pre-built release binaries
+#   Build DeCloud.NodeAgent as a versioned release tarball in CI
+#   (linux-amd64, linux-arm64) on every git tag push.
+#   Benefits: no build toolchain required on nodes, faster installs,
+#   reproducible binaries, eliminates compile-time failures in production.
+#   Tracked: see GitHub Releases workflow discussion.
 download_node_agent() {
     if [ "$SKIP_DOWNLOAD" = true ]; then
         log_warn "Skipping Node Agent download (--skip-download)"
