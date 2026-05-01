@@ -1965,6 +1965,13 @@ public class LibvirtVmManager : IVmManager
             // =====================================================
             if (spec.VmType == VmType.Dht)
             {
+                variables["__DHT_REGION__"] = spec.Labels?.GetValueOrDefault("node-region") ?? "";
+                variables["__DHT_ADVERTISE_IP__"] = spec.Labels?.GetValueOrDefault("dht-advertise-ip") ?? "";
+                variables["__DHT_BOOTSTRAP_PEERS__"] = spec.Labels?.GetValueOrDefault("dht-bootstrap-peers") ?? "";
+                variables["__WG_RELAY_ENDPOINT__"] = spec.Labels?.GetValueOrDefault("wg-relay-endpoint") ?? "";
+                variables["__WG_RELAY_PUBKEY__"] = spec.Labels?.GetValueOrDefault("wg-relay-pubkey") ?? "";
+                variables["__WG_TUNNEL_IP__"] = spec.Labels?.GetValueOrDefault("wg-tunnel-ip") ?? "";
+                variables["__WG_RELAY_API__"] = spec.Labels?.GetValueOrDefault("wg-relay-api") ?? "";
                 variables["__NODE_ID__"] = spec.Labels?.GetValueOrDefault("node-id")
                                         ?? _nodeMetadata.NodeId;
                 variables["__HOST_MACHINE_ID__"] = _nodeMetadata.MachineId;
