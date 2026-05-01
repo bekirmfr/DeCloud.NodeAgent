@@ -56,4 +56,14 @@ public sealed record OutstandingCommand
     /// to detect expiry against the global CommandTimeout.
     /// </summary>
     public required DateTime IssuedAt { get; init; }
+
+    /// <summary>
+    /// Revision of the system template this Create was issued against.
+    /// Used to detect template drift while a Create is in flight.
+    /// When the stored template revision exceeds this value and the VM
+    /// has appeared (reality=Unhealthy), the Create is considered stale
+    /// and is cleared immediately rather than waiting for the 20-minute sweep.
+    /// Zero for Delete commands (revision is irrelevant).
+    /// </summary>
+    public int TemplateRevision { get; init; }
 }

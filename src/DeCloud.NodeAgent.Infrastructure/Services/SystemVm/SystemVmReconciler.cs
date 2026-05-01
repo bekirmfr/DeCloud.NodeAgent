@@ -212,6 +212,34 @@ public sealed class SystemVmReconciler : BackgroundService
             pendingOrNull = null;
         }
 
+        // If an outstanding Create was issued against a stale template revision
+        // and the VM has already appeared (reality=Unhealthy), the Create is
+        // definitively done but produced a wrong VM. Clear the pending command
+        // immediately — Decide() will see (intent=yes, reality=Unhealthy, pending=None)
+        // and issue Delete this cycle, then Create with the new template next cycle.
+        //
+        // Safety: we only clear when reality=Unhealthy (VM exists). When reality=None
+        // the old VM is still being created — clearing now would cause a second
+        // concurrent Create, which libvirt's duplicate-name guard blocks but wastes
+        // a cycle. We wait for the VM to appear instead.
+        if (pendingOrNull?.Kind == OutstandingCommandKind.Create &&
+            reality.State == Reality.Unhealthy &&
+            pendingOrNull.TemplateRevision > 0)
+        {
+            var currentRevision = await _obligationState.GetSystemTemplateRevisionAsync(role, ct);
+            if (pendingOrNull.TemplateRevision < currentRevision)
+            {
+                _outstanding.Clear(role);
+                _logger.LogWarning(
+                    "SystemVmReconciler [{Role}]: Create was issued for template r{Old} but " +
+                    "current template is r{New} — stale VM is Unhealthy, clearing pending to " +
+                    "begin immediate Delete→Create with new template",
+                    role, pendingOrNull.TemplateRevision, currentRevision);
+                pendingOrNull = null;
+                // Fall through — Decide() issues Delete this cycle
+            }
+        }
+
         var decision = Decide(intent, reality, pendingOrNull);
 
         var pendingDesc = pendingOrNull is null
@@ -474,6 +502,7 @@ public sealed class SystemVmReconciler : BackgroundService
             Kind = OutstandingCommandKind.Create,
             VmId = vmId,
             IssuedAt = DateTime.UtcNow,
+            TemplateRevision = template?.Revision ?? 0
         });
 
         // ── 7–8. Create VM, set services ────────────────────────────────
