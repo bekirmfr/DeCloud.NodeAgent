@@ -240,6 +240,31 @@ public sealed class SystemVmReconciler : BackgroundService
             }
         }
 
+        // If a Create was issued, the VM ID is known, but the VM no longer exists —
+        // the VM was deleted externally while the Create was still pending
+        // (user cleanup, virsh destroy, operator intervention, etc.).
+        //
+        // Why this is safe: CreateVmAsync clears the pending on failure/exception.
+        // A still-live pending with VmId set means CreateVmAsync returned success,
+        // so the VM was registered in libvirt and is now gone — not still being created.
+        //
+        // Age guard: skips the narrow window between step 6 (pending set with VmId,
+        // before libvirt has defined the domain) and libvirt confirming the domain.
+        // After one ReconcileInterval the VM would be visible if libvirt had it.
+        if (pendingOrNull?.Kind == OutstandingCommandKind.Create &&
+            !string.IsNullOrEmpty(pendingOrNull.VmId) &&
+            reality.State == Reality.None &&
+            (DateTime.UtcNow - pendingOrNull.IssuedAt) > ReconcileInterval)
+        {
+            _outstanding.Clear(role);
+            _logger.LogWarning(
+                "SystemVmReconciler [{Role}]: VM {VmId} was deleted while Create was " +
+                "in flight — clearing pending to allow immediate redeploy",
+                role, pendingOrNull.VmId);
+            pendingOrNull = null;
+            // Fall through — Decide() sees (intent=yes, reality=None, pending=None) → Create
+        }
+
         var decision = Decide(intent, reality, pendingOrNull);
 
         var pendingDesc = pendingOrNull is null
