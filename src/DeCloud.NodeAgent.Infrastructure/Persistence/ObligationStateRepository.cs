@@ -1,4 +1,3 @@
-using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Core.Models.State;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;

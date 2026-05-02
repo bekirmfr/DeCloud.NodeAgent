@@ -1,7 +1,8 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Infrastructure.Persistence;
+using DeCloud.Shared.Models;
 using Microsoft.AspNetCore.Mvc;
-using Org.BouncyCastle.Utilities;
 
 namespace DeCloud.NodeAgent.Controllers;
 
@@ -22,29 +23,32 @@ namespace DeCloud.NodeAgent.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/system-vms")]
-public class SystemVmDashboardController : ControllerBase
+public class SystemVmController : ControllerBase
 {
     private const int DashboardPort = 8080;
 
     private readonly IVmManager _vmManager;
     private readonly IHttpClientFactory _httpClientFactory;
-    private readonly ILogger<SystemVmDashboardController> _logger;
+    private readonly ObligationStateRepository _obligationStore;
+    private readonly ILogger<SystemVmController> _logger;
 
     private static readonly Dictionary<string, VmType> RoleMap =
         new(StringComparer.OrdinalIgnoreCase)
         {
-            ["relay"]      = VmType.Relay,
-            ["dht"]        = VmType.Dht,
-            ["blockstore"] = VmType.BlockStore,
+            [ObligationRole.Relay]      = VmType.Relay,
+            [ObligationRole.Dht]        = VmType.Dht,
+            [ObligationRole.BlockStore] = VmType.BlockStore,
         };
 
-    public SystemVmDashboardController(
+    public SystemVmController(
         IVmManager vmManager,
         IHttpClientFactory httpClientFactory,
-        ILogger<SystemVmDashboardController> logger)
+        ObligationStateRepository obligationStore,
+        ILogger<SystemVmController> logger)
     {
         _vmManager  = vmManager;
         _httpClientFactory = httpClientFactory;
+        _obligationStore = obligationStore;
         _logger = logger;
     }
 
@@ -212,6 +216,59 @@ public class SystemVmDashboardController : ControllerBase
                 role);
 
             return StatusCode(500, new { error = "Internal proxy error.", details = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Returns connection details for a co-located system VM so that sibling
+    /// system VMs (e.g. blockstore → dht) can establish direct libp2p
+    /// connections over virbr0 without involving the orchestrator.
+    ///
+    /// 404 means "not yet ready" — callers poll until they get 200.
+    /// </summary>
+    [HttpGet("{role}/peer-info")]
+    public async Task<IActionResult> GetPeerInfo(string role)
+    {
+        var vmType = RoleMap.TryGetValue(role, out var vt) ? vt : (VmType?)null;
+        if (vmType is null) return NotFound();
+
+        var vm = _vmManager.GetRunningVms()
+            .FirstOrDefault(v => v.Spec.VmType == vmType.Value && v.IsFullyReady);
+        if (vm is null || string.IsNullOrEmpty(vm.Spec.IpAddress))
+            return NotFound();  // not yet running — caller polls
+
+        var state = await _obligationStore.GetStateJsonAsync(role);
+        var peerId = ExtractPeerId(state);
+        if (string.IsNullOrEmpty(peerId))
+            return NotFound();
+
+        return Ok(new
+        {
+            peerId,
+            ipAddress = vm.Spec.IpAddress,   // virbr0 — same-host direct route
+            port = vmType == VmType.Dht ? 4001 : 5001
+        });
+    }
+
+    /// <summary>
+    /// Extract the libp2p peerId from a serialized obligation state JSON
+    /// document. Returns null if the field is missing or the JSON is invalid —
+    /// callers treat that as "not yet ready" and the client polls.
+    /// </summary>
+    private static string? ExtractPeerId(string? stateJson)
+    {
+        if (string.IsNullOrWhiteSpace(stateJson)) return null;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(stateJson);
+            return doc.RootElement.TryGetProperty("peerId", out var p)
+                && p.ValueKind == System.Text.Json.JsonValueKind.String
+                ? p.GetString()
+                : null;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
         }
     }
 
