@@ -1966,7 +1966,9 @@ public class LibvirtVmManager : IVmManager
             // =====================================================
             if (spec.VmType == VmType.Dht)
             {
-                variables["__DHT_REGION__"] = spec.Labels?.GetValueOrDefault("node-region") ?? "";
+                variables["__DHT_REGION__"] = spec.Labels?.GetValueOrDefault("node-region")
+                                           ?? _nodeMetadata.Region
+                                           ?? "";
                 variables["__DHT_ADVERTISE_IP__"] = spec.Labels?.GetValueOrDefault("dht-advertise-ip") ?? "";
                 variables["__DHT_BOOTSTRAP_PEERS__"] = spec.Labels?.GetValueOrDefault("dht-bootstrap-peers") ?? "";
                 variables["__WG_RELAY_ENDPOINT__"] = spec.Labels?.GetValueOrDefault("wg-relay-endpoint") ?? "";

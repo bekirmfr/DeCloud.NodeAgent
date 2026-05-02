@@ -147,7 +147,9 @@ public class ObligationStateController : ControllerBase
                     // before the host's wg-relay tunnel has an active handshake.
                     // The tunnel gateway (10.20.x.254) is not reachable at enrollment
                     // time if the host's WireGuard handshake hasn't completed yet.
-                    var relayApiUrl = $"http://{relayHostIp}:8080/api/relay";
+                    // wg-mesh-enroll.sh Strategy 2 appends /api/relay/add-peer —
+                    // relayApiUrl must be the base URL only, no path suffix.
+                    var relayApiUrl = $"http://{relayHostIp}:8080";
                     var relayGatewayIp = await DiscoverRelayGatewayFromWgAsync(ct)
                         ?? $"10.20.0.254";
 
@@ -208,7 +210,7 @@ public class ObligationStateController : ControllerBase
                     // Peer registration uses the NodeAgent proxy separately.
                     relayEndpoint = $"{relayVmIp}:51820",
                     relayPublicKey = relayPubKey,
-                    relayApiUrl = $"http://{relayVmIp}:8080/api/relay",
+                    relayApiUrl = $"http://{relayVmIp}:8080",
                     tunnelIp = $"{vmTunnelIp}/24"
                 });
             }
