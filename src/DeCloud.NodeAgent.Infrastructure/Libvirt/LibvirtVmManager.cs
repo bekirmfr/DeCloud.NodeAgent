@@ -2001,11 +2001,23 @@ public class LibvirtVmManager : IVmManager
                 variables["__TIMESTAMP__"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
                 variables["__ORCHESTRATOR_URL__"] = _nodeMetadata.OrchestratorUrl;
 
+                // Port constants — 5090 = API port, 5001 = bitswap (libp2p) port.
+                // These match BlockStoreVmSpec.ApiPort / BitswapPort in the Orchestrator.
+                variables["__BLOCKSTORE_API_PORT__"] = "5090";
+                variables["__BLOCKSTORE_LISTEN_PORT__"] = "5001";
+
+                // Advertise IP and bootstrap peers — sourced from labels set at deploy time.
+                // BLOCKSTORE_ADVERTISE_IP is also overwritten by wg-config-fetch.sh at boot
+                // once the WireGuard tunnel IP is confirmed, so an empty initial value is safe.
+                variables["__BLOCKSTORE_ADVERTISE_IP__"] = spec.Labels?.GetValueOrDefault("blockstore-advertise-ip") ?? "";
+                variables["__BLOCKSTORE_BOOTSTRAP_PEERS__"] = spec.Labels?.GetValueOrDefault("blockstore-bootstrap-peers") ?? "";
+
                 _logger.LogInformation(
-                    "VM {VmId}: Set BlockStore metadata - NodeId={NodeId}, StorageBytes={Storage}, OrchestratorUrl={Url}",
+                    "VM {VmId}: Set BlockStore metadata - NodeId={NodeId}, ApiPort={ApiPort}, BitswapPort={BitswapPort}, OrchestratorUrl={Url}",
                     spec.Id,
                     variables["__NODE_ID__"],
-                    spec.Labels?.GetValueOrDefault("blockstore-storage-bytes") ?? "(from template)",
+                    variables["__BLOCKSTORE_API_PORT__"],
+                    variables["__BLOCKSTORE_LISTEN_PORT__"],
                     _nodeMetadata.OrchestratorUrl);
             }
 
