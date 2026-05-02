@@ -1802,6 +1802,7 @@ private List<string> GetInvalidVmsForNode(string nodeId, List<string> reportedRu
 8. **SystemVmReconciliationService** — Wire up deployment method
 9. **VmService** — Add BlockStore to isSystemVm check
 10. **Program.cs** — Register DI
+*(Note: GoBinaryBuildStartupService, which was registered here, has been deleted as part of P11. System VM binaries are now fetched via ArtifactCacheService at deploy time.)*
 
 ### Phase B: NodeAgent — VM Template & Binary
 

@@ -2006,6 +2006,13 @@ public class LibvirtVmManager : IVmManager
                 variables["__BLOCKSTORE_API_PORT__"] = "5090";
                 variables["__BLOCKSTORE_LISTEN_PORT__"] = "5001";
 
+                // Region — same source as DHT VMs (node-region label, falls back to node region).
+                // Required by blockstore-metadata.json; consumed by blockstore-dashboard.py
+                // when substituting __NODE_REGION__ into served dashboard files.
+                variables["__DHT_REGION__"] = spec.Labels?.GetValueOrDefault("node-region")
+                                           ?? _nodeMetadata.Region
+                                           ?? "";
+
                 // Advertise IP and bootstrap peers — sourced from labels set at deploy time.
                 // BLOCKSTORE_ADVERTISE_IP is also overwritten by wg-config-fetch.sh at boot
                 // once the WireGuard tunnel IP is confirmed, so an empty initial value is safe.

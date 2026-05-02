@@ -704,7 +704,10 @@ function paintSysVm(key, vm) {
           </div>` +
             svcs.map(s => svcChip(s)).join('');
     } else {
-        servicesEl.innerHTML = '';
+        servicesEl.innerHTML = `<div class="sysvm-ready-row">
+            <span class="sysvm-ready-dot ${rdotFailed ? 'failed' : rdot}"></span>
+            <span>No services found</span>
+          </div>`;
     }
 }
 
