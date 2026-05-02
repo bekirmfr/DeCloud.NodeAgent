@@ -691,7 +691,7 @@ function paintSysVm(key, vm) {
         servicesEl.className = 'svc-chips';
         card.appendChild(servicesEl);
     }
-    const svcs = (running && vmMatchesObligation) ? (vm?.services ?? []) : [];
+    const svcs = (running) ? (vm?.services ?? []) : [];
     if (svcs.length) {
         const readyAll = vm.isFullyReady;
         const readyCount = svcs.filter(s => svcReadiness(s) === 'ready').length;
