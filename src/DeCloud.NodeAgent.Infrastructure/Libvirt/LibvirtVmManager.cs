@@ -2070,6 +2070,60 @@ public class LibvirtVmManager : IVmManager
                 _logger.LogInformation(
                     "VM {VmId}: Merged custom UserData with base configuration",
                     spec.Id);
+
+                // AUDIT-FIX F2: detect placeholders that survived all substitution
+                // layers. The orchestrator-side renderer (CloudInitRenderer) is
+                // authoritative for new-pipeline templates and validates clean output.
+                // The legacy paths (marketplace ${VARNAME}, system-VM legacy
+                // substitution) can leak placeholders undetected — this is the catch-all.
+                //
+                // Warn-not-throw: a leak is bad but not always fatal (some leaked
+                // placeholders end up in cosmetic positions like log messages).
+                // Throwing would block legitimate edge cases where a marketplace
+                // template intentionally uses uppercase strings that look like
+                // placeholders. The warning makes leaks visible without breaking deploys.
+                {
+                    var unreplacedDoubleUnderscore = System.Text.RegularExpressions.Regex.Matches(
+                            cloudInitYaml, @"__[A-Z][A-Z0-9_]*__")
+                        .Cast<System.Text.RegularExpressions.Match>()
+                        .Select(m => m.Value)
+                        .Distinct(StringComparer.Ordinal)
+                        .OrderBy(p => p, StringComparer.Ordinal)
+                        .ToList();
+
+                    var unreplacedDollarBraces = System.Text.RegularExpressions.Regex.Matches(
+                            cloudInitYaml, @"\$\{[^}\s]+\}")
+                        .Cast<System.Text.RegularExpressions.Match>()
+                        .Select(m => m.Value)
+                        .Distinct(StringComparer.Ordinal)
+                        .OrderBy(p => p, StringComparer.Ordinal)
+                        .ToList();
+
+                    if (unreplacedDoubleUnderscore.Count > 0)
+                    {
+                        _logger.LogWarning(
+                            "VM {VmId}: cloud-init has {Count} unreplaced __VARNAME__ placeholder(s): {Placeholders}. " +
+                            "These will appear LITERALLY in the deployed cloud-init and may cause boot-time " +
+                            "failures or malformed config files. Investigate which substitution layer should " +
+                            "have handled them (orchestrator CloudInitRenderer, VmService legacy substitution, " +
+                            "or LibvirtVmManager STEP 5.x VmType branch).",
+                            spec.Id,
+                            unreplacedDoubleUnderscore.Count,
+                            string.Join(", ", unreplacedDoubleUnderscore));
+                    }
+
+                    if (unreplacedDollarBraces.Count > 0)
+                    {
+                        _logger.LogWarning(
+                            "VM {VmId}: cloud-init has {Count} unreplaced ${{VARNAME}} placeholder(s): {Placeholders}. " +
+                            "These survived VmService.SubstituteCloudInitVariables — likely an unknown variable, " +
+                            "or the legacy regex (\\$\\{{[A-Z_]+\\}}) didn't match (colons, hyphens, lowercase " +
+                            "are not in its character class).",
+                            spec.Id,
+                            unreplacedDollarBraces.Count,
+                            string.Join(", ", unreplacedDollarBraces));
+                    }
+                }
             }
             else
             {
@@ -2718,29 +2772,50 @@ public class LibvirtVmManager : IVmManager
                     lines.Add("disable_root: false");
                     lines.Add("");
                 }
-                
-                // Add SSH keys if provided
-                if (!string.IsNullOrEmpty(sshKeysBlock) && !sshKeysBlock.Contains("# No SSH keys"))
+
+                // Only inject if the template doesn't already declare
+                // ssh_authorized_keys (literal section OR new-pipeline placeholder).
+                // New pipeline pre-renders __SSH_AUTHORIZED_KEYS_BLOCK__ → literal
+                // section; marketplace templates may carry the placeholder still.
+                // Either way, skip the append to avoid duplicate top-level keys.
+                var sshKeysAlreadyHandled =
+                    customUserData.Contains("ssh_authorized_keys:", StringComparison.OrdinalIgnoreCase)
+                    || customUserData.Contains("__SSH_AUTHORIZED_KEYS_BLOCK__", StringComparison.OrdinalIgnoreCase);
+
+                if (!sshKeysAlreadyHandled
+                    && !string.IsNullOrEmpty(sshKeysBlock)
+                    && !sshKeysBlock.Contains("# No SSH keys"))
                 {
                     lines.Add(sshKeysBlock);
                     lines.Add("");
                 }
-                
-                // Add password configuration if provided (root user only)
-                if (hasPassword && !string.IsNullOrEmpty(passwordBlock) && !passwordBlock.Contains("# No password"))
+
+                // Only inject if the template doesn't already declare
+                // chpasswd (literal block OR new-pipeline placeholder).
+                var passwordAlreadyHandled =
+                    customUserData.Contains("chpasswd:", StringComparison.OrdinalIgnoreCase)
+                    || customUserData.Contains("__PASSWORD_CONFIG_BLOCK__", StringComparison.OrdinalIgnoreCase);
+
+                if (hasPassword
+                    && !passwordAlreadyHandled
+                    && !string.IsNullOrEmpty(passwordBlock)
+                    && !passwordBlock.Contains("# No password"))
                 {
                     // Use the password block as-is (already configured for root)
                     lines.Add(passwordBlock);
                     lines.Add("");
                 }
-                
-                // Add SSH password auth flag
-                if (hasPassword)
+
+                // Only inject if the template doesn't already declare
+                // ssh_pwauth. The check is a single substring; covers both literal
+                // (`ssh_pwauth: true`) and new-pipeline placeholder
+                // (`ssh_pwauth: __SSH_PASSWORD_AUTH__`) — both contain "ssh_pwauth:".
+                if (hasPassword && !customUserData.Contains("ssh_pwauth:", StringComparison.OrdinalIgnoreCase))
                 {
                     lines.Add("ssh_pwauth: true");
                     lines.Add("");
                 }
-                
+
                 // Now add the runcmd line
                 lines.Add(line);
                 afterRuncmd = true;
