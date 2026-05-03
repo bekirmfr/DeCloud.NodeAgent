@@ -2071,11 +2071,19 @@ public class LibvirtVmManager : IVmManager
                     "VM {VmId}: Merged custom UserData with base configuration",
                     spec.Id);
 
-                // AUDIT-FIX F2: detect placeholders that survived all substitution
-                // layers. The orchestrator-side renderer (CloudInitRenderer) is
-                // authoritative for new-pipeline templates and validates clean output.
-                // The legacy paths (marketplace ${VARNAME}, system-VM legacy
-                // substitution) can leak placeholders undetected — this is the catch-all.
+                // Detect __VARNAME__ placeholders
+                // that survived all substitution layers. The orchestrator-side renderer
+                // (CloudInitRenderer) is authoritative for new-pipeline templates and
+                // validates clean output. The legacy node-side substitution can leak
+                // __VARNAME__ placeholders undetected — this is the catch-all.
+                //
+                // ${VARNAME} detection was originally part of F2 but produced too many
+                // false positives — almost every system-VM cloud-init has legitimate
+                // bash variable references (${ATTEMPTS}, ${WG_PRIV}, ${HTTP:-timeout},
+                // etc.) inside runcmd blocks, and the regex cannot distinguish them
+                // from leaked placeholders. CloudInitTemplateService already warns on
+                // its own __[A-Z_]+__ leaks at the legacy substitution layer, which is
+                // the only path that ever produced ${VARNAME} placeholders to begin with.
                 //
                 // Warn-not-throw: a leak is bad but not always fatal (some leaked
                 // placeholders end up in cosmetic positions like log messages).
@@ -2085,14 +2093,6 @@ public class LibvirtVmManager : IVmManager
                 {
                     var unreplacedDoubleUnderscore = System.Text.RegularExpressions.Regex.Matches(
                             cloudInitYaml, @"__[A-Z][A-Z0-9_]*__")
-                        .Cast<System.Text.RegularExpressions.Match>()
-                        .Select(m => m.Value)
-                        .Distinct(StringComparer.Ordinal)
-                        .OrderBy(p => p, StringComparer.Ordinal)
-                        .ToList();
-
-                    var unreplacedDollarBraces = System.Text.RegularExpressions.Regex.Matches(
-                            cloudInitYaml, @"\$\{[^}\s]+\}")
                         .Cast<System.Text.RegularExpressions.Match>()
                         .Select(m => m.Value)
                         .Distinct(StringComparer.Ordinal)
@@ -2110,18 +2110,6 @@ public class LibvirtVmManager : IVmManager
                             spec.Id,
                             unreplacedDoubleUnderscore.Count,
                             string.Join(", ", unreplacedDoubleUnderscore));
-                    }
-
-                    if (unreplacedDollarBraces.Count > 0)
-                    {
-                        _logger.LogWarning(
-                            "VM {VmId}: cloud-init has {Count} unreplaced ${{VARNAME}} placeholder(s): {Placeholders}. " +
-                            "These survived VmService.SubstituteCloudInitVariables — likely an unknown variable, " +
-                            "or the legacy regex (\\$\\{{[A-Z_]+\\}}) didn't match (colons, hyphens, lowercase " +
-                            "are not in its character class).",
-                            spec.Id,
-                            unreplacedDollarBraces.Count,
-                            string.Join(", ", unreplacedDollarBraces));
                     }
                 }
             }
