@@ -42,6 +42,7 @@ public partial class OrchestratorClient : IOrchestratorClient
     private string? _orchestratorPublicKey;
     private string? _walletAddress;
     private HeartbeatDto? _lastHeartbeat = null;
+    private const string SshCaPublicKeyPath = "/etc/ssh/decloud_ca.pub";
 
     // Queue for pending commands received from heartbeat responses
     // Shared singleton with CommandProcessorService via DI
@@ -200,6 +201,10 @@ REGISTERED_AT={DateTime.UtcNow:O}";
 
         _nodeMetadata.UpdateInventory(inventory);
 
+        // Read the SSH CA public key — P1.9. Used by orchestrator to substitute
+        // __CA_PUBLIC_KEY__ in tenant cloud-init at render time.
+        var sshCaPublicKey = await ReadSshCaPublicKeyAsync(ct);
+
         // Build registration request
         var registration = new NodeRegistration
         {
@@ -217,8 +222,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             Zone = _nodeMetadata.Zone,
             Pricing = _nodeMetadata.Pricing,
             RegisteredAt = DateTime.UtcNow,
-            // Report which obligation state versions we already have so the
-            // orchestrator only sends states that are newer than our local copy.
+            SshCaPublicKey = sshCaPublicKey,                              // ← new
             ObligationStateVersions = await BuildObligationStateVersionsAsync(ct),
             SystemTemplateVersions = await BuildSystemTemplateVersionsAsync(ct)
         };
@@ -561,6 +565,60 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         return Assembly.GetExecutingAssembly()
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
             ?.InformationalVersion ?? "unknown";
+    }
+
+    /// <summary>
+    /// Reads the SSH certificate authority public key from disk for inclusion
+    /// in the registration payload (P1.9). The key lives on every DeCloud node
+    /// and is used to sign per-VM SSH host certificates.
+    ///
+    /// <para>
+    /// Failure modes are non-fatal — registration continues with a null value
+    /// and tenant deploys that need the CA key fail loudly at orchestrator-side
+    /// render time, with a clear message pointing at the node. This keeps
+    /// node-side bootstrap robust against transient FS issues; the operator
+    /// fixes the file and the next registration cycle picks it up.
+    /// </para>
+    /// </summary>
+    private async Task<string?> ReadSshCaPublicKeyAsync(CancellationToken ct)
+    {
+        try
+        {
+            if (!File.Exists(SshCaPublicKeyPath))
+            {
+                _logger.LogWarning(
+                    "SSH CA public key not found at {Path} — registering without it. " +
+                    "Tenant cloud-init templates that reference __CA_PUBLIC_KEY__ will " +
+                    "fail at orchestrator-side render time until this file is created " +
+                    "and the agent re-registers.",
+                    SshCaPublicKeyPath);
+                return null;
+            }
+
+            var content = await File.ReadAllTextAsync(SshCaPublicKeyPath, ct);
+            var trimmed = content.Trim();
+
+            if (string.IsNullOrEmpty(trimmed))
+            {
+                _logger.LogWarning(
+                    "SSH CA public key file at {Path} is empty — registering without it.",
+                    SshCaPublicKeyPath);
+                return null;
+            }
+
+            _logger.LogInformation(
+                "✓ SSH CA public key read from {Path} ({Length} bytes)",
+                SshCaPublicKeyPath, trimmed.Length);
+
+            return trimmed;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to read SSH CA public key from {Path} — registering without it.",
+                SshCaPublicKeyPath);
+            return null;
+        }
     }
 
     /// <summary>

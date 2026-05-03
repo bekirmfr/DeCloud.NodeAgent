@@ -212,7 +212,28 @@ public class NodeRegistration
     public required string AgentVersion { get; set; } = string.Empty;
     public required List<string> SupportedImages { get; set; } = new();
 
-    
+    /// <summary>
+    /// SSH certificate authority public key — captured from
+    /// <c>/etc/ssh/decloud_ca.pub</c> by <c>OrchestratorClient.RegisterAsync</c>
+    /// at registration time. Sent to the orchestrator so tenant cloud-init
+    /// templates can substitute <c>__CA_PUBLIC_KEY__</c> at render time.
+    ///
+    /// <para>
+    /// Mirrors the orchestrator-side
+    /// <c>NodeRegistrationRequest.SshCaPublicKey</c>. Same JSON shape on the
+    /// wire.
+    /// </para>
+    ///
+    /// <para>
+    /// Null on the rare path where the node lacks <c>/etc/ssh/decloud_ca.pub</c>
+    /// (e.g., misconfigured or freshly cloned node image). The orchestrator
+    /// accepts null and stamps null into <c>Node.SshCaPublicKey</c>; tenant
+    /// deploys that need the CA key fail at render time with a clear message.
+    /// </para>
+    /// </summary>
+    public string? SshCaPublicKey { get; set; }
+
+
     // Staking info
     public string StakingTxHash { get; set; } = string.Empty;
 
