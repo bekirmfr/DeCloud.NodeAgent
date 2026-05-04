@@ -5,6 +5,7 @@ using DeCloud.NodeAgent.Infrastructure.Docker;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
+using DeCloud.Shared.Models;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 using System.Text.Json;
@@ -22,6 +23,7 @@ public class CommandProcessorService : BackgroundService
     private readonly ConcurrentQueue<PendingCommand> _pushedCommands;
     private readonly IVmManager _vmManager;
     private readonly DockerContainerManager _dockerManager;
+    private readonly IVmDeploymentPipeline _pipeline;
     private readonly IResourceDiscoveryService _resourceDiscovery;
     private readonly INatRuleManager _natRuleManager;
     private readonly INodeMetadataService _nodeMetadata;
@@ -58,6 +60,7 @@ public class CommandProcessorService : BackgroundService
         ConcurrentQueue<PendingCommand> pushedCommands,
         IVmManager vmManager,
         DockerContainerManager dockerManager,
+        IVmDeploymentPipeline pipeline,
         IResourceDiscoveryService resourceDiscovery,
         INatRuleManager natRuleManager,
         INodeMetadataService nodeMetadata,
@@ -74,6 +77,7 @@ public class CommandProcessorService : BackgroundService
         _pushedCommands = pushedCommands;
         _vmManager = vmManager;
         _dockerManager = dockerManager;
+        _pipeline = pipeline;
         _resourceDiscovery = resourceDiscovery;
         _natRuleManager = natRuleManager;
         _nodeMetadata = nodeMetadata;
@@ -381,6 +385,33 @@ public class CommandProcessorService : BackgroundService
                 labelsElement.GetRawText());
         }
 
+        // Parse artifacts (P2.5). The orchestrator includes the template's
+        // architecture-filtered Artifacts list so the pipeline can prefetch
+        // before VM creation. Empty list for custom-cloud-init and container
+        // deployments — the pipeline no-ops in that case.
+        List<TemplateArtifact> artifacts = new();
+        if (root.TryGetProperty("Artifacts", out var artifactsElement) ||
+            root.TryGetProperty("artifacts", out artifactsElement))
+        {
+            if (artifactsElement.ValueKind == JsonValueKind.Array)
+            {
+                try
+                {
+                    artifacts = JsonSerializer.Deserialize<List<TemplateArtifact>>(
+                        artifactsElement.GetRawText(),
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                        ?? new List<TemplateArtifact>();
+                }
+                catch (JsonException ex)
+                {
+                    _logger.LogWarning(ex,
+                        "VM {VmId}: failed to parse Artifacts payload — proceeding with " +
+                        "empty list. The VM may fail at boot if cloud-init references " +
+                        "uncached artifacts.", vmId);
+                }
+            }
+        }
+
         // Resolve image URL with architecture awareness
         baseImageUrl = await ResolveImageUrlAsync(imageId, baseImageUrl, ct);
 
@@ -512,16 +543,23 @@ public class CommandProcessorService : BackgroundService
                 vmId, userData.Length);
         }
 
-        // Route to the correct manager based on deployment mode
-        IVmManager manager = deploymentMode == DeploymentMode.Container
-            ? _dockerManager
-            : _vmManager;
+        // Dispatch via unified pipeline (P2.5). Pipeline owns prefetch +
+        // binary verification + manager routing. We still need a reference
+        // to the chosen manager for the post-create services lookup below.
+        var result = await _pipeline.DeployAsync(vmSpec, artifacts, password, ct);
 
-        var result = await manager.CreateVmAsync(vmSpec, password, ct);
-
-        // Parse service definitions from orchestrator payload
+        // Parse service definitions from orchestrator payload.
+        // Manager lookup mirrors the pipeline's internal routing; we cannot
+        // use the pipeline's manager directly because it's an implementation
+        // detail. Resolving from DeploymentMode here is consistent and
+        // doesn't add new code paths — the alternative (pipeline returns
+        // the manager) leaks abstraction.
         if (result.Success)
         {
+            IVmManager manager = deploymentMode == DeploymentMode.Container
+                ? _dockerManager
+                : _vmManager;
+
             var vm = (manager.GetAllVms()).FirstOrDefault(v => v.VmId == vmId);
             if (vm != null)
             {

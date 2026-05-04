@@ -97,6 +97,7 @@ public sealed class SystemVmReconciler : BackgroundService
     private readonly IIntentComputation _intent;
     private readonly IRealityProjection _reality;
     private readonly IOutstandingCommands _outstanding;
+    private readonly IVmDeploymentPipeline _pipeline;
     private readonly IVmManager _vmManager;
     private readonly IArtifactCacheService _artifactCache;
     private readonly VmRepository _repository;
@@ -107,6 +108,7 @@ public sealed class SystemVmReconciler : BackgroundService
         IIntentComputation intent,
         IRealityProjection reality,
         IOutstandingCommands outstanding,
+        IVmDeploymentPipeline pipeline,
         IVmManager vmManager,
         IArtifactCacheService artifactCache,
         VmRepository repository,
@@ -116,6 +118,7 @@ public sealed class SystemVmReconciler : BackgroundService
         _intent = intent;
         _reality = reality;
         _outstanding = outstanding;
+        _pipeline = pipeline;
         _vmManager = vmManager;
         _artifactCache = artifactCache;
         _repository = repository;
@@ -364,37 +367,11 @@ public sealed class SystemVmReconciler : BackgroundService
             return;
         }
 
-        // ── 3. Verify / prefetch artifacts ──────────────────────────────
+        // ── 3. Architecture (still needed for SubstituteArtifactVariables) ──
+        // Prefetch + binary verification moved into IVmDeploymentPipeline (P2.5).
+        // The pipeline returns a Failed VmOperationResult if any binary is
+        // missing; we handle that uniformly with other create failures below.
         var arch = ResourceDiscoveryService.GetArchitectureNormalised();
-
-        if (template.Artifacts.Count > 0)
-        {
-            await _artifactCache.PrefetchAsync(template.Artifacts, arch, ct);
-
-            // Verify every architecture-appropriate binary is cached.
-            // A missing binary means the VM will fail to start — better to skip
-            // and retry next cycle than to deploy a broken VM.
-            var missingBinary = false;
-            foreach (var artifact in template.Artifacts)
-            {
-                if (artifact.Type != ArtifactType.Binary) continue;
-                if (artifact.Architecture is not null &&
-                    !string.Equals(artifact.Architecture, arch, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                var cached = await _artifactCache.GetLocalPathAsync(artifact.Sha256, ct);
-                if (cached is null)
-                {
-                    _logger.LogWarning(
-                        "SystemVmReconciler [{Role}]: binary artifact '{Name}' ({Sha256}) " +
-                        "not in cache after prefetch — skipping Create this cycle.",
-                        role, artifact.Name, artifact.Sha256[..12]);
-                    missingBinary = true;
-                }
-            }
-
-            if (missingBinary) return;
-        }
 
         // ── 4. Substitute artifact variables in cloud-init ──────────────
         var cloudInit = SubstituteArtifactVariables(
@@ -488,7 +465,11 @@ public sealed class SystemVmReconciler : BackgroundService
         // (VM booting through cloud-init) and issuing a premature Delete.
         try
         {
-            var result = await _vmManager.CreateVmAsync(vmSpec, password: null, ct);
+            var result = await _pipeline.DeployAsync(
+                vmSpec,
+                template.Artifacts,
+                password: null,
+                ct);
 
             if (!result.Success)
             {

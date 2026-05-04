@@ -15,7 +15,6 @@ using DeCloud.NodeAgent.Infrastructure.Services.Resilience;
 using DeCloud.NodeAgent.Infrastructure.Services.State;
 using DeCloud.NodeAgent.Infrastructure.Services.SystemVm;
 using DeCloud.NodeAgent.Services;
-using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
@@ -264,6 +263,13 @@ builder.Services.AddSingleton<GpuProxyService>();
 // Docker Container Manager (GPU sharing for WSL2/non-IOMMU nodes)
 // =====================================================
 builder.Services.AddSingleton<DockerContainerManager>();
+
+// =====================================================
+// Unified VM deploy pipeline (P2.5).
+// Single prefetch + manager-dispatch path, called by both
+// SystemVmReconciler.ActCreateAsync and CommandProcessorService.HandleCreateVmAsync.
+// =====================================================
+builder.Services.AddSingleton<IVmDeploymentPipeline, VmDeploymentPipeline>();
 
 // =====================================================
 // Network Services
