@@ -2546,7 +2546,7 @@ print_summary() {
         echo "    GPU:           ${gpu_name:-detected}"
         echo "    GPU Mode:      ${GPU_MODE}"
         echo "    Proxy Daemon:  $([ -f /usr/local/bin/gpu-proxy-daemon ] && echo 'installed' || echo 'not built')"
-        echo "    CUDA Shim:     $([ -f /usr/local/lib/libdecloud_cuda_shim.so ] && echo 'installed' || echo 'not built')"
+        echo "    CUDA Shim:     $([ -f /usr/local/lib/decloud-gpu-shim/libdecloud_cuda_shim.so ] && echo 'installed' || echo 'not built')"
     else
         echo "    GPU:           not detected"
     fi

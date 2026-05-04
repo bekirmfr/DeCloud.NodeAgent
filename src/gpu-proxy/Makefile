@@ -339,6 +339,9 @@ install-shim-compat: shim-compat
 # ----------------------------------------------------------------
 install-all-shims-compat: all-shims-compat
 	install -d $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim
+	# Remove stale real cuBLAS libraries left by previous install methods (614 MB)
+	rm -f $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcublas_real.so.* \
+	      $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcublasLt_real.so.*
 	# Runtime API shim (VM delivery only — NEVER install to system lib paths)
 	install -m 644 $(SHIM_COMPAT) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libdecloud_cuda_shim.so
 	# Driver API shim (libcuda.so.1)
@@ -362,6 +365,9 @@ install-all-shims-compat: all-shims-compat
 
 install-all-shims: all-shims
 	install -d $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim
+	# Remove stale real cuBLAS libraries left by previous install methods (614 MB)
+	rm -f $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcublas_real.so.* \
+	      $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcublasLt_real.so.*
 	install -m 644 $(SHIM_COMPAT) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libdecloud_cuda_shim.so
 	install -m 644 $(DRIVER_SHIM) $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcuda.so.1
 	ln -sf libcuda.so.1 $(DESTDIR)$(PREFIX)/lib/decloud-gpu-shim/libcuda.so
