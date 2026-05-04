@@ -20,6 +20,7 @@ public class DockerContainerManager : IVmManager
     // Track containers in memory (synced with repository)
     private readonly Dictionary<string, VmInstance> _containers = new();
     private bool _initialized;
+    private bool _supportsGpuContainers;   // detected once at InitializeAsync
 
     private const string LabelPrefix = "decloud";
 
@@ -350,6 +351,15 @@ public class DockerContainerManager : IVmManager
 
         try
         {
+            // Detect GPU container support once — aligns to the same boundary used
+            // by ResourceDiscoveryService.DetectNvidiaContainerRuntimeAsync().
+            // `--gpus all` requires the NVIDIA Container Toolkit to be installed and
+            // registered as a Docker runtime; without it Docker returns exit 125.
+            var runtimesResult = await _executor.ExecuteAsync(
+            "docker", "info --format '{{.Runtimes}}'", ct);
+            _supportsGpuContainers = runtimesResult.Success &&
+            runtimesResult.StandardOutput.Contains("nvidia");
+            _logger.LogInformation("GPU container support: {Supported}", _supportsGpuContainers);
             // Load from database
             var savedVms = await _repository.LoadAllVmsAsync();
             foreach (var vm in savedVms)
@@ -384,7 +394,6 @@ public class DockerContainerManager : IVmManager
         {
             "run", "-d",
             "--name", containerName,
-            "--gpus", "all",
             "--restart", "unless-stopped",
             $"--cpus={spec.VirtualCpuCores}",
             $"--memory={spec.MemoryBytes}",
@@ -392,6 +401,22 @@ public class DockerContainerManager : IVmManager
             $"--label={LabelPrefix}.owner-id={spec.OwnerId ?? "unknown"}",
             $"--label={LabelPrefix}.managed=true"
         };
+
+        // Only request GPU access when the NVIDIA Container Toolkit is present.
+        // Without it, Docker has no device driver for the `gpu` capability and
+        // fails immediately with exit 125.
+        if (_supportsGpuContainers)
+        {
+            args.Add("--gpus");
+            args.Add("all");
+        }
+        else
+        {
+            _logger.LogWarning(
+            "Container {Name}: omitting --gpus (NVIDIA Container Toolkit not detected). " +
+            "Install nvidia-container-toolkit and restart Docker to enable GPU access.",
+            containerName);
+        }
 
         // Environment variables
         if (spec.EnvironmentVariables != null)
