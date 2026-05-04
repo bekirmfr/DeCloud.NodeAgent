@@ -323,10 +323,7 @@ public sealed class SystemVmReconciler : BackgroundService
     ///   2. Deserialise to <see cref="SystemVmTemplate"/>.
     ///   3. Verify artifacts are cached; prefetch any that are missing.
     ///      Skip if any critical (Binary) artifact is still missing after prefetch.
-    ///   4. Build the cloud-init UserData by substituting artifact URL/SHA256 variables
-    ///      in the template content. LibvirtVmManager handles all other variables
-    ///      (__NODE_ID__, __ORCHESTRATOR_URL__, __HOSTNAME__, __TIMESTAMP__) from its
-    ///      own node metadata at ISO-creation time.
+    ///   4. Use template.CloudInitContent directly — fully rendered by the orchestrator.
     ///   5. Build <see cref="VmSpec"/> from the template resource spec.
     ///   6. Register an outstanding command before dispatching.
     ///   7. Call <see cref="IVmManager.CreateVmAsync"/>.
@@ -364,15 +361,21 @@ public sealed class SystemVmReconciler : BackgroundService
             return;
         }
 
-        // ── 3. Architecture (still needed for SubstituteArtifactVariables) ──
-        // Prefetch + binary verification moved into IVmDeploymentPipeline (P2.5).
-        // The pipeline returns a Failed VmOperationResult if any binary is
-        // missing; we handle that uniformly with other create failures below.
+        // ── 3. Architecture ─────────────────────────────────────────────
+        // Needed for the node-arch label and for the deployment pipeline's
+        // architecture-filtered binary verification.
+        // Prefetch + binary verification are in IVmDeploymentPipeline (P2.5).
         var arch = ResourceDiscoveryService.GetArchitectureNormalised();
 
-        // ── 4. Substitute artifact variables in cloud-init ──────────────
-        var cloudInit = SubstituteArtifactVariables(
-            template.CloudInitContent, template.Artifacts, arch);
+        // ── 4. Cloud-init ────────────────────────────────────────────────
+        // template.CloudInitContent is the fully-rendered string produced by
+        // CloudInitRenderer on the orchestrator: all __VARNAME__ placeholders
+        // substituted in Pass 1, all ${ARTIFACT_URL:...} tokens substituted
+        // in Pass 2. Use it directly — no node-side substitution needed or safe.
+        // SubstituteArtifactVariables is dropped (P3.1.5): calling it on an
+        // already-substituted string is a no-op, and it would be wrong once
+        // the legacy LibvirtVmManager substitution path is removed in Phase 4.
+        var cloudInit = template.CloudInitContent;
 
         // ── 5. Build VmSpec ─────────────────────────────────────────────
         var vmId = Guid.NewGuid().ToString();
@@ -404,43 +407,33 @@ public sealed class SystemVmReconciler : BackgroundService
             ReplicationFactor = 0,  // system VMs are never replicated
             Labels = new Dictionary<string, string>
             {
-                // Carried into LibvirtVmManager's variable substitution pipeline
-                // as spec.Labels["node-arch"] for ResolveArtifactVariables.
+                // node-arch: consumed by LibvirtVmManager (architecture-filtered
+                //   artifact cache lookups; still runs during Phase 3 legacy path).
+                // system-vm-role / system-vm-revision: carried into the VM record
+                //   for observability and drift detection.
+                // Role-specific labels (relay-subnet, relay-region, node-public-ip,
+                //   dht-advertise-ip, etc.) are NOT included here. The rendered
+                //   cloud-init in CloudInitUserData already has all __VARNAME__
+                //   placeholders substituted by the orchestrator renderer (P3.1.x).
+                //   LibvirtVmManager STEP 5.5/5.6/5.7 will attempt to Replace()
+                //   those placeholders but find nothing to replace — a no-op.
+                //   Phase 4.1 removes those legacy substitution blocks entirely.
                 ["node-arch"] = arch,
                 ["system-vm-role"] = role,
                 ["system-vm-revision"] = template.Revision.ToString(),
+                // TODO (Phase 3 cleanup / BLOCKSTORE-FIX §6): replace Guid.NewGuid()
+                // above with obligation.VmId once NodeService.ReconcileNodeAsync stops
+                // pre-assigning VmIds and all three roles adopt the "node mints VmId,
+                // orchestrator adopts via heartbeat" pattern.
             }
         };
 
-        // ── Inject role-specific labels from obligation state ──────────
-        // The relay subnet lives in obligation state, not the template.
-        // Without it, __RELAY_SUBNET__ substitutes as "0" in cloud-init.
-        if (role == ObligationRole.Relay)
-        {
-            try
-            {
-                var relayStateJson = await _obligationState.GetStateJsonAsync(ObligationRole.Relay, ct);
-                if (relayStateJson is not null)
-                {
-                    using var doc = JsonDocument.Parse(relayStateJson);
-                    if (doc.RootElement.TryGetProperty("relaySubnet", out var subnetEl))
-                    {
-                        var subnetRaw = subnetEl.GetString() ?? "";
-                        // Normalise "10.20.248.0/24" → "248", "248" → "248"
-                        var subnetOctet = subnetRaw.Contains('.')
-                            ? subnetRaw.Split('.').ElementAtOrDefault(2) ?? "0"
-                            : subnetRaw;
-                        vmSpec.Labels["relay-subnet"] = subnetOctet;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex,
-                    "SystemVmReconciler [relay]: could not read relay subnet from obligation state — " +
-                    "runcmd will patch it at boot time");
-            }
-        }
+        // relay-specific label injection block removed (P3.1.5).
+        // Previously injected relay-subnet from obligation state so that
+        // LibvirtVmManager STEP 5.5 could substitute __RELAY_SUBNET__ in cloud-init.
+        // Now redundant: RelaySubnetResolver (P3.1.1/P3.1.2) substitutes
+        // __RELAY_SUBNET__ at orchestrator render time; placeholder is absent from
+        // template.CloudInitContent by the time the reconciler sees it.
 
         // ── 6. Register outstanding command ─────────────────────────────
         var commandId = Guid.NewGuid().ToString();
@@ -556,48 +549,6 @@ public sealed class SystemVmReconciler : BackgroundService
                 "readiness probing may be delayed",
                 vmId);
         }
-    }
-
-    // ── Artifact variable substitution ───────────────────────────────────
-
-    /// <summary>
-    /// Replace <c>${ARTIFACT_URL:name}</c> and <c>${ARTIFACT_SHA256:name}</c>
-    /// placeholders in the cloud-init template with the local artifact cache
-    /// URLs and SHA256 digests, filtered by architecture.
-    ///
-    /// All artifact URLs resolve to the local node-agent cache endpoint:
-    /// <c>http://192.168.122.1:5100/api/artifacts/{sha256}</c>
-    ///
-    /// The VM never sees the upstream SourceUrl — it always fetches from the
-    /// local cache, which the node agent has pre-verified.
-    /// </summary>
-    private static string SubstituteArtifactVariables(
-        string cloudInitContent,
-        IReadOnlyList<TemplateArtifact> artifacts,
-        string nodeArch)
-    {
-        if (artifacts.Count == 0) return cloudInitContent;
-
-        var result = cloudInitContent;
-
-        foreach (var artifact in artifacts)
-        {
-            // Skip arch-specific artifacts that don't match this node.
-            if (artifact.Architecture is not null &&
-                !string.Equals(artifact.Architecture, nodeArch,
-                    StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            var urlKey = $"${{ARTIFACT_URL:{artifact.Name}}}";
-            var sha256Key = $"${{ARTIFACT_SHA256:{artifact.Name}}}";
-            var localUrl = $"{ArtifactBaseUrl}/{artifact.Sha256}";
-
-            result = result
-                .Replace(urlKey, localUrl, StringComparison.Ordinal)
-                .Replace(sha256Key, artifact.Sha256, StringComparison.Ordinal);
-        }
-
-        return result;
     }
 
     // ── Matrix decision function ─────────────────────────────────────────
