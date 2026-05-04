@@ -1,0 +1,194 @@
+﻿using System.Net;
+using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using DeCloud.NodeAgent.Core.Interfaces.State;
+using DeCloud.NodeAgent.Core.Models;
+using DeCloud.Shared.Models;
+using Microsoft.AspNetCore.Mvc;
+
+namespace DeCloud.NodeAgent.Controllers;
+
+/// <summary>
+/// Serves runtime-mutable environment variable values and scope policy
+/// to system VMs over the local virbr0 bridge.
+///
+/// <para>
+/// <b>Route:</b> <c>GET /api/obligations/{role}/environment</c>
+/// </para>
+///
+/// <para>
+/// Called periodically by <c>decloud-env-watcher.sh</c> running inside
+/// each system VM. The watcher diffs the returned <c>values</c> against
+/// its locally-cached environment file and applies the max-scope reaction
+/// across any changed variables.
+/// </para>
+///
+/// <para>
+/// <b>Security:</b> virbr0-only (192.168.122.0/24). Same enforcement as
+/// <c>ObligationStateController</c> and <c>ArtifactCacheController</c>.
+/// No authentication — network isolation is the security boundary.
+/// Dynamic variable values may include sensitive fields (e.g. WG keys);
+/// virbr0 isolation ensures only local VMs can reach this endpoint.
+/// </para>
+///
+/// <para>
+/// <b>Phase 3.1 behaviour for relay:</b> relay declares no Dynamic variables,
+/// so <c>values</c> and <c>scopes</c> are both empty. The watcher sees an
+/// empty scope file on the VM and exits immediately each tick.
+/// </para>
+/// </summary>
+[ApiController]
+[Route("api/obligations")]
+public class ObligationEnvironmentController : ControllerBase
+{
+    private static readonly IPNetwork VirbR0Network = IPNetwork.Parse("192.168.122.0/24");
+
+    private static readonly JsonSerializerOptions TemplateJsonOpts = new()
+    {
+        PropertyNameCaseInsensitive = true,
+    };
+
+    private readonly IObligationStateService _obligationState;
+    private readonly ILogger<ObligationEnvironmentController> _logger;
+
+    public ObligationEnvironmentController(
+        IObligationStateService obligationState,
+        ILogger<ObligationEnvironmentController> logger)
+    {
+        _obligationState = obligationState;
+        _logger = logger;
+    }
+
+    // ── GET /api/obligations/{role}/environment ──────────────────────────────
+
+    /// <summary>
+    /// Returns the current Dynamic variable values and scope policy for the
+    /// given system VM role.
+    ///
+    /// <para>Returns 404 if no template has been received for this role yet
+    /// (node not yet registered / template not pushed). The watcher treats
+    /// any non-200 response as a transient error and retries next tick.</para>
+    /// </summary>
+    [HttpGet("{role}/environment")]
+    public async Task<IActionResult> GetEnvironment(string role, CancellationToken ct)
+    {
+        if (!EnforceVirbr0(out var callerIp))
+        {
+            _logger.LogWarning(
+                "ObligationEnvironmentController: rejected {Role} request from {Ip} — not on virbr0",
+                role, callerIp);
+            return StatusCode(403, "Environment endpoint is only accessible from the VM bridge network.");
+        }
+
+        role = role.ToLowerInvariant();
+        if (!IsKnownRole(role))
+        {
+            _logger.LogWarning(
+                "ObligationEnvironmentController: unknown role '{Role}' from {Ip}", role, callerIp);
+            return BadRequest($"Unknown system VM role: {role}");
+        }
+
+        // Load the system template from SQLite to get the Variables declaration.
+        var templateJson = await _obligationState.GetSystemTemplateJsonAsync(role, ct);
+        if (templateJson is null)
+        {
+            _logger.LogDebug(
+                "ObligationEnvironmentController: no template for role '{Role}' — returning 404",
+                role);
+            return NotFound($"No system template stored for role '{role}'. " +
+                            "The node agent will push it on next registration or heartbeat.");
+        }
+
+        SystemVmTemplate template;
+        try
+        {
+            template = JsonSerializer.Deserialize<SystemVmTemplate>(templateJson, TemplateJsonOpts)
+                       ?? throw new InvalidOperationException("Deserialized template is null.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "ObligationEnvironmentController: failed to deserialize template for role '{Role}'",
+                role);
+            return StatusCode(500, "Failed to read system template.");
+        }
+
+        // Phase 3.1: no Dynamic variables exist yet (relay is all-Static).
+        // For Phase 3.2+ (DHT/BlockStore), Dynamic variables will be resolved
+        // here via node-side IVariableResolver implementations (P3.2.3).
+        var dynamicVars = template.Variables
+            .Where(v => v.Kind == VariableKind.Dynamic)
+            .ToList();
+
+        // Build values and scopes from the Dynamic variable list.
+        // In Phase 3.1 both are empty (relay has no dynamics).
+        var values = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        var scopes = new SortedDictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var variable in dynamicVars)
+        {
+            // TODO (P3.2.3): resolve actual value via node-side IVariableResolver.
+            // For now, Dynamic variables are not resolvable on the node side;
+            // relay has none so this loop never executes in Phase 3.1.
+            var scopeString = variable.Scope switch
+            {
+                WatcherScope.Noop => "noop",
+                WatcherScope.Reload => "reload",
+                WatcherScope.Restart => "restart",
+                _ => "restart",
+            };
+            scopes[variable.Name] = scopeString;
+            // values[variable.Name] will be populated by P3.2.3 resolvers.
+        }
+
+        var generation = ComputeGeneration(values);
+
+        _logger.LogDebug(
+            "ObligationEnvironmentController: served {Role} environment ({Count} dynamics, gen={Gen})",
+            role, values.Count, generation);
+
+        return Ok(new ObligationEnvironment
+        {
+            Values = values,
+            Scopes = scopes,
+            Generation = generation,
+        });
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Compute a deterministic generation fingerprint from the values dict.
+    /// Sort keys, serialise to compact JSON, SHA256, take first 16 hex chars.
+    /// Stable across .NET versions because SortedDictionary + System.Text.Json
+    /// with no custom converters produces deterministic output for string maps.
+    /// </summary>
+    internal static string ComputeGeneration(IReadOnlyDictionary<string, string> values)
+    {
+        // Copy into a SortedDictionary to guarantee key order before serialising.
+        var sorted = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (k, v) in values)
+            sorted[k] = v;
+
+        var json = JsonSerializer.Serialize(sorted);
+        var hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(json));
+        return Convert.ToHexString(hashBytes).ToLowerInvariant()[..16];
+    }
+
+    private bool EnforceVirbr0(out string callerIp)
+    {
+        var remoteIp = HttpContext.Connection.RemoteIpAddress;
+        if (remoteIp is null) { callerIp = "unknown"; return false; }
+
+        if (remoteIp.IsIPv4MappedToIPv6)
+            remoteIp = remoteIp.MapToIPv4();
+
+        callerIp = remoteIp.ToString();
+        return VirbR0Network.Contains(remoteIp);
+    }
+
+    private static bool IsKnownRole(string role) =>
+        role is "relay" or "dht" or "blockstore";
+}
