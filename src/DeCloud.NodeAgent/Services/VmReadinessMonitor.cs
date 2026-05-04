@@ -90,7 +90,10 @@ public class VmReadinessMonitor : BackgroundService
             try
             {
                 if (await IsGuestAgentReady(vm.VmId, ct))
+                {
                     vm.LastHeartbeat = DateTime.UtcNow;
+                    await _repository.UpdateLastHeartbeatAsync(vm.VmId, vm.LastHeartbeat); // ← add this
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

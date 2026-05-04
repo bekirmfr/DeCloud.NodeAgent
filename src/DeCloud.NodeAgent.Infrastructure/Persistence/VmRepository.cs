@@ -715,6 +715,29 @@ public class VmRepository : IDisposable
     }
 
     /// <summary>
+    /// Lightweight method with lock to update the LastUpdated field. Parses to vm.LastHeartBeat 
+    /// </summary>
+    /// <param name="vmId"></param>
+    /// <param name="timestamp"></param>
+    /// <returns></returns>
+    public async Task UpdateLastHeartbeatAsync(string vmId, DateTime timestamp)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "UPDATE VmRecords SET LastUpdated = @ts WHERE VmId = @id";
+            cmd.Parameters.AddWithValue("@ts", timestamp.ToString("O"));
+            cmd.Parameters.AddWithValue("@id", vmId);
+            await cmd.ExecuteNonQueryAsync();
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>
     /// Returns a sanitized summary of all VM records for dashboard display.
     /// SECURITY: Excludes SshPublicKey, EncryptedPassword, BaseImageHash.
     /// </summary>
