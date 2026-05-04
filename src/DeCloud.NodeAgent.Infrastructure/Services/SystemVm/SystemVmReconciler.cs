@@ -99,7 +99,6 @@ public sealed class SystemVmReconciler : BackgroundService
     private readonly IOutstandingCommands _outstanding;
     private readonly IVmDeploymentPipeline _pipeline;
     private readonly IVmManager _vmManager;
-    private readonly IArtifactCacheService _artifactCache;
     private readonly VmRepository _repository;
     private readonly ILogger<SystemVmReconciler> _logger;
 
@@ -110,7 +109,6 @@ public sealed class SystemVmReconciler : BackgroundService
         IOutstandingCommands outstanding,
         IVmDeploymentPipeline pipeline,
         IVmManager vmManager,
-        IArtifactCacheService artifactCache,
         VmRepository repository,
         ILogger<SystemVmReconciler> logger)
     {
@@ -120,7 +118,6 @@ public sealed class SystemVmReconciler : BackgroundService
         _outstanding = outstanding;
         _pipeline = pipeline;
         _vmManager = vmManager;
-        _artifactCache = artifactCache;
         _repository = repository;
         _logger = logger;
     }
