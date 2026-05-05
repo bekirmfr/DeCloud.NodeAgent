@@ -2,6 +2,7 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Services;
+using DeCloud.NodeAgent.Infrastructure.Services.CloudInit;
 using DeCloud.Shared.Models;
 using Microsoft.AspNetCore.Mvc;
 using System.Net;
@@ -62,6 +63,7 @@ public class ObligationStateController : ControllerBase
     private static readonly IPNetwork VirbR0Network = IPNetwork.Parse("192.168.122.0/24");
 
     private readonly IObligationStateService _obligationState;
+    private readonly INodeRelayConfigProvider _relayConfigProvider;
     private readonly IOrchestratorClient _orchestratorClient;
     private readonly IPortForwardingManager _portForwardingManager;
     private readonly IVmManager _vmManager;
@@ -77,6 +79,7 @@ public class ObligationStateController : ControllerBase
 
     public ObligationStateController(
         IObligationStateService obligationState,
+        INodeRelayConfigProvider relayConfigProvider,
         IOrchestratorClient orchestratorClient,
         IPortForwardingManager portForwardingManager,
         IVmManager vmManager,
@@ -84,6 +87,7 @@ public class ObligationStateController : ControllerBase
         ILogger<ObligationStateController> logger)
     {
         _obligationState = obligationState;
+        _relayConfigProvider = relayConfigProvider;
         _orchestratorClient = orchestratorClient;
         _portForwardingManager = portForwardingManager;
         _vmManager = vmManager;
@@ -122,107 +126,22 @@ public class ObligationStateController : ControllerBase
         if (canonical == ObligationRole.Relay)
             return BadRequest("Relay VMs are the relay — they do not connect to one.");
 
-        // ── Path 1: CGNAT node ────────────────────────────────────────────────
-        var cgnatInfo = _orchestratorClient.GetLastHeartbeat()?.Heartbeat?.CgnatInfo;
-        if (cgnatInfo != null && !string.IsNullOrEmpty(cgnatInfo.WireGuardConfig))
+        var cfg = await _relayConfigProvider.TryGetAsync(canonical, ct);
+        if (cfg is not null)
         {
-            var relayEndpoint = ParseWgConfigField(cgnatInfo.WireGuardConfig, "Endpoint");
-            var relayPubKey = ParseWgConfigField(cgnatInfo.WireGuardConfig, "PublicKey");
-            var hostTunnelIp = cgnatInfo.TunnelIp; // e.g. 10.20.248.2
+            _logger.LogInformation(
+                "GetWgConfig [{Role}]: endpoint={Endpoint}, tunnel={Tunnel}. Caller: {Ip}",
+                canonical, cfg.RelayEndpoint, cfg.TunnelIp, callerIp);
 
-            if (!string.IsNullOrEmpty(relayEndpoint) &&
-                !string.IsNullOrEmpty(relayPubKey) &&
-                !string.IsNullOrEmpty(hostTunnelIp))
+            return Ok(new
             {
-                var vmTunnelIp = ComputeVmTunnelIp(hostTunnelIp, canonical);
-                if (vmTunnelIp != null)
-                {
-                    // The relay's WG API lives at .254 of the relay's OWN subnet (e.g. 10.20.0.254),
-                    // NOT .254 of the host's CGNAT subnet (e.g. 10.20.248.254 — doesn't exist).
-                    // Derive the relay's subnet from its allowed-ips via `wg show`.
-                    // Fall back to the NodeAgent proxy which handles routing correctly.
-                    var relayHostIp = relayEndpoint.Split(':')[0];
-                    // Use the relay's public IP (port 8080 is NAT-forwarded) so
-                    // wg-mesh-enroll.sh Strategy 2 can reach the relay API even
-                    // before the host's wg-relay tunnel has an active handshake.
-                    // The tunnel gateway (10.20.x.254) is not reachable at enrollment
-                    // time if the host's WireGuard handshake hasn't completed yet.
-                    // wg-mesh-enroll.sh Strategy 2 appends /api/relay/add-peer —
-                    // relayApiUrl must be the base URL only, no path suffix.
-                    var relayApiUrl = $"http://{relayHostIp}:8080";
-                    var relayGatewayIp = await DiscoverRelayGatewayFromWgAsync(ct)
-                        ?? $"10.20.0.254";
-
-                    _logger.LogInformation(
-                        "GetWgConfig [{Role}] → CGNAT path: endpoint={Endpoint}, tunnel={Tunnel}. Caller: {Ip}",
-                        canonical, relayEndpoint, vmTunnelIp, callerIp);
-
-                    return Ok(new
-                    {
-                        relayEndpoint,
-                        relayPublicKey = relayPubKey,
-                        relayApiUrl,
-                        tunnelIp = $"{vmTunnelIp}/24"
-                    });
-                }
-            }
+                relayEndpoint = cfg.RelayEndpoint,
+                relayPublicKey = cfg.RelayPublicKey,
+                relayApiUrl = cfg.RelayApiUrl,
+                tunnelIp = cfg.TunnelIp
+            });
         }
 
-        // ── Path 2: Public IP node with co-located relay VM ───────────────────
-        var relayVmIp = await _portForwardingManager.GetRelayVmIpAsync(ct);
-        var relayVm = _vmManager.GetAllVms()
-            .FirstOrDefault(v =>
-                v.Spec.VmType == VmType.Relay &&
-                v.State == VmState.Running);
-
-        if (relayVmIp != null && relayVm != null)
-        {
-            try
-            {
-                var http = _httpClientFactory.CreateClient();
-                http.Timeout = TimeSpan.FromSeconds(5);
-                var statusJson = await http.GetStringAsync(
-                    $"http://{relayVmIp}/api/relay/status", ct);
-
-                using var doc = System.Text.Json.JsonDocument.Parse(statusJson);
-                var relayPubKey = doc.RootElement
-                    .GetProperty("wireguard_public_key")
-                    .GetString() ?? string.Empty;
-
-                var relaySubnetLabel = relayVm.Spec.Labels
-                    ?.GetValueOrDefault("relay-subnet") ?? "248";
-                int.TryParse(relaySubnetLabel, out var relaySubnet);
-
-                var vmOctet = canonical == ObligationRole.Dht
-                    ? DhtRelayNodeOctet
-                    : BlockStoreRelayNodeOctet;
-                var vmTunnelIp = $"10.20.{relaySubnet}.{vmOctet}";
-
-                _logger.LogInformation(
-                    "GetWgConfig [{Role}] → local relay path: vmIp={RelayVmIp}, tunnel={Tunnel}. Caller: {Ip}",
-                    canonical, relayVmIp, vmTunnelIp, callerIp);
-
-                return Ok(new
-                {
-                    // Use the relay VM's direct virbr0 IP — co-located VMs on the
-                    // same bridge can reach it directly. 192.168.122.1 (host bridge)
-                    // is not the relay and has nothing listening on UDP 51820.
-                    // Peer registration uses the NodeAgent proxy separately.
-                    relayEndpoint = $"{relayVmIp}:51820",
-                    relayPublicKey = relayPubKey,
-                    relayApiUrl = $"http://{relayVmIp}:8080",
-                    tunnelIp = $"{vmTunnelIp}/24"
-                });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex,
-                    "GetWgConfig [{Role}]: could not query relay VM at {Ip} — returning 202",
-                    canonical, relayVmIp);
-            }
-        }
-
-        // ── Not ready yet — tell VM to retry ─────────────────────────────────
         _logger.LogInformation(
             "GetWgConfig [{Role}]: relay not yet available — returning 202. Caller: {Ip}",
             canonical, callerIp);
@@ -233,87 +152,6 @@ public class ObligationStateController : ControllerBase
             status = "pending",
             message = "Relay not yet assigned. Retry in 15 seconds."
         });
-    }
-
-    // ----------------------------------------------------------------
-    // Private helpers
-    // ----------------------------------------------------------------
-
-    /// <summary>
-    /// Parse a field from a WireGuard config [Peer] section.
-    /// e.g. ParseWgConfigField(config, "PublicKey") → "1+MKr..."
-    /// </summary>
-    private static string? ParseWgConfigField(string wgConfig, string fieldName)
-    {
-        foreach (var line in wgConfig.Split('\n'))
-        {
-            var trimmed = line.Trim();
-            if (trimmed.StartsWith(fieldName + " =", StringComparison.OrdinalIgnoreCase) ||
-                trimmed.StartsWith(fieldName + "=", StringComparison.OrdinalIgnoreCase))
-            {
-                var idx = trimmed.IndexOf('=');
-                return idx >= 0 ? trimmed[(idx + 1)..].Trim() : null;
-            }
-        }
-        return null;
-    }
-
-    /// <summary>
-    /// Compute the WireGuard mesh tunnel IP for a system VM on a CGNAT node,
-    /// using the same offset convention as DhtNodeService and BlockStoreService.
-    /// </summary>
-    private static string? ComputeVmTunnelIp(string hostTunnelIp, string role)
-    {
-        var parts = hostTunnelIp.Split('.');
-        if (parts.Length != 4 || !int.TryParse(parts[3], out var hostOctet))
-            return null;
-
-        var offset = role == ObligationRole.Dht
-            ? DhtCgnatOffset
-            : BlockStoreCgnatOffset;
-
-        var vmOctet = offset + hostOctet;
-        if (vmOctet > 253) return null;
-
-        return $"{parts[0]}.{parts[1]}.{parts[2]}.{vmOctet}";
-    }
-
-    private async Task<string?> DiscoverRelayGatewayFromWgAsync(CancellationToken ct)
-    {
-        try
-        {
-            var process = new System.Diagnostics.Process
-            {
-                StartInfo = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "wg",
-                    Arguments = "show all allowed-ips",
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                }
-            };
-            process.Start();
-            var output = await process.StandardOutput.ReadToEndAsync(ct);
-            await process.WaitForExitAsync(ct);
-
-            // Parse: "<iface>  <pubkey>  10.20.0.0/16"
-            // Take first 10.20.x.x network and derive .254 of that network
-            foreach (var line in output.Split('\n'))
-            {
-                var parts = line.Split('\t', ' ', StringSplitOptions.RemoveEmptyEntries);
-                foreach (var part in parts.Skip(2))
-                {
-                    if (!part.StartsWith("10.20.")) continue;
-                    var network = part.Split('/')[0];
-                    var octets = network.Split('.');
-                    if (octets.Length == 4)
-                        return $"{octets[0]}.{octets[1]}.{octets[2]}.254";
-                }
-            }
-            return null;
-        }
-        catch { return null; }
     }
 
     // ----------------------------------------------------------------

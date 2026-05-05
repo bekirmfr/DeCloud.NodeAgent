@@ -11,6 +11,7 @@ using DeCloud.NodeAgent.Infrastructure.Network.UserNetwork;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.NodeAgent.Infrastructure.Services.Auth;
+using DeCloud.NodeAgent.Infrastructure.Services.CloudInit;
 using DeCloud.NodeAgent.Infrastructure.Services.Resilience;
 using DeCloud.NodeAgent.Infrastructure.Services.State;
 using DeCloud.NodeAgent.Infrastructure.Services.SystemVm;
@@ -183,6 +184,10 @@ builder.Services.AddSingleton<IArtifactCacheService>(sp =>
 // =====================================================
 builder.Services.AddSingleton<IObligationStateService, ObligationStateService>();
 builder.Services.AddSingleton<IRealityProjection, RealityProjection>();
+builder.Services.AddHttpClient<INodeRelayConfigProvider, NodeRelayConfigProvider>(client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(5);
+});
 
 // =====================================================
 // Smart Port Allocation Services

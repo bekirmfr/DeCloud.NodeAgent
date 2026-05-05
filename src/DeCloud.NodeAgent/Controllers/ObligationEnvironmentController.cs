@@ -1,12 +1,12 @@
-﻿using System.Net;
-using System.Net.Sockets;
+﻿using DeCloud.NodeAgent.Core.Interfaces.State;
+using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Infrastructure.Services.CloudInit;
+using DeCloud.Shared.Models;
+using Microsoft.AspNetCore.Mvc;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using DeCloud.NodeAgent.Core.Interfaces.State;
-using DeCloud.NodeAgent.Core.Models;
-using DeCloud.Shared.Models;
-using Microsoft.AspNetCore.Mvc;
 
 namespace DeCloud.NodeAgent.Controllers;
 
@@ -51,13 +51,19 @@ public class ObligationEnvironmentController : ControllerBase
     };
 
     private readonly IObligationStateService _obligationState;
+    private readonly INodeRelayConfigProvider _relayConfigProvider;
+    private readonly INodeMetadataService _nodeMetadata;
     private readonly ILogger<ObligationEnvironmentController> _logger;
 
     public ObligationEnvironmentController(
         IObligationStateService obligationState,
+        INodeRelayConfigProvider relayConfigProvider,
+        INodeMetadataService nodeMetadata,
         ILogger<ObligationEnvironmentController> logger)
     {
         _obligationState = obligationState;
+        _relayConfigProvider = relayConfigProvider;
+        _nodeMetadata = nodeMetadata;
         _logger = logger;
     }
 
@@ -115,32 +121,42 @@ public class ObligationEnvironmentController : ControllerBase
             return StatusCode(500, "Failed to read system template.");
         }
 
-        // Phase 3.1: no Dynamic variables exist yet (relay is all-Static).
-        // For Phase 3.2+ (DHT/BlockStore), Dynamic variables will be resolved
-        // here via node-side IVariableResolver implementations (P3.2.3).
         var dynamicVars = template.Variables
             .Where(v => v.Kind == VariableKind.Dynamic)
             .ToList();
 
-        // Build values and scopes from the Dynamic variable list.
-        // In Phase 3.1 both are empty (relay has no dynamics).
         var values = new SortedDictionary<string, string>(StringComparer.Ordinal);
         var scopes = new SortedDictionary<string, string>(StringComparer.Ordinal);
 
+        // Pre-fetch relay config once per request — shared by any dynamic
+        // that needs it (currently DHT_ADVERTISE_IP). Returns null on
+        // transient unavailability; affected dynamics resolve to "" and
+        // the watcher detects the transition via generation diff.
+        // Skipped for relay role (relay is the relay).
+        NodeRelayConfig? relayConfig = null;
+        if (role != "relay")
+            relayConfig = await _relayConfigProvider.TryGetAsync(role, ct);
+
         foreach (var variable in dynamicVars)
         {
-            // TODO (P3.2.3): resolve actual value via node-side IVariableResolver.
-            // For now, Dynamic variables are not resolvable on the node side;
-            // relay has none so this loop never executes in Phase 3.1.
-            var scopeString = variable.Scope switch
+            scopes[variable.Name] = variable.Scope switch
             {
                 WatcherScope.Noop => "noop",
                 WatcherScope.Reload => "reload",
                 WatcherScope.Restart => "restart",
                 _ => "restart",
             };
-            scopes[variable.Name] = scopeString;
-            // values[variable.Name] will be populated by P3.2.3 resolvers.
+
+            // Inline resolution. Universe is small (2 entries for DHT;
+            // ~2 more land in P3.3 for BlockStore). Resolver pattern would
+            // earn nothing at this scale; revisit if it grows past ~10
+            // cases or starts needing serious per-variable logic.
+            values[variable.Name] = (role, variable.Name) switch
+            {
+                ("dht", "DHT_ADVERTISE_IP") => DeriveAdvertiseIp(relayConfig),
+                ("dht", "DHT_BOOTSTRAP_PEERS") => "",  // TODO post-Phase-3: source from heartbeat if needed
+                _ => ""
+            };
         }
 
         var generation = ComputeGeneration(values);
@@ -175,6 +191,19 @@ public class ObligationEnvironmentController : ControllerBase
         var json = JsonSerializer.Serialize(sorted);
         var hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(json));
         return Convert.ToHexString(hashBytes).ToLowerInvariant()[..16];
+    }
+
+    /// <summary>
+    /// Derives the bare IP address from a tunnel IP that may include a CIDR
+    /// suffix (e.g. "10.30.0.248/24" → "10.30.0.248"). Returns "" when the
+    /// relay config is null (transient unavailability — the watcher's
+    /// generation-diff handles the eventual transition).
+    /// </summary>
+    private static string DeriveAdvertiseIp(NodeRelayConfig? cfg)
+    {
+        var tunnel = cfg?.TunnelIp ?? "";
+        var slash = tunnel.IndexOf('/');
+        return slash >= 0 ? tunnel[..slash] : tunnel;
     }
 
     private bool EnforceVirbr0(out string callerIp)
