@@ -367,19 +367,24 @@ public sealed class SystemVmReconciler : BackgroundService
         // Prefetch + binary verification are in IVmDeploymentPipeline (P2.5).
         var arch = ResourceDiscoveryService.GetArchitectureNormalised();
 
-        // ── 4. Cloud-init ────────────────────────────────────────────────
-        // template.CloudInitContent is the fully-rendered string produced by
-        // CloudInitRenderer on the orchestrator: all __VARNAME__ placeholders
-        // substituted in Pass 1, all ${ARTIFACT_URL:...} tokens substituted
-        // in Pass 2. Use it directly — no node-side substitution needed or safe.
-        // SubstituteArtifactVariables is dropped (P3.1.5): calling it on an
-        // already-substituted string is a no-op, and it would be wrong once
-        // the legacy LibvirtVmManager substitution path is removed in Phase 4.
-        var cloudInit = template.CloudInitContent;
-
-        // ── 5. Build VmSpec ─────────────────────────────────────────────
+        // ── 4. Build VmSpec identifiers (BLOCKSTORE-FIX §6) ─────────────
+        // The libvirt domain UUID is the single authoritative VmId. Mint it
+        // here. The orchestrator no longer pre-assigns obligation.VmId;
+        // SyncVmStateFromHeartbeatAsync stamps the obligation with this UUID
+        // on the next heartbeat after the libvirt domain reports healthy.
         var vmId = Guid.NewGuid().ToString();
         var vmName = $"{role}-{vmId[..8]}";
+
+        // ── 5. Cloud-init: render-time substitution + deferred __VM_ID__ ──
+        // template.CloudInitContent is fully rendered by the orchestrator
+        // EXCEPT for __VM_ID__ — deferred to here, where the libvirt-minted
+        // vmId is available. WG_DESCRIPTION was rendered with __VM_ID__
+        // embedded ("{role}-__VM_ID__") so this single Replace catches both
+        // direct and embedded occurrences in one pass. ${ARTIFACT_URL:...}
+        // tokens were already substituted in orchestrator render Pass 2.
+        // The legacy LibvirtVmManager substitution path is dormant for system
+        // VMs and removed in Phase 4.
+        var cloudInit = template.CloudInitContent.Replace("__VM_ID__", vmId);
 
         var vmType = role switch
         {
