@@ -692,11 +692,11 @@ function paintSysVm(key, vm) {
         card.appendChild(servicesEl);
     }
     const svcs = (running) ? (vm?.services ?? []) : [];
+    const rdotFailed = svcs.some(s => ['timedout', 'failed'].includes(svcReadiness(s)));
+    const rdot = readyAll ? 'ready' : readyCount > 0 ? 'partial' : 'pending';
     if (svcs.length) {
         const readyAll = vm.isFullyReady;
         const readyCount = svcs.filter(s => svcReadiness(s) === 'ready').length;
-        const rdotFailed = svcs.some(s => ['timedout', 'failed'].includes(svcReadiness(s)));
-        const rdot = readyAll ? 'ready' : readyCount > 0 ? 'partial' : 'pending';
         servicesEl.innerHTML =
             `<div class="sysvm-ready-row">
             <span class="sysvm-ready-dot ${rdotFailed ? 'failed' : rdot}"></span>
