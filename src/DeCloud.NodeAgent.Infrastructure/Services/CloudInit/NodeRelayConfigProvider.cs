@@ -118,9 +118,9 @@ public sealed class NodeRelayConfigProvider : INodeRelayConfigProvider
             }
             catch (Exception ex)
             {
-                _logger.LogDebug(ex,
-                    "NodeRelayConfigProvider [{Role}]: co-located relay query failed " +
-                    "— treating as not-yet-ready", role);
+                _logger.LogDebug(
+                    "NodeRelayConfigProvider [{Role}]: co-located relay at {Ip} not reachable — treating as not-yet-ready",
+                    role, relayVmIp);
             }
         }
 

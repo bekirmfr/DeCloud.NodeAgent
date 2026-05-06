@@ -1,5 +1,6 @@
 using DeCloud.NodeAgent.Infrastructure.Services;
 using Microsoft.AspNetCore.Mvc;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 
@@ -156,9 +157,16 @@ public class WgMeshEnrollController : ControllerBase
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex,
-                "Failed to proxy enrollment to relay at {RelayIp}",
-                relayIp);
+            if (ex.InnerException is SocketException { SocketErrorCode: SocketError.ConnectionRefused })
+            {
+                _logger.LogDebug(
+                    "Relay at {RelayIp} not reachable (connection refused) — enrollment will retry",
+                    relayIp);
+            }
+            else
+            {
+                _logger.LogWarning(ex, "Failed to proxy enrollment to relay at {RelayIp}", relayIp);
+            }
             return null;
         }
     }
