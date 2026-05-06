@@ -146,70 +146,132 @@ class HardwareScreen(BaseScreen):
         if not cfg.has_node_agent:
             self.notify("DECLOUD_NODE_URL not configured", severity="warning")
             return
+
+        # Use /api/node/snapshot — fast (cached, no CPU benchmark).
+        # Returns ResourceSnapshot: aggregate core/memory/storage/GPU counts.
+        # The web dashboard uses the same endpoint for its hardware section.
         na = NodeAgentClient(cfg.node_url)
         try:
-            # The web dashboard gets hardware data from snapshot.inventory —
-            # the HardwareInventory is nested inside the snapshot response,
-            # not served at a separate endpoint on all agent versions.
-            # Try both sources: snapshot.inventory (primary) and the
-            # dedicated /api/node/resources (fallback).
-            snap_result, res_result = await asyncio.gather(
-                na.node_snapshot(),
-                na.node_resources(),
-                return_exceptions=True,
-            )
+            snap = await na.node_snapshot()
+        except Exception:
+            snap = {}
         finally:
             await na.close()
 
-        snap = snap_result if isinstance(snap_result, dict) else {}
-
-        # Primary: inventory nested in the snapshot response
-        inv = snap.get("inventory") if isinstance(snap, dict) else None
-
-        # Fallback: dedicated /api/node/resources endpoint
-        if not isinstance(inv, dict) or not inv:
-            inv = res_result if isinstance(res_result, dict) else {}
-
-        if isinstance(inv, dict) and inv:
-            self._apply(inv, snap)
-        elif snap:
-            # If we have a snapshot but no inventory, populate what we can
-            # from the flat snapshot fields (totalMemoryBytes, etc.)
+        if isinstance(snap, dict) and snap:
             self._apply_from_snapshot(snap)
-        else:
-            self.notify("Hardware data not available", severity="warning")
 
         self.mark_updated()
 
     def _apply_from_snapshot(self, snap: dict) -> None:
-        """Populate what we can from the flat snapshot (no nested inventory).
+        """Populate Hardware screen from the flat ResourceSnapshot.
 
-        The snapshot has fields like totalMemoryBytes, totalPhysicalCores,
-        kvmAvailable — enough for a partial display.
+        ResourceSnapshot fields (camelCase after serialisation):
+          totalPhysicalCores, totalVirtualCpuCores, usedVirtualCpuCores,
+          availableVirtualCpuCores, virtualCpuUsagePercent,
+          totalComputePoints, usedComputePoints, availableComputePoints,
+          computePointUsagePercent,
+          totalMemoryBytes, usedMemoryBytes, availableMemoryBytes,
+          totalStorageBytes, usedStorageBytes, availableStorageBytes,
+          totalGpus, usedGpus, availableGpus
         """
-        # Memory from snapshot
-        total_m = snap.get("totalMemoryBytes")
-        used_m = snap.get("usedMemoryBytes")
-        if total_m:
-            self._set("mem-total", fmt_bytes(total_m))
-        if used_m:
-            self._set("mem-used", fmt_bytes(used_m))
-        avail_m = (total_m or 0) - (used_m or 0)
-        if total_m and used_m:
-            self._set("mem-available", fmt_bytes(max(0, avail_m)))
-
-        # CPU cores from snapshot
+        # ── CPU card ──────────────────────────────────────────────
         phys = snap.get("totalPhysicalCores")
         virt = snap.get("totalVirtualCpuCores")
-        if phys or virt:
-            self._set("cpu-cores", f"{virt or '—'} logical / {phys or '—'} physical")
+        used_v = snap.get("usedVirtualCpuCores")
+        cpu_pct = snap.get("virtualCpuUsagePercent")
 
-        # KVM
+        if phys or virt:
+            self._set("cpu-cores",
+                       f"{virt or '—'} logical / {phys or '—'} physical")
+        if cpu_pct is not None:
+            self._set("cpu-model",
+                       f"Usage: {cpu_pct:.1f}%"
+                       + (f"  ({used_v}/{virt} vCPUs allocated)"
+                          if used_v is not None and virt else ""))
+
+        bench = snap.get("benchmarkScore")
+        if isinstance(bench, (int, float)) and bench > 0:
+            self._set_text("cpu-bench",
+                           Text(f"{bench:.0f}", style=f"bold {COLOR['info']}"))
+
+        # Compute points
+        total_cp = snap.get("totalComputePoints", 0)
+        used_cp = snap.get("usedComputePoints", 0)
+        if total_cp:
+            self._set("cpu-freq",
+                       f"{used_cp}/{total_cp} compute points allocated")
+
+        # ── Memory card ───────────────────────────────────────────
+        total_m = snap.get("totalMemoryBytes")
+        used_m = snap.get("usedMemoryBytes")
+        avail_m = snap.get("availableMemoryBytes")
+
+        if total_m:
+            self._set("mem-total", fmt_bytes(total_m))
+        if used_m is not None:
+            self._set("mem-used", fmt_bytes(used_m))
+        if avail_m is not None:
+            self._set("mem-available", fmt_bytes(avail_m))
+        elif total_m and used_m is not None:
+            self._set("mem-available", fmt_bytes(max(0, total_m - used_m)))
+
+        # ── Storage card (aggregate row) ──────────────────────────
+        total_s = snap.get("totalStorageBytes")
+        used_s = snap.get("usedStorageBytes")
+        avail_s = snap.get("availableStorageBytes")
+
+        if total_s:
+            try:
+                t = self.query_one("#stor-table", DataTable)
+                t.clear()
+                t.add_row(
+                    "(all)",               # mount
+                    "—",                   # filesystem
+                    fmt_bytes(used_s or 0),
+                    fmt_bytes(total_s),
+                    fmt_bytes(avail_s if avail_s is not None
+                              else max(0, total_s - (used_s or 0))),
+                )
+            except Exception:
+                pass
+
+        # ── GPU card ──────────────────────────────────────────────
+        total_g = snap.get("totalGpus", 0)
+        used_g = snap.get("usedGpus", 0)
+        self._set("gpu-count", str(total_g))
+        if total_g:
+            self._set("gpu-model",
+                       f"{used_g} used / {total_g - used_g} available")
+        else:
+            try:
+                gauge = self.query_one("#hw-gpu-gauge")
+                if hasattr(gauge, "set_unavailable"):
+                    gauge.set_unavailable("no GPU")
+            except Exception:
+                pass
+
+        # ── Virtualisation card ───────────────────────────────────
         kvm = snap.get("kvmAvailable")
         if kvm is True:
-            self._set_text("virt-kvm", Text("available", style=f"{COLOR['ok']}"))
+            self._set_text("virt-kvm",
+                           Text("available", style=f"{COLOR['ok']}"))
         elif kvm is False:
-            self._set_text("virt-kvm", Text("not available", style=f"{COLOR['crit']}"))
+            self._set_text("virt-kvm",
+                           Text("not available", style=f"{COLOR['crit']}"))
+
+        wsl = snap.get("isWsl2")
+        if wsl is not None:
+            self._set_text("virt-wsl", _yn(wsl))
+
+        runtimes = snap.get("containerRuntimes")
+        if isinstance(runtimes, list):
+            self._set("virt-runtimes",
+                       ", ".join(str(r) for r in runtimes) or "none")
+
+        gpu_cont = snap.get("supportsGpuContainers")
+        if gpu_cont is not None:
+            self._set_text("virt-gpu_containers", _yn(gpu_cont))
 
     # ─── Rendering ─────────────────────────────────────────────────────
 
