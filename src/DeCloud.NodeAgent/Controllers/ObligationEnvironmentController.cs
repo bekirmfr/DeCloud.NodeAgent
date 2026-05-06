@@ -147,14 +147,16 @@ public class ObligationEnvironmentController : ControllerBase
                 _ => "restart",
             };
 
-            // Inline resolution. Universe is small (2 entries for DHT;
-            // ~2 more land in P3.3 for BlockStore). Resolver pattern would
-            // earn nothing at this scale; revisit if it grows past ~10
-            // cases or starts needing serious per-variable logic.
+            // Inline resolution. Universe stays small (4 cases across 2 roles
+            // after P3.3.3). Resolver pattern would earn nothing at this scale;
+            // revisit if it grows past ~10 cases or starts needing serious
+            // per-variable logic.
             values[variable.Name] = (role, variable.Name) switch
             {
                 ("dht", "DHT_ADVERTISE_IP") => DeriveAdvertiseIp(relayConfig),
-                ("dht", "DHT_BOOTSTRAP_PEERS") => "",  // TODO post-Phase-3: source from heartbeat if needed
+                ("dht", "DHT_BOOTSTRAP_PEERS") => "",
+                ("blockstore", "BLOCKSTORE_ADVERTISE_IP") => DeriveAdvertiseIp(relayConfig),
+                ("blockstore", "BLOCKSTORE_BOOTSTRAP_PEERS") => "",
                 _ => ""
             };
         }
