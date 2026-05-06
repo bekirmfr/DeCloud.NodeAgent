@@ -148,15 +148,68 @@ class HardwareScreen(BaseScreen):
             return
         na = NodeAgentClient(cfg.node_url)
         try:
-            inv, snap = await asyncio.gather(
-                na.node_resources(), na.node_snapshot(),
+            # The web dashboard gets hardware data from snapshot.inventory —
+            # the HardwareInventory is nested inside the snapshot response,
+            # not served at a separate endpoint on all agent versions.
+            # Try both sources: snapshot.inventory (primary) and the
+            # dedicated /api/node/resources (fallback).
+            snap_result, res_result = await asyncio.gather(
+                na.node_snapshot(),
+                na.node_resources(),
                 return_exceptions=True,
             )
         finally:
             await na.close()
-        if isinstance(inv, dict):
-            self._apply(inv, snap if isinstance(snap, dict) else {})
+
+        snap = snap_result if isinstance(snap_result, dict) else {}
+
+        # Primary: inventory nested in the snapshot response
+        inv = snap.get("inventory") if isinstance(snap, dict) else None
+
+        # Fallback: dedicated /api/node/resources endpoint
+        if not isinstance(inv, dict) or not inv:
+            inv = res_result if isinstance(res_result, dict) else {}
+
+        if isinstance(inv, dict) and inv:
+            self._apply(inv, snap)
+        elif snap:
+            # If we have a snapshot but no inventory, populate what we can
+            # from the flat snapshot fields (totalMemoryBytes, etc.)
+            self._apply_from_snapshot(snap)
+        else:
+            self.notify("Hardware data not available", severity="warning")
+
         self.mark_updated()
+
+    def _apply_from_snapshot(self, snap: dict) -> None:
+        """Populate what we can from the flat snapshot (no nested inventory).
+
+        The snapshot has fields like totalMemoryBytes, totalPhysicalCores,
+        kvmAvailable — enough for a partial display.
+        """
+        # Memory from snapshot
+        total_m = snap.get("totalMemoryBytes")
+        used_m = snap.get("usedMemoryBytes")
+        if total_m:
+            self._set("mem-total", fmt_bytes(total_m))
+        if used_m:
+            self._set("mem-used", fmt_bytes(used_m))
+        avail_m = (total_m or 0) - (used_m or 0)
+        if total_m and used_m:
+            self._set("mem-available", fmt_bytes(max(0, avail_m)))
+
+        # CPU cores from snapshot
+        phys = snap.get("totalPhysicalCores")
+        virt = snap.get("totalVirtualCpuCores")
+        if phys or virt:
+            self._set("cpu-cores", f"{virt or '—'} logical / {phys or '—'} physical")
+
+        # KVM
+        kvm = snap.get("kvmAvailable")
+        if kvm is True:
+            self._set_text("virt-kvm", Text("available", style=f"{COLOR['ok']}"))
+        elif kvm is False:
+            self._set_text("virt-kvm", Text("not available", style=f"{COLOR['crit']}"))
 
     # ─── Rendering ─────────────────────────────────────────────────────
 
