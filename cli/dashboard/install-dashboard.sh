@@ -80,11 +80,21 @@ log_ok "Dashboard source: ${DASHBOARD_DIR}"
 log_step "Creating virtual environment at ${VENV_DIR}"
 
 mkdir -p "$(dirname "$VENV_DIR")"
-if [[ ! -d "${VENV_DIR}" ]]; then
+if [[ -d "${VENV_DIR}" ]]; then
+    # Verify the venv is healthy — the Python binary and pip must both
+    # exist. A stale venv (created by a now-removed Python version, or
+    # partially deleted) is the most common install failure.
+    if [[ -x "${VENV_DIR}/bin/python" ]] && [[ -x "${VENV_DIR}/bin/pip" ]]; then
+        log_ok "Venv already exists — reusing"
+    else
+        log_warn "Venv exists but is broken (missing python or pip) — recreating"
+        rm -rf "${VENV_DIR}"
+        "$PYTHON" -m venv "${VENV_DIR}"
+        log_ok "Venv recreated"
+    fi
+else
     "$PYTHON" -m venv "${VENV_DIR}"
     log_ok "Venv created"
-else
-    log_ok "Venv already exists — reusing"
 fi
 
 # ── dependencies ─────────────────────────────────────────────────────────────
