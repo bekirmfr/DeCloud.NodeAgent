@@ -354,6 +354,11 @@ public class VmServiceStatus
 
     [JsonConverter(typeof(JsonStringEnumConverter))]
     public ServiceReadiness Status { get; set; } = ServiceReadiness.Pending;
+    /// <summary>
+    /// When true, this service is periodically re-verified after reaching
+    /// Ready. A failed re-check reverts Ready → Failed. Default: false.
+    /// </summary>
+    public bool LivenessCheck { get; set; } = false;
 
     public string? StatusMessage { get; set; }
     public DateTime? ReadyAt { get; set; }
@@ -374,7 +379,14 @@ public enum CheckType
     HttpGet,
 
     /// <summary>Arbitrary command via bash -c → exit 0</summary>
-    ExecCommand
+    ExecCommand,
+
+    /// <summary>
+    /// Host-side guest-agent ping via virsh qemu-agent-command guest-ping.
+    /// Does not run through guest-exec — it IS the agent liveness test.
+    /// Evaluated before the guest-agent gate in VmReadinessMonitor.
+    /// </summary>
+    GuestAgentPing
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]

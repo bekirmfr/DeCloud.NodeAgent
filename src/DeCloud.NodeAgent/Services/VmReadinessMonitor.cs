@@ -21,29 +21,6 @@ public class VmReadinessMonitor : BackgroundService
     private static readonly TimeSpan GuestExecWait = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan RecheckInterval = TimeSpan.FromSeconds(60);
 
-    // ── Periodic liveness for fully-ready system VMs ─────────────────────
-    //
-    // System VMs are long-lived; the reconciler depends on accurate
-    // IsFullyReady to detect Unhealthy reality. These fields support
-    // periodic re-verification after initial readiness is established.
-    //
-    // Guest-agent failure tracking: if the agent is persistently
-    // unreachable, service checks cannot run and the only signal is
-    // the ping itself. After the threshold, System service is reverted
-    // to Failed so IsFullyReady becomes false.
-    //
-    // Liveness cadence: service re-checks run at LivenessRecheckInterval
-    // (60s). SystemVm services run under Restart=always in systemd — a
-    // transient crash self-heals within seconds. A service still dead at
-    // the next 60s check is persistently failed and warrants redeploy.
-
-    private readonly Dictionary<string, int> _guestAgentConsecutiveFailures = new();
-    private readonly Dictionary<string, DateTime> _lastLivenessCheck = new();
-    private const int GuestAgentFailureThreshold = 18; // ~3 min at 10s poll
-    private static readonly TimeSpan LivenessRecheckInterval = TimeSpan.FromSeconds(60);
-    private static readonly HashSet<VmType> SystemVmTypes =
-        [VmType.Relay, VmType.Dht, VmType.BlockStore];
-
     public VmReadinessMonitor(
         IVmManager vmManager,
         VmRepository repository,
@@ -82,9 +59,11 @@ public class VmReadinessMonitor : BackgroundService
     {
         var allVms = _vmManager.GetAllVms();
 
-        // Service readiness checks — only for VMs not yet fully ready.
+        // Boot-time readiness + liveness re-verification for opted-in services.
         var runningVms = allVms
-            .Where(vm => vm.State == VmState.Running && vm.Services.Count > 0 && !vm.IsFullyReady)
+            .Where(vm => vm.State == VmState.Running
+                      && vm.Services.Count > 0
+                      && (!vm.IsFullyReady || vm.Services.Any(s => s.LivenessCheck)))
             .ToList();
 
         foreach (var vm in runningVms)
@@ -99,10 +78,8 @@ public class VmReadinessMonitor : BackgroundService
             }
         }
 
-        // Guest-agent liveness ping for fully-ready VMs.
-        // Updates LastHeartbeat so VmHealthService can detect stale tenant VMs.
-        // For system VMs, also runs periodic service re-verification so
-        // IsFullyReady reflects reality and the reconciler can act on failures.
+        // Guest-agent liveness ping for fully-ready VMs (LastHeartbeat update).
+        // VmHealthService uses LastHeartbeat to detect stale tenant VMs.
         var fullyReadyVms = allVms
             .Where(vm => vm.State == VmState.Running && vm.IsFullyReady)
             .ToList();
@@ -111,21 +88,10 @@ public class VmReadinessMonitor : BackgroundService
         {
             try
             {
-                var agentAlive = await IsGuestAgentReady(vm.VmId, ct);
-
-                if (agentAlive)
+                if (await IsGuestAgentReady(vm.VmId, ct))
                 {
                     vm.LastHeartbeat = DateTime.UtcNow;
                     await _repository.UpdateLastHeartbeatAsync(vm.VmId, vm.LastHeartbeat);
-                    _guestAgentConsecutiveFailures.Remove(vm.VmId);
-
-                    // Periodic service liveness re-check for system VMs.
-                    if (SystemVmTypes.Contains(vm.Spec.VmType))
-                        await RecheckSystemVmServicesAsync(vm, ct);
-                }
-                else if (SystemVmTypes.Contains(vm.Spec.VmType))
-                {
-                    await HandleSystemVmAgentFailureAsync(vm);
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -133,15 +99,6 @@ public class VmReadinessMonitor : BackgroundService
                 _logger.LogWarning(ex, "Failed to ping guest agent for VM {VmId}", vm.VmId);
             }
         }
-
-        // Prune tracking for VMs that no longer exist (deleted/redeployed).
-        var activeVmIds = allVms.Select(v => v.VmId).ToHashSet();
-        foreach (var staleId in _guestAgentConsecutiveFailures.Keys
-                     .Where(id => !activeVmIds.Contains(id)).ToList())
-            _guestAgentConsecutiveFailures.Remove(staleId);
-        foreach (var staleId in _lastLivenessCheck.Keys
-                     .Where(id => !activeVmIds.Contains(id)).ToList())
-            _lastLivenessCheck.Remove(staleId);
     }
 
     private async Task CheckVmServicesAsync(VmInstance vm, CancellationToken ct)
@@ -174,8 +131,65 @@ public class VmReadinessMonitor : BackgroundService
             }
         }
 
+        // ── GuestAgentPing: host-side, runs before the gate ──────────────
+        foreach (var service in vm.Services.Where(s => s.CheckType == CheckType.GuestAgentPing))
+        {
+            // Apply same cadence rules as other services
+            if (service.Status == ServiceReadiness.Ready)
+            {
+                if (!service.LivenessCheck) continue;
+                var since = service.LastCheckAt.HasValue
+                    ? (DateTime.UtcNow - service.LastCheckAt.Value).TotalSeconds
+                    : double.MaxValue;
+                if (since < RecheckInterval.TotalSeconds) continue;
+            }
+            else if (service.Status is ServiceReadiness.TimedOut or ServiceReadiness.Failed)
+            {
+                var since = service.LastCheckAt.HasValue
+                    ? (DateTime.UtcNow - service.LastCheckAt.Value).TotalSeconds
+                    : double.MaxValue;
+                if (since < RecheckInterval.TotalSeconds) continue;
+            }
+
+            var alive = await IsGuestAgentReady(domainName, ct);
+            var prev = service.Status;
+
+            if (alive)
+            {
+                if (prev != ServiceReadiness.Ready)
+                {
+                    service.Status = ServiceReadiness.Ready;
+                    service.ReadyAt = DateTime.UtcNow;
+                    service.StatusMessage = null;
+                    _logger.LogInformation(prev is ServiceReadiness.TimedOut or ServiceReadiness.Failed
+                        ? "Service {Service} on VM {VmId} RECOVERED from {Prev}"
+                        : "Service {Service} on VM {VmId} is READY",
+                        service.Name, vm.VmId, prev);
+                }
+            }
+            else
+            {
+                service.Status = ServiceReadiness.Failed;
+                service.StatusMessage = "Guest agent unreachable";
+                if (prev != ServiceReadiness.Failed)
+                    _logger.LogWarning(
+                        "Service {Service} on VM {VmId} FAILED — guest agent unreachable",
+                        service.Name, vm.VmId);
+            }
+
+            service.LastCheckAt = DateTime.UtcNow;
+            if (service.Status != prev) anyChanged = true;
+        }
+
         // Check if guest agent is responding — needed for active probing
-        if (!await IsGuestAgentReady(domainName, ct))
+        // Use GuestAgentPing result if declared; otherwise probe directly.
+        var agentPingService = vm.Services
+            .FirstOrDefault(s => s.CheckType == CheckType.GuestAgentPing);
+        var agentAlive = agentPingService != null
+            ? agentPingService.Status == ServiceReadiness.Ready
+            : await IsGuestAgentReady(domainName, ct);
+
+        if (!agentAlive)
         {
             _logger.LogDebug("Guest agent not ready for VM {VmId}, skipping active checks", vm.VmId);
             if (anyChanged)
@@ -187,8 +201,20 @@ public class VmReadinessMonitor : BackgroundService
 
         foreach (var service in vm.Services)
         {
-            if (service.Status == ServiceReadiness.Ready)
+            if (service.CheckType == CheckType.GuestAgentPing)
                 continue;
+
+            if (service.Status == ServiceReadiness.Ready)
+            {
+                if (!service.LivenessCheck)
+                    continue;
+                var sinceLast = service.LastCheckAt.HasValue
+                    ? (DateTime.UtcNow - service.LastCheckAt.Value).TotalSeconds
+                    : double.MaxValue;
+                if (sinceLast < RecheckInterval.TotalSeconds)
+                    continue;
+                // Fall through to execute the check.
+            }
 
             // Self-healing: recheck TimedOut/Failed services at a slower interval
             if (service.Status is ServiceReadiness.TimedOut or ServiceReadiness.Failed)
@@ -223,7 +249,7 @@ public class VmReadinessMonitor : BackgroundService
                         "Service {Service} on VM {VmId} RECOVERED from {PreviousStatus} (port: {Port})",
                         service.Name, vm.VmId, previousStatus, service.Port);
                 }
-                else
+                else if (previousStatus != ServiceReadiness.Ready)
                 {
                     _logger.LogInformation("Service {Service} on VM {VmId} is READY (port: {Port})",
                         service.Name, vm.VmId, service.Port);
@@ -244,11 +270,24 @@ public class VmReadinessMonitor : BackgroundService
             }
             else
             {
-                // Don't downgrade TimedOut/Failed to Checking — keep the terminal status
-                // so the recheck interval continues to apply
-                if (previousStatus is not (ServiceReadiness.TimedOut or ServiceReadiness.Failed))
-                    service.Status = ServiceReadiness.Checking;
-                service.LastCheckAt = DateTime.UtcNow;
+                if (previousStatus == ServiceReadiness.Ready)
+                {
+                    // Liveness re-check failure: service was Ready but no longer
+                    // responding. Revert so IsFullyReady reflects reality.
+                    service.Status = ServiceReadiness.Failed;
+                    service.StatusMessage = "Liveness check failed";
+                    service.LastCheckAt = DateTime.UtcNow;
+                    _logger.LogWarning(
+                        "Service {Service} on VM {VmId} FAILED liveness check (port {Port})",
+                        service.Name, vm.VmId, service.Port);
+                }
+                else
+                {
+                    // Boot-time path: don't downgrade TimedOut/Failed to Checking
+                    if (previousStatus is not (ServiceReadiness.TimedOut or ServiceReadiness.Failed))
+                        service.Status = ServiceReadiness.Checking;
+                    service.LastCheckAt = DateTime.UtcNow;
+                }
             }
 
             if (service.Status != previousStatus) anyChanged = true;
@@ -258,94 +297,6 @@ public class VmReadinessMonitor : BackgroundService
         {
             await _repository.SaveVmAsync(vm);
         }
-    }
-
-    /// <summary>
-    /// Periodic liveness re-verification for a fully-ready system VM.
-    /// Re-runs HttpGet/TcpPort service checks at <see cref="LivenessRecheckInterval"/>
-    /// cadence. If a previously-Ready service now fails, reverts it to Failed so
-    /// <see cref="VmInstance.IsFullyReady"/> becomes false and the reconciler
-    /// detects Unhealthy reality.
-    ///
-    /// CloudInitDone checks are skipped — cloud-init completion is permanent.
-    /// Only called when the guest agent is confirmed alive (the caller gates on
-    /// <see cref="IsGuestAgentReady"/>).
-    /// </summary>
-    private async Task RecheckSystemVmServicesAsync(VmInstance vm, CancellationToken ct)
-    {
-        // Throttle: one re-check per LivenessRecheckInterval per VM.
-        if (_lastLivenessCheck.TryGetValue(vm.VmId, out var lastCheck)
-            && (DateTime.UtcNow - lastCheck) < LivenessRecheckInterval)
-            return;
-
-        _lastLivenessCheck[vm.VmId] = DateTime.UtcNow;
-
-        var anyReverted = false;
-
-        foreach (var service in vm.Services)
-        {
-            if (service.Status != ServiceReadiness.Ready)
-                continue;
-
-            // CloudInitDone is permanent — boot-finished doesn't disappear.
-            if (service.CheckType == CheckType.CloudInitDone)
-                continue;
-
-            var (success, _) = await ExecuteServiceCheckAsync(vm.VmId, service, ct);
-            service.LastCheckAt = DateTime.UtcNow;
-
-            if (!success)
-            {
-                _logger.LogWarning(
-                    "System VM {VmId} ({VmType}): service {Service} (port {Port}) " +
-                    "failed periodic liveness check — reverting to Failed",
-                    vm.VmId, vm.Spec.VmType, service.Name, service.Port);
-
-                service.Status = ServiceReadiness.Failed;
-                service.StatusMessage = "Periodic liveness check failed";
-                anyReverted = true;
-            }
-        }
-
-        if (anyReverted)
-            await _repository.SaveVmAsync(vm);
-    }
-
-    /// <summary>
-    /// Handles persistent guest-agent unreachability for a fully-ready system VM.
-    /// After <see cref="GuestAgentFailureThreshold"/> consecutive failures (~3 min),
-    /// reverts all services to Failed. This is the fallback for the case where the
-    /// guest OS itself is dead — service checks cannot run via guest-exec, so the
-    /// agent ping is the only signal.
-    /// </summary>
-    private async Task HandleSystemVmAgentFailureAsync(VmInstance vm)
-    {
-        _guestAgentConsecutiveFailures.TryGetValue(vm.VmId, out var count);
-        count++;
-        _guestAgentConsecutiveFailures[vm.VmId] = count;
-
-        if (count < GuestAgentFailureThreshold)
-            return;
-
-        _logger.LogWarning(
-            "System VM {VmId} ({VmType}) guest agent unreachable for {Count} " +
-            "consecutive polls (~{Seconds}s) — reverting all services to Failed",
-            vm.VmId, vm.Spec.VmType, count,
-            count * (int)PollInterval.TotalSeconds);
-
-        foreach (var svc in vm.Services)
-        {
-            svc.Status = ServiceReadiness.Failed;
-            svc.StatusMessage = "Guest agent unreachable";
-            svc.LastCheckAt = DateTime.UtcNow;
-        }
-
-        await _repository.SaveVmAsync(vm);
-
-        // Reset counter. If the reconciler doesn't act immediately (e.g.
-        // a pending Delete is in flight), the next threshold crossing will
-        // re-trigger, keeping reality accurate.
-        _guestAgentConsecutiveFailures.Remove(vm.VmId);
     }
 
     /// <summary>

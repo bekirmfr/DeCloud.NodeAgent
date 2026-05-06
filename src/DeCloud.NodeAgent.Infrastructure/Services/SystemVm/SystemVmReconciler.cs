@@ -530,6 +530,7 @@ public sealed class SystemVmReconciler : BackgroundService
                 CheckType = Enum.TryParse<CheckType>(d.CheckType, ignoreCase: true, out var ct2)
                                   ? ct2 : CheckType.CloudInitDone,
                 HttpPath = d.HttpPath,
+                LivenessCheck = d.LivenessCheck,
                 TimeoutSeconds = d.TimeoutSeconds,
                 Status = ServiceReadiness.Pending,
             }).ToList();
