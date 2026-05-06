@@ -18,7 +18,7 @@ from typing import Any
 
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import VerticalScroll
 from textual.widgets import Static
 
 from api.node_agent import NodeAgentClient
@@ -26,7 +26,6 @@ from config import cfg
 from screens._base import BaseScreen
 from theme import COLOR, DOT_FILLED, DOT_OPEN, DASH
 from util.format import fmt_bytes, fmt_duration, fmt_age, truncate
-from widgets.card import Card
 
 
 # ── Status styling ────────────────────────────────────────────────────────
@@ -167,9 +166,10 @@ class ObligationsScreen(BaseScreen):
     """
 
     def compose_content(self) -> ComposeResult:
-        yield Static("Loading obligations…", id="obl-empty",
-                      classes="obl-body")
-        yield VerticalScroll(id="obl-scroll")
+        yield VerticalScroll(
+            Static("Loading obligations…", id="obl-body"),
+            id="obl-scroll",
+        )
 
     def on_mount(self) -> None:
         self.set_interval(max(cfg.refresh_interval, 15), self._load)
@@ -205,108 +205,100 @@ class ObligationsScreen(BaseScreen):
 
     def _render_obligations(self, obligations: list[dict],
                             vm_by_id: dict[str, dict]) -> None:
-        scroll = self.query_one("#obl-scroll", VerticalScroll)
-        empty_label = self.query_one("#obl-empty", Static)
+        body_widget = self.query_one("#obl-body", Static)
 
         if not obligations:
-            empty_label.update(Text("No obligations assigned to this node.",
+            body_widget.update(Text("No obligations assigned to this node.",
                                     style=f"{COLOR['dim']}"))
-            empty_label.display = True
-            scroll.display = False
             return
 
-        empty_label.display = False
-        scroll.display = True
+        # Build the entire view as a single Rich Text — avoids the
+        # mount/unmount/DuplicateIds problem entirely.  Each obligation
+        # is a visual "card" drawn with box-drawing characters.
+        out = Text()
+        for idx, obl in enumerate(obligations):
+            if idx:
+                out.append("\n\n")
+            self._render_one_obligation(out, obl, vm_by_id)
 
-        # Remove old cards
-        scroll.remove_children()
+        body_widget.update(out)
 
-        for obl in obligations:
-            role_name = obl.get("roleName") or f"Role {obl.get('role', '?')}"
-            status_name = obl.get("statusName") or "Unknown"
-            vm_id = obl.get("vmId")
-            state_data = obl.get("stateData")
-            failure_count = obl.get("failureCount") or 0
-            last_error = obl.get("lastError")
-            deployed_at = obl.get("deployedAt")
-            active_at = obl.get("activeAt")
-            running_ver = obl.get("runningBinaryVersion")
-            current_ver = obl.get("currentBinaryVersion")
-            state_version = obl.get("stateVersion", 0)
+    def _render_one_obligation(self, out: Text, obl: dict,
+                               vm_by_id: dict[str, dict]) -> None:
+        role_name = obl.get("roleName") or f"Role {obl.get('role', '?')}"
+        status_name = obl.get("statusName") or "Unknown"
+        vm_id = obl.get("vmId")
+        state_data = obl.get("stateData")
+        failure_count = obl.get("failureCount") or 0
+        last_error = obl.get("lastError")
+        deployed_at = obl.get("deployedAt")
+        active_at = obl.get("activeAt")
+        running_ver = obl.get("runningBinaryVersion")
+        current_ver = obl.get("currentBinaryVersion")
+        state_version = obl.get("stateVersion", 0)
 
-            # ── Build card content as a single Static ─────────────
-            body = Text()
+        # ── Header ────────────────────────────────────────────────
+        out.append(f"━━━ ", style=f"{COLOR['dim']}")
+        out.append(f"{role_name}", style=f"bold {COLOR['info']}")
+        out.append(f" ━━━ ", style=f"{COLOR['dim']}")
+        out.append_text(_status_pill(status_name))
+        if failure_count:
+            out.append(f"   failures: {failure_count}",
+                        style=f"bold {COLOR['crit']}")
+        out.append("\n")
 
-            # Status line
-            body.append_text(_status_pill(status_name))
-            if failure_count:
-                body.append(f"   failures: {failure_count}",
-                            style=f"bold {COLOR['crit']}")
-            body.append("\n")
+        # Timing
+        timing_parts: list[str] = []
+        if deployed_at:
+            timing_parts.append(f"deployed {deployed_at}")
+        if active_at:
+            timing_parts.append(f"active since {active_at}")
+        if timing_parts:
+            out.append("  " + "  ·  ".join(timing_parts) + "\n",
+                        style=f"{COLOR['muted']}")
 
-            # Timing
-            timing_parts: list[str] = []
-            if deployed_at:
-                timing_parts.append(f"deployed {deployed_at}")
-            if active_at:
-                timing_parts.append(f"active since {active_at}")
-            if timing_parts:
-                body.append("  " + "  ·  ".join(timing_parts) + "\n",
-                            style=f"{COLOR['muted']}")
+        # Version info
+        if running_ver or current_ver or state_version:
+            if running_ver:
+                out.append_text(_kv_line("Running version",
+                                          truncate(running_ver, 20)))
+                out.append("\n")
+            if current_ver:
+                out.append_text(_kv_line("Current version",
+                                          truncate(current_ver, 20)))
+                out.append("\n")
+            if state_version:
+                out.append_text(_kv_line("State version",
+                                          str(state_version)))
+                out.append("\n")
 
-            # Version info
-            if running_ver or current_ver:
-                body.append("\n")
-                if running_ver:
-                    body.append_text(_kv_line("Running version",
-                                              truncate(running_ver, 20)))
-                    body.append("\n")
-                if current_ver:
-                    body.append_text(_kv_line("Current version",
-                                              truncate(current_ver, 20)))
-                    body.append("\n")
-                if state_version:
-                    body.append_text(_kv_line("State version",
-                                              str(state_version)))
-                    body.append("\n")
+        # Last error
+        if last_error:
+            out.append("\n")
+            out.append("  Last error: ", style=f"bold {COLOR['crit']}")
+            out.append(truncate(str(last_error), 80) + "\n",
+                        style=f"{COLOR['crit']}")
 
-            # Last error
-            if last_error:
-                body.append("\n")
-                body.append("  Last error: ", style=f"bold {COLOR['crit']}")
-                body.append(truncate(str(last_error), 80) + "\n",
-                            style=f"{COLOR['crit']}")
+        # State data section
+        if state_data and isinstance(state_data, dict):
+            out.append("\n")
+            out.append("  Identity State\n",
+                        style=f"bold {COLOR['info']}")
+            out.append_text(_render_state_data(state_data))
+            out.append("\n")
 
-            # State data section
-            if state_data and isinstance(state_data, dict):
-                body.append("\n")
-                body.append("  Identity State\n",
-                            style=f"bold {COLOR['info']}")
-                body.append_text(_render_state_data(state_data))
-                body.append("\n")
-
-            # Related VM section
-            vm = vm_by_id.get(vm_id) if vm_id else None
-            if vm:
-                body.append("\n")
-                vm_name = vm.get("name") or vm_id or DASH
-                body.append(f"  VM: {vm_name}\n",
-                            style=f"bold {COLOR['info']}")
-                body.append_text(_render_vm_details(vm))
-            elif vm_id:
-                body.append("\n")
-                body.append(f"  VM: {vm_id}\n",
-                            style=f"bold {COLOR['info']}")
-                body.append("  (VM details not available — "
-                            "VM may still be starting)\n",
-                            style=f"{COLOR['dim']}")
-
-            # Create the card and add the body as a Static
-            card = Card(f"{role_name} Obligation",
-                        subtitle=status_name,
-                        id=f"obl-{role_name.lower()}")
-            content = Static(id=f"obl-{role_name.lower()}-body")
-            card._body_static = content
-            scroll.mount(card)
-            card.mount(content)
-            content.update(body)
+        # Related VM section
+        vm = vm_by_id.get(vm_id) if vm_id else None
+        if vm:
+            out.append("\n")
+            vm_name = vm.get("name") or vm_id or DASH
+            out.append(f"  VM: {vm_name}\n",
+                        style=f"bold {COLOR['info']}")
+            out.append_text(_render_vm_details(vm))
+        elif vm_id:
+            out.append("\n")
+            out.append(f"  VM: {vm_id}\n",
+                        style=f"bold {COLOR['info']}")
+            out.append("  (VM details not available — "
+                        "VM may still be starting)\n",
+                        style=f"{COLOR['dim']}")
