@@ -54,12 +54,22 @@ class NodeAgentClient(BaseClient):
         data = await self.get("/api/dashboard/services") or []
         return data if isinstance(data, list) else data.get("services", [])
 
-    async def dashboard_logs(self, lines: int = 200) -> list[dict[str, Any]]:
-        """Recent structured log entries from the node-agent."""
-        data = await self.get("/api/dashboard/logs", params={"lines": lines}) or []
+    async def dashboard_logs(self, lines: int = 200) -> list[str]:
+        """Recent log lines from the node-agent.
+
+        Returns a list of strings — the upstream endpoint emits raw lines
+        (one per log entry, source = file or journald). Callers are
+        responsible for parsing level/timestamp from the line text.
+        """
+        data = await self.get("/api/dashboard/logs", params={"lines": lines}) or {}
         if isinstance(data, list):
-            return data
-        return data.get("logs", data.get("entries", []))
+            return [str(x) for x in data]
+        # Server shape: {source, logFile, logLines: [string], count, collectedAt}
+        for key in ("logLines", "logs", "entries"):
+            v = data.get(key) if isinstance(data, dict) else None
+            if isinstance(v, list):
+                return [str(x) for x in v]
+        return []
 
     async def dashboard_obligations(self) -> list[dict[str, Any]]:
         """SystemVm obligations (DHT/Relay/BlockStore) with state data."""

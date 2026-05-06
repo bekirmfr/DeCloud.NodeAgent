@@ -57,7 +57,7 @@ class HardwareScreen(BaseScreen):
                 yield self._make_card("GPU", "gpu", self._compose_gpu)
                 yield self._make_card("Virtualization & Runtimes",
                                       "virt", self._compose_virt)
-                yield self._make_card("Network Interfaces", "nics",
+                yield self._make_card("Network", "net",
                                       self._compose_nics)
 
     def _make_card(self, title, ident, body_fn) -> Card:
@@ -78,10 +78,11 @@ class HardwareScreen(BaseScreen):
                 yield Static("—", classes="kv-val", id=f"cpu-{k}")
 
     def _compose_mem(self) -> ComposeResult:
-        for k in ("total", "available", "swap"):
+        for k in ("total", "available", "used", "reserved"):
             with Horizontal(classes="kv"):
                 yield Static({
-                    "total": "Total", "available": "Available", "swap": "Swap",
+                    "total": "Total", "available": "Available",
+                    "used":  "Used",  "reserved":  "Reserved (host)",
                 }[k], classes="kv-key")
                 yield Static("—", classes="kv-val", id=f"mem-{k}")
 
@@ -117,9 +118,20 @@ class HardwareScreen(BaseScreen):
                 yield Static("—", classes="kv-val", id=f"virt-{k}")
 
     def _compose_nics(self) -> ComposeResult:
-        t = DataTable(id="nics-table", zebra_stripes=True)
-        t.add_columns("Name", "MAC", "Speed", "State")
-        yield t
+        # /api/node/resources returns NetworkInfo as a single dict (publicIp,
+        # privateIp, wireGuardIp, wireGuardPort, bandwidthBitsPerSecond) —
+        # NOT a list of interfaces. Per-interface detail lives on the
+        # Network screen (which uses /api/dashboard/network).
+        for k in ("public", "private", "wg_ip", "wg_port", "bandwidth"):
+            with Horizontal(classes="kv"):
+                yield Static({
+                    "public":    "Public IP",
+                    "private":   "Private IP",
+                    "wg_ip":     "WireGuard IP",
+                    "wg_port":   "WireGuard port",
+                    "bandwidth": "Bandwidth",
+                }[k], classes="kv-key")
+                yield Static("—", classes="kv-val", id=f"net-{k}")
 
     # ─── Lifecycle ─────────────────────────────────────────────────────
 
@@ -159,7 +171,7 @@ class HardwareScreen(BaseScreen):
         cores = f'{cpu.get("logicalCores","—")} logical / {cpu.get("physicalCores","—")} physical'
         self._set("cpu-cores", cores)
         self._set("cpu-freq",  f'{cpu.get("frequencyMhz", "—")} MHz')
-        self._set("cpu-arch",  cpu.get("architecture", "—"))
+        self._set("cpu-arch",  cpu.get("architecture", "—") or "—")
         bench = cpu.get("benchmarkScore")
         bench_t = (Text(f"{bench:.0f}", style=f"bold {COLOR['info']}")
                    if isinstance(bench, (int, float)) and bench > 0
@@ -168,39 +180,55 @@ class HardwareScreen(BaseScreen):
         flags = cpu.get("flags") or []
         self._set("cpu-flags", truncate(", ".join(flags), 60))
 
-        # Memory
+        # Memory — MemoryInfo has no swapBytes; show used + reserved instead.
         self._set("mem-total",     fmt_bytes(mem.get("totalBytes")))
         self._set("mem-available", fmt_bytes(mem.get("availableBytes")))
-        self._set("mem-swap",      fmt_bytes(mem.get("swapBytes")))
+        self._set("mem-used",      fmt_bytes(mem.get("usedBytes")))
+        self._set("mem-reserved",  fmt_bytes(mem.get("reservedBytes")))
 
-        # Storage
+        # Storage — per-volume rows. Note: filesystem field is `fileSystem`
+        # (capital S) after camelCase serialisation.  Use AvailableBytes
+        # directly rather than computing it (it's authoritative on the host).
         t = self.query_one("#stor-table", DataTable)
         t.clear()
         for s in inv.get("storage", []) or []:
             total = int(s.get("totalBytes", 0) or 0)
             used  = int(s.get("usedBytes",  0) or 0)
-            free  = max(0, total - used)
+            free  = int(s.get("availableBytes", max(0, total - used)) or 0)
             t.add_row(
-                s.get("mountPoint") or s.get("path") or "—",
-                s.get("filesystem", "—"),
+                s.get("mountPoint") or s.get("devicePath") or "—",
+                s.get("fileSystem") or "—",
                 fmt_bytes(used),
                 fmt_bytes(total),
                 fmt_bytes(free),
             )
 
-        # GPU
+        # GPU — GpuInfo uses `model` and `vendor`; IOMMU/passthrough flags
+        # are PER-GPU, not on HardwareInventory.  Derive aggregate booleans.
         self._set("gpu-count", str(len(gpus)) if gpus else "0")
         if gpus:
             g = gpus[0]
-            self._set("gpu-model",  truncate(g.get("name", "—"), 40))
+            vendor = g.get("vendor") or ""
+            model  = g.get("model")  or "—"
+            display = f"{vendor} {model}".strip()
+            self._set("gpu-model",  truncate(display, 40))
             self._set("gpu-memory", fmt_bytes(g.get("memoryBytes")))
             self._set("gpu-driver", g.get("driverVersion", "—") or "—")
-        self._set_text("gpu-iommu",       _yn(inv.get("hasIommuCapableGpu")))
-        self._set_text("gpu-passthrough", _yn(inv.get("hasPassthroughCapableGpu")))
+        else:
+            self._set("gpu-model",  "—")
+            self._set("gpu-memory", "—")
+            self._set("gpu-driver", "—")
+
+        any_iommu = any(g.get("isIommuEnabled") for g in gpus)
+        any_pt    = any(g.get("isAvailableForPassthrough") for g in gpus)
+        self._set_text("gpu-iommu",       _yn(any_iommu if gpus else None))
+        self._set_text("gpu-passthrough", _yn(any_pt    if gpus else None))
         self._set_text("gpu-proxy",       _yn(inv.get("supportsGpuProxy")))
 
         # Virtualisation
         kvm = snap.get("kvmAvailable")
+        if kvm is None:
+            kvm = inv.get("kvmAvailable")
         if kvm is False:
             self._set_text("virt-kvm", Text("not available",
                                             style=f"{COLOR['crit']}"))
@@ -211,25 +239,20 @@ class HardwareScreen(BaseScreen):
             self._set_text("virt-kvm", Text("unknown",
                                             style=f"{COLOR['dim']}"))
         self._set_text("virt-wsl", _yn(inv.get("isWsl2")))
-        self._set("virt-runtimes",
-                  ", ".join(r.get("name","?") + " v" + r.get("version","?")
-                            for r in runtimes) or "none")
+        # ContainerRuntimes is a list of strings (e.g. ["docker", "podman"]).
+        self._set("virt-runtimes", ", ".join(str(r) for r in runtimes) or "none")
         self._set_text("virt-gpu_containers",
                        _yn(inv.get("supportsGpuContainers")))
 
-        # NICs
-        nt = self.query_one("#nics-table", DataTable)
-        nt.clear()
-        for n in inv.get("network", []) or []:
-            up = n.get("isUp")
-            state = (Text("UP",   style=f"{COLOR['ok']}") if up
-                     else Text("DOWN", style=f"{COLOR['crit']}"))
-            nt.add_row(
-                n.get("name", "—"),
-                n.get("macAddress", "—") or "—",
-                f'{n.get("speedMbps","—")} Mbps' if n.get("speedMbps") else "—",
-                state,
-            )
+        # Network — NetworkInfo is a single object, not a list.
+        net = inv.get("network") or {}
+        self._set("net-public",    net.get("publicIp")  or "—")
+        self._set("net-private",   net.get("privateIp") or "—")
+        self._set("net-wg_ip",     net.get("wireGuardIp") or "—")
+        self._set("net-wg_port",   str(net.get("wireGuardPort") or "—"))
+        bw = net.get("bandwidthBitsPerSecond")
+        self._set("net-bandwidth",
+                  f"{bw/1e9:.1f} Gbps" if bw else "—")
 
     def _set(self, ident: str, value: str) -> None:
         try:

@@ -13,7 +13,7 @@ from __future__ import annotations
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal
-from textual.widgets import Button, Input, Label, Log
+from textual.widgets import Button, Input, Label, RichLog
 from widgets.nav_input import NavInput
 
 from config import cfg
@@ -56,7 +56,7 @@ class LogsScreen(BaseScreen):
             for lvl in _LEVELS:
                 yield Button(lvl, id=f"lvl-{lvl}", variant="default")
             yield Button("Clear", id="btn-clear")
-        yield Log(id="log-out", max_lines=cfg.log_lines)
+        yield RichLog(id="log-out", max_lines=cfg.log_lines, highlight=False, markup=False, wrap=False)
         yield Label("", id="log-meta")
 
     def on_mount(self) -> None:
@@ -69,7 +69,7 @@ class LogsScreen(BaseScreen):
 
     def action_clear_log(self) -> None:
         try:
-            self.query_one("#log-out", Log).clear()
+            self.query_one("#log-out", RichLog).clear()
         except Exception:
             pass
 
@@ -107,27 +107,35 @@ class LogsScreen(BaseScreen):
         finally:
             await na.close()
 
-        log = self.query_one("#log-out", Log)
+        log = self.query_one("#log-out", RichLog)
         log.clear()
         shown = 0
-        for entry in entries:
-            level = (entry.get("level") or "INF").upper()[:5].rstrip()
-            level_short = level[:3]
+        for raw in entries:
+            # Server returns raw strings (one log line per entry).  Classify
+            # severity by substring match — same heuristic as the web dashboard.
+            line = raw if isinstance(raw, str) else str(raw)
+            low = line.lower()
+            if "error" in low or "crit" in low or "fatal" in low:
+                level_short = "ERR"
+            elif "warn" in low:
+                level_short = "WRN"
+            elif "debug" in low or "[dbg]" in low:
+                level_short = "DBG"
+            else:
+                level_short = "INF"
+
             if self._level != "ALL":
                 want = {"INFO": "INF", "WARN": "WRN", "ERR": "ERR"}[self._level]
                 if level_short != want:
                     continue
-            msg = entry.get("message") or entry.get("msg") or ""
-            ts  = entry.get("timestamp") or entry.get("time") or ""
-            line_text = f"{ts} {level} {msg}"
-            if self._search and self._search not in line_text.lower():
+            if self._search and self._search not in low:
                 continue
+
             color = _LEVEL_COLOR.get(level_short, COLOR["muted"])
-            line = Text()
-            line.append(ts[-12:] if ts else "------------", style=f"{COLOR['dim']}")
-            line.append(f"  {level_short:<3} ", style=f"bold {color}")
-            line.append(msg)
-            log.write_line(line)
+            out = Text()
+            out.append(f"{level_short} ", style=f"bold {color}")
+            out.append(line)
+            log.write(out)
             shown += 1
 
         try:
