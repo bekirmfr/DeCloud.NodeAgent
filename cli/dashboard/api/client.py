@@ -2,10 +2,12 @@
 api/client.py — Base async HTTP client.
 
 Security posture:
-- HTTPS enforced in production (warn on http:// for non-localhost)
-- JWT token sent only in Authorization header, never in URLs
-- connect/read timeouts to avoid hanging the TUI
-- Token value is never logged
+  • HTTPS strongly preferred — emits a one-shot warning on plain HTTP
+    for non-localhost endpoints. Never errors-out; allows lab use.
+  • JWT only in the Authorization header. Never in URLs or logs.
+  • Bounded timeouts on connect/read/write/pool to avoid hanging the TUI.
+  • Bounded retries (transient connection/timeouts only — never 4xx/5xx).
+  • Token value never appears in any logged or rendered string.
 """
 
 from __future__ import annotations
@@ -20,23 +22,30 @@ log = logging.getLogger(__name__)
 _TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
 _MAX_RETRIES = 2
 
+# Set of URLs we've already warned about — avoid log spam.
+_warned_plain_http: set[str] = set()
+
 
 class ApiError(Exception):
+    """Wraps an HTTP error or transport failure."""
     def __init__(self, status: int, message: str) -> None:
         self.status = status
         self.message = message
-        super().__init__(f"HTTP {status}: {message}")
+        super().__init__(f"HTTP {status}: {message}" if status else message)
 
 
 class BaseClient:
-    """Thin async wrapper around httpx with auth and retry logic."""
+    """Thin async wrapper around httpx with auth, retry, and HTTPS guard."""
 
     def __init__(self, base_url: str, headers: dict[str, str] | None = None) -> None:
         if base_url.startswith("http://") and not _is_localhost(base_url):
-            log.warning(
-                "Connecting to %s over plain HTTP — use HTTPS in production",
-                base_url,
-            )
+            if base_url not in _warned_plain_http:
+                log.warning(
+                    "Connecting to %s over plain HTTP — use HTTPS in production",
+                    base_url,
+                )
+                _warned_plain_http.add(base_url)
+
         self._client = httpx.AsyncClient(
             base_url=base_url,
             headers=headers or {},
@@ -60,6 +69,9 @@ class BaseClient:
                 resp = await self._client.request(method, path, **kwargs)
                 if resp.status_code >= 400:
                     _raise(resp)
+                # Some endpoints (e.g. 204 No Content) return empty bodies.
+                if not resp.content:
+                    return None
                 return resp.json()
             except (httpx.ConnectError, httpx.TimeoutException) as exc:
                 last_exc = exc

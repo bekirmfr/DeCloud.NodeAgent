@@ -1,8 +1,15 @@
 """
 app.py — DeCloud CLI Dashboard application.
 
-Uses proper Textual Screen subclasses with switch_screen() for navigation.
-No ContentSwitcher, no mount/unmount — each screen is a real Screen.
+Top-level Textual App. The app owns:
+
+  • Global keymap (1–9 to switch screens, r to refresh, q to quit)
+  • A dark theme with cyan accent (matches the DeCloud web brand)
+  • Initial screen (Overview)
+
+Screens own their own data fetching. The app does not poll directly;
+each screen schedules its own set_interval. This keeps the navigation
+layer free of business logic.
 """
 
 from __future__ import annotations
@@ -12,106 +19,126 @@ from textual.binding import Binding
 
 from config import cfg
 from screens import get_screen
-from screens.dashboard import DashboardScreen
+from screens.overview import OverviewScreen
 
 
 class DeCloudDashboard(App):
-    """DeCloud CLI Dashboard."""
 
-    TITLE     = "DeCloud Dashboard"
-    SUB_TITLE = cfg.orchestrator_url or cfg.node_url or "not configured"
+    TITLE = "DeCloud · Node Operator Dashboard"
+
+    # ─── Global CSS ────────────────────────────────────────────────────
+    # Per-screen CSS lives next to each screen (DEFAULT_CSS). Here we
+    # only define rules that apply to chrome (sidebar, identity bar,
+    # status strip, key hints) shared across all screens.
 
     CSS = """
-    /* Global layout */
-    BaseScreen { layout: horizontal; }
-    #content   { width: 1fr; height: 100%; padding: 1 2; overflow: auto auto; }
+    /* --- Tokens (Textual theme variables we override per element) --- */
+    Screen { background: $background; color: $text; }
 
-    /* Typography */
-    .section-title {
-        color: $text-muted; text-style: italic;
-        border-bottom: solid $panel; margin-bottom: 1; height: 2;
+    /* Identity bar separator */
+    #identity-bar { border-bottom: solid $panel; }
+
+    /* Card chrome — accentuate focused card without being noisy */
+    Card { background: $surface; }
+    Card:focus-within { background: $boost; }
+
+    /* DataTable readability */
+    DataTable {
+        background: $surface;
     }
-    .card-label { color: $text-muted; height: 1; }
-    .card-value { text-style: bold; height: 2; }
-    .card-sub   { color: $text-muted; height: 1; }
+    DataTable > .datatable--header {
+        background: $boost;
+        color: $accent;
+        text-style: bold;
+    }
+    DataTable > .datatable--cursor {
+        background: $boost;
+    }
 
-    /* Stat cards */
-    .stat-card  { border: solid $panel; padding: 1 2; width: 1fr; height: 7; }
-    #stat-row   { height: 8; margin-bottom: 1; }
-    #balance-row { height: 8; margin-bottom: 1; }
+    /* Tabs */
+    TabbedContent Tabs {
+        background: $surface;
+    }
 
-    /* Gauges */
-    .gauge-row    { height: 2; }
-    .gauge-label  { width: 12; color: $text-muted; }
-    .gauge-pct    { width: 7; text-align: right; color: $text-muted; }
-
-    /* Mid row */
-    #mid-row      { height: 18; margin-bottom: 1; }
-    #gauges-panel { width: 1fr; margin-right: 1; }
-    #events-panel { width: 1fr; }
-
-    /* Filter / action bars */
-    #filter-bar { height: 3; margin-bottom: 1; align: left middle; }
-    #filter-bar Input  { width: 28; margin-right: 1; }
-    #filter-bar Button { width: auto; margin-right: 1; height: 3; }
-    #filter-bar Select { width: 22; margin-right: 1; }
-    #action-bar { height: 3; margin-top: 1; align: left middle; }
-    #action-bar Button { width: auto; margin-right: 1; height: 3; }
-
-    /* Settings */
-    #settings-actions { height: 3; margin-top: 1; align: left middle; }
-    #settings-actions Button { width: auto; margin-right: 1; height: 3; }
-    #settings-status  { height: 2; color: $text-muted; margin-top: 1; }
-
-    /* DataTable */
-    DataTable { height: 1fr; }
-
-    /* Sidebar */
-    Sidebar .nav-key   { width: 3; color: $text-disabled; }
-    Sidebar .nav-label { width: 1fr; }
+    /* Inputs and buttons sit on slightly elevated surface */
+    Input, Select { background: $boost; }
+    Button { min-width: 10; }
+    Button:hover { background: $accent 30%; }
     """
 
     BINDINGS = [
-        Binding("q",      "quit",   "Quit",    show=True),
-        Binding("ctrl+c", "quit",   "Quit",    show=False),
-        Binding("r",      "refresh","Refresh", show=True),
-        Binding("1", "go_1", show=False), Binding("2", "go_2", show=False),
-        Binding("3", "go_3", show=False), Binding("4", "go_4", show=False),
-        Binding("5", "go_5", show=False), Binding("6", "go_6", show=False),
-        Binding("7", "go_7", show=False), Binding("8", "go_8", show=False),
-        Binding("9", "go_9", show=False),
+        Binding("q",       "quit",         "Quit",    show=True),
+        Binding("ctrl+c",  "quit",         "Quit",    show=False),
+        Binding("r",       "refresh",      "Refresh", show=True),
+        Binding("?",       "help",         "Help",    show=True),
+        Binding("question_mark", "help",   "Help",    show=False),
+        # 1-9 switch screens. priority=True so they fire even when an Input
+        # widget has focus on the current screen (otherwise the digit would
+        # be typed into the input instead of switching screens).
+        Binding("1", "go_1", show=False, priority=True),
+        Binding("2", "go_2", show=False, priority=True),
+        Binding("3", "go_3", show=False, priority=True),
+        Binding("4", "go_4", show=False, priority=True),
+        Binding("5", "go_5", show=False, priority=True),
+        Binding("6", "go_6", show=False, priority=True),
+        Binding("7", "go_7", show=False, priority=True),
+        Binding("8", "go_8", show=False, priority=True),
+        Binding("9", "go_9", show=False, priority=True),
     ]
 
-    _NAV_LABELS = [
-        "Dashboard", "Nodes", "Virtual Machines", "System VMs",
-        "Networking", "Ingress Routes", "Billing", "Live Logs", "Settings",
-    ]
+    # Map 1..9 → screen label (mirrors NAV in screens/_base.py).
+    _SCREEN_BY_KEY = {
+        "1": "Overview",
+        "2": "Hardware",
+        "3": "Virtual Machines",
+        "4": "Network",
+        "5": "Firewall",
+        "6": "Services",
+        "7": "Logs",
+        "8": "Diagnostics",
+        "9": "Settings",
+    }
 
-    def compose(self) -> ComposeResult:
-        # App composes nothing — the Screen provides all layout
-        return
-        yield  # type: ignore[misc]
+    # ─── Lifecycle ─────────────────────────────────────────────────────
 
     def on_mount(self) -> None:
-        self.push_screen(DashboardScreen())
+        # Use Textual's dark theme as base; cyan accent comes from $accent.
+        self.dark = True
+        self.push_screen(OverviewScreen())
 
-    # 1-9 navigation
-    def action_go_1(self) -> None: self._nav("Dashboard")
-    def action_go_2(self) -> None: self._nav("Nodes")
-    def action_go_3(self) -> None: self._nav("Virtual Machines")
-    def action_go_4(self) -> None: self._nav("System VMs")
-    def action_go_5(self) -> None: self._nav("Networking")
-    def action_go_6(self) -> None: self._nav("Ingress Routes")
-    def action_go_7(self) -> None: self._nav("Billing")
-    def action_go_8(self) -> None: self._nav("Live Logs")
-    def action_go_9(self) -> None: self._nav("Settings")
-
-    def _nav(self, label: str) -> None:
-        screen = get_screen(label)
-        if screen:
-            self.switch_screen(screen)
+    # ─── Actions ───────────────────────────────────────────────────────
 
     def action_refresh(self) -> None:
+        """Delegate to the active screen's refresh, if it has one."""
         screen = self.screen
         if hasattr(screen, "action_refresh"):
             screen.action_refresh()
+
+    def action_help(self) -> None:
+        """Show a quick keymap toast."""
+        self.notify(
+            "Navigation: 1–9 switch screens · r refresh · q quit\n"
+            "Per-screen actions: see hint bar at the bottom",
+            title="Help", timeout=6,
+        )
+
+    # Screen-switch actions — generated programmatically via __getattr__.
+    def __getattr__(self, name: str):
+        if name.startswith("action_go_") and name[10:].isdigit():
+            key = name[10:]
+            label = self._SCREEN_BY_KEY.get(key)
+            if label:
+                def _go(_label=label):
+                    self._nav(_label)
+                return _go
+        raise AttributeError(name)
+
+    def _nav(self, label: str) -> None:
+        new = get_screen(label)
+        if new is not None:
+            # switch_screen replaces the current screen (no stack).
+            self.switch_screen(new)
+
+
+def run() -> None:
+    DeCloudDashboard().run()

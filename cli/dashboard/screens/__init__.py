@@ -1,29 +1,31 @@
-"""Screen registry — maps label names to screen instances."""
+"""Screen registry — label → screen instance."""
 
 from __future__ import annotations
+
 from textual.screen import Screen
 
 
 def get_screen(label: str) -> Screen | None:
-    from screens.dashboard  import DashboardScreen
-    from screens.nodes      import NodesScreen
-    from screens.vms        import VmsScreen
-    from screens.system_vms import SystemVmsScreen
-    from screens.network    import NetworkScreen
-    from screens.ingress    import IngressScreen
-    from screens.billing    import BillingScreen
-    from screens.logs       import LogsScreen
-    from screens.settings   import SettingsScreen
+    # Local imports prevent circular-import storms.
+    from screens.overview    import OverviewScreen
+    from screens.hardware    import HardwareScreen
+    from screens.vms         import VmsScreen
+    from screens.network     import NetworkScreen
+    from screens.firewall    import FirewallScreen
+    from screens.services    import ServicesScreen
+    from screens.logs        import LogsScreen
+    from screens.diagnostics import DiagnosticsScreen
+    from screens.settings    import SettingsScreen
 
     mapping = {
-        "Dashboard":        DashboardScreen,
-        "Nodes":            NodesScreen,
+        "Overview":         OverviewScreen,
+        "Hardware":         HardwareScreen,
         "Virtual Machines": VmsScreen,
-        "System VMs":       SystemVmsScreen,
-        "Networking":       NetworkScreen,
-        "Ingress Routes":   IngressScreen,
-        "Billing":          BillingScreen,
-        "Live Logs":        LogsScreen,
+        "Network":          NetworkScreen,
+        "Firewall":         FirewallScreen,
+        "Services":         ServicesScreen,
+        "Logs":             LogsScreen,
+        "Diagnostics":      DiagnosticsScreen,
         "Settings":         SettingsScreen,
     }
     cls = mapping.get(label)
