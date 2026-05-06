@@ -83,8 +83,8 @@ SKIP_WIREGUARD=false
 SKIP_DOWNLOAD=false
 
 # SSH CA
-SSH_CA_KEY_PATH="/etc/decloud/ssh_ca"
-SSH_CA_PUB_PATH="/etc/decloud/ssh_ca.pub"
+SSH_CA_KEY_PATH="/etc/ssh/decloud_ca"
+SSH_CA_PUB_PATH="/etc/ssh/decloud_ca.pub"
 
 # Other
 SKIP_LIBVIRT=false

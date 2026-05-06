@@ -24,6 +24,14 @@ class Card(Container):
         padding: 0 1;
         margin: 0 0 1 0;
         height: auto;
+        /* Explicitly colour the border title — Textual's default is to
+         * inherit from the border, which on dark themes gives the
+         * "dark blue on dark background" effect that's nearly unreadable.
+         * Cyan accent + bold makes section titles pop against the panel. */
+        border-title-color: $accent;
+        border-title-style: bold;
+        border-subtitle-color: $text-muted;
+        border-subtitle-style: none;
     }
     Card:focus-within {
         border: round $accent;

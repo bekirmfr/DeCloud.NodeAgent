@@ -240,7 +240,8 @@ class OverviewScreen(BaseScreen):
         # Persist identity for IdentityBar (lives in app chrome).
         cfg.identity = summary
         try:
-            self.query_one("#identity-bar").refresh()
+            from widgets.header import IdentityBar
+            self.query_one("#identity-bar", IdentityBar).refresh_identity()
         except Exception:
             pass
 
@@ -402,22 +403,51 @@ class OverviewScreen(BaseScreen):
         if not isinstance(logs, list) or not logs:
             target.update(Text("no recent events", style=f"{COLOR['dim']}"))
             return
+
+        # The dashboard_logs endpoint returns raw strings — same shape as
+        # journalctl or the .NET logger writes them. Two common patterns:
+        #   "info: SourceName[101]"           ← header
+        #   "      End processing HTTP req…"  ← indented continuation
+        # We classify by the first non-space token and skip pure
+        # continuation lines so the card shows distinct events, not a
+        # stack-traced waterfall.
+        events: list[tuple[str, str]] = []   # (level3, message)
+        for raw in logs:
+            line = raw if isinstance(raw, str) else str(raw)
+            stripped = line.lstrip()
+            if not stripped:
+                continue
+            # Continuation lines (4+ leading spaces) — attach to last event
+            if line.startswith("    ") and events:
+                last_lvl, last_msg = events[-1]
+                # Append a separator + the continuation, truncated soon enough
+                events[-1] = (last_lvl, f"{last_msg} {stripped}")
+                continue
+            low = stripped.lower()
+            if low.startswith(("err", "fail", "fatal", "crit")) or "error" in low[:30]:
+                lvl = "ERR"
+            elif low.startswith(("warn", "wrn")):
+                lvl = "WRN"
+            elif low.startswith(("dbug", "debug", "trce", "trace")):
+                lvl = "DBG"
+            else:
+                lvl = "INF"
+            events.append((lvl, stripped))
+
+        if not events:
+            target.update(Text("no recent events", style=f"{COLOR['dim']}"))
+            return
+
         out = Text()
-        for i, entry in enumerate(logs[-8:]):
+        for i, (lvl, msg) in enumerate(events[-8:]):
             if i:
                 out.append("\n")
-            ts = entry.get("timestamp") or entry.get("time") or ""
-            level = (entry.get("level") or "INF").upper()[:3]
-            msg = entry.get("message") or entry.get("msg") or ""
             color = {
                 "ERR": COLOR["crit"], "WRN": COLOR["warn"],
-                "WAR": COLOR["warn"], "INF": COLOR["info"],
-                "DBG": COLOR["dim"],
-            }.get(level, COLOR["muted"])
-            out.append(f"{ts[-8:] if ts else '--:--:--'} ",
-                       style=f"{COLOR['muted']}")
-            out.append(f"{level} ", style=f"bold {color}")
-            out.append(truncate(msg, 60))
+                "INF": COLOR["info"], "DBG": COLOR["dim"],
+            }.get(lvl, COLOR["muted"])
+            out.append(f"{lvl} ", style=f"bold {color}")
+            out.append(truncate(msg, 70))
         target.update(out)
 
     def _update_status_strip(self, summary, snap, vms) -> None:

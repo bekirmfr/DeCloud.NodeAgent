@@ -16,23 +16,26 @@ from textual.app import ComposeResult
 from textual.containers import Container, Horizontal
 from textual.widgets import Static
 
-from theme import COLOR, severity, SPARK_BLOCKS
+from theme import COLOR, severity
 from util.format import fmt_pct
 from widgets.sparkline import Sparkline
 
 
 def render_bar(pct: float, width: int) -> Text:
-    """A solid bar built from full-block chars with eighths at the tip."""
+    """Solid bar made of full-block chars only.
+
+    Earlier versions added a partial eighth-block at the tip
+    (`▁▂▃▄▅▆▇`), which served two bugs simultaneously: (a) those are
+    *bottom* eighths, semantically wrong for a horizontal bar (a
+    horizontal bar should use *left* eighths `▏▎▍▌▋▊▉`), and (b) many
+    fonts that ship with `█` lack the eighth-block range entirely,
+    rendering the tip as tofu.  Rounding to the nearest full block is
+    visually almost identical at the widths we use and works in every
+    monospace font.
+    """
     pct = max(0.0, min(100.0, pct))
-    total_eighths = round(pct / 100.0 * width * 8)
-    full = total_eighths // 8
-    rem = total_eighths % 8
-    bar = "█" * full
-    if rem and full < width:
-        # SPARK_BLOCKS index 0..7 maps to one-eighth ... full block
-        bar += SPARK_BLOCKS[rem - 1] if rem >= 1 else ""
-    pad = width - len(bar)
-    bar += " " * max(0, pad)
+    full = int(round(pct / 100.0 * width))
+    bar = "█" * full + " " * (width - full)
     color = COLOR[severity(pct)]
     return Text(bar, style=f"{color}")
 
