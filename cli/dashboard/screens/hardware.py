@@ -147,18 +147,27 @@ class HardwareScreen(BaseScreen):
             self.notify("DECLOUD_NODE_URL not configured", severity="warning")
             return
 
-        # Use /api/node/snapshot — fast (cached, no CPU benchmark).
-        # Returns ResourceSnapshot: aggregate core/memory/storage/GPU counts.
-        # The web dashboard uses the same endpoint for its hardware section.
         na = NodeAgentClient(cfg.node_url)
         try:
-            snap = await na.node_snapshot()
-        except Exception:
-            snap = {}
+            # Fetch snapshot (always fast) + cached inventory in parallel.
+            # GET /api/node/resources?cached=true returns the HardwareInventory
+            # from the in-memory cache (populated by the first heartbeat after
+            # agent start) without running a CPU benchmark.  Falls back to the
+            # flat snapshot if the cache isn't warm yet (404).
+            inv_r, snap_r = await asyncio.gather(
+                na.get("/api/node/resources", params={"cached": "true"}),
+                na.node_snapshot(),
+                return_exceptions=True,
+            )
         finally:
             await na.close()
 
-        if isinstance(snap, dict) and snap:
+        snap = snap_r if isinstance(snap_r, dict) else {}
+        inv  = inv_r  if isinstance(inv_r,  dict) else None
+
+        if inv:
+            self._apply(inv, snap)
+        elif snap:
             self._apply_from_snapshot(snap)
 
         self.mark_updated()

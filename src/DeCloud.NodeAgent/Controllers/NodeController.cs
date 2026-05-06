@@ -30,11 +30,21 @@ public class NodeController : ControllerBase
 
     /// <summary>
     /// Get full node resource inventory
+    /// Pass ?cached=true to return the cached inventory without running
+    /// a fresh CPU benchmark. Returns 404 if the cache is empty (agent
+    /// just started, first heartbeat hasn't run yet).
     /// </summary>
     [HttpGet("resources")]
-    public async Task<ActionResult<HardwareInventory>> GetResources(CancellationToken ct)
+    public async Task<ActionResult<HardwareInventory>> GetResources(
+        [FromQuery] bool cached = false, CancellationToken ct = default)
     {
-        var resources = await _resourceDiscovery.DiscoverAllAsync(ct);
+        var resources = cached
+            ? await _resourceDiscovery.GetInventoryCachedAsync(ct)
+            : await _resourceDiscovery.DiscoverAllAsync(ct);
+
+        if (resources == null)
+            return NotFound("No cached inventory available yet — try again after the first heartbeat cycle.");
+
         return Ok(resources);
     }
 
