@@ -84,19 +84,21 @@ class DeCloudDashboard(App):
         Binding("7", "go_7", show=False, priority=True),
         Binding("8", "go_8", show=False, priority=True),
         Binding("9", "go_9", show=False, priority=True),
+        Binding("0", "go_0", show=False, priority=True),
     ]
 
-    # Map 1..9 → screen label (mirrors NAV in screens/_base.py).
+    # Map 1..9,0 → screen label (mirrors NAV in screens/_base.py).
     _SCREEN_BY_KEY = {
         "1": "Overview",
         "2": "Hardware",
-        "3": "Virtual Machines",
-        "4": "Network",
-        "5": "Firewall",
-        "6": "Services",
-        "7": "Logs",
-        "8": "Diagnostics",
-        "9": "Settings",
+        "3": "Obligations",
+        "4": "Virtual Machines",
+        "5": "Network",
+        "6": "Firewall",
+        "7": "Services",
+        "8": "Logs",
+        "9": "Diagnostics",
+        "0": "Settings",
     }
 
     # ─── Lifecycle ─────────────────────────────────────────────────────

@@ -40,13 +40,14 @@ from widgets.keyhints import KeyHints
 NAV: list[tuple[str, str, str]] = [
     ("1", "Overview",         "Health"),
     ("2", "Hardware",         "Health"),
-    ("3", "Virtual Machines", "Workloads"),
-    ("4", "Network",          "Connectivity"),
-    ("5", "Firewall",         "Connectivity"),
-    ("6", "Services",         "System"),
-    ("7", "Logs",             "System"),
-    ("8", "Diagnostics",      "Tools"),
-    ("9", "Settings",         "Tools"),
+    ("3", "Obligations",      "Health"),
+    ("4", "Virtual Machines", "Workloads"),
+    ("5", "Network",          "Connectivity"),
+    ("6", "Firewall",         "Connectivity"),
+    ("7", "Services",         "System"),
+    ("8", "Logs",             "System"),
+    ("9", "Diagnostics",      "Tools"),
+    ("0", "Settings",         "Tools"),
 ]
 
 

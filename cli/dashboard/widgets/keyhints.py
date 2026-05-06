@@ -28,7 +28,7 @@ class KeyHints(Static):
     """
 
     BASE_HINTS = [
-        ("1-9", "switch"),
+        ("1-0", "switch"),
         ("r",   "refresh"),
         ("?",   "help"),
         ("q",   "quit"),

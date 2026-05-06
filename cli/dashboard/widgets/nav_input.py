@@ -23,7 +23,7 @@ from textual.widgets import Input
 # Keys that must always reach the app/screen bindings regardless of focus.
 # Digits drive the 1-9 nav. We deliberately do NOT include 'r', '?' or 'q'
 # — those need to remain typeable in a search box.
-_NAV_KEYS = frozenset("123456789")
+_NAV_KEYS = frozenset("1234567890")
 
 
 class NavInput(Input):
