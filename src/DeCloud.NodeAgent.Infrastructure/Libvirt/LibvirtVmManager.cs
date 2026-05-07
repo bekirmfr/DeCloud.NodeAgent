@@ -1905,33 +1905,29 @@ public class LibvirtVmManager : IVmManager
             if (!string.IsNullOrEmpty(spec.CloudInitUserData))
             {
                 _logger.LogInformation(
-                    "VM {VmId}: Using custom cloud-init UserData from orchestrator ({Bytes} bytes)",
+                    "VM {VmId}: Using cloud-init UserData from orchestrator ({Bytes} bytes)",
                     spec.Id, spec.CloudInitUserData.Length);
 
-                // IMPORTANT: Custom UserData from orchestrator needs to be merged with
-                // base configuration (hostname, password, SSH keys, etc.)
-                cloudInitYaml = MergeCustomUserDataWithBaseConfig(
-                    spec.CloudInitUserData,
-                    spec.Name,
-                    sshKeysBlock,
-                    passwordBlock,
-                    hasPassword,
-                    password ?? "");
+                // The orchestrator's CloudInitRenderer is the authoritative
+                // substitution layer. By the time the rendered cloud-init reaches
+                // us, every __VARNAME__ placeholder has been substituted except
+                // __VM_ID__, which SystemVmReconciler.ActCreateAsync substitutes
+                // itself before dispatching here. Tenant VMs receive equally
+                // complete cloud-init — see VmDeploymentPipeline.cs for the
+                // contract.
+                cloudInitYaml = spec.CloudInitUserData;
 
-                // Re-assert base identity variables. STEP 1 already set them,
-                // but this guards against a future addition that mutates the
-                // dictionary between STEP 1 and here.
+                // Re-assert base identity variables. STEP 1 already set them; this
+                // guards against a future addition that mutates the dictionary
+                // between STEP 1 and the defensive substitution pass below.
                 variables["__VM_ID__"] = spec.Id;
                 variables["__VM_NAME__"] = spec.Name;
                 variables["__HOSTNAME__"] = spec.Name;
 
-                // Apply the full variables dictionary to the merged cloud-init content.
-                // MergeCustomUserDataWithBaseConfig handles structural merging only —
-                // it does not substitute __PLACEHOLDER__ variables. Without this pass:
-                //   • __ORCHESTRATOR_IP__ / __ORCHESTRATOR_PORT__ stay literal
-                //     → wg-quick fails immediately with "No such device"
-                //   • __RELAY_SUBNET__ / __VM_NAME__ stay literal in final_message
-                //   • __ORCHESTRATOR_PUBLIC_KEY__ stays literal in [Peer] block
+                // Defensive substitution pass. Catches any placeholder that
+                // escaped the orchestrator-side renderer (e.g., a marketplace
+                // template that uses an undeclared variable). The leak detector
+                // below warns on any __VARNAME__ that still survives.
                 foreach (var (placeholder, value) in variables)
                 {
                     cloudInitYaml = cloudInitYaml.Replace(placeholder, value);
@@ -2563,155 +2559,6 @@ public class LibvirtVmManager : IVmManager
         return result;
     }
 
-    /// <summary>
-    /// Merge custom cloud-init UserData with base configuration (hostname, password, SSH)
-    /// This ensures marketplace templates get proper authentication even when using custom cloud-init
-    /// </summary>
-    private string MergeCustomUserDataWithBaseConfig(
-        string customUserData,
-        string hostname,
-        string sshKeysBlock,
-        string passwordBlock,
-        bool hasPassword,
-        string password = "")
-    {
-        var lines = new List<string>();
-        
-        // Parse custom UserData line by line
-        using var reader = new StringReader(customUserData);
-        string? line;
-        bool foundRuncmd = false;
-        bool afterRuncmd = false;
-        
-        while ((line = reader.ReadLine()) != null)
-        {
-            // Skip the first #cloud-config line, we'll add it back at the start
-            if (line.Trim() == "#cloud-config" && lines.Count == 0)
-            {
-                continue;
-            }
-            
-            // Check if we're entering the runcmd section
-            if (line.TrimStart().StartsWith("runcmd:") && !foundRuncmd)
-            {
-                foundRuncmd = true;
-                
-                // ── bootcmd: password + SSH config ───────────────────────────────────────
-                // Runs in cloud_init_modules (before packages, set-passwords, runcmd).
-                // Jobs: (1) set root password, (2) write sshd_config.d so it is present
-                // when the cloud-init ssh module generates host keys and starts sshd.
-                //
-                // IMPORTANT: Do NOT restart sshd here. bootcmd runs before the cloud-init
-                // ssh module generates host keys. Restarting sshd without host keys causes
-                // repeated failures that exhaust systemd's StartLimitBurst (default: 5),
-                // after which systemd permanently marks the service failed — SSH stays
-                // "Connection refused" for the entire boot.
-                //
-                // Only inject if no bootcmd section exists (templates define their own).
-                if (hasPassword && !customUserData.Contains("bootcmd:", StringComparison.OrdinalIgnoreCase))
-                {
-                    lines.Add("bootcmd:");
-                    lines.Add($"  - echo 'root:{password}' | chpasswd");
-                    lines.Add("  - mkdir -p /etc/ssh/sshd_config.d");
-                    lines.Add("  - |");
-                    lines.Add("    printf 'PasswordAuthentication yes\\nPermitRootLogin yes\\nChallengeResponseAuthentication no\\nUsePAM yes\\n' > /etc/ssh/sshd_config.d/99-decloud-password-auth.conf");
-                    lines.Add("");
-                }
-                // Before runcmd, inject base configuration if not already present
-                if (!customUserData.Contains("hostname:", StringComparison.OrdinalIgnoreCase))
-                {
-                    lines.Add($"hostname: {hostname}");
-                    lines.Add("manage_etc_hosts: true");
-                    lines.Add("");
-                }
-                
-                if (!customUserData.Contains("disable_root:", StringComparison.OrdinalIgnoreCase))
-                {
-                    lines.Add("disable_root: false");
-                    lines.Add("");
-                }
-
-                // Only inject if the template doesn't already declare
-                // ssh_authorized_keys (literal section OR new-pipeline placeholder).
-                // New pipeline pre-renders __SSH_AUTHORIZED_KEYS_BLOCK__ → literal
-                // section; marketplace templates may carry the placeholder still.
-                // Either way, skip the append to avoid duplicate top-level keys.
-                var sshKeysAlreadyHandled =
-                    customUserData.Contains("ssh_authorized_keys:", StringComparison.OrdinalIgnoreCase)
-                    || customUserData.Contains("__SSH_AUTHORIZED_KEYS_BLOCK__", StringComparison.OrdinalIgnoreCase);
-
-                if (!sshKeysAlreadyHandled
-                    && !string.IsNullOrEmpty(sshKeysBlock)
-                    && !sshKeysBlock.Contains("# No SSH keys"))
-                {
-                    lines.Add(sshKeysBlock);
-                    lines.Add("");
-                }
-
-                // Only inject if the template doesn't already declare
-                // chpasswd (literal block OR new-pipeline placeholder).
-                var passwordAlreadyHandled =
-                    customUserData.Contains("chpasswd:", StringComparison.OrdinalIgnoreCase)
-                    || customUserData.Contains("__PASSWORD_CONFIG_BLOCK__", StringComparison.OrdinalIgnoreCase);
-
-                if (hasPassword
-                    && !passwordAlreadyHandled
-                    && !string.IsNullOrEmpty(passwordBlock)
-                    && !passwordBlock.Contains("# No password"))
-                {
-                    // Use the password block as-is (already configured for root)
-                    lines.Add(passwordBlock);
-                    lines.Add("");
-                }
-
-                // Only inject if the template doesn't already declare
-                // ssh_pwauth. The check is a single substring; covers both literal
-                // (`ssh_pwauth: true`) and new-pipeline placeholder
-                // (`ssh_pwauth: __SSH_PASSWORD_AUTH__`) — both contain "ssh_pwauth:".
-                if (hasPassword && !customUserData.Contains("ssh_pwauth:", StringComparison.OrdinalIgnoreCase))
-                {
-                    lines.Add("ssh_pwauth: true");
-                    lines.Add("");
-                }
-
-                // Now add the runcmd line
-                lines.Add(line);
-                afterRuncmd = true;
-                continue;
-            }
-
-            // If we just added runcmd, inject SSH setup commands as first runcmd items
-            if (afterRuncmd && hasPassword && line.TrimStart().StartsWith("-"))
-            {
-                // Add SSH configuration commands before other runcmd items.
-                // NOTE: We use printf instead of heredoc (cat <<'EOF') because
-                // cloud-init runcmd items are indented, and heredoc closing
-                // delimiters MUST be at column 0 with <<'EOF' syntax.
-                // An indented closing delimiter silently fails, leaving the
-                // SSH config file empty and sshd rejecting all connections.
-                lines.Add("  # Enable password authentication for SSH");
-                lines.Add("  - mkdir -p /etc/ssh/sshd_config.d");
-                lines.Add("  - |");
-                lines.Add("    printf '%s\\n' 'PasswordAuthentication yes' 'PermitRootLogin yes' 'ChallengeResponseAuthentication no' 'UsePAM yes' > /etc/ssh/sshd_config.d/99-decloud-password-auth.conf");
-                lines.Add("  - systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true");
-                lines.Add("");
-
-                // Now add the first actual runcmd item
-                afterRuncmd = false;
-            }
-
-            lines.Add(line);
-        }
-        
-        // Rebuild with #cloud-config header
-        var merged = "#cloud-config\n\n" + string.Join("\n", lines);
-        
-        _logger.LogDebug(
-            "Merged custom UserData with base config (hostname: {Hostname}, password: {HasPassword}, ssh: {HasSsh})",
-            hostname, hasPassword, !sshKeysBlock.Contains("# No SSH keys"));
-        
-        return merged;
-    }
 
     // =====================================================================
     // VFIO GPU PASSTHROUGH HELPERS
