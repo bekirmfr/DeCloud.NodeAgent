@@ -28,7 +28,6 @@ public class LibvirtVmManager : IVmManager
     private readonly INodeStateService _nodeState;
     private readonly ICommandExecutor _executor;
     private readonly IImageManager _imageManager;
-    private readonly ICloudInitTemplateService _templateService;
     private readonly ILogger<LibvirtVmManager> _logger;
     private readonly LibvirtVmManagerOptions _options;
     private readonly VmRepository _repository;
@@ -58,7 +57,6 @@ public class LibvirtVmManager : IVmManager
         IImageManager imageManager,
         IOptions<LibvirtVmManagerOptions> options,
         VmRepository repository,
-        ICloudInitTemplateService templateService,
         IUserWireGuardManager userWireGuardManager,
         INodeMetadataService nodeMetadata,
         INodeStateService nodeState,
@@ -67,7 +65,6 @@ public class LibvirtVmManager : IVmManager
     {
         _executor = executor;
         _imageManager = imageManager;
-        _templateService = templateService;
         _nodeMetadata = nodeMetadata;
         _nodeState = nodeState;
         _userWireGuardManager = userWireGuardManager;
@@ -1813,12 +1810,11 @@ public class LibvirtVmManager : IVmManager
 
             variables["__PASSWORD_CONFIG_BLOCK__"] = passwordBlock;
 
-            // Set __ADMIN_PASSWORD__ explicitly so the general-vm-cloudinit.yaml bootcmd
-            // gets the same password as __PASSWORD_CONFIG_BLOCK__.
-            // CloudInitTemplateService.BuildTemplateVariablesAsync() calls GenerateSecurePassword()
-            // independently — without this override the template would have a DIFFERENT password
-            // in __ADMIN_PASSWORD__ than what chpasswd.users sets. The additionalVariables dict
-            // is merged AFTER variables.ToDictionary(), so this value wins.
+            // Set __ADMIN_PASSWORD__ explicitly so the orchestrator-rendered cloud-init's
+            // bootcmd gets the same password as __PASSWORD_CONFIG_BLOCK__. Defensive
+            // override against any future code path that introduces an independent
+            // password generator and would otherwise produce a mismatch between
+            // __ADMIN_PASSWORD__ and the chpasswd.users value.
             variables["__ADMIN_PASSWORD__"] = hasPassword ? password! : "";
 
             // =====================================================
@@ -1897,8 +1893,13 @@ public class LibvirtVmManager : IVmManager
             // =====================================================
 
             // =====================================================
-            // STEP 6: Process template using CloudInitTemplateService
+            // STEP 6: Apply orchestrator-rendered cloud-init
             // =====================================================
+            // The orchestrator's CloudInitRenderer is the authoritative substitution
+            // layer for both system and tenant VMs. spec.CloudInitUserData arrives
+            // pre-rendered with every __VARNAME__ placeholder substituted except
+            // __VM_ID__ (deferred to SystemVmReconciler.ActCreateAsync per
+            // BLOCKSTORE-FIX §6).
             string cloudInitYaml;
 
             // Check if custom UserData is provided (from orchestrator template)
@@ -1944,12 +1945,12 @@ public class LibvirtVmManager : IVmManager
                 // __VARNAME__ placeholders undetected — this is the catch-all.
                 //
                 // ${VARNAME} detection was originally part of F2 but produced too many
-                // false positives — almost every system-VM cloud-init has legitimate
-                // bash variable references (${ATTEMPTS}, ${WG_PRIV}, ${HTTP:-timeout},
-                // etc.) inside runcmd blocks, and the regex cannot distinguish them
-                // from leaked placeholders. CloudInitTemplateService already warns on
-                // its own __[A-Z_]+__ leaks at the legacy substitution layer, which is
-                // the only path that ever produced ${VARNAME} placeholders to begin with.
+                // false positives — almost every cloud-init has legitimate bash variable
+                // references (${ATTEMPTS}, ${WG_PRIV}, ${HTTP:-timeout}, etc.) inside
+                // runcmd blocks, and the regex cannot distinguish them from leaked
+                // placeholders. The orchestrator's CloudInitRenderer is the only layer
+                // that produces __VARNAME__ tokens; this detector is the last-line
+                // safety net catching any token its render pipeline missed.
                 //
                 // Warn-not-throw: a leak is bad but not always fatal (some leaked
                 // placeholders end up in cosmetic positions like log messages).
@@ -1981,27 +1982,16 @@ public class LibvirtVmManager : IVmManager
             }
             else
             {
-                // Use built-in template processing
-                try
-                {
-                    cloudInitYaml = await _templateService.ProcessTemplateAsync(
-                        spec.VmType,
-                        spec,
-                        variables,
-                        ct);
-
-                    _logger.LogInformation(
-                        "VM {VmId}: Successfully processed cloud-init template for {VmType}",
-                        spec.Id, spec.VmType);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(
-                        ex,
-                        "VM {VmId}: Failed to process cloud-init template for {VmType}",
-                        spec.Id, spec.VmType);
-                    throw;
-                }
+                // P4.3: legacy CloudInitTemplateService path removed. The orchestrator's
+                // CloudInitRenderer is the single authoritative substitution layer for
+                // both system and tenant VMs (per VmDeploymentPipeline.cs). If a CreateVm
+                // command arrives without userData, the originating orchestrator caller
+                // must be fixed to populate it — concealing the gap with a node-side
+                // fallback is no longer acceptable.
+                throw new InvalidOperationException(
+                    $"VM {spec.Id} ({spec.VmType}): spec.CloudInitUserData is null/empty. " +
+                    "The orchestrator must pre-render and send userData for every CreateVm " +
+                    "command. Investigate the originating CreateVm caller in the orchestrator.");
             }
 
             // =====================================================
