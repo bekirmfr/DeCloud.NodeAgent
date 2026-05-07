@@ -1878,155 +1878,23 @@ public class LibvirtVmManager : IVmManager
             }
 
             // =====================================================
-            // STEP 5.5: Orchestrator Public Key (for Relay VMs)
+            // STEP 5.5–5.7: REMOVED in P4.1 (2026-05-06).
+            //
+            // Role-specific cloud-init substitution for Relay/DHT/BlockStore
+            // is now performed by the orchestrator's CloudInitRenderer at
+            // template-push time. By the time the rendered cloud-init reaches
+            // SystemVmReconciler.ActCreateAsync (which sets spec.CloudInitUserData
+            // and dispatches to this manager), every __VARNAME__ placeholder
+            // has already been substituted — except __VM_ID__, which the
+            // reconciler substitutes itself once the libvirt UUID is minted.
+            //
+            // The legacy STEP 5.5/5.6/5.7 blocks were dormant for the new
+            // pipeline (Replace() on absent placeholders is a no-op) and not
+            // applicable to tenant VMs (the if-guards filtered them out). They
+            // are gone; the variables dictionary populated by STEP 1–5 above
+            // is sufficient for the merged-userdata path used by tenant VMs
+            // and is harmless for system VMs.
             // =====================================================
-            if (spec.VmType == VmType.Relay)
-            {
-                const string orchestratorPubKeyPath = "/etc/wireguard/orchestrator-public.key";
-
-                var orchestratorUrl = _nodeMetadata.OrchestratorUrl;
-                var relayCapacity = spec.Labels?.GetValueOrDefault("relay-capacity", "10") ?? "10";
-                var relayRegion = spec.Labels?.GetValueOrDefault("relay-region")
-                               ?? _nodeMetadata.Region
-                               ?? "default";
-                var publicIp = spec.Labels?.GetValueOrDefault("node-public-ip")
-                            ?? _nodeMetadata.PublicIp
-                            ?? _nodeMetadata.Inventory?.Network?.PublicIp
-                            ?? "";
-
-                if (File.Exists(orchestratorPubKeyPath))
-                {
-                    var orchestratorPublicKey = await File.ReadAllTextAsync(orchestratorPubKeyPath, ct);
-                    variables["__ORCHESTRATOR_PUBLIC_KEY__"] = orchestratorPublicKey.Trim();
-
-                    _logger.LogInformation(
-                        "VM {VmId}: Including orchestrator WireGuard public key for relay peer pre-configuration",
-                        spec.Id);
-                }
-                else
-                {
-                    _logger.LogWarning(
-                        "VM {VmId}: Orchestrator WireGuard public key not found at {Path} - " +
-                        "relay will not have orchestrator peer pre-configured! " +
-                        "Ensure orchestrator was installed with --enable-wireguard flag.",
-                        spec.Id, orchestratorPubKeyPath);
-
-                    variables["__ORCHESTRATOR_PUBLIC_KEY__"] = "# ERROR: Orchestrator public key not available";
-                }
-
-                // Relay VM metadata placeholders
-
-                // Use orchestrator URL host directly — it's the correct WireGuard endpoint.
-                // Exception: when co-located (localhost/127.0.0.1), substitute the node's
-                // public IP because localhost is unreachable from inside the relay VM.
-                // __ORCHESTRATOR_IP__: must be the orchestrator's host, not this node's IP.
-                // Exception: if orchestratorUrl is localhost/127.0.0.1 (co-located deployment),
-                // fall back to this node's public IP since that's where the orchestrator lives.
-                var orchestratorHost = new Uri(orchestratorUrl).Host;
-                var orchestratorWgIp = orchestratorHost is "localhost" or "127.0.0.1" or "::1"
-                    ? (_nodeMetadata.PublicIp ?? orchestratorHost)
-                    : orchestratorHost;
-
-                variables["__ORCHESTRATOR_IP__"] = orchestratorWgIp;
-                variables["__ORCHESTRATOR_PORT__"] = "51821";
-
-                // __ORCHESTRATOR_URL__: used by notify-orchestrator.sh for the HTTP register-callback.
-                // Same localhost substitution logic — use the public IP when co-located.
-                var orchestratorPort = new Uri(orchestratorUrl).Port > 0
-                    ? new Uri(orchestratorUrl).Port : 5050;
-                var orchestratorCallbackUrl = orchestratorHost is "localhost" or "127.0.0.1" or "::1"
-                    ? $"http://{_nodeMetadata.PublicIp}:{orchestratorPort}"
-                    : orchestratorUrl;
-
-                variables["__ORCHESTRATOR_URL__"] = orchestratorCallbackUrl;
-
-                _logger.LogInformation(
-                    "VM {VmId}: Relay endpoints — WG={WgIp}:51821, Callback={CallbackUrl}",
-                    spec.Id, orchestratorWgIp, orchestratorCallbackUrl);
-
-                _logger.LogInformation(
-                    "VM {VmId}: Relay WireGuard endpoint set to {Ip}:51821 (PublicIp={PublicIp}, OrchestratorUrl={Url})",
-                    spec.Id, orchestratorWgIp, _nodeMetadata.PublicIp, orchestratorUrl);
-                variables["__NODE_ID__"] = _nodeMetadata.NodeId;
-                variables["__HOST_MACHINE_ID__"] = _nodeMetadata.MachineId;
-                variables["__PUBLIC_IP__"] = publicIp;
-                variables["__RELAY_CAPACITY__"] = relayCapacity;
-                variables["__RELAY_REGION__"] = relayRegion;
-                variables["__TIMESTAMP__"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                var relaySubnet = spec.Labels?.GetValueOrDefault("relay-subnet") ?? "0";
-                variables["__RELAY_SUBNET__"] = relaySubnet;
-
-                _logger.LogInformation(
-                    "VM {VmId}: Set relay metadata - Subnet={Subnet}, Capacity={Capacity}, Region={Region}",
-                    spec.Id, relaySubnet, relayCapacity, relayRegion);
-            }
-
-            // =====================================================
-            // STEP 5.6: DHT VM metadata (from orchestrator labels)
-            // =====================================================
-            if (spec.VmType == VmType.Dht)
-            {
-                variables["__DHT_REGION__"] = spec.Labels?.GetValueOrDefault("node-region")
-                                           ?? _nodeMetadata.Region
-                                           ?? "";
-                variables["__DHT_ADVERTISE_IP__"] = spec.Labels?.GetValueOrDefault("dht-advertise-ip") ?? "";
-                variables["__DHT_BOOTSTRAP_PEERS__"] = spec.Labels?.GetValueOrDefault("dht-bootstrap-peers") ?? "";
-                variables["__WG_RELAY_ENDPOINT__"] = spec.Labels?.GetValueOrDefault("wg-relay-endpoint") ?? "";
-                variables["__WG_RELAY_PUBKEY__"] = spec.Labels?.GetValueOrDefault("wg-relay-pubkey") ?? "";
-                variables["__WG_TUNNEL_IP__"] = spec.Labels?.GetValueOrDefault("wg-tunnel-ip") ?? "";
-                variables["__WG_RELAY_API__"] = spec.Labels?.GetValueOrDefault("wg-relay-api") ?? "";
-                variables["__NODE_ID__"] = spec.Labels?.GetValueOrDefault("node-id")
-                                        ?? _nodeMetadata.NodeId;
-                variables["__HOST_MACHINE_ID__"] = _nodeMetadata.MachineId;
-                variables["__TIMESTAMP__"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-
-                variables["__ORCHESTRATOR_URL__"] = _nodeMetadata.OrchestratorUrl;
-
-                _logger.LogInformation(
-                    "VM {VmId}: Set DHT metadata - NodeId={NodeId}, AdvertiseIP={AdvIP}, OrchestratorUrl={Url}",
-                    spec.Id,
-                    variables["__NODE_ID__"],
-                    spec.Labels?.GetValueOrDefault("dht-advertise-ip") ?? "(from template)",
-                    _nodeMetadata.OrchestratorUrl);
-            }
-
-            // =====================================================
-            // STEP 5.7: Block Store VM metadata (from orchestrator labels)
-            // =====================================================
-            if (spec.VmType == VmType.BlockStore)
-            {
-                variables["__NODE_ID__"] = spec.Labels?.GetValueOrDefault("node-id")
-                                        ?? _nodeMetadata.NodeId;
-                variables["__HOST_MACHINE_ID__"] = _nodeMetadata.MachineId;
-                variables["__TIMESTAMP__"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-                variables["__ORCHESTRATOR_URL__"] = _nodeMetadata.OrchestratorUrl;
-
-                // Port constants — 5090 = API port, 5001 = bitswap (libp2p) port.
-                // These match BlockStoreVmSpec.ApiPort / BitswapPort in the Orchestrator.
-                variables["__BLOCKSTORE_API_PORT__"] = "5090";
-                variables["__BLOCKSTORE_LISTEN_PORT__"] = "5001";
-
-                // Region — same source as DHT VMs (node-region label, falls back to node region).
-                // Required by blockstore-metadata.json; consumed by blockstore-dashboard.py
-                // when substituting __NODE_REGION__ into served dashboard files.
-                variables["__DHT_REGION__"] = spec.Labels?.GetValueOrDefault("node-region")
-                                           ?? _nodeMetadata.Region
-                                           ?? "";
-
-                // Advertise IP and bootstrap peers — sourced from labels set at deploy time.
-                // BLOCKSTORE_ADVERTISE_IP is also overwritten by wg-config-fetch.sh at boot
-                // once the WireGuard tunnel IP is confirmed, so an empty initial value is safe.
-                variables["__BLOCKSTORE_ADVERTISE_IP__"] = spec.Labels?.GetValueOrDefault("blockstore-advertise-ip") ?? "";
-                variables["__BLOCKSTORE_BOOTSTRAP_PEERS__"] = spec.Labels?.GetValueOrDefault("blockstore-bootstrap-peers") ?? "";
-
-                _logger.LogInformation(
-                    "VM {VmId}: Set BlockStore metadata - NodeId={NodeId}, ApiPort={ApiPort}, BitswapPort={BitswapPort}, OrchestratorUrl={Url}",
-                    spec.Id,
-                    variables["__NODE_ID__"],
-                    variables["__BLOCKSTORE_API_PORT__"],
-                    variables["__BLOCKSTORE_LISTEN_PORT__"],
-                    _nodeMetadata.OrchestratorUrl);
-            }
 
             // =====================================================
             // STEP 6: Process template using CloudInitTemplateService
@@ -2050,7 +1918,9 @@ public class LibvirtVmManager : IVmManager
                     hasPassword,
                     password ?? "");
 
-                // Add base variables not populated by type-specific blocks above.
+                // Re-assert base identity variables. STEP 1 already set them,
+                // but this guards against a future addition that mutates the
+                // dictionary between STEP 1 and here.
                 variables["__VM_ID__"] = spec.Id;
                 variables["__VM_NAME__"] = spec.Name;
                 variables["__HOSTNAME__"] = spec.Name;
@@ -2104,9 +1974,9 @@ public class LibvirtVmManager : IVmManager
                         _logger.LogWarning(
                             "VM {VmId}: cloud-init has {Count} unreplaced __VARNAME__ placeholder(s): {Placeholders}. " +
                             "These will appear LITERALLY in the deployed cloud-init and may cause boot-time " +
-                            "failures or malformed config files. Investigate which substitution layer should " +
-                            "have handled them (orchestrator CloudInitRenderer, VmService legacy substitution, " +
-                            "or LibvirtVmManager STEP 5.x VmType branch).",
+                            "failures or malformed config files. The orchestrator's CloudInitRenderer is the " +
+                            "authoritative substitution layer for system and tenant VMs alike — investigate " +
+                            "which resolver should have handled the leaked placeholder.",
                             spec.Id,
                             unreplacedDoubleUnderscore.Count,
                             string.Join(", ", unreplacedDoubleUnderscore));
