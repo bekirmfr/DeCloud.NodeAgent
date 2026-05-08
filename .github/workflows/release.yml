@@ -41,9 +41,20 @@ env:
 
 jobs:
   # --------------------------------------------------------------------------
-  # Gate: refuse to build unsigned tags. The tag signature is the trust root
+  # Gate: refuse to build unverified tags. The tag signature is the trust root
   # for everything downstream — without it, a compromised CI run could publish
   # a release that matches the manifest signature.
+  #
+  # Verification path: query GitHub's API for the tag object and require
+  # `verification.verified == true`. GitHub validates the signature against
+  # the tagger's account-registered signing keys (GPG or SSH). This is the
+  # same check that produces the green "Verified" badge in the web UI.
+  #
+  # Why not `git tag -v` on the runner: it requires a per-runner trust store
+  # (gpg.ssh.allowedSignersFile for SSH, imported public keys for GPG). The
+  # runner has neither, and bootstrapping one adds attack surface without
+  # adding security — GitHub already gates which keys are trusted via the
+  # account-key association.
   # --------------------------------------------------------------------------
   verify-tag:
     runs-on: ubuntu-latest
@@ -57,12 +68,34 @@ jobs:
       - id: version
         run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
-      - name: Verify tag is signed
+      - name: Verify tag signature via GitHub API
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if ! git tag -v "${GITHUB_REF_NAME}" 2>&1 | grep -qE 'Good signature|good signature'; then
-            echo "::error::Tag ${GITHUB_REF_NAME} is not signed (or signature is invalid)."
-            echo "Sign tags with: git tag -s vX.Y.Z -m '...'"
+
+          # Resolve the tag ref → annotated tag object SHA.
+          tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/${GITHUB_REF_NAME}" \
+                          --jq '.object.sha')
+
+          # Fetch the annotated tag object and read its verification block.
+          # Lightweight (non-annotated) tags would fail this lookup — that's
+          # intentional: only `git tag -s` produces an annotated, signed tag.
+          verified=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" \
+                            --jq '.verification.verified')
+          reason=$(gh api   "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}" \
+                            --jq '.verification.reason')
+
+          echo "Tag:      ${GITHUB_REF_NAME}"
+          echo "Tag SHA:  ${tag_sha}"
+          echo "Verified: ${verified}"
+          echo "Reason:   ${reason}"
+
+          if [ "$verified" != "true" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} is not verifiably signed (reason=${reason})."
+            echo "Sign with: git tag -s vX.Y.Z -m '...'"
+            echo "And ensure your signing key is registered on GitHub as a 'Signing Key'"
+            echo "  (Settings → SSH and GPG keys → New SSH key → Key type: Signing Key)."
             exit 1
           fi
 
