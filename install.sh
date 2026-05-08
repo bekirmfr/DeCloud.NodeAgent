@@ -2168,53 +2168,6 @@ download_node_agent() {
 # System VM cleanup — destroy VMs whose binary changed during update
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Destroy all libvirt VMs whose name starts with the given role prefix.
-# NodeAgent is stopped at this point so the reconciliation loop re-deploys
-# them with the new binary on next start.
-destroy_system_vms() {
-    local role="$1"
-
-    if ! command -v virsh &>/dev/null; then
-        log_warn "virsh not available — cannot auto-destroy ${role} VMs"
-        log_warn "Manually destroy ${role} VMs to get the new binary deployed"
-        return 0
-    fi
-
-    # Primary: use VM UUID saved from NodeAgent API before service stopped
-    local vm_id
-    vm_id=$(cat "/tmp/decloud-${role}-vm-id" 2>/dev/null | tr -d '[:space:]' || echo "")
-    rm -f "/tmp/decloud-${role}-vm-id"
-
-    # Fallback: inspect libvirt domain XML — NodeAgent sets <title> to the
-    # friendly name (e.g. blockstore-us-east-1-e9277b2c); domain name is the UUID.
-    if [ -z "$vm_id" ]; then
-        log_info "No saved VM ID for ${role} — scanning libvirt domains..."
-        while IFS= read -r uuid; do
-            [ -z "$uuid" ] && continue
-            local title
-            title=$(virsh dumpxml "$uuid" 2>/dev/null \
-                | grep -oP '(?<=<title>)[^<]*' 2>/dev/null \
-                | tr -d '[:space:]' || true)
-            if [[ "$title" == ${role}-* ]]; then
-                vm_id="$uuid"
-                log_info "  Found ${role} VM via XML title: $title ($uuid)"
-                break
-            fi
-        done < <(virsh list --all --uuid 2>/dev/null)
-    fi
-
-    if [ -z "$vm_id" ]; then
-        log_warn "Could not identify ${role} VM — manual cleanup required"
-        log_warn "Run: virsh list --all  then: virsh destroy <id> && virsh undefine <id> --remove-all-storage"
-        return 0
-    fi
-
-    log_step "Destroying stale ${role} VM $vm_id — reconciliation will redeploy on NodeAgent start..."
-    virsh destroy  "$vm_id"                      2>/dev/null || true
-    virsh undefine "$vm_id" --remove-all-storage 2>/dev/null || true
-    log_success "  $vm_id destroyed"
-}
-
 build_node_agent() {
     log_step "Verifying installed Node Agent..."
 
@@ -2232,19 +2185,6 @@ build_node_agent() {
         log_error "DeCloud.NodeAgent.dll missing under ${INSTALL_DIR}/publish"
         log_error "  Symlink target: $(readlink "${INSTALL_DIR}/publish" 2>/dev/null || echo unknown)"
         return 1
-    fi
-
-    # CloudInit templates ship inside the publish output.
-    if [ -d "${INSTALL_DIR}/publish/CloudInit/Templates" ]; then
-        local template_count
-        template_count=$(find "${INSTALL_DIR}/publish/CloudInit/Templates" -name '*.yaml' | wc -l)
-        if [ "$template_count" -gt 0 ]; then
-            log_success "CloudInit templates present (${template_count})"
-        else
-            log_warn "CloudInit/Templates directory present but empty"
-        fi
-    else
-        log_warn "CloudInit/Templates directory not present in publish output"
     fi
 
     local file_count dir_size active_version
