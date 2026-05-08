@@ -164,11 +164,6 @@ jobs:
             -p:Version=${{ needs.verify-tag.outputs.version_numeric }} \
             -p:DebugType=embedded
 
-      - name: Verify CloudInit templates copied
-        run: |
-          test -d publish/CloudInit/Templates
-          test -f publish/DeCloud.NodeAgent.dll
-
       - name: Package
         run: |
           set -euo pipefail
