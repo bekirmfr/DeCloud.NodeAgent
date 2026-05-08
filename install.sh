@@ -2018,7 +2018,6 @@ create_directories() {
     log_step "Creating directories..."
     
     mkdir -p "$INSTALL_DIR"
-    mkdir -p "$CONFIG_DIR"
     mkdir -p "$DATA_DIR"
     mkdir -p "$LOG_DIR"
     mkdir -p "$BACKUP_DIR"
