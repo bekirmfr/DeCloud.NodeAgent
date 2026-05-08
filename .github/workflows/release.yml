@@ -125,6 +125,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # DeCloud.Shared is referenced as a sibling source tree at
+      # ../../../Decloud.Shared/DeCloud.Shared.csproj from the .NodeAgent.Core
+      # project file. We clone it into the sibling location the .csproj
+      # expects so dotnet restore + publish can resolve types like
+      # TemplateArtifact and SystemVmTemplatePayload.
+      #
+      # Note on reproducibility: this pulls Shared at HEAD-of-master at build
+      # time. Two builds of the same NodeAgent tag may pick up different
+      # Shared revisions if Shared moved between them. Acceptable for now
+      # because it matches the prior install.sh behaviour; the long-term fix
+      # is to publish DeCloud.Shared as a signed NuGet package and use a
+      # <PackageReference> with a pinned version.
+      - name: Checkout DeCloud.Shared (sibling source dependency)
+        run: |
+          set -euo pipefail
+          SHARED_DIR="${GITHUB_WORKSPACE}/../Decloud.Shared"
+          rm -rf "$SHARED_DIR"
+          git clone --depth 1 \
+            https://github.com/bekirmfr/DeCloud.Shared.git \
+            "$SHARED_DIR"
+          echo "Shared HEAD: $(git -C "$SHARED_DIR" rev-parse --short HEAD)"
+
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
