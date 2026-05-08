@@ -60,13 +60,21 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      version_numeric: ${{ steps.version.outputs.version_numeric }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - id: version
-        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          # Tag name as-is (e.g. v2.2.0-rc1) — used for release filenames,
+          # download URLs, and the install.sh version pin.
+          echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          # Numeric SemVer (e.g. 2.2.0-rc1) — used for -p:Version on MSBuild,
+          # which rejects non-SemVer strings (the leading 'v' is invalid).
+          echo "version_numeric=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Verify tag signature via GitHub API
         env:
@@ -131,7 +139,7 @@ jobs:
             --runtime ${{ matrix.rid }} \
             --self-contained false \
             --output publish/ \
-            -p:Version=${{ needs.verify-tag.outputs.version }} \
+            -p:Version=${{ needs.verify-tag.outputs.version_numeric }} \
             -p:DebugType=embedded
 
       - name: Verify CloudInit templates copied
