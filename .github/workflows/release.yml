@@ -1,0 +1,296 @@
+# .github/workflows/release.yml
+#
+# DeCloud.NodeAgent release pipeline.
+#
+# Trigger: pushed git tag matching v*.*.* (must be a SIGNED tag — see
+#          `verify-tag` job below).
+#
+# Outputs (attached to the GitHub Release):
+#   decloud-node-agent-<v>-linux-amd64.tar.gz   ASP.NET Core publish, framework-dependent
+#   decloud-node-agent-<v>-linux-arm64.tar.gz
+#   decloud-cli-<v>.tar.gz                      shell scripts (decloud, cli-decloud-node, ...)
+#   decloud-gpu-shim-<v>-linux-amd64.tar.gz     pre-built CUDA shims/stubs (compat, glibc 2.31+)
+#   manifest.json                               version + sha256 of every artifact
+#   manifest.json.sig                           cosign keyless signature (Sigstore)
+#   manifest.json.pem                           cosign signing certificate
+#   sbom.cdx.json                               CycloneDX SBOM for the .NET app
+#
+# NOT built here:
+#   - dht-node, blockstore-node Go binaries — built by DeCloud.Builds CI.
+#     The orchestrator's system-VM templates reference DeCloud.Builds release
+#     URLs directly via TemplateArtifact.SourceUrl; the artifact-cache service
+#     verifies sha256 on prefetch. Keeps provenance chains clean: each repo's
+#     signature attests only to artifacts built from its own source.
+#   - gpu-proxy-daemon — links against host's exact CUDA version, stays a
+#     manual local build on nodes where GPU_MODE=proxy and CUDA is present.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write       # create GitHub Release, upload assets
+  id-token: write       # cosign keyless OIDC
+  attestations: write   # SLSA build provenance
+
+env:
+  DOTNET_VERSION: '8.0.x'
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Gate: refuse to build unsigned tags. The tag signature is the trust root
+  # for everything downstream — without it, a compromised CI run could publish
+  # a release that matches the manifest signature.
+  # --------------------------------------------------------------------------
+  verify-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: version
+        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag is signed
+        run: |
+          set -euo pipefail
+          if ! git tag -v "${GITHUB_REF_NAME}" 2>&1 | grep -qE 'Good signature|good signature'; then
+            echo "::error::Tag ${GITHUB_REF_NAME} is not signed (or signature is invalid)."
+            echo "Sign tags with: git tag -s vX.Y.Z -m '...'"
+            exit 1
+          fi
+
+  # --------------------------------------------------------------------------
+  # Build the ASP.NET Core node agent for both architectures.
+  # Framework-dependent publish (smaller, uses host aspnetcore-runtime-8.0).
+  # --------------------------------------------------------------------------
+  build-nodeagent:
+    needs: verify-tag
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - rid: linux-x64
+            asset_arch: linux-amd64
+          - rid: linux-arm64
+            asset_arch: linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore src/DeCloud.NodeAgent/DeCloud.NodeAgent.csproj
+
+      - name: Publish
+        run: |
+          dotnet publish src/DeCloud.NodeAgent/DeCloud.NodeAgent.csproj \
+            --configuration Release \
+            --runtime ${{ matrix.rid }} \
+            --self-contained false \
+            --output publish/ \
+            -p:Version=${{ needs.verify-tag.outputs.version }} \
+            -p:DebugType=embedded
+
+      - name: Verify CloudInit templates copied
+        run: |
+          test -d publish/CloudInit/Templates
+          test -f publish/DeCloud.NodeAgent.dll
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          cd publish
+          tar -czf "../decloud-node-agent-${{ needs.verify-tag.outputs.version }}-${{ matrix.asset_arch }}.tar.gz" .
+
+      - name: Generate SBOM (amd64 only)
+        if: matrix.asset_arch == 'linux-amd64'
+        run: |
+          dotnet tool install --global CycloneDX
+          export PATH="$PATH:$HOME/.dotnet/tools"
+          dotnet CycloneDX src/DeCloud.NodeAgent/DeCloud.NodeAgent.csproj \
+            -o . -fn sbom.cdx.json --json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nodeagent-${{ matrix.asset_arch }}
+          path: |
+            decloud-node-agent-*.tar.gz
+            sbom.cdx.json
+          if-no-files-found: error
+
+  # NOTE: dht-node and blockstore-node Go binaries are NOT built here.
+  # Their source and CI live in DeCloud.Builds, which publishes its own
+  # signed releases. The orchestrator's system-VM templates reference those
+  # release URLs directly via TemplateArtifact.SourceUrl + Sha256, and each
+  # node's IArtifactCacheService verifies on prefetch. NodeAgent never sees
+  # those binaries on disk during install — they only exist inside system VMs.
+  # Keeping them out of this workflow preserves a clean provenance chain:
+  # NodeAgent's signature attests only to NodeAgent-built artifacts.
+
+  # --------------------------------------------------------------------------
+  # CLI bundle — arch-independent shell scripts and docs.
+  # --------------------------------------------------------------------------
+  build-cli-bundle:
+    needs: verify-tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify expected files
+        run: |
+          set -euo pipefail
+          test -f cli/decloud
+          test -f cli/cli-decloud-node
+          test -f decloud-relay-nat
+          # vm-cleanup.sh is optional per install.sh
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p stage/cli
+          cp -a cli/. stage/cli/
+          cp decloud-relay-nat stage/
+          [ -f vm-cleanup.sh ] && cp vm-cleanup.sh stage/ || true
+          cd stage
+          tar -czf "../decloud-cli-${{ needs.verify-tag.outputs.version }}.tar.gz" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-bundle
+          path: decloud-cli-*.tar.gz
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # GPU shims/stubs — built inside Ubuntu 20.04 container for glibc 2.31+
+  # universal compat, exactly as install.sh's build_gpu_proxy currently does.
+  # No CUDA needed for shims; the daemon stays a local build on nodes.
+  # --------------------------------------------------------------------------
+  build-gpu-shims:
+    needs: verify-tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip if gpu-proxy source missing
+        id: check
+        run: |
+          if [ ! -d "src/gpu-proxy" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::src/gpu-proxy not present — skipping"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build all compat shims
+        if: steps.check.outputs.skip == 'false'
+        run: make -C src/gpu-proxy all-shims-compat
+
+      - name: Package
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          cd src/gpu-proxy/build
+          tar -czf "${GITHUB_WORKSPACE}/decloud-gpu-shim-${{ needs.verify-tag.outputs.version }}-linux-amd64.tar.gz" \
+            libdecloud_cuda_shim-compat.so \
+            libcuda.so.1 libcuda.so \
+            libnvidia-ml.so.1 libnvidia-ml.so \
+            libcublas_stub.so libcublasLt_stub.so \
+            libcudnn_stub.so libcuda_pytorch_stubs.so
+
+      - uses: actions/upload-artifact@v4
+        if: steps.check.outputs.skip == 'false'
+        with:
+          name: gpu-shims
+          path: decloud-gpu-shim-*.tar.gz
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # Aggregate, manifest, sign, attest, publish.
+  # --------------------------------------------------------------------------
+  release:
+    needs:
+      - verify-tag
+      - build-nodeagent
+      - build-cli-bundle
+      - build-gpu-shims
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Generate manifest.json
+        env:
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cd dist
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, datetime
+          version = os.environ["VERSION"]
+          git_sha = os.environ["GIT_SHA"]
+          artifacts = {}
+          for p in sorted(pathlib.Path('.').iterdir()):
+              if not p.is_file() or p.name in ("manifest.json", "manifest.json.sig", "manifest.json.pem"):
+                  continue
+              h = hashlib.sha256(p.read_bytes()).hexdigest()
+              artifacts[p.name] = {"sha256": h, "size": p.stat().st_size}
+          manifest = {
+              "version": version,
+              "git_sha": git_sha,
+              "built_at": datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+              "artifacts": artifacts,
+          }
+          pathlib.Path("manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True))
+          print(json.dumps(manifest, indent=2, sort_keys=True))
+          PY
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Sign manifest (keyless, OIDC)
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          COSIGN_YES=true cosign sign-blob \
+            --output-signature manifest.json.sig \
+            --output-certificate manifest.json.pem \
+            manifest.json
+
+      - name: Attest provenance for all artifacts
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/*'
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.verify-tag.outputs.version }}
+          name: ${{ needs.verify-tag.outputs.version }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/manifest.json
+            dist/manifest.json.sig
+            dist/manifest.json.pem
+            dist/sbom.cdx.json

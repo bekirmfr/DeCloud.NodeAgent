@@ -2,14 +2,22 @@
 #
 # DeCloud Node Agent Installation Script
 # 
-# Installs and configures the Node Agent with minimal dependencies:
-# - .NET 8 Runtime
-# - Go 1.23+ (for building DHT node binary)
+# Installs and configures the Node Agent from signed release artifacts:
+# - ASP.NET Core 8 Runtime (NOT the SDK — no compiler on production nodes)
+# - cosign (for verifying release signatures)
 # - KVM/QEMU/libvirt for virtualization
 # - Docker + NVIDIA Container Toolkit (auto-detected for GPU nodes)
-# - GPU proxy daemon + CUDA shim (auto-built for proxy-mode GPU nodes)
+# - GPU CUDA shim (downloaded pre-built from signed release)
 # - WireGuard for overlay networking
 # - SSH CA for certificate authentication
+#
+# RELEASE MODEL:
+# - All binaries fetched from signed GitHub Releases (cosign keyless verified)
+# - Atomic version swap via /opt/decloud/publish symlink (rollback-friendly)
+# - Pin a version with --version vX.Y.Z, default is latest stable
+# - dht-node and blockstore-node Go binaries are NOT installed by this script:
+#   the orchestrator's TemplateArtifact mechanism delivers them to system VMs
+#   directly from the DeCloud.Builds release pipeline.
 #
 # PORTS REQUIRED:
 # - Agent API (default 5100) - configurable
@@ -28,7 +36,7 @@
 
 set -e
 
-VERSION="2.1.0"
+VERSION="2.2.0"
 
 # Colors
 RED='\033[0;31m'
@@ -65,7 +73,33 @@ CONFIG_DIR="/opt/decloud/publish"
 DATA_DIR="/var/lib/decloud/vms"
 LOG_DIR="/var/log/decloud"
 BACKUP_DIR="/var/backups/decloud"
-REPO_URL="https://github.com/bekirmfr/DeCloud.NodeAgent.git"
+# ── Release / CI distribution ────────────────────────────────────────────
+# As of v2.2.0, install.sh fetches signed release artifacts instead of
+# cloning the source repo and building on the node. The git clone path is
+# kept only as a fallback for development (--from-source flag, future).
+#
+# RELEASE_BASE_URL points at the GitHub Releases download root for the
+# DeCloud.NodeAgent repo. dht-node and blockstore-node binaries are NOT
+# distributed through this URL — those are owned by the DeCloud.Builds
+# release pipeline and consumed by the orchestrator's TemplateArtifact
+# system, not by install.sh.
+RELEASE_BASE_URL_DEFAULT="https://github.com/bekirmfr/DeCloud.NodeAgent/releases/download"
+RELEASE_API_LATEST="https://api.github.com/repos/bekirmfr/DeCloud.NodeAgent/releases/latest"
+RELEASE_BASE_URL=""
+RELEASE_VERSION=""
+
+# Cosign keyless identity allow-list. Only signatures produced by the
+# release.yml workflow in the DeCloud.NodeAgent repo are accepted.
+COSIGN_IDENTITY_REGEXP_DEFAULT='^https://github\.com/bekirmfr/DeCloud\.NodeAgent/\.github/workflows/release\.yml@'
+COSIGN_OIDC_ISSUER='https://token.actions.githubusercontent.com'
+COSIGN_VERSION="v2.4.1"
+
+# Staging dirs for non-publish files extracted from releases.
+STAGE_DIR="${INSTALL_DIR}/stage"
+GPU_PROXY_DIR="${INSTALL_DIR}/gpu-proxy"
+RELEASE_CACHE_DIR="${INSTALL_DIR}/releases"
+CURRENT_VERSION_FILE="${INSTALL_DIR}/current-version"
+PREVIOUS_VERSION_FILE="${INSTALL_DIR}/previous-version"
 
 # Logging
 INSTALL_LOG="$LOG_DIR/install.log"
@@ -142,6 +176,14 @@ parse_args() {
                 SKIP_LIBVIRT=true
                 shift
                 ;;
+            --version)
+                RELEASE_VERSION="$2"
+                shift 2
+                ;;
+            --release-base-url)
+                RELEASE_BASE_URL="$2"
+                shift 2
+                ;;
             --help|-h)
                 show_help
                 exit 0
@@ -206,7 +248,9 @@ Network (all ports are configurable!):
 
 Other:
   --skip-libvirt         Skip libvirt installation (testing only)
-  --skip-download        Skip git auto-update setup
+  --skip-download        Skip release download (use existing files on disk)
+  --version <vX.Y.Z>     Pin a specific release version (default: latest stable)
+  --release-base-url <u> Override the release host (default: GitHub Releases)
   --help                 Show this help message
 
 PORT REQUIREMENTS:
@@ -497,81 +541,236 @@ install_base_dependencies() {
     
     apt-get update -qq
     apt-get install -y -qq \
-        curl wget git jq apt-transport-https ca-certificates \
+        curl wget git jq tar xz-utils apt-transport-https ca-certificates \
         gnupg lsb-release software-properties-common > /dev/null 2>&1
     
+    install_cosign
+
     log_success "Base dependencies installed"
 }
 
-install_dotnet() {
-    log_step "Installing .NET 8 SDK..."
-    
-    # Check if already installed
-    if command -v dotnet &> /dev/null; then
-        DOTNET_VERSION=$(dotnet --version 2>/dev/null | head -1)
-        if [[ "$DOTNET_VERSION" == 8.* ]]; then
-            log_success ".NET 8 already installed: $DOTNET_VERSION"
-            return 0
-        else
-            log_warn ".NET $DOTNET_VERSION found, but need version 8.x"
-            log_info "Proceeding with .NET 8 installation..."
-        fi
+# Cosign is the trust root for verifying release manifests.
+# Static binary, single-file install, pinned version.
+install_cosign() {
+    if command -v cosign &>/dev/null; then
+        log_info "cosign already installed: $(cosign version 2>/dev/null | head -1 | awk '{print $NF}')"
+        return 0
     fi
-    
+
+    local cosign_arch
+    case "$(uname -m)" in
+        x86_64|amd64)  cosign_arch="amd64" ;;
+        aarch64|arm64) cosign_arch="arm64" ;;
+        *)
+            log_error "Unsupported architecture for cosign: $(uname -m)"
+            return 1
+            ;;
+    esac
+
+    local url="https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-${cosign_arch}"
+    local dest="/usr/local/bin/cosign"
+
+    log_info "Installing cosign ${COSIGN_VERSION} (${cosign_arch})..."
+    if ! curl -fsSL --retry 3 --retry-delay 2 "$url" -o "${dest}.tmp"; then
+        log_error "Failed to download cosign from $url"
+        rm -f "${dest}.tmp"
+        return 1
+    fi
+    chmod +x "${dest}.tmp"
+    mv "${dest}.tmp" "$dest"
+
+    if ! cosign version &>/dev/null; then
+        log_error "cosign installation verification failed"
+        rm -f "$dest"
+        return 1
+    fi
+    log_success "cosign installed"
+}
+
+install_dotnet() {
+    log_step "Installing ASP.NET Core 8 Runtime..."
+
+    # The release pipeline ships framework-dependent publish output, so the
+    # node only needs the ASP.NET Core runtime — not the SDK. Removing the
+    # SDK eliminates ~700 MB of toolchain and a meaningful attack surface
+    # (compilers, NuGet restore paths, build-time package downloads).
+
+    if command -v dotnet &>/dev/null; then
+        if dotnet --list-runtimes 2>/dev/null | grep -q '^Microsoft\.AspNetCore\.App 8\.'; then
+            local rt
+            rt=$(dotnet --list-runtimes 2>/dev/null | grep '^Microsoft\.AspNetCore\.App 8\.' | head -1)
+            log_success "ASP.NET Core 8 runtime already installed: $rt"
+            return 0
+        fi
+        log_warn "dotnet present but no ASP.NET Core 8 runtime — installing"
+    fi
+
     # Add Microsoft repository
-    local ubuntu_version=$(lsb_release -rs)
     log_info "Adding Microsoft package repository..."
-    
-    if ! wget -q https://packages.microsoft.com/config/$OS/$OS_VERSION/packages-microsoft-prod.deb \
+    if ! wget -q "https://packages.microsoft.com/config/${OS}/${OS_VERSION}/packages-microsoft-prod.deb" \
             -O /tmp/packages-microsoft-prod.deb 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
         log_error "Failed to download Microsoft repository package"
         log_error "Check network connectivity and logs: $LOG_DIR/install.log"
         return 1
     fi
-    
+
     if ! dpkg -i /tmp/packages-microsoft-prod.deb 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
         log_error "Failed to add Microsoft repository"
         log_error "Check logs: $LOG_DIR/install.log"
         rm -f /tmp/packages-microsoft-prod.deb
         return 1
     fi
-    
+
     rm -f /tmp/packages-microsoft-prod.deb
     log_info "Microsoft repository added"
-    
-    # Update package cache
-    log_info "Updating package cache..."
-    if ! apt-get update -qq 2>&1 | grep -qi "err:"; then
-        log_info "Package cache updated"
-    fi
-    
-    # Install .NET SDK
-    log_info "Installing .NET 8 SDK (this may take a few minutes)..."
-    
-    if ! apt-get install -y dotnet-sdk-8.0 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
-        log_error "Failed to install .NET 8 SDK"
-        log_error "Check logs: $LOG_DIR/install.log"
-        log_error "Try manually: sudo apt-get install -y dotnet-sdk-8.0"
-        return 1
-    fi
-    
-    # Verify installation
-    if ! command -v dotnet &> /dev/null; then
-        log_error "dotnet command not found after installation"
-        log_error "Installation may have failed"
-        return 1
-    fi
-    
-    # Verify version
-    DOTNET_VERSION=$(dotnet --version 2>/dev/null | head -1)
-    if [[ ! "$DOTNET_VERSION" == 8.* ]]; then
-        log_error "Wrong .NET version installed: $DOTNET_VERSION (expected 8.x)"
-        return 1
-    fi
-    
-    log_success ".NET 8 SDK installed: $DOTNET_VERSION"
 
+    log_info "Updating package cache..."
+    apt-get update -qq 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null || true
+
+    log_info "Installing aspnetcore-runtime-8.0..."
+    if ! apt-get install -y aspnetcore-runtime-8.0 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null; then
+        log_error "Failed to install aspnetcore-runtime-8.0"
+        log_error "Check logs: $LOG_DIR/install.log"
+        log_error "Try manually: sudo apt-get install -y aspnetcore-runtime-8.0"
+        return 1
+    fi
+
+    if ! command -v dotnet &>/dev/null; then
+        log_error "dotnet command not found after installation"
+        return 1
+    fi
+
+    if ! dotnet --list-runtimes 2>/dev/null | grep -q '^Microsoft\.AspNetCore\.App 8\.'; then
+        log_error "ASP.NET Core 8 runtime not present after install"
+        return 1
+    fi
+
+    log_success "ASP.NET Core 8 runtime installed"
     return 0
+}
+
+# ============================================================
+# Release fetch / verify helpers (used by download_node_agent
+# and build_gpu_proxy)
+# ============================================================
+
+# Resolve the effective release base URL.
+release_base_url() {
+    echo "${RELEASE_BASE_URL:-$RELEASE_BASE_URL_DEFAULT}"
+}
+
+# Map node arch (uname -m) to the asset arch tag used in release filenames.
+release_asset_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64)  echo "linux-amd64" ;;
+        aarch64|arm64) echo "linux-arm64" ;;
+        *)
+            log_error "Unsupported architecture: $(uname -m)"
+            return 1
+            ;;
+    esac
+}
+
+# Resolve "latest stable" via the GitHub API when --version was not given.
+# Fails loudly rather than silently installing HEAD-equivalent.
+resolve_release_version() {
+    if [ -n "$RELEASE_VERSION" ]; then
+        echo "$RELEASE_VERSION"
+        return 0
+    fi
+
+    log_info "No --version given, resolving latest stable release..." >&2
+    local latest
+    latest=$(curl -fsSL --retry 3 "$RELEASE_API_LATEST" 2>/dev/null \
+        | jq -r '.tag_name // empty' 2>/dev/null)
+
+    if [ -z "$latest" ] || [ "$latest" = "null" ]; then
+        log_error "Could not resolve latest release from $RELEASE_API_LATEST"
+        log_error "Pin a version explicitly with --version vX.Y.Z"
+        return 1
+    fi
+
+    RELEASE_VERSION="$latest"
+    log_info "Latest release: $RELEASE_VERSION" >&2
+    echo "$RELEASE_VERSION"
+}
+
+# Download manifest.json + signature, verify cosign keyless signature.
+# Cached under $RELEASE_CACHE_DIR/manifest.<version>.json after verification.
+fetch_and_verify_manifest() {
+    local version="$1"
+    local base; base=$(release_base_url)
+
+    mkdir -p "$RELEASE_CACHE_DIR"
+    local manifest="${RELEASE_CACHE_DIR}/manifest.${version}.json"
+    local sig="${manifest}.sig"
+    local cert="${manifest}.pem"
+
+    log_info "Fetching manifest for ${version}..."
+    if ! curl -fsSL --retry 3 "${base}/${version}/manifest.json"     -o "${manifest}.tmp" \
+       || ! curl -fsSL --retry 3 "${base}/${version}/manifest.json.sig" -o "${sig}.tmp" \
+       || ! curl -fsSL --retry 3 "${base}/${version}/manifest.json.pem" -o "${cert}.tmp"; then
+        log_error "Failed to download manifest artifacts from ${base}/${version}/"
+        rm -f "${manifest}.tmp" "${sig}.tmp" "${cert}.tmp"
+        return 1
+    fi
+
+    log_info "Verifying manifest signature (cosign keyless)..."
+    local identity_regexp="${COSIGN_IDENTITY_REGEXP_OVERRIDE:-$COSIGN_IDENTITY_REGEXP_DEFAULT}"
+    if ! cosign verify-blob \
+            --certificate-identity-regexp "$identity_regexp" \
+            --certificate-oidc-issuer     "$COSIGN_OIDC_ISSUER" \
+            --signature   "${sig}.tmp" \
+            --certificate "${cert}.tmp" \
+            "${manifest}.tmp" >/dev/null 2>&1; then
+        log_error "MANIFEST SIGNATURE VERIFICATION FAILED for ${version}"
+        log_error "  Expected identity regex: $identity_regexp"
+        log_error "  Expected OIDC issuer:    $COSIGN_OIDC_ISSUER"
+        log_error "Refusing to install unverified release."
+        rm -f "${manifest}.tmp" "${sig}.tmp" "${cert}.tmp"
+        return 1
+    fi
+
+    mv "${manifest}.tmp" "$manifest"
+    mv "${sig}.tmp"      "$sig"
+    mv "${cert}.tmp"     "$cert"
+    log_success "Manifest verified: $manifest"
+}
+
+# Download an artifact and verify its sha256 against the manifest.
+# Args: <version> <artifact-name> <out-path>
+download_artifact_verified() {
+    local version="$1"
+    local name="$2"
+    local out="$3"
+    local manifest="${RELEASE_CACHE_DIR}/manifest.${version}.json"
+    local base; base=$(release_base_url)
+
+    local expected
+    expected=$(jq -r --arg n "$name" '.artifacts[$n].sha256 // empty' "$manifest")
+    if [ -z "$expected" ]; then
+        log_error "Artifact '$name' not present in manifest for $version"
+        return 1
+    fi
+
+    log_info "Downloading $name..."
+    if ! curl -fsSL --retry 3 "${base}/${version}/${name}" -o "${out}.tmp"; then
+        log_error "Download failed: ${base}/${version}/${name}"
+        return 1
+    fi
+
+    local actual
+    actual=$(sha256sum "${out}.tmp" | awk '{print $1}')
+    if [ "$actual" != "$expected" ]; then
+        log_error "SHA256 mismatch for $name"
+        log_error "  expected: $expected"
+        log_error "  actual:   $actual"
+        rm -f "${out}.tmp"
+        return 1
+    fi
+
+    mv "${out}.tmp" "$out"
+    log_success "Verified $name"
 }
 
 install_libvirt() {
@@ -973,274 +1172,126 @@ install_cuda_toolkit() {
 # GPU Proxy Build (daemon + shim)
 # ============================================================
 build_gpu_proxy() {
-    log_step "Building GPU proxy components..."
+    log_step "Setting up GPU proxy components (release-mode)..."
 
     if [ "$GPU_MODE" = "none" ]; then
-        log_info "No GPU — skipping GPU proxy build"
+        log_info "No GPU — skipping GPU proxy setup"
         return 0
     fi
 
-    local GPU_PROXY_SRC="$INSTALL_DIR/DeCloud.NodeAgent/src/gpu-proxy"
-
-    if [ ! -f "$GPU_PROXY_SRC/Makefile" ]; then
-        log_warn "GPU proxy source not found at $GPU_PROXY_SRC — skipping"
-        return 0
-    fi
-
-    # Ensure build tools are available
-    if ! command -v gcc &>/dev/null || ! command -v make &>/dev/null; then
-        log_info "Installing build tools for GPU proxy compilation..."
-        apt-get install -y build-essential 2>&1 | tee -a "$LOG_DIR/install.log" > /dev/null || {
-            log_error "Failed to install build-essential — cannot build GPU proxy"
-            return 0
-        }
-    fi
-
-    # --- Build shims (for any GPU mode — guests may need them even alongside passthrough) ---
-    # Prefer compat build via Docker — compiles against Ubuntu 20.04 glibc 2.31,
-    # which is forward-compatible with all modern distros (22.04, 24.04, etc.).
-    # Falls back to dynamic host build if Docker is not available.
-    #
-    # Phase 2: builds all three shims:
-    #   - libdecloud_cuda_shim.so  (Runtime API, LD_PRELOAD)
-    #   - libcuda.so.1             (Driver API, dlopen target for Ollama/llama.cpp)
-    #   - libnvidia-ml.so.1        (NVML, dlopen target for VRAM monitoring)
-    # Determine whether to use Docker-based compat build or dynamic host build.
-    # NOTE: We only record the target here — the actual build+install is done in
-    # one step below via install-all-shims[-compat] to avoid building twice.
-    local use_compat=false
-    if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
-        log_info "Building all GPU shims (Docker compat — glibc 2.31, universal)..."
-        use_compat=true
-    else
-        log_info "Docker not available — building dynamic shims (may have glibc compat issues)"
-        log_info "For universal compatibility: install Docker and re-run"
-    fi
-
-    # Build shims (the install target depends on the build target, so this
-    # builds AND installs in one pass — no redundant second Docker build).
-    local install_target="install-all-shims"
-    if [ "$use_compat" = true ]; then
-        install_target="install-all-shims-compat"
-    fi
-    make -C "$GPU_PROXY_SRC" "$install_target" 2>&1 | tee -a "$LOG_DIR/install.log"
-    local make_exit=${PIPESTATUS[0]}
-    if [ "$make_exit" -ne 0 ]; then
-        log_error "Shim build failed (exit=$make_exit) — stale artifacts in build/ will NOT be deployed"
-        log_info "Check logs: $LOG_DIR/install.log"
-        return 1
-    fi
-
-    # Detect whichever runtime API shim was built
-    local built_shim=""
-    if [ -f "$GPU_PROXY_SRC/build/libdecloud_cuda_shim-compat.so" ]; then
-        built_shim="$GPU_PROXY_SRC/build/libdecloud_cuda_shim-compat.so"
-    elif [ -f "$GPU_PROXY_SRC/build/libdecloud_cuda_shim.so" ]; then
-        built_shim="$GPU_PROXY_SRC/build/libdecloud_cuda_shim.so"
-    fi
-
-    if [ -n "$built_shim" ]; then
-        log_success "CUDA Runtime API shim built: $built_shim"
-    else
-        log_error "CUDA shim build failed — output binary not found"
-        log_info "Check logs: $LOG_DIR/install.log"
-        ls -la "$GPU_PROXY_SRC/build/" 2>/dev/null || log_info "Build directory does not exist"
-        return 0
-    fi
-
-    # Check Driver API and NVML shims
-    local built_driver_shim="$GPU_PROXY_SRC/build/libcuda.so.1"
-    local built_nvml_shim="$GPU_PROXY_SRC/build/libnvidia-ml.so.1"
-    [ -f "$built_driver_shim" ] && log_success "CUDA Driver API shim built: $built_driver_shim" || log_warn "Driver API shim not built"
-    [ -f "$built_nvml_shim" ] && log_success "NVML shim built: $built_nvml_shim" || log_warn "NVML shim not built"
-
-    # --- Build daemon (only in proxy mode — passthrough doesn't need it) ---
-    local daemon_built=false
-    if [ "$GPU_MODE" = "proxy" ] && [ -n "$CUDA_HOME" ]; then
-        log_info "Building GPU proxy daemon (CUDA_HOME=$CUDA_HOME)..."
-
-        # Resolve lib path: lib64 (standard CUDA) or lib/x86_64-linux-gnu (apt package)
-        local cuda_lib_dir="$CUDA_HOME/lib64"
-        if [ ! -d "$cuda_lib_dir" ]; then
-            cuda_lib_dir="$CUDA_HOME/lib/x86_64-linux-gnu"
-        fi
-        if [ ! -d "$cuda_lib_dir" ]; then
-            cuda_lib_dir="$CUDA_HOME/lib"
-        fi
-
-        log_info "CUDA lib dir: $cuda_lib_dir"
-
-        # Remove stale binary so we can detect a fresh build failure
-        rm -f "$GPU_PROXY_SRC/build/gpu-proxy-daemon"
-
-        make -C "$GPU_PROXY_SRC" daemon \
-            CUDA_HOME="$CUDA_HOME" \
-            CUDA_LIB="$cuda_lib_dir" \
-            2>&1 | tee -a "$LOG_DIR/install.log"
-        local daemon_make_exit=${PIPESTATUS[0]}
-
-        if [ "$daemon_make_exit" -ne 0 ]; then
-            log_error "GPU proxy daemon build failed (make exit=$daemon_make_exit)"
-            log_info "Check logs: $LOG_DIR/install.log"
-            log_info "Shim is still available — daemon can be built later"
-        elif [ -f "$GPU_PROXY_SRC/build/gpu-proxy-daemon" ]; then
-            daemon_built=true
-            log_success "GPU proxy daemon built: $GPU_PROXY_SRC/build/gpu-proxy-daemon"
-        else
-            log_error "GPU proxy daemon build reported success but binary not found"
-            ls -la "$GPU_PROXY_SRC/build/" 2>/dev/null || log_info "Build directory does not exist"
-            log_info "Shim is still available — daemon can be built later"
-        fi
-    elif [ "$GPU_MODE" = "proxy" ]; then
-        log_info "CUDA toolkit not available — skipping daemon build"
-        log_info "The shim (for guest VMs) is built; daemon must be built manually when CUDA is installed"
-    else
-        log_info "GPU_MODE=${GPU_MODE} — daemon not needed (passthrough uses VFIO, not proxy)"
-    fi
-
-    # --- Verify install (already done above in the combined build+install step) ---
-    # CRITICAL: Shims go ONLY to decloud-gpu-shim/ (for VM delivery via 9p share).
-    # NEVER install to /usr/local/lib/ directly — that poisons the host's ldconfig
-    # cache and causes the daemon to load our shim instead of the real CUDA runtime
-    # (circular dependency: daemon → shim → tries to connect to daemon → timeout).
+    # The shim install location used by the 9p share for guest VMs.
+    # CRITICAL: shims go ONLY here, never to /usr/local/lib/, because that
+    # would poison the host's ldconfig cache and cause the daemon to load
+    # our shim instead of the real CUDA runtime (circular dependency).
     local SHIM_DIR="/usr/local/lib/decloud-gpu-shim"
 
-    # Daemon → /usr/local/bin (this is fine — daemon is a standalone binary)
-    if [ "$daemon_built" = true ] && [ -f "$GPU_PROXY_SRC/build/gpu-proxy-daemon" ]; then
-        # Capture running daemon's command-line args before killing
-        local daemon_was_running=false
-        local daemon_args=""
-        local daemon_pid
-        daemon_pid=$(pgrep -x gpu-proxy-daemon 2>/dev/null | head -1 || true)
-        if [ -n "$daemon_pid" ]; then
-            daemon_was_running=true
-            # Read args from /proc (null-delimited → space-delimited, skip argv[0])
-            daemon_args=$(tr '\0' ' ' < /proc/$daemon_pid/cmdline 2>/dev/null | cut -d' ' -f2- || true)
-            log_info "Running daemon detected (PID $daemon_pid, args: $daemon_args)"
-        fi
+    # ── 1. Resolve version + arch ────────────────────────────────────────
+    local version asset_arch
+    if [ ! -f "$CURRENT_VERSION_FILE" ]; then
+        log_error "current-version not recorded — download_node_agent must run first"
+        return 1
+    fi
+    version=$(cat "$CURRENT_VERSION_FILE")
+    asset_arch=$(release_asset_arch)
 
-        # Kill all daemon processes before replacing binary
-        local stale_pids
-        stale_pids=$(pgrep -f gpu-proxy-daemon 2>/dev/null || true)
-        if [ -n "$stale_pids" ]; then
-            log_info "Stopping gpu-proxy-daemon processes..."
-            kill -9 $stale_pids 2>/dev/null || true
-            sleep 2
-            local remaining
-            remaining=$(pgrep -f gpu-proxy-daemon 2>/dev/null || true)
-            if [ -n "$remaining" ]; then
-                kill -9 $remaining 2>/dev/null || true
-                sleep 1
-            fi
-            log_success "Daemon processes stopped"
-        fi
-
-        install -d /usr/local/bin
-        install -m 755 "$GPU_PROXY_SRC/build/gpu-proxy-daemon" /usr/local/bin/
-
-        # Restart daemon if it was previously running
-        if [ "$daemon_was_running" = true ] && [ -n "$daemon_args" ]; then
-            log_info "Restarting daemon with previous args: $daemon_args"
-            /usr/local/bin/gpu-proxy-daemon $daemon_args > /dev/null 2>&1 &
-            sleep 1
-            if pgrep -x gpu-proxy-daemon > /dev/null 2>&1; then
-                log_success "Daemon restarted (PID $(pgrep -x gpu-proxy-daemon | head -1))"
-            else
-                log_warn "Daemon failed to restart — start manually"
-            fi
-        elif [ "$daemon_was_running" = true ]; then
-            log_warn "Could not read previous daemon args — restart manually"
-        fi
-
-        log_success "Daemon installed → /usr/local/bin/gpu-proxy-daemon"
-    elif [ "$daemon_built" = true ]; then
-        log_warn "Daemon binary not found at $GPU_PROXY_SRC/build/gpu-proxy-daemon — skipping install"
+    # GPU shim is published for linux-amd64 only — NVIDIA's proprietary
+    # stack targets x86_64 and the shim links against it. ARM64 nodes
+    # can't run the shim, but they can still passthrough physical GPUs.
+    if [ "$asset_arch" != "linux-amd64" ]; then
+        log_warn "GPU proxy shim is published for linux-amd64 only — skipping on ${asset_arch}"
+        return 0
     fi
 
-    # PyTorch Compat Stubs → decloud-gpu-shim/ only
-    # Supplies cudaMallocAsync, cudaFreeAsync, cudaStreamCreateWithPriority,
-    # cudaGraphInstantiateWithFlags, cudaMemPrefetchAsync (+22 more) required by
-    # libtorch_cuda.so, libc10_cuda.so, and libbitsandbytes_cuda121.so.
-    # Must precede libdecloud_cuda_shim.so in LD_PRELOAD — see LibvirtVmManager.cs.
-    # Pure no-ops for Ollama/ggml (those symbols are never called by ggml backend).
-    local built_pytorch_stub="$GPU_PROXY_SRC/build/libcuda_pytorch_stubs.so"
-    if [ -f "$built_pytorch_stub" ]; then
-        install -m 644 "$built_pytorch_stub" "$SHIM_DIR/libcuda_pytorch_stubs.so"
-        log_success "PyTorch compat stubs installed → $SHIM_DIR/libcuda_pytorch_stubs.so"
+    # ── 2. Verify the artifact exists in the manifest ────────────────────
+    local manifest="${RELEASE_CACHE_DIR}/manifest.${version}.json"
+    local shim_name="decloud-gpu-shim-${version}-${asset_arch}.tar.gz"
+    if ! jq -e --arg n "$shim_name" '.artifacts[$n]' "$manifest" >/dev/null 2>&1; then
+        log_warn "GPU shim artifact not in manifest for ${version} — skipping"
+        log_warn "  (older releases may not include shims; rebuild from source if needed)"
+        return 0
     fi
 
-    # --- Summary ---
+    # ── 3. Download + verify ─────────────────────────────────────────────
+    local shim_tar="${RELEASE_CACHE_DIR}/${shim_name}"
+    download_artifact_verified "$version" "$shim_name" "$shim_tar" || return 1
+
+    # ── 4. Extract to staging ────────────────────────────────────────────
+    rm -rf "${GPU_PROXY_DIR}/build"
+    mkdir -p "${GPU_PROXY_DIR}/build"
+    if ! tar -xzf "$shim_tar" -C "${GPU_PROXY_DIR}/build"; then
+        log_error "Failed to extract GPU shim tarball"
+        return 1
+    fi
+    log_success "GPU shims extracted to ${GPU_PROXY_DIR}/build"
+
+    # ── 5. Install to SHIM_DIR ───────────────────────────────────────────
+    # Mirrors the layout produced by 'make install-all-shims-compat'.
+    # The compat-built runtime shim is delivered under TWO names because
+    # different guest workloads dlopen different ones (Ollama looks up
+    # libdecloud_cuda_shim.so, PyTorch dlopens libcudart.so.12).
+    install -d "$SHIM_DIR"
+
+    install -m 644 "${GPU_PROXY_DIR}/build/libdecloud_cuda_shim-compat.so" \
+        "${SHIM_DIR}/libdecloud_cuda_shim.so"
+    install -m 644 "${GPU_PROXY_DIR}/build/libdecloud_cuda_shim-compat.so" \
+        "${SHIM_DIR}/libcudart.so.12"
+
+    install -m 644 "${GPU_PROXY_DIR}/build/libcuda.so.1"            "$SHIM_DIR/"
+    install -m 644 "${GPU_PROXY_DIR}/build/libnvidia-ml.so.1"       "$SHIM_DIR/"
+    install -m 644 "${GPU_PROXY_DIR}/build/libcublas_stub.so"       "$SHIM_DIR/"
+    install -m 644 "${GPU_PROXY_DIR}/build/libcublasLt_stub.so"     "$SHIM_DIR/"
+    install -m 644 "${GPU_PROXY_DIR}/build/libcudnn_stub.so"        "$SHIM_DIR/"
+    install -m 644 "${GPU_PROXY_DIR}/build/libcuda_pytorch_stubs.so" "$SHIM_DIR/"
+
+    log_success "Shims installed to $SHIM_DIR/"
+
+    # ── 6. Daemon: NOT shipped via release ──────────────────────────────
+    # The daemon links against the host's exact CUDA runtime version, so
+    # a single prebuilt binary is unsafe across CUDA versions. Document
+    # the manual build path and continue. VM creation in proxy mode will
+    # surface the missing-daemon error clearly when the user tries it.
+    if [ "$GPU_MODE" = "proxy" ]; then
+        if [ -x /usr/local/bin/gpu-proxy-daemon ]; then
+            log_info "Existing gpu-proxy-daemon detected at /usr/local/bin/gpu-proxy-daemon"
+            log_info "  Daemon was NOT replaced — release pipeline does not ship it."
+            log_info "  Rebuild manually if needed (see docs/gpu-proxy-daemon.md)"
+        else
+            log_warn "GPU_MODE=proxy but no daemon installed."
+            log_warn "  The daemon must be built locally against your CUDA toolkit."
+            log_warn "  See: https://github.com/bekirmfr/DeCloud.NodeAgent/blob/${version}/docs/gpu-proxy-daemon.md"
+        fi
+    fi
+
+    # ── 7. Verify symbol counts on installed stubs ──────────────────────
+    # Same checks as before — catches a broken/stale upload as early as
+    # possible, before VM creation fails inside a guest.
+    local cublas_syms=0 cublaslt_syms=0 cudnn_syms=0
+    [ -f "$SHIM_DIR/libcublas_stub.so"   ] && cublas_syms=$(objdump -T "$SHIM_DIR/libcublas_stub.so"   2>/dev/null | grep -c "libcublas.so.12" || true)
+    [ -f "$SHIM_DIR/libcublasLt_stub.so" ] && cublaslt_syms=$(objdump -T "$SHIM_DIR/libcublasLt_stub.so" 2>/dev/null | grep -c "libcublasLt.so.12" || true)
+    [ -f "$SHIM_DIR/libcudnn_stub.so"    ] && cudnn_syms=$(objdump -T "$SHIM_DIR/libcudnn_stub.so"    2>/dev/null | grep -c "libcudnn.so.8"   || true)
+
+    if [ "$cublas_syms"   -lt 20 ]; then log_error "libcublas_stub.so   has only $cublas_syms versioned symbols (expected 20+)"; else log_success "libcublas_stub.so   OK ($cublas_syms versioned symbols)"; fi
+    if [ "$cublaslt_syms" -lt 28 ]; then log_error "libcublasLt_stub.so has only $cublaslt_syms versioned symbols (expected 28)";  else log_success "libcublasLt_stub.so OK ($cublaslt_syms versioned symbols)"; fi
+    if [ "$cudnn_syms"    -lt 84 ]; then log_error "libcudnn_stub.so    has only $cudnn_syms versioned symbols (expected 84+)"; else log_success "libcudnn_stub.so    OK ($cudnn_syms versioned symbols)"; fi
+
+    # ── 8. Summary ───────────────────────────────────────────────────────
     echo ""
     log_info "┌──────────────────────────────────────────────────┐"
-    log_info "│ GPU Proxy Build Summary                           │"
+    log_info "│ GPU Proxy Setup Summary                           │"
     log_info "├──────────────────────────────────────────────────┤"
     log_info "│ GPU Mode:       ${GPU_MODE}"
     log_info "│ WSL2:           ${IS_WSL2}"
-    log_info "│ CUDA Home:      ${CUDA_HOME:-not found}"
-    log_info "│ Runtime Shim:   $([ -f $SHIM_DIR/libdecloud_cuda_shim.so ] && echo 'installed' || echo 'not built')"
-    log_info "│ Driver Shim:    $([ -f $SHIM_DIR/libcuda.so.1 ] && echo 'installed' || echo 'not built')"
-    log_info "│ NVML Shim:      $([ -f $SHIM_DIR/libnvidia-ml.so.1 ] && echo 'installed' || echo 'not built')"
-    log_info "│ cuBLAS Stub:    $([ -f $SHIM_DIR/libcublas_stub.so ] && echo 'installed' || echo 'not built')"
-    log_info "│ cuBLAS Lt Stub: $([ -f $SHIM_DIR/libcublasLt_stub.so ] && echo 'installed' || echo 'not built')"
-    log_info "│ cuDNN Stub:     $([ -f $SHIM_DIR/libcudnn_stub.so ] && echo 'installed' || echo 'not built')"
-    log_info "│ PyTorch Stubs:  $([ -f $SHIM_DIR/libcuda_pytorch_stubs.so ] && echo 'installed' || echo 'not built')"
-    log_info "│ Daemon:         $([ -f /usr/local/bin/gpu-proxy-daemon ] && echo 'installed' || echo 'not built')"
+    log_info "│ Release ver:    ${version}"
+    log_info "│ Runtime Shim:   $([ -f $SHIM_DIR/libdecloud_cuda_shim.so ] && echo 'installed' || echo 'missing')"
+    log_info "│ Driver Shim:    $([ -f $SHIM_DIR/libcuda.so.1 ] && echo 'installed' || echo 'missing')"
+    log_info "│ NVML Shim:      $([ -f $SHIM_DIR/libnvidia-ml.so.1 ] && echo 'installed' || echo 'missing')"
+    log_info "│ cuBLAS Stub:    $([ -f $SHIM_DIR/libcublas_stub.so ] && echo 'installed' || echo 'missing')"
+    log_info "│ cuBLAS Lt Stub: $([ -f $SHIM_DIR/libcublasLt_stub.so ] && echo 'installed' || echo 'missing')"
+    log_info "│ cuDNN Stub:     $([ -f $SHIM_DIR/libcudnn_stub.so ] && echo 'installed' || echo 'missing')"
+    log_info "│ PyTorch Stubs:  $([ -f $SHIM_DIR/libcuda_pytorch_stubs.so ] && echo 'installed' || echo 'missing')"
+    log_info "│ Daemon:         $([ -x /usr/local/bin/gpu-proxy-daemon ] && echo 'installed (manual build)' || echo 'not installed')"
     log_info "└──────────────────────────────────────────────────┘"
     echo ""
-
-    # --- Verify all 9p share files are in sync ---
-    # Cloud-init copies these files from the 9p share into the VM.
-    # If any are stale, the VM gets old binaries without recent fixes.
-    local shim_ref="$SHIM_DIR/libdecloud_cuda_shim.so"
-    if [ -f "$shim_ref" ]; then
-        for sync_target in libcudart.so.12; do
-            if [ -f "$SHIM_DIR/$sync_target" ]; then
-                if ! cmp -s "$shim_ref" "$SHIM_DIR/$sync_target"; then
-                    log_warn "$sync_target is stale — syncing from libdecloud_cuda_shim.so"
-                    cp "$shim_ref" "$SHIM_DIR/$sync_target"
-                fi
-            fi
-        done
-    fi
-
-    # Verify cuBLAS stubs have the expected versioned symbol counts.
-    # A stale stub (built before the PyTorch fix) has 11 symbols; correct is 20+.
-    # A stale cublasLt stub has 0 symbols; correct is 29.
-    local cublas_syms=0 cublaslt_syms=0
-    if [ -f "$SHIM_DIR/libcublas_stub.so" ]; then
-        cublas_syms=$(objdump -T "$SHIM_DIR/libcublas_stub.so" 2>/dev/null | grep -c "libcublas.so.12" || true)
-    fi
-    if [ -f "$SHIM_DIR/libcublasLt_stub.so" ]; then
-        cublaslt_syms=$(objdump -T "$SHIM_DIR/libcublasLt_stub.so" 2>/dev/null | grep -c "libcublasLt.so.12" || true)
-    fi
-
-    if [ "$cublas_syms" -lt 20 ]; then
-        log_error "libcublas_stub.so has only $cublas_syms versioned symbols (expected 20+) — PyTorch will fail"
-        log_error "Likely cause: make build failed silently and stale artifact was installed"
-        log_error "Fix: check $LOG_DIR/install.log, then re-run install.sh"
-    else
-        log_success "libcublas_stub.so OK ($cublas_syms versioned symbols)"
-    fi
-
-    if [ "$cublaslt_syms" -lt 28 ]; then
-        log_error "libcublasLt_stub.so has only $cublaslt_syms versioned symbols (expected 28) — PyTorch will fail"
-        log_error "Likely cause: stale artifact from before the cublasLt version script fix"
-        log_error "Fix: check $LOG_DIR/install.log, then re-run install.sh"
-    else
-        log_success "libcublasLt_stub.so OK ($cublaslt_syms versioned symbols)"
-    fi
-
-    local cudnn_syms=0
-    if [ -f "$SHIM_DIR/libcudnn_stub.so" ]; then
-        cudnn_syms=$(objdump -T "$SHIM_DIR/libcudnn_stub.so" 2>/dev/null | grep -c "libcudnn.so.8" || true)
-    fi
-    if [ "$cudnn_syms" -lt 84 ]; then
-        log_error "libcudnn_stub.so has only $cudnn_syms versioned symbols (expected 84+) — PyTorch will fail to import"
-        log_error "Likely cause: make build failed silently and stale artifact was installed"
-        log_error "Fix: check $LOG_DIR/install.log, then re-run install.sh"
-    else
-        log_success "libcudnn_stub.so OK ($cudnn_syms versioned symbols)"
-    fi
 
     return 0
 }
@@ -1763,13 +1814,13 @@ install_python_dependencies() {
 install_walletconnect_cli() {
     log_step "Installing DeCloud authentication CLI..."
     
-    # The CLI is in the repository we just cloned
-    local cli_source="$INSTALL_DIR/DeCloud.NodeAgent/cli/cli-decloud-node"
+    # Source from the verified CLI bundle extracted by download_node_agent.
+    local cli_source="${STAGE_DIR}/cli/cli-decloud-node"
     local cli_dest="/usr/local/bin/cli-decloud-node"
     
     if [ ! -f "$cli_source" ]; then
         log_error "CLI script not found at $cli_source"
-        log_error "Repository may be incomplete"
+        log_error "CLI bundle may be incomplete — re-run install with a valid --version"
         exit 1
     fi
     
@@ -1803,8 +1854,8 @@ install_walletconnect_cli() {
 install_decloud_cli() {
     log_step "Installing DeCloud unified CLI..."
     
-    # The CLI is in the repository we just cloned
-    local cli_source="$INSTALL_DIR/DeCloud.NodeAgent/cli/decloud"
+    # Source from the verified CLI bundle extracted by download_node_agent.
+    local cli_source="${STAGE_DIR}/cli/decloud"
     local cli_dest="/usr/local/bin/decloud"
     
     # Check if CLI source exists
@@ -1827,8 +1878,8 @@ install_decloud_cli() {
         log_success "DeCloud CLI installed"
     fi
     
-    # Copy supporting scripts if they exist (vm-cleanup.sh lives at repo root)
-    local vm_cleanup_source="$INSTALL_DIR/DeCloud.NodeAgent/vm-cleanup.sh"
+    # Copy supporting scripts if they exist (vm-cleanup.sh ships at bundle root)
+    local vm_cleanup_source="${STAGE_DIR}/vm-cleanup.sh"
     local vm_cleanup_dest="/usr/local/bin/vm-cleanup.sh"
     
     if [ -f "$vm_cleanup_source" ]; then
@@ -1845,7 +1896,7 @@ install_decloud_cli() {
 
 install_decloud_docs() {
     local doc_dir="/usr/local/share/doc/decloud"
-    local source_dir="$INSTALL_DIR/DeCloud.NodeAgent/cli/docs"
+    local source_dir="${STAGE_DIR}/cli/docs"
     
     if [ -d "$source_dir" ]; then
         mkdir -p "$doc_dir"
@@ -1976,20 +2027,35 @@ create_directories() {
     log_success "Directories created"
 }
 
-# Future improvement: pre-built release binaries
-#   Build DeCloud.NodeAgent as a versioned release tarball in CI
-#   (linux-amd64, linux-arm64) on every git tag push.
-#   Benefits: no build toolchain required on nodes, faster installs,
-#   reproducible binaries, eliminates compile-time failures in production.
-#   Tracked: see GitHub Releases workflow discussion.
+# ── Release-mode install ─────────────────────────────────────────────────
+# As of v2.2.0, install.sh fetches signed release artifacts from GitHub
+# Releases instead of cloning source and building on the node.
+#
+# Layout produced under $INSTALL_DIR after a successful install:
+#
+#   /opt/decloud/
+#   ├── publish              -> publish.<version>     (active symlink)
+#   ├── publish.<previous>/                            (kept for rollback)
+#   ├── publish.<version>/                             (current release)
+#   │   ├── DeCloud.NodeAgent.dll
+#   │   ├── appsettings.Production.json
+#   │   └── CloudInit/Templates/...
+#   ├── stage/                                         (extracted CLI bundle)
+#   ├── gpu-proxy/build/                               (extracted GPU shims)
+#   ├── releases/                                      (manifests + tarball cache)
+#   └── current-version                                (active version string)
+#
+# The systemd unit's WorkingDirectory and ExecStart point at /opt/decloud/publish
+# (the symlink), so version swaps are atomic from systemd's perspective.
+
 download_node_agent() {
     if [ "$SKIP_DOWNLOAD" = true ]; then
         log_warn "Skipping Node Agent download (--skip-download)"
         return
     fi
-    log_step "Downloading Node Agent..."
+    log_step "Downloading Node Agent release..."
     
-    # Save system VM UUIDs BEFORE stopping NodeAgent.
+    # ── PRE: save system VM UUIDs while NodeAgent is still up ────────
     # NodeAgent maps friendly names (blockstore-region-nodeid) to UUIDs via its API.
     # After the service stops this mapping is unavailable, so we save it to temp files now.
     rm -f /tmp/decloud-blockstore-vm-id /tmp/decloud-dht-vm-id
@@ -2007,56 +2073,96 @@ download_node_agent() {
                     2>/dev/null | head -1 | tr -d '[:space:]' || true)
                 [ -n "$bs_id" ]  && echo "$bs_id"  > /tmp/decloud-blockstore-vm-id
                 [ -n "$dht_id" ] && echo "$dht_id" > /tmp/decloud-dht-vm-id
-                log_info "Saved system VM IDs for post-build cleanup"
+                log_info "Saved system VM IDs for post-swap cleanup"
             fi
         fi
     fi
 
-    # Stop service if running (update mode)
+    # ── 1. Resolve version, fetch + verify manifest ──────────────────
+    local version asset_arch
+    version=$(resolve_release_version) || return 1
+    asset_arch=$(release_asset_arch)   || return 1
+    fetch_and_verify_manifest "$version" || return 1
+
+    # ── 2. Stop service before swapping the publish symlink ──────────
     if [ "$UPDATE_MODE" = true ]; then
         log_info "Stopping existing node agent service..."
         systemctl stop decloud-node-agent 2>/dev/null || true
         sleep 2
     fi
 
-    if [ -d "$INSTALL_DIR/DeCloud.NodeAgent" ]; then
-        rm -rf "$INSTALL_DIR/DeCloud.NodeAgent"
+    # ── 3. Download + extract NodeAgent tarball ──────────────────────
+    local nodeagent_name="decloud-node-agent-${version}-${asset_arch}.tar.gz"
+    local nodeagent_tar="${RELEASE_CACHE_DIR}/${nodeagent_name}"
+    download_artifact_verified "$version" "$nodeagent_name" "$nodeagent_tar" || return 1
+
+    local target_dir="${INSTALL_DIR}/publish.${version}"
+    rm -rf "$target_dir"
+    mkdir -p "$target_dir"
+    if ! tar -xzf "$nodeagent_tar" -C "$target_dir"; then
+        log_error "Failed to extract NodeAgent tarball"
+        rm -rf "$target_dir"
+        return 1
     fi
-    
-    cd "$INSTALL_DIR"
-    git clone --depth 1 "$REPO_URL" DeCloud.NodeAgent > /dev/null 2>&1
-    
-    cd DeCloud.NodeAgent
-    COMMIT=$(git rev-parse --short HEAD)
-    
-    log_success "Code downloaded (commit: $COMMIT)"
+
+    if [ ! -f "${target_dir}/DeCloud.NodeAgent.dll" ]; then
+        log_error "Extracted publish dir is missing DeCloud.NodeAgent.dll"
+        rm -rf "$target_dir"
+        return 1
+    fi
+
+    # ── 4. Download + extract CLI bundle to staging ──────────────────
+    local cli_name="decloud-cli-${version}.tar.gz"
+    local cli_tar="${RELEASE_CACHE_DIR}/${cli_name}"
+    download_artifact_verified "$version" "$cli_name" "$cli_tar" || return 1
+
+    rm -rf "$STAGE_DIR"
+    mkdir -p "$STAGE_DIR"
+    if ! tar -xzf "$cli_tar" -C "$STAGE_DIR"; then
+        log_error "Failed to extract CLI bundle"
+        return 1
+    fi
+
+    # ── 5. Atomic publish symlink swap ───────────────────────────────
+    local previous=""
+    if [ -L "${INSTALL_DIR}/publish" ]; then
+        previous=$(readlink "${INSTALL_DIR}/publish" | xargs basename | sed 's/^publish\.//')
+    fi
+    local tmp_link="${INSTALL_DIR}/publish.new"
+    ln -sfn "$target_dir" "$tmp_link"
+    mv -Tf  "$tmp_link"   "${INSTALL_DIR}/publish"
+
+    echo "$version" > "$CURRENT_VERSION_FILE"
+    if [ -n "$previous" ] && [ "$previous" != "$version" ]; then
+        echo "$previous" > "$PREVIOUS_VERSION_FILE"
+    fi
+
+    # ── 6. Prune older publish.* dirs, keep current + 1 prior ────────
+    find "$INSTALL_DIR" -maxdepth 1 -type d -name 'publish.*' \
+        ! -name "publish.${version}" \
+        ! -name "publish.${previous:-NEVER_MATCH_SENTINEL}" \
+        -exec rm -rf {} + 2>/dev/null || true
+
+    # ── 7. One-time migration: clean up old git-clone layout ─────────
+    # If the node was previously installed via the git-clone flow,
+    # /opt/decloud/DeCloud.NodeAgent and /opt/decloud/Decloud.Shared exist
+    # but are no longer used. Remove to avoid confusion.
+    if [ -d "${INSTALL_DIR}/DeCloud.NodeAgent/.git" ]; then
+        log_info "Removing obsolete git clone at ${INSTALL_DIR}/DeCloud.NodeAgent"
+        rm -rf "${INSTALL_DIR}/DeCloud.NodeAgent"
+    fi
+    if [ -d "${INSTALL_DIR}/Decloud.Shared/.git" ]; then
+        log_info "Removing obsolete DeCloud.Shared clone"
+        rm -rf "${INSTALL_DIR}/Decloud.Shared"
+    fi
+
+    log_success "Node Agent ${version} installed (active: ${INSTALL_DIR}/publish -> publish.${version})"
 }
 
-download_shared_library() {
-    if [ "$SKIP_DOWNLOAD" = true ]; then
-        log_warn "Skipping DeCloud.Shared download (--skip-download)"
-        return
-    fi
-    log_step "Downloading DeCloud.Shared..."
-
-    local shared_dir="$INSTALL_DIR/Decloud.Shared"
-    local shared_url="https://github.com/bekirmfr/DeCloud.Shared.git"
-
-    if [ -d "$shared_dir/.git" ]; then
-        log_info "Updating DeCloud.Shared..."
-        git -C "$shared_dir" pull --quiet origin main 2>/dev/null \
-            || git -C "$shared_dir" pull --quiet origin master 2>/dev/null \
-            || log_warn "DeCloud.Shared pull failed — using existing checkout"
-    else
-        rm -rf "$shared_dir"
-        cd "$INSTALL_DIR"
-        git clone --depth 1 "$shared_url" Decloud.Shared --quiet
-    fi
-
-    local commit
-    commit=$(git -C "$shared_dir" rev-parse --short HEAD 2>/dev/null || echo "unknown")
-    log_success "DeCloud.Shared ready (commit: $commit)"
-}
+# NOTE: download_shared_library() has been removed.
+# DeCloud.Shared is now consumed at CI build time as a transitive ProjectRef
+# in the DeCloud.NodeAgent solution. The published NodeAgent tarball already
+# contains the compiled Shared DLL — no separate download is needed on nodes.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # System VM cleanup — destroy VMs whose binary changed during update
@@ -2110,84 +2216,44 @@ destroy_system_vms() {
 }
 
 build_node_agent() {
-    log_step "Building Node Agent..."
-    
-    # Verify we're in the right directory
-    if [ ! -d "$INSTALL_DIR/DeCloud.NodeAgent" ]; then
-        log_error "Repository directory not found: $INSTALL_DIR/DeCloud.NodeAgent"
+    log_step "Verifying installed Node Agent..."
+
+    # Build happened in CI; the atomic symlink flip happened in download_node_agent.
+    # This function exists in main()'s call order to preserve the existing flow,
+    # but no compilation is performed on the node.
+
+    if [ ! -L "${INSTALL_DIR}/publish" ]; then
+        log_error "${INSTALL_DIR}/publish is not a symlink — release install is incomplete"
+        log_error "  Did download_node_agent run successfully?"
         return 1
     fi
-    
-    cd "$INSTALL_DIR/DeCloud.NodeAgent"
-    
-    # Verify project structure
-    if [ ! -f "src/DeCloud.NodeAgent/DeCloud.NodeAgent.csproj" ]; then
-        log_error "Project file not found: src/DeCloud.NodeAgent/DeCloud.NodeAgent.csproj"
-        log_info "Directory contents:"
-        ls -la
+
+    if [ ! -f "${INSTALL_DIR}/publish/DeCloud.NodeAgent.dll" ]; then
+        log_error "DeCloud.NodeAgent.dll missing under ${INSTALL_DIR}/publish"
+        log_error "  Symlink target: $(readlink "${INSTALL_DIR}/publish" 2>/dev/null || echo unknown)"
         return 1
     fi
-    
-    # Clean previous build (show errors)
-    log_info "Cleaning previous build..."
-    if ! dotnet clean --configuration Release 2>&1 | grep -i "error" ; then
-        log_info "Clean completed"
-    fi
-    
-    # Build (capture and show errors)
-    log_info "Building project..."
-    dotnet build --configuration Release 2>&1 | tee /tmp/dotnet-build.log
-    BUILD_EXIT=$?
-    
-    if [ $BUILD_EXIT -ne 0 ]; then
-        log_error "Build failed!"
-        echo "$BUILD_OUTPUT" | tail -30
-        return 1
-    fi
-    
-    log_info "Build succeeded"
-    
-    # Publish (capture and show errors)
-    log_info "Publishing to $INSTALL_DIR/publish..."
-    PUBLISH_OUTPUT=$(dotnet publish src/DeCloud.NodeAgent/DeCloud.NodeAgent.csproj \
-        --configuration Release \
-        --output "$INSTALL_DIR/publish" \
-        --no-build \
-        2>&1)
-    PUBLISH_EXIT=$?
-    
-    if [ $PUBLISH_EXIT -ne 0 ]; then
-        log_error "Publish failed!"
-        echo "$PUBLISH_OUTPUT" | tail -30
-        return 1
-    fi
-    
-    # Verify publish output
-    if [ ! -f "$INSTALL_DIR/publish/DeCloud.NodeAgent.dll" ]; then
-        log_error "Published DLL not found!"
-        log_info "Publish directory contents:"
-        ls -la "$INSTALL_DIR/publish" 2>&1 || echo "Directory does not exist"
-        return 1
-    fi
-    
-    # Show publish statistics
-    local file_count=$(find "$INSTALL_DIR/publish" -type f | wc -l)
-    local dir_size=$(du -sh "$INSTALL_DIR/publish" | cut -f1)
-    log_info "Published $file_count files ($dir_size)"
-    
-    # Verify CloudInit templates were copied
-    if [ -d "$INSTALL_DIR/publish/CloudInit/Templates" ]; then
-        local template_count=$(find "$INSTALL_DIR/publish/CloudInit/Templates" -name "*.yaml" | wc -l)
-        if [ $template_count -gt 0 ]; then
-            log_success "CloudInit templates included ($template_count templates)"
+
+    # CloudInit templates ship inside the publish output.
+    if [ -d "${INSTALL_DIR}/publish/CloudInit/Templates" ]; then
+        local template_count
+        template_count=$(find "${INSTALL_DIR}/publish/CloudInit/Templates" -name '*.yaml' | wc -l)
+        if [ "$template_count" -gt 0 ]; then
+            log_success "CloudInit templates present (${template_count})"
         else
-            log_warn "No CloudInit templates found in publish output!"
+            log_warn "CloudInit/Templates directory present but empty"
         fi
     else
-        log_warn "CloudInit/Templates directory not found in publish output"
+        log_warn "CloudInit/Templates directory not present in publish output"
     fi
-    
-    log_success "Node Agent built successfully"
+
+    local file_count dir_size active_version
+    file_count=$(find -L "${INSTALL_DIR}/publish" -type f | wc -l)
+    dir_size=$(du -shL "${INSTALL_DIR}/publish" 2>/dev/null | cut -f1)
+    active_version=$(cat "$CURRENT_VERSION_FILE" 2>/dev/null || echo unknown)
+    log_info "Active version: ${active_version} (${file_count} files, ${dir_size})"
+
+    log_success "Node Agent verified"
 }
 
 create_configuration() {
@@ -2330,13 +2396,13 @@ install_relay_nat_support() {
     # Copy relay NAT manager script from file
     echo "→ Installing relay NAT manager..."
 
-    # The relay NAT manager is in the repository we just cloned
-    local file_source="$INSTALL_DIR/DeCloud.NodeAgent/decloud-relay-nat"
+    # The relay NAT manager script ships in the verified CLI bundle.
+    local file_source="${STAGE_DIR}/decloud-relay-nat"
     local file_dest="/usr/local/bin/decloud-relay-nat"
     
     if [ ! -f "$file_source" ]; then
         log_error "Relay NAT manager script not found at $file_source"
-        log_error "Repository may be incomplete"
+        log_error "CLI bundle may be incomplete"
         exit 1
     fi
     
@@ -2720,9 +2786,8 @@ main() {
     # Application
     create_directories
     download_node_agent
-    download_shared_library
     
-    # Install CLI from downloaded repo
+    # Install CLI from verified release bundle
     install_walletconnect_cli
     install_decloud_cli
     install_decloud_docs
