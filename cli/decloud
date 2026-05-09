@@ -283,35 +283,6 @@ find_install_script() {
     return 1
 }
 
-
-
-# Fetch the latest install.sh from the GitHub Release.
-# Echoes the temp path on success, returns non-zero on failure.
-# Trust model: TLS to github.com. install.sh then verifies all release
-# artifacts via cosign, so this curl is a bootstrap, not the trust root.
-fetch_latest_install_sh() {
-    local url="https://github.com/bekirmfr/DeCloud.NodeAgent/releases/latest/download/install.sh"
-    local tmp
-    tmp=$(mktemp /tmp/decloud-install-XXXXXX.sh)
- 
-    # 30s cap so 'decloud update' doesn't hang indefinitely on a flaky network.
-    if ! curl -fsSL --max-time 30 "$url" -o "$tmp" 2>/dev/null; then
-        rm -f "$tmp"
-        return 1
-    fi
- 
-    # Sanity check: did we actually get a bash script?
-    # An HTML 404 page or empty response would silently break otherwise.
-    if ! head -1 "$tmp" 2>/dev/null | grep -qE '^#!.*\b(ba)?sh\b'; then
-        rm -f "$tmp"
-        return 1
-    fi
- 
-    chmod 755 "$tmp"
-    echo "$tmp"
-    return 0
-}
-
 # Fetch a script from the latest GitHub Release.
 # Args: <basename> — e.g. "install.sh" or "uninstall.sh"
 # Echoes the temp path on success, returns non-zero on failure.

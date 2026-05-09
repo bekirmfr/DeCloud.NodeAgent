@@ -240,7 +240,13 @@ jobs:
           test -f decloud-relay-nat
           test -f install.sh
           test -f uninstall.sh
-          # vm-cleanup.sh is optional per install.sh
+          # Reject CRLF line endings — would break bash parsing on Linux.
+          for f in cli/decloud cli/cli-decloud-node decloud-relay-nat install.sh uninstall.sh; do
+            if grep -q $'\r' "$f"; then
+              echo "::error::$f has CRLF line endings; convert to LF"
+              exit 1
+            fi
+          done
 
       - name: Package
         run: |

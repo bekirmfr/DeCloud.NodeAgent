@@ -7,3 +7,6 @@
 *.sh text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
+cli/decloud text eol=lf
+cli/cli-decloud-node text eol=lf
+decloud-relay-nat text eol=lf
