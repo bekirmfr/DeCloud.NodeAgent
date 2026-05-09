@@ -252,14 +252,11 @@ jobs:
           cd stage
           tar -czf "../decloud-cli-${{ needs.verify-tag.outputs.version }}.tar.gz" .
 
-      # Stage install.sh separately for upload as a standalone release asset.
-      # This is what the bootstrap curl on the landing page hits:
-      #   curl -fsSL https://github.com/.../releases/<tag>/download/install.sh | sudo bash
-      # The same install.sh also rides inside the CLI bundle above so the
-      # offline-fallback path in 'decloud update' can find it after install.
-      - name: Stage standalone install.sh
-        run: cp install.sh "install.sh"
-
+      # install.sh is uploaded both as a top-level release asset (for the
+      # bootstrap curl on the landing page) AND inside the CLI bundle tarball
+      # above (for the offline-fallback path used by 'decloud update').
+      # No staging step needed — actions/upload-artifact reads from the
+      # workspace, where install.sh already lives.
       - uses: actions/upload-artifact@v4
         with:
           name: cli-bundle
