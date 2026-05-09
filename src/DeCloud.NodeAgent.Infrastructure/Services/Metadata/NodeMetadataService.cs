@@ -3,7 +3,6 @@ using DeCloud.NodeAgent.Core.Models;
 using DeCloud.Shared;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
-using Orchestrator.Models;
 
 public interface INodeMetadataService
 {
@@ -15,6 +14,12 @@ public interface INodeMetadataService
     string WalletAddress { get; }
     string Region { get; }
     string Zone { get; }
+    /// <summary>
+    /// ISO 3166-1 alpha-2 country code from <c>Node:Country</c> config.
+    /// <c>"ZZ"</c> when not configured (unknown / not yet declared).
+    /// </summary>
+    string Country { get; }
+
     NodePricing? Pricing { get; }
     HardwareInventory? Inventory { get; }
 
@@ -37,6 +42,7 @@ public class NodeMetadataService : INodeMetadataService
     public string WalletAddress { get; private set; } = string.Empty;
     public string Region { get; private set; } = string.Empty;
     public string Zone { get; private set; } = string.Empty;
+    public string Country { get; private set; } = "ZZ";
     public NodePricing? Pricing { get; private set; }
     public HardwareInventory? Inventory { get; private set; } = null;
 
@@ -63,6 +69,11 @@ public class NodeMetadataService : INodeMetadataService
         Name = _configuration["Node:Name"] ?? Environment.MachineName;
         Region = _configuration["Node:Region"] ?? "default";
         Zone = _configuration["Node:Zone"] ?? "default";
+        Country = (_configuration["Node:Country"] ?? "ZZ").ToUpperInvariant();
+        _logger.LogInformation(
+            "Node locality: Country={Country}, Region={Region}, Zone={Zone}",
+            Country, Region, Zone);
+
 
         // Load operator pricing from config (optional)
         var pricingSection = _configuration.GetSection("Node:Pricing");

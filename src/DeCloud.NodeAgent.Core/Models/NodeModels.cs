@@ -241,6 +241,15 @@ public class NodeRegistration
     public string Zone { get; set; } = "default";
 
     /// <summary>
+    /// ISO 3166-1 alpha-2 country code declared by the operator.
+    /// Read from <c>Node:Country</c> in appsettings.Production.json.
+    /// <c>"ZZ"</c> when not configured. Null on nodes running pre-2.3
+    /// agents — orchestrator accepts null and records "ZZ".
+    /// </summary>
+    public string? Country { get; set; }
+
+
+    /// <summary>
     /// Wallet signature proving ownership (from WalletConnect CLI)
     /// Optional for backward compatibility - will be required in production
     /// </summary>

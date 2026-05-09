@@ -220,6 +220,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             SupportedImages = GetSupportedImages(),
             Region = _nodeMetadata.Region,
             Zone = _nodeMetadata.Zone,
+            Country = _nodeMetadata.Country,
             Pricing = _nodeMetadata.Pricing,
             RegisteredAt = DateTime.UtcNow,
             SshCaPublicKey = sshCaPublicKey,                              // ← new
