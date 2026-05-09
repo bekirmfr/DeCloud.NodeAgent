@@ -283,6 +283,8 @@ find_install_script() {
     return 1
 }
 
+
+
 # Fetch the latest install.sh from the GitHub Release.
 # Echoes the temp path on success, returns non-zero on failure.
 # Trust model: TLS to github.com. install.sh then verifies all release
@@ -308,6 +310,53 @@ fetch_latest_install_sh() {
     chmod 755 "$tmp"
     echo "$tmp"
     return 0
+}
+
+# Fetch a script from the latest GitHub Release.
+# Args: <basename> — e.g. "install.sh" or "uninstall.sh"
+# Echoes the temp path on success, returns non-zero on failure.
+# Trust model: TLS to github.com. install.sh then verifies all release
+# artifacts via cosign; uninstall.sh only touches local state.
+fetch_release_script() {
+    local name="$1"
+    local url="https://github.com/bekirmfr/DeCloud.NodeAgent/releases/latest/download/${name}"
+    local tmp
+    tmp=$(mktemp "/tmp/decloud-${name%.sh}-XXXXXX.sh")
+ 
+    # 30s cap so the command doesn't hang indefinitely on a flaky network.
+    if ! curl -fsSL --max-time 30 "$url" -o "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        return 1
+    fi
+ 
+    # Sanity check: did we actually get a bash script?
+    # An HTML 404 page or empty response would silently break otherwise.
+    if ! head -1 "$tmp" 2>/dev/null | grep -qE '^#!.*\b(ba)?sh\b'; then
+        rm -f "$tmp"
+        return 1
+    fi
+ 
+    chmod 755 "$tmp"
+    echo "$tmp"
+    return 0
+}
+ 
+# Locate the on-disk uninstall.sh — mirror of find_install_script.
+find_uninstall_script() {
+    local candidates=(
+        "/usr/local/share/decloud/uninstall.sh"
+        "$SCRIPT_DIR/uninstall.sh"
+        "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/uninstall.sh"
+        "/opt/decloud/DeCloud.NodeAgent/uninstall.sh"
+        "/opt/decloud/uninstall.sh"
+    )
+    for path in "${candidates[@]}"; do
+        if [[ -f "$path" ]]; then
+            echo "$path"
+            return 0
+        fi
+    done
+    return 1
 }
 
 
@@ -519,7 +568,7 @@ cmd_update() {
     echo ""
  
     local -a SAVED_PARAMS
-    load_install_params  # populates SAVED_PARAMS or exits
+    load_install_params
  
     log_info "Re-running install with saved parameters:"
     for p in "${SAVED_PARAMS[@]}"; do
@@ -527,17 +576,12 @@ cmd_update() {
     done
     echo ""
  
-    # Hybrid resolution:
-    #   1. Try fetching the latest install.sh from GitHub Releases
-    #      (so 'decloud update' always runs the newest installer logic)
-    #   2. On failure (offline, GitHub down, network restricted), fall back
-    #      to the on-disk copy installed by the previous install_decloud_cli
-    #   3. If both fail, error clearly
+    # Hybrid: try GitHub Release first, fall back to on-disk copy.
     local install_script=""
     local cleanup_path=""
  
     log_info "Fetching latest install.sh from GitHub Release..."
-    if install_script=$(fetch_latest_install_sh); then
+    if install_script=$(fetch_release_script "install.sh"); then
         cleanup_path="$install_script"
         log_success "Using latest install.sh from GitHub: $install_script"
     else
@@ -546,15 +590,8 @@ cmd_update() {
             log_info "Falling back to local copy: $install_script"
         else
             log_error "Could not fetch install.sh from GitHub and no local copy was found"
-            log_info "Searched on disk:"
-            log_info "  $SCRIPT_DIR/install.sh"
-            log_info "  /opt/decloud/DeCloud.NodeAgent/install.sh"
-            log_info "  /opt/decloud/install.sh"
-            log_info "  /usr/local/share/decloud/install.sh"
-            log_info ""
-            log_info "Check network connectivity, or download install.sh manually:"
-            log_info "  sudo curl -fsSL \\"
-            log_info "    https://github.com/bekirmfr/DeCloud.NodeAgent/releases/latest/download/install.sh \\"
+            log_info "Re-seed manually:"
+            log_info "  sudo curl -fsSL https://github.com/bekirmfr/DeCloud.NodeAgent/releases/latest/download/install.sh \\"
             log_info "    -o /usr/local/share/decloud/install.sh"
             log_info "  sudo chmod 755 /usr/local/share/decloud/install.sh"
             exit $EXIT_ERROR
@@ -562,15 +599,10 @@ cmd_update() {
     fi
  
     echo ""
- 
-    # Change to / before launching install.sh — same reason as cmd_install:
-    # the current directory may be the repo clone that install.sh is about to wipe.
     cd / 2>/dev/null || true
- 
     bash "$install_script" "${SAVED_PARAMS[@]}"
     local exit_code=$?
  
-    # Clean up the curl'd temp file (no-op if we used a local copy).
     [ -n "$cleanup_path" ] && rm -f "$cleanup_path"
  
     if (( exit_code == 0 )); then
@@ -609,36 +641,54 @@ cmd_pull() {
 
 cmd_remove() {
     check_root
-
+ 
     local -a passthrough_args=()
     while [[ $# -gt 0 ]]; do
         passthrough_args+=("$1")
         shift
     done
-
+ 
     echo ""
     echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
     echo -e "${BOLD}  DeCloud Node Agent — Uninstall${NC}"
     echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
     echo ""
-
-    local uninstall_script
-    uninstall_script=$(dirname "$(find_install_script 2>/dev/null || echo "")")/uninstall.sh
-
-    if [[ ! -f "$uninstall_script" ]]; then
-        # Fall back to repo location
-        uninstall_script="/opt/decloud/DeCloud.NodeAgent/uninstall.sh"
+ 
+    # Same hybrid pattern as cmd_update: prefer the latest uninstall.sh
+    # (so cleanup logic always knows about the most recent layout),
+    # fall back to on-disk copy when offline.
+    local uninstall_script=""
+    local cleanup_path=""
+ 
+    log_info "Fetching latest uninstall.sh from GitHub Release..."
+    if uninstall_script=$(fetch_release_script "uninstall.sh"); then
+        cleanup_path="$uninstall_script"
+        log_success "Using latest uninstall.sh from GitHub: $uninstall_script"
+    else
+        log_warn "Could not fetch uninstall.sh from GitHub (offline or unreachable)"
+        if uninstall_script=$(find_uninstall_script); then
+            log_info "Falling back to local copy: $uninstall_script"
+        else
+            log_error "Could not fetch uninstall.sh from GitHub and no local copy was found"
+            log_info "Download manually:"
+            log_info "  sudo curl -fsSL https://github.com/bekirmfr/DeCloud.NodeAgent/releases/latest/download/uninstall.sh \\"
+            log_info "    -o /usr/local/share/decloud/uninstall.sh"
+            log_info "  sudo chmod 755 /usr/local/share/decloud/uninstall.sh"
+            log_info "  sudo /usr/local/share/decloud/uninstall.sh"
+            exit $EXIT_ERROR
+        fi
     fi
-
-    if [[ ! -f "$uninstall_script" ]]; then
-        log_error "uninstall.sh not found"
-        log_info "Download from: https://github.com/bekirmfr/DeCloud.NodeAgent/raw/main/uninstall.sh"
-        exit $EXIT_ERROR
-    fi
-
+ 
+    echo ""
     cd / 2>/dev/null || true
     bash "$uninstall_script" "${passthrough_args[@]}"
+    local exit_code=$?
+ 
+    [ -n "$cleanup_path" ] && rm -f "$cleanup_path"
+ 
+    exit $exit_code
 }
+
 
 # ============================================================================
 # STATUS & INFO COMMANDS

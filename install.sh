@@ -1977,20 +1977,32 @@ install_decloud_cli() {
         log_info "  (decloud vm cleanup works without it — virsh logic is built in)"
     fi
 
-    # Refresh install.sh at the canonical persistent location.
-    # cli/decloud's find_install_script looks here when running 'decloud update'.
-    # Doing this on every install makes the loop self-healing: each install
-    # places its own install.sh at the well-known path so the next update
-    # always has a copy that matches the version it was last installed from.
+    # Refresh install.sh and uninstall.sh at the canonical persistent location.
+    # cli/decloud's find_install_script and cmd_remove look here when running
+    # 'decloud update' or 'decloud uninstall'. Doing this on every install run
+    # makes the loop self-healing: each install places its own scripts at the
+    # well-known path so the next invocation always has copies that match the
+    # version it was last installed from.
+    install -d /usr/local/share/decloud
+
     local install_sh_source="${STAGE_DIR}/install.sh"
     local install_sh_dest="/usr/local/share/decloud/install.sh"
     if [ -f "$install_sh_source" ]; then
-        install -d "$(dirname "$install_sh_dest")"
         install -m 755 "$install_sh_source" "$install_sh_dest"
         log_info "→ install.sh installed to $install_sh_dest (used by 'decloud update')"
     else
         log_warn "install.sh not found at $install_sh_source"
         log_warn "  'decloud update' may fail to locate the installer until next release"
+    fi
+
+    local uninstall_sh_source="${STAGE_DIR}/uninstall.sh"
+    local uninstall_sh_dest="/usr/local/share/decloud/uninstall.sh"
+    if [ -f "$uninstall_sh_source" ]; then
+        install -m 755 "$uninstall_sh_source" "$uninstall_sh_dest"
+        log_info "→ uninstall.sh installed to $uninstall_sh_dest (used by 'decloud uninstall')"
+    else
+        log_warn "uninstall.sh not found at $uninstall_sh_source"
+        log_warn "  'decloud uninstall' may fail to locate the uninstaller until next release"
     fi
     
     log_success "✓ DeCloud unified CLI ready"

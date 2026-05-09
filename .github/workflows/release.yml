@@ -239,6 +239,7 @@ jobs:
           test -f cli/cli-decloud-node
           test -f decloud-relay-nat
           test -f install.sh
+          test -f uninstall.sh
           # vm-cleanup.sh is optional per install.sh
 
       - name: Package
@@ -248,21 +249,22 @@ jobs:
           cp -a cli/. stage/cli/
           cp decloud-relay-nat stage/
           cp install.sh stage/
+          cp uninstall.sh stage/
           [ -f vm-cleanup.sh ] && cp vm-cleanup.sh stage/ || true
           cd stage
           tar -czf "../decloud-cli-${{ needs.verify-tag.outputs.version }}.tar.gz" .
 
-      # install.sh is uploaded both as a top-level release asset (for the
-      # bootstrap curl on the landing page) AND inside the CLI bundle tarball
-      # above (for the offline-fallback path used by 'decloud update').
-      # No staging step needed — actions/upload-artifact reads from the
-      # workspace, where install.sh already lives.
+      # install.sh and uninstall.sh are uploaded both as top-level release
+      # assets (so the bootstrap curl on the landing page and 'decloud
+      # uninstall' can fetch them) AND inside the CLI bundle tarball above
+      # (for the offline-fallback path used by 'decloud update'/'uninstall').
       - uses: actions/upload-artifact@v4
         with:
           name: cli-bundle
           path: |
             decloud-cli-*.tar.gz
             install.sh
+            uninstall.sh
           if-no-files-found: error
 
   # --------------------------------------------------------------------------
@@ -386,6 +388,7 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/install.sh
+            dist/uninstall.sh
             dist/manifest.json
             dist/manifest.json.sig
             dist/manifest.json.pem
