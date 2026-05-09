@@ -252,10 +252,20 @@ jobs:
           cd stage
           tar -czf "../decloud-cli-${{ needs.verify-tag.outputs.version }}.tar.gz" .
 
+      # Stage install.sh separately for upload as a standalone release asset.
+      # This is what the bootstrap curl on the landing page hits:
+      #   curl -fsSL https://github.com/.../releases/<tag>/download/install.sh | sudo bash
+      # The same install.sh also rides inside the CLI bundle above so the
+      # offline-fallback path in 'decloud update' can find it after install.
+      - name: Stage standalone install.sh
+        run: cp install.sh "install.sh"
+
       - uses: actions/upload-artifact@v4
         with:
           name: cli-bundle
-          path: decloud-cli-*.tar.gz
+          path: |
+            decloud-cli-*.tar.gz
+            install.sh
           if-no-files-found: error
 
   # --------------------------------------------------------------------------
@@ -378,6 +388,7 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/*.tar.gz
+            dist/install.sh
             dist/manifest.json
             dist/manifest.json.sig
             dist/manifest.json.pem
