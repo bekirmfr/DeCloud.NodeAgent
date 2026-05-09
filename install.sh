@@ -553,7 +553,11 @@ install_base_dependencies() {
 # Static binary, single-file install, pinned version.
 install_cosign() {
     if command -v cosign &>/dev/null; then
-        log_info "cosign already installed: $(cosign version 2>/dev/null | head -1 | awk '{print $NF}')"
+        # cosign 2.x output begins with multi-line ASCII art; the GitVersion
+        # line is the reliable identifier across versions.
+        local cosign_ver
+        cosign_ver=$(cosign version 2>/dev/null | awk '/GitVersion/{print $NF; exit}')
+        log_info "cosign already installed: ${cosign_ver:-installed}"
         return 0
     fi
 
@@ -1890,6 +1894,22 @@ install_decloud_cli() {
         log_warn "vm-cleanup.sh not found at $vm_cleanup_source — skipping"
         log_info "  (decloud vm cleanup works without it — virsh logic is built in)"
     fi
+
+    # Refresh install.sh at the canonical persistent location.
+    # cli/decloud's find_install_script looks here when running 'decloud update'.
+    # Doing this on every install makes the loop self-healing: each install
+    # places its own install.sh at the well-known path so the next update
+    # always has a copy that matches the version it was last installed from.
+    local install_sh_source="${STAGE_DIR}/install.sh"
+    local install_sh_dest="/usr/local/share/decloud/install.sh"
+    if [ -f "$install_sh_source" ]; then
+        install -d "$(dirname "$install_sh_dest")"
+        install -m 755 "$install_sh_source" "$install_sh_dest"
+        log_info "→ install.sh installed to $install_sh_dest (used by 'decloud update')"
+    else
+        log_warn "install.sh not found at $install_sh_source"
+        log_warn "  'decloud update' may fail to locate the installer until next release"
+    fi
     
     log_success "✓ DeCloud unified CLI ready"
 }
@@ -2018,6 +2038,13 @@ create_directories() {
     log_step "Creating directories..."
     
     mkdir -p "$INSTALL_DIR"
+    # NOTE: do NOT pre-create $CONFIG_DIR. Under release-mode install,
+    # CONFIG_DIR=/opt/decloud/publish is a SYMLINK created by
+    # download_node_agent pointing at the active publish.<version> directory.
+    # Pre-creating it here as a real directory blocks the atomic symlink
+    # swap (mv -T refuses to replace a directory with a non-directory).
+    # The symlink itself provides the path; create_configuration writes
+    # appsettings.Production.json into it later in main().
     mkdir -p "$DATA_DIR"
     mkdir -p "$LOG_DIR"
     mkdir -p "$BACKUP_DIR"
@@ -2123,6 +2150,19 @@ download_node_agent() {
     fi
 
     # ── 5. Atomic publish symlink swap ───────────────────────────────
+    # Prerequisite: /opt/decloud/publish must NOT exist as a real directory.
+    # It may be:
+    #   (a) absent (fresh install, expected case)
+    #   (b) a symlink from a previous release-mode install (will be replaced)
+    #   (c) a real directory from a legacy non-release-mode install or a
+    #       broken prior install attempt — we clean those up here.
+    # mv -T refuses to overwrite a directory with a non-directory, so case
+    # (c) requires explicit removal.
+    if [ -d "${INSTALL_DIR}/publish" ] && [ ! -L "${INSTALL_DIR}/publish" ]; then
+        log_info "Removing pre-existing /opt/decloud/publish directory (legacy or recovered state)"
+        rm -rf "${INSTALL_DIR}/publish"
+    fi
+
     local previous=""
     if [ -L "${INSTALL_DIR}/publish" ]; then
         previous=$(readlink "${INSTALL_DIR}/publish" | xargs basename | sed 's/^publish\.//')
@@ -2163,10 +2203,6 @@ download_node_agent() {
 # in the DeCloud.NodeAgent solution. The published NodeAgent tarball already
 # contains the compiled Shared DLL — no separate download is needed on nodes.
 
-# ─────────────────────────────────────────────────────────────────────────────
-# System VM cleanup — destroy VMs whose binary changed during update
-# ─────────────────────────────────────────────────────────────────────────────
-
 build_node_agent() {
     log_step "Verifying installed Node Agent..."
 
@@ -2184,6 +2220,19 @@ build_node_agent() {
         log_error "DeCloud.NodeAgent.dll missing under ${INSTALL_DIR}/publish"
         log_error "  Symlink target: $(readlink "${INSTALL_DIR}/publish" 2>/dev/null || echo unknown)"
         return 1
+    fi
+
+    # CloudInit templates ship inside the publish output.
+    if [ -d "${INSTALL_DIR}/publish/CloudInit/Templates" ]; then
+        local template_count
+        template_count=$(find "${INSTALL_DIR}/publish/CloudInit/Templates" -name '*.yaml' | wc -l)
+        if [ "$template_count" -gt 0 ]; then
+            log_success "CloudInit templates present (${template_count})"
+        else
+            log_warn "CloudInit/Templates directory present but empty"
+        fi
+    else
+        log_warn "CloudInit/Templates directory not present in publish output"
     fi
 
     local file_count dir_size active_version

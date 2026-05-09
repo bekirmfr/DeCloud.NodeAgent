@@ -164,6 +164,34 @@ jobs:
             -p:Version=${{ needs.verify-tag.outputs.version_numeric }} \
             -p:DebugType=embedded
 
+      - name: Verify build output
+        run: |
+          set -euo pipefail
+
+          # Hard requirement: the main DLL must be present.
+          if [ ! -f publish/DeCloud.NodeAgent.dll ]; then
+            echo "::error::publish/DeCloud.NodeAgent.dll missing - publish failed silently"
+            echo "publish/ contents:"
+            ls -la publish/ 2>&1 || echo "(publish/ does not exist)"
+            exit 1
+          fi
+          echo "OK DeCloud.NodeAgent.dll present"
+
+          # Soft check: CloudInit templates. install.sh's build_node_agent treats
+          # this as warn-not-fail; we mirror that semantic here so the workflow
+          # doesn't introduce stricter validation than the runtime install does.
+          # If templates are genuinely missing, the warning surfaces it without
+          # blocking the release.
+          if [ -d publish/CloudInit/Templates ]; then
+            template_count=$(find publish/CloudInit/Templates -name '*.yaml' | wc -l)
+            echo "OK CloudInit/Templates present (${template_count} yaml files)"
+          else
+            echo "::warning::publish/CloudInit/Templates not found in publish output."
+            echo "::warning::VM creation may fail until templates are present in the publish dir."
+            echo "Top-level publish/ contents:"
+            ls -la publish/ | head -40
+          fi
+
       - name: Package
         run: |
           set -euo pipefail
@@ -210,6 +238,7 @@ jobs:
           test -f cli/decloud
           test -f cli/cli-decloud-node
           test -f decloud-relay-nat
+          test -f install.sh
           # vm-cleanup.sh is optional per install.sh
 
       - name: Package
@@ -218,6 +247,7 @@ jobs:
           mkdir -p stage/cli
           cp -a cli/. stage/cli/
           cp decloud-relay-nat stage/
+          cp install.sh stage/
           [ -f vm-cleanup.sh ] && cp vm-cleanup.sh stage/ || true
           cd stage
           tar -czf "../decloud-cli-${{ needs.verify-tag.outputs.version }}.tar.gz" .
