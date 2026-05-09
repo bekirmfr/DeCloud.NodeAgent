@@ -283,6 +283,34 @@ find_install_script() {
     return 1
 }
 
+# Fetch the latest install.sh from the GitHub Release.
+# Echoes the temp path on success, returns non-zero on failure.
+# Trust model: TLS to github.com. install.sh then verifies all release
+# artifacts via cosign, so this curl is a bootstrap, not the trust root.
+fetch_latest_install_sh() {
+    local url="https://github.com/bekirmfr/DeCloud.NodeAgent/releases/latest/download/install.sh"
+    local tmp
+    tmp=$(mktemp /tmp/decloud-install-XXXXXX.sh)
+ 
+    # 30s cap so 'decloud update' doesn't hang indefinitely on a flaky network.
+    if ! curl -fsSL --max-time 30 "$url" -o "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        return 1
+    fi
+ 
+    # Sanity check: did we actually get a bash script?
+    # An HTML 404 page or empty response would silently break otherwise.
+    if ! head -1 "$tmp" 2>/dev/null | grep -qE '^#!.*\b(ba)?sh\b'; then
+        rm -f "$tmp"
+        return 1
+    fi
+ 
+    chmod 755 "$tmp"
+    echo "$tmp"
+    return 0
+}
+
+
 # ============================================================================
 # AUTHENTICATION COMMANDS
 # ============================================================================
@@ -483,39 +511,68 @@ cmd_install() {
 
 cmd_update() {
     check_root
-
+ 
     echo ""
     echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
     echo -e "${BOLD}  DeCloud Node Agent — Update${NC}"
     echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
     echo ""
-
+ 
     local -a SAVED_PARAMS
     load_install_params  # populates SAVED_PARAMS or exits
-
+ 
     log_info "Re-running install with saved parameters:"
     for p in "${SAVED_PARAMS[@]}"; do
         log_info "  $p"
     done
     echo ""
-
-    # Locate install script
-    local install_script
-    if ! install_script=$(find_install_script); then
-        log_error "Node agent install.sh not found"
-        exit $EXIT_ERROR
+ 
+    # Hybrid resolution:
+    #   1. Try fetching the latest install.sh from GitHub Releases
+    #      (so 'decloud update' always runs the newest installer logic)
+    #   2. On failure (offline, GitHub down, network restricted), fall back
+    #      to the on-disk copy installed by the previous install_decloud_cli
+    #   3. If both fail, error clearly
+    local install_script=""
+    local cleanup_path=""
+ 
+    log_info "Fetching latest install.sh from GitHub Release..."
+    if install_script=$(fetch_latest_install_sh); then
+        cleanup_path="$install_script"
+        log_success "Using latest install.sh from GitHub: $install_script"
+    else
+        log_warn "Could not fetch install.sh from GitHub (offline or unreachable)"
+        if install_script=$(find_install_script); then
+            log_info "Falling back to local copy: $install_script"
+        else
+            log_error "Could not fetch install.sh from GitHub and no local copy was found"
+            log_info "Searched on disk:"
+            log_info "  $SCRIPT_DIR/install.sh"
+            log_info "  /opt/decloud/DeCloud.NodeAgent/install.sh"
+            log_info "  /opt/decloud/install.sh"
+            log_info "  /usr/local/share/decloud/install.sh"
+            log_info ""
+            log_info "Check network connectivity, or download install.sh manually:"
+            log_info "  sudo curl -fsSL \\"
+            log_info "    https://github.com/bekirmfr/DeCloud.NodeAgent/releases/latest/download/install.sh \\"
+            log_info "    -o /usr/local/share/decloud/install.sh"
+            log_info "  sudo chmod 755 /usr/local/share/decloud/install.sh"
+            exit $EXIT_ERROR
+        fi
     fi
-
-    log_info "Using install script: $install_script"
+ 
     echo ""
-
+ 
     # Change to / before launching install.sh — same reason as cmd_install:
     # the current directory may be the repo clone that install.sh is about to wipe.
     cd / 2>/dev/null || true
-
+ 
     bash "$install_script" "${SAVED_PARAMS[@]}"
     local exit_code=$?
-
+ 
+    # Clean up the curl'd temp file (no-op if we used a local copy).
+    [ -n "$cleanup_path" ] && rm -f "$cleanup_path"
+ 
     if (( exit_code == 0 )); then
         echo ""
         log_success "Update complete"

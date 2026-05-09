@@ -304,27 +304,49 @@ validate_wallet_address() {
 
 check_required_params() {
     log_step "Validating required parameters..."
-    
-    # Check orchestrator URL
-    
-    # Check wallet address
-    if [ -z "$NODE_WALLET" ]; then
-        log_error "❌ Wallet address is REQUIRED!"
-        echo ""
-        log_error "Starting from v2.1.0, wallet address is mandatory."
-        log_error "No fallback or auto-generation available."
-        echo ""
-        log_info "Usage: $0 --orchestrator <url> --wallet 0xYourAddress"
-        echo ""
-        log_info "Get a wallet:"
-        log_info "  • Use your existing Ethereum wallet"
-        log_info "  • Create one at https://metamask.io"
-        log_info "  • Generate: openssl rand -hex 20 | awk '{print \"0x\" \$1}'"
-        echo ""
-        exit 1
+
+    local prompted=false
+
+    # /dev/tty resolves to the controlling terminal even when stdin is a pipe
+    # (the canonical "curl | bash" case). Reading from /dev/tty lets us prompt
+    # the human while the script body streams in over the pipe.
+    local tty_available=false
+    [ -r /dev/tty ] && [ -w /dev/tty ] && tty_available=true
+
+    # Orchestrator URL
+    if [ -z "$ORCHESTRATOR_URL" ]; then
+        if [ "$tty_available" = true ]; then
+            local default_orch="https://decloud.stackfi.tech"
+            echo ""
+            read -r -p "Orchestrator URL [${default_orch}]: " ORCHESTRATOR_URL </dev/tty
+            ORCHESTRATOR_URL="${ORCHESTRATOR_URL:-$default_orch}"
+            prompted=true
+        else
+            _missing_param_error "--orchestrator <url>"
+        fi
     fi
-    
-    # Validate wallet format
+
+    # Wallet
+    if [ -z "$NODE_WALLET" ]; then
+        if [ "$tty_available" = true ]; then
+            echo ""
+            log_info "Wallet address is required for node identity and rewards."
+            log_info "  Use your existing Ethereum wallet, or create one at https://metamask.io"
+            echo ""
+            while true; do
+                read -r -p "Wallet address (0x...): " NODE_WALLET </dev/tty
+                if validate_wallet_address "$NODE_WALLET"; then
+                    break
+                fi
+                log_warn "Invalid format. Wallet must start with 0x followed by 40 hex characters."
+            done
+            prompted=true
+        else
+            _missing_param_error "--wallet 0x..."
+        fi
+    fi
+
+    # Validate wallet format whether prompted or provided.
     if ! validate_wallet_address "$NODE_WALLET"; then
         log_error "❌ Invalid wallet address: $NODE_WALLET"
         echo ""
@@ -337,10 +359,70 @@ check_required_params() {
         echo ""
         exit 1
     fi
-    
+
+    # If anything was prompted, the install-params file written at parse time
+    # is missing those values. Re-save from current variable state so future
+    # 'decloud update' invocations have everything they need.
+    if [ "$prompted" = true ]; then
+        save_install_params_from_vars
+    fi
+
     log_success "Orchestrator: $ORCHESTRATOR_URL"
     log_success "Wallet:       $NODE_WALLET"
-    log_success "Node Name:    $NODE_NAME"
+    [ -n "$NODE_NAME" ] && log_success "Node Name:    $NODE_NAME"
+}
+
+# Print a clear, copy-pasteable error for non-interactive invocations
+# (curl | bash with no /dev/tty) when a required flag is missing.
+_missing_param_error() {
+    local param="$1"
+    echo ""
+    log_error "Missing required parameter: $param"
+    echo ""
+    log_error "No interactive terminal detected (running under curl | bash, CI, or similar)."
+    log_error "All required parameters must be provided as flags in this mode:"
+    echo ""
+    log_error "  curl -fsSL https://github.com/bekirmfr/DeCloud.NodeAgent/releases/latest/download/install.sh \\"
+    log_error "    | sudo bash -s -- \\"
+    log_error "        --orchestrator https://decloud.stackfi.tech \\"
+    log_error "        --wallet 0xYourWalletAddress \\"
+    log_error "        --name \"MyNode\" \\"
+    log_error "        --region us-east-1 \\"
+    log_error "        --zone us-east-1-nyc-1a"
+    echo ""
+    log_error "Or download install.sh first and run it interactively to be prompted:"
+    log_error "  curl -fsSL https://github.com/bekirmfr/DeCloud.NodeAgent/releases/latest/download/install.sh -o install.sh"
+    log_error "  sudo bash install.sh"
+    echo ""
+    exit 1
+}
+
+# Reconstruct /etc/decloud/install-params from the current variable state.
+# Called after check_required_params if any value was prompted, so that
+# 'decloud update' has a complete params file to re-run install non-interactively.
+save_install_params_from_vars() {
+    mkdir -p /etc/decloud
+    {
+        echo "# DeCloud node install parameters"
+        echo "# Written by install.sh on $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "# Used by: decloud update"
+        echo "# Reconstructed from runtime state after interactive prompts."
+        echo "--orchestrator"
+        echo "$ORCHESTRATOR_URL"
+        echo "--wallet"
+        echo "$NODE_WALLET"
+        [ -n "$NODE_NAME" ]   && { echo "--name";   echo "$NODE_NAME"; }
+        [ -n "$NODE_REGION" ] && { echo "--region"; echo "$NODE_REGION"; }
+        [ -n "$NODE_ZONE" ]   && { echo "--zone";   echo "$NODE_ZONE"; }
+        [ -n "${AGENT_PORT:-}" ]    && [ "$AGENT_PORT"     != "5100"  ] && { echo "--port"; echo "$AGENT_PORT"; }
+        [ -n "${WIREGUARD_PORT:-}" ] && [ "$WIREGUARD_PORT" != "51821" ] && { echo "--wg-port"; echo "$WIREGUARD_PORT"; }
+        [ "${SKIP_DOWNLOAD:-false}"  = true ] && echo "--skip-download"
+        [ "${SKIP_WIREGUARD:-false}" = true ] && echo "--skip-wireguard"
+        [ "${SKIP_LIBVIRT:-false}"   = true ] && echo "--skip-libvirt"
+        [ -n "${RELEASE_VERSION:-}" ]  && { echo "--version";          echo "$RELEASE_VERSION"; }
+        [ -n "${RELEASE_BASE_URL:-}" ] && { echo "--release-base-url"; echo "$RELEASE_BASE_URL"; }
+    } > /etc/decloud/install-params
+    chmod 600 /etc/decloud/install-params
 }
 
 # ============================================================
