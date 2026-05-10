@@ -271,8 +271,8 @@ load_install_params() {
     local port wg_port
     port=$(_read_setting "agent_port")
     wg_port=$(_read_setting "wireguard_port")
-    [[ -n "$port" ]]    && [[ "$port" != "5100" ]]  && SAVED_PARAMS+=(--port "$port")
-    [[ -n "$wg_port" ]] && [[ "$wg_port" != "51821" ]] && SAVED_PARAMS+=(--wg-port "$wg_port")
+    [[ -n "$port" ]]    && [[ "$port" != "5100" ]]  && SAVED_PARAMS+=(--port "$port") || true
+    [[ -n "$wg_port" ]] && [[ "$wg_port" != "51821" ]] && SAVED_PARAMS+=(--wg-port "$wg_port") || true
 }
 
 # Find the node agent install.sh script
