@@ -35,24 +35,25 @@ Maintainers debugging install/update/uninstall behavior can jump to
 - [2. Commands](#2-commands)
 - [3. Settings model](#3-settings-model)
 - [4. Cryptographic invariants](#4-cryptographic-invariants)
-- [5. VM compliance handling](#5-vm-compliance-handling)
-- [6. Trust model](#6-trust-model)
+- [5. Continuous drift detection](#5-continuous-drift-detection)
+- [6. VM compliance handling](#6-vm-compliance-handling)
+- [7. Trust model](#7-trust-model)
 
 **Part 2 — Implementation Status**
-- [7. What's deployed today](#7-whats-deployed-today)
-- [8. The deferred work](#8-the-deferred-work)
+- [8. What's deployed today](#8-whats-deployed-today)
+- [9. The deferred work](#9-the-deferred-work)
 
 **Part 3 — Infrastructure Mechanics (current)**
-- [9. Overview of operations](#9-overview-of-operations)
-- [10. Fresh install](#10-fresh-install)
-- [11. Update](#11-update)
-- [12. Uninstall](#12-uninstall)
-- [13. On-disk layout](#13-on-disk-layout)
-- [14. Configuration](#14-configuration)
-- [15. Trust chain at runtime](#15-trust-chain-at-runtime)
-- [16. Common operator tasks](#16-common-operator-tasks)
-- [17. Recovery scenarios](#17-recovery-scenarios)
-- [18. Migration from legacy installs](#18-migration-from-legacy-installs)
+- [10. Overview of operations](#10-overview-of-operations)
+- [11. Fresh install](#11-fresh-install)
+- [12. Update](#12-update)
+- [13. Uninstall](#13-uninstall)
+- [14. On-disk layout](#14-on-disk-layout)
+- [15. Configuration](#15-configuration)
+- [16. Trust chain at runtime](#16-trust-chain-at-runtime)
+- [17. Common operator tasks](#17-common-operator-tasks)
+- [18. Recovery scenarios](#18-recovery-scenarios)
+- [19. Migration from legacy installs](#19-migration-from-legacy-installs)
 
 ---
 
@@ -60,35 +61,81 @@ Maintainers debugging install/update/uninstall behavior can jump to
 
 ## 1. States
 
-A node passes through five states. Each transition is driven by exactly
-one operator command.
+A node passes through four states. Each transition is driven by
+exactly one operator command.
 
 ```
-                                           configure
-                                       ┌───── (locality only;
-                                       │   re-register required)
-                                       │
-GONE ──install──► INSTALLED ──configure──► CONFIGURED ──register──► ENROLLED ──login──► ACTIVE
- ▲                                                                       ▲    │
- │                                                                       │    │
- │                                                                  login│    │ logout
- │                                                                       └────┘
+                                     configure
+                                  ┌──── (requires logout first
+                                  │      for locality/rate changes)
+                                  │
+GONE ──install──► CONFIGURED ──register──► ENROLLED ──login──► ACTIVE
+ ▲                                            ▲    │               │
+ │                                            │    │               │
+ │                                       login│    │ logout        │ logout
+ │                                            │    │               │
+ │                                            └────┘               │
+ │                                            ▲                    │
+ │                                            └────────────────────┘
  │
- └─────────────────────── uninstall (from any state) ─────────────────────────
+ └─────────────────── uninstall (from any state) ──────────────────
 ```
 
 | State | What it means | What's persisted |
 | --- | --- | --- |
 | `GONE` | Nothing on the machine | Nothing |
-| `INSTALLED` | Binaries on disk, wallet declared, orchestrator URL recorded | Minimal `/etc/decloud/settings` (wallet + orchestrator); systemd unit installed but service idle |
-| `CONFIGURED` | Operational settings declared (locality, name, rates) but orchestrator hasn't seen them | Full `/etc/decloud/settings` |
-| `ENROLLED` | Orchestrator knows this node, has issued credentials, has computed obligations | Above + `/etc/decloud/credentials` (JWT, refresh token, obligations) |
-| `ACTIVE` | Heartbeating, with a fresh wallet signature attesting the node is running registered settings | All of the above + active heartbeat loop |
+| `CONFIGURED` | Binaries on disk, wallet declared, operational settings written, orchestrator hasn't seen them | `/opt/decloud/` binaries; `/etc/decloud/settings` (full); systemd unit installed but service idle |
+| `ENROLLED` | Orchestrator knows this node, has issued credentials, has computed obligations; node is heartbeating but **not schedulable** | Above + `/etc/decloud/credentials` (JWT); active heartbeat loop |
+| `ACTIVE` | Heartbeating **and schedulable** — orchestrator will place VMs here | Same as ENROLLED + scheduling flag set |
 
-**Important:** `ENROLLED ⇄ ACTIVE` oscillates freely. A node can `logout`
-and `login` repeatedly without re-running register or configure. Login
-signs the *current* settings; if local settings have drifted from what
-was enrolled, login fails until the operator re-registers.
+### Why four states, not five
+
+Earlier design rounds separated `INSTALLED` (binaries + wallet only)
+from `CONFIGURED` (binaries + wallet + operational settings). In
+practice every installation provides operational settings in the same
+step — there is no useful operational posture where the node has
+binaries and a wallet but no locality. Merging the two removes a state
+that existed to model a checkpoint in `install.sh`, not a meaningful
+node posture.
+
+### ENROLLED vs ACTIVE: the scheduling boundary
+
+`ENROLLED ⇄ ACTIVE` is an operational toggle, not a cryptographic
+ceremony.
+
+An `ENROLLED` node is heartbeating — the orchestrator sees its
+metrics, sees its running VMs, knows it's alive. But the scheduler
+will not place new VMs on it. This gives the operator a window to
+change settings, wait for migrations, perform maintenance, or simply
+pause.
+
+An `ACTIVE` node is enrolled and additionally schedulable. `login`
+flips the flag; `logout` clears it.
+
+The wallet is not involved in this toggle. The wallet speaks at
+`register`, where it has something to say ("I attest to this
+locality"). Login and logout speak at the scheduler, where they have
+something to say ("I'm ready" or "I'm pausing"). Each signal goes to
+the system boundary where it belongs.
+
+### Unattended restart
+
+Because login is a lightweight, JWT-authenticated readiness signal
+(not a wallet ceremony), the node agent can auto-login on startup if
+valid credentials exist on disk. A node that reboots at 3 AM comes
+back online and schedulable without operator intervention.
+
+The agent startup sequence:
+
+1. Check for `/etc/decloud/credentials` — if absent, wait for
+   `decloud register`
+2. Credentials present → begin heartbeating (ENROLLED)
+3. Auto-call `POST /api/nodes/{id}/login` using existing JWT → ACTIVE
+
+If the operator logged out before the reboot (the `logged-out`
+sentinel file exists at `/etc/decloud/logged-out`), the agent
+heartbeats but does **not** auto-login. The operator's intent to
+pause is preserved across restarts.
 
 ---
 
@@ -98,58 +145,93 @@ Seven commands cover every state transition.
 
 ### `decloud install`
 
-Installs binaries; prompts for wallet address; records orchestrator URL.
+Installs binaries, prompts for wallet address, records orchestrator
+URL, and collects operational settings (locality, name).
 
 | Aspect | Detail |
 | --- | --- |
-| **Inputs** | `--wallet 0x...` (required), `--orchestrator <URL>` (defaults to `https://decloud.stackfi.tech`) |
-| **State change** | `GONE` → `INSTALLED` |
-| **Side effects** | Binaries placed at `/opt/decloud/`; CLI at `/usr/local/bin/decloud`; systemd unit installed; minimal `/etc/decloud/settings` written |
+| **Inputs** | `--wallet 0x...` (required), `--orchestrator <URL>` (defaults to `https://decloud.stackfi.tech`), `--country <CC>`, `--region <region>`, `--zone <zone>`, `--name <text>` |
+| **State change** | `GONE` → `CONFIGURED` |
+| **Side effects** | Binaries placed at `/opt/decloud/`; CLI at `/usr/local/bin/decloud`; systemd unit installed; `/etc/decloud/settings` written |
 | **Network** | Fetches release artifacts from GitHub; verifies cosign + SHA-256 |
-| **Failure mode** | Binaries removed on rollback; wallet not yet declared; node remains GONE |
+| **Failure mode** | Binaries removed on rollback; node remains GONE |
+| **Validation** | Country must be in `countries.json`; region in `regions.json`; zone format validated |
 
-After install the node is on disk but has no operational settings beyond
-wallet/orchestrator. The agent service is not started. The operator
-must `configure` next.
+After install the node is on disk with full settings but the
+orchestrator hasn't seen them. The agent service is installed but
+idle. The operator must `register` next.
 
 ### `decloud configure`
 
-Commits operational settings: locality, display name, service rates,
-capacity preferences.
+Updates operational settings: locality, display name, service rates.
 
 | Aspect | Detail |
 | --- | --- |
 | **Inputs** | `--country <CC>`, `--region <region>`, `--zone <zone>`, `--name <text>`, `--description <text>`, `--rate-cpu-hour <amount>`, etc. |
-| **State change** | `INSTALLED` → `CONFIGURED` (or `CONFIGURED` → `CONFIGURED'` for updates) |
+| **State change** | `CONFIGURED` → `CONFIGURED'` (pre-enrollment updates) |
 | **Side effects** | Updates `/etc/decloud/settings`; regenerates `appsettings.Production.json`; restarts agent service |
 | **Network** | None — purely local |
 | **Validation** | Country must be in `countries.json`; region in `regions.json`; zone format validated; client-side check via `--validate` |
-| **Refused if** | Node is `ENROLLED` and the change includes locality fields — locality changes on enrolled nodes go through `register` (which validates VM compliance) |
+| **Refused if** | Node is ENROLLED or ACTIVE and the change includes locality or rate fields. Operator must `logout` first, then configure, then `register` to commit. |
 
 The settings written are *staged*: the agent will read them on next
 start, but the orchestrator has not seen them. The operator must
 `register` to commit to the orchestrator.
 
-Cosmetic-only updates (`--name`, `--description`) on enrolled nodes
-are pushed to the orchestrator immediately via the existing profile
-endpoint — no re-register needed.
+**Cosmetic-only updates** (`--name`, `--description`) on enrolled or
+active nodes are allowed without logout. These are pushed to the
+orchestrator immediately via the existing profile endpoint — no
+re-register needed.
+
+**Locality and rate changes** on enrolled nodes require the full
+sequence:
+
+```bash
+sudo decloud logout                      # stop scheduling, open settings window
+sudo decloud configure --country BR --region sa-east
+sudo decloud register                    # wallet ceremony, VM compliance check
+# ... wait for migrations if flagged VMs ...
+sudo decloud login                       # resume scheduling when ready
+```
+
+### Why configure requires logout for locality/rate changes
+
+Accepting new VMs under settings the operator is about to change is
+wrong. An enrolled node declaring `country: DE` with VMs placed under
+German jurisdiction requirements should not accept more VMs while
+the operator is mid-change to `country: BR`. Logout removes the node
+from scheduling *before* settings change, not after.
+
+The refusal is in the CLI, not the orchestrator. `decloud configure
+--country BR` while ENROLLED or ACTIVE prints:
+
+```
+✗ Cannot change locality while enrolled. Run 'decloud logout' first.
+
+  The full sequence for locality/rate changes:
+    1. sudo decloud logout          # pause scheduling
+    2. sudo decloud configure ...   # change settings
+    3. sudo decloud register        # wallet-sign and commit
+    4. sudo decloud login           # resume when ready
+```
 
 ### `decloud register`
 
 Pushes current settings to the orchestrator; receives credentials and
-computes obligations.
+computes obligations. This is the only command that requires the
+wallet.
 
 | Aspect | Detail |
 | --- | --- |
 | **Inputs** | None (reads `/etc/decloud/settings`) |
-| **State change** | `CONFIGURED` → `ENROLLED` (first registration) or `ENROLLED` → `ENROLLED'` (re-registration) |
+| **State change** | `CONFIGURED` → `ENROLLED` (first registration) or `ENROLLED` → `ENROLLED'` (re-registration after settings change) |
 | **Side effects** | Wallet-signing flow (QR + sign.html); writes `/etc/decloud/credentials`; stamps `/etc/decloud/settings.locality` block with signature |
 | **Network** | `POST /api/nodes/register` |
 | **Authorization** | Wallet signature over canonical locality message; 5-minute validity window with ±2-minute orchestrator skew tolerance |
 | **VM compliance** | Re-registration path: orchestrator walks running VMs; flags non-compliant ones for migration scheduler |
 
 The orchestrator's response includes:
-- JWT (used by subsequent authenticated calls)
+- JWT (used by all subsequent authenticated calls)
 - Obligations: system VMs to host (DHT/BlockStore/Relay), attestation cadence
 - List of any non-compliant VMs (re-registration only)
 
@@ -173,50 +255,67 @@ jurisdictional placement of tenant workloads.
 Note: only `country` and `region` are in the signed payload. `zone` is
 operator-side organizational metadata and is not signed.
 
+After first registration, the node enters ENROLLED state:
+heartbeating, visible to the orchestrator, but not yet schedulable.
+The operator runs `login` when ready to accept workloads.
+
+After re-registration (settings change), the node returns to ENROLLED
+(paused). The operator can inspect the VM compliance results, wait
+for migrations to complete, and `login` when satisfied.
+
 ### `decloud login`
 
-Activates the heartbeat loop. Proves to the orchestrator that the node
-is currently running with the registered settings.
+Signals operational readiness. The scheduler begins considering this
+node for VM placement.
 
 | Aspect | Detail |
 | --- | --- |
-| **Inputs** | None (reads `/etc/decloud/credentials` and `/etc/decloud/settings`) |
+| **Inputs** | None (reads `/etc/decloud/credentials`) |
 | **State change** | `ENROLLED` → `ACTIVE` |
-| **Side effects** | Wallet-signs canonical locality message with current timestamp; agent begins heartbeat loop |
-| **Network** | `POST /api/nodes/{id}/login` (with fresh signature) |
-| **Failure mode** | If orchestrator computes a different canonical message than the one signed (settings drift), login is rejected with structured error pointing at the drifted field |
+| **Side effects** | Sets scheduling-ready flag at orchestrator; clears `/etc/decloud/logged-out` sentinel if present |
+| **Network** | `POST /api/nodes/{id}/login` (JWT-authenticated) |
+| **Authorization** | Existing JWT — no wallet involvement |
+| **Failure mode** | If credentials are missing or invalid, login fails with a message pointing at `register` |
 
-This is the cryptographic checkpoint of the lifecycle. The wallet signs
-the live settings; the orchestrator validates against what it has
-stored from register; mismatch means either the node has been tampered
-with or settings were edited locally without re-registering.
+Login is lightweight. No wallet ceremony, no QR code, no signature
+flow. The node is already enrolled and heartbeating — login just
+flips the scheduling flag. This is what makes unattended restart
+possible: the agent can auto-login on startup without human
+involvement.
 
-The signature uses the same canonical message format as register. The
-5-minute validity window applies — operator must complete the login
-flow within 5 minutes of the wallet signing.
+The orchestrator validates that the node is enrolled and that the JWT
+is valid. If the node's heartbeat-carried settings hash doesn't match
+the orchestrator's stored state, login is refused with a structured
+"settings drift detected" error pointing at the drifted field.
 
 ### `decloud logout`
 
-Clears local credentials. Optional courtesy notification to orchestrator.
+Pauses scheduling. The node continues heartbeating and hosting its
+existing VMs — it simply stops receiving new ones.
 
 | Aspect | Detail |
 | --- | --- |
 | **Inputs** | None |
-| **State change** | `ACTIVE` → `ENROLLED` (orchestrator-side state preserved) |
-| **Side effects** | Removes `/etc/decloud/credentials`; stops heartbeat loop |
-| **Network** | Best-effort `POST /api/nodes/{id}/logout` (graceful pause) |
+| **State change** | `ACTIVE` → `ENROLLED` (or no-op if already ENROLLED) |
+| **Side effects** | Clears scheduling-ready flag at orchestrator; writes `/etc/decloud/logged-out` sentinel to prevent auto-login on restart |
+| **Network** | `POST /api/nodes/{id}/logout` (JWT-authenticated) |
+| **Credentials** | Preserved — credentials are NOT removed |
 
-The node remains enrolled at the orchestrator. JWT is technically still
-valid (in the orchestrator's records) until the next `register` or
-`uninstall`. To resume operation, the operator runs `login` again —
-which re-signs current settings, validates against the orchestrator's
-stored state, and resumes heartbeating.
+The node remains enrolled, heartbeating, and running its existing
+VMs. Only new scheduling is paused. The operator can:
+
+- Change settings (`configure`) and re-register
+- Drain existing workloads (`vm drain`)
+- Perform maintenance
+- Resume at any time (`login`)
 
 If the operator skips logout and just stops the service (or the node
 crashes), the orchestrator's heartbeat-timeout safety net detects
 silence within ~5 minutes and marks the node Offline. The two
-mechanisms coexist: explicit logout for graceful pause, timeout as
-the fallback.
+mechanisms serve different purposes: logout is an intentional
+scheduling pause (node is healthy, heartbeating); timeout is a
+failure detection (node is unresponsive). They coexist without
+overlap.
 
 ### `decloud vm drain` / `decloud vm migrate`
 
@@ -224,11 +323,18 @@ Workload movement primitives. **Deferred to Phase 2.5b** — stub
 implementations in v1 print "not yet implemented; manually migrate or
 destroy VMs before uninstall."
 
+Drain composes on logout. Conceptually:
+
+```
+drain = logout + request migration of existing VMs
+```
+
 When implemented, these will be:
 
-**`decloud vm drain`** — Mark this node as winding down. Orchestrator
-stops scheduling new VMs onto it; existing VMs are flagged for
-migration to other eligible nodes via the migration scheduler.
+**`decloud vm drain`** — Logout (if not already), then mark existing
+VMs for migration. Orchestrator's migration scheduler moves them to
+other eligible nodes. The operator can monitor progress and `login`
+when the node is empty, or proceed to `uninstall`.
 
 **`decloud vm drain --to <node-id>`** — Same as above, but prefer
 migration to a specific operator-controlled target node. Wallet
@@ -239,7 +345,8 @@ node; if it's ineligible for a given VM, that VM falls back to
 general scheduling.
 
 **`decloud vm migrate <vm-id> --to <node-id>`** — Migrate one specific
-VM to a chosen target. Same wallet-equality rule.
+VM to a chosen target. Same wallet-equality rule. Does not imply
+logout — this is a single-VM operation, not a node-wide pause.
 
 These commands stay as stubs in v1 to establish the operator-facing
 CLI surface. Operators discover them via `decloud vm --help`. When
@@ -256,7 +363,7 @@ Full teardown.
 | **State change** | Any → `GONE` |
 | **Side effects** | Notifies orchestrator (deregister); removes binaries, credentials, settings; optionally removes `decloud` user |
 | **Network** | `POST /api/nodes/{id}/deregister` (best-effort); orchestrator removes node record and adds JWT to revocation list |
-| **Refused if** | Running VMs detected and `--force` not provided |
+| **Refused if** | Running tenant VMs detected and `--force` not provided. System VMs are destroyed unconditionally. |
 | **JWT revocation** | Orchestrator-side revocation list ensures stale credentials cannot authenticate even if re-presented later |
 
 Uninstall is the only path that produces the GONE state. There is no
@@ -265,6 +372,14 @@ uninstall, never an independent operation. (Earlier design rounds
 explored a separate `decloud deregister`; we landed on uninstall-as-
 the-only-path because the cases for needing deregister independently
 of uninstall did not survive scrutiny.)
+
+The recommended path for a clean departure:
+
+```bash
+sudo decloud vm drain        # migrate workloads off (when implemented)
+# ... wait for migrations ...
+sudo decloud uninstall       # clean teardown, no tenant VMs to destroy
+```
 
 ---
 
@@ -299,23 +414,32 @@ operational configuration.
 
 ### Field categories and mutability
 
-| Field | Category | Mutable while ENROLLED? | Authorization |
+| Field | Category | When changeable | Authorization |
 | --- | --- | --- | --- |
 | `wallet` | identity | Never (re-install required) | Cannot change |
 | `orchestrator_url` | identity | Never | Cannot change |
-| `locality.country` | locality (signed) | Re-register required | Wallet signature |
-| `locality.region` | locality (signed) | Re-register required | Wallet signature |
-| `locality.zone` | locality (cosmetic) | Re-register required | None (not signed) |
-| `profile.name` | cosmetic | Yes (no re-register) | JWT only |
-| `profile.description` | cosmetic | Yes (no re-register) | JWT only |
-| `rates.*` | service | Re-register required | Wallet signature |
+| `locality.country` | locality (signed) | Logout → configure → register | Wallet signature |
+| `locality.region` | locality (signed) | Logout → configure → register | Wallet signature |
+| `locality.zone` | locality (cosmetic) | Logout → configure → register | None (not signed) |
+| `profile.name` | cosmetic | Any time (no logout/re-register) | JWT only |
+| `profile.description` | cosmetic | Any time (no logout/re-register) | JWT only |
+| `rates.*` | service | Logout → configure → register | Wallet signature |
 
 Cosmetic updates flow through `decloud configure --name "X"` and use
-the orchestrator's profile endpoint directly — no re-register needed.
+the orchestrator's profile endpoint directly — no logout or re-register
+needed.
 
-Locality and rate updates require re-register: the orchestrator
-receives the new signed declaration, validates VM compliance, and
-returns any flagged VMs in the response.
+Locality and rate updates require the full sequence: logout (stop
+scheduling) → configure (change settings) → register (wallet-sign and
+commit, VM compliance check) → login (resume when ready).
+
+### Settings hash
+
+A SHA-256 hash of the settings file's canonical JSON representation
+(sorted keys, no whitespace) is computed by the node agent and
+included in every heartbeat payload. The orchestrator compares this
+hash against its stored state to detect drift continuously (see
+[§5 Continuous drift detection](#5-continuous-drift-detection)).
 
 ### Why zone is not signed
 
@@ -341,38 +465,94 @@ about a node's locality is what was registered. Local edits to
 `/etc/decloud/settings` without re-register cannot change orchestrator-
 side state.
 
-**(b) Login proves current local state matches registered state.**
-Every login signs the *current* canonical locality message. The
-orchestrator computes the canonical message it expects (from
-registered settings) and compares; signatures over different messages
-recover different signers. A drift in country or region between local
-and registered settings causes login to fail with a structured
-"settings drift detected" error.
+**(b) Continuous drift detection.** Every heartbeat carries a hash of
+the node's local settings. The orchestrator compares this against
+its stored state and detects drift within one heartbeat interval
+(~30 seconds). This is strictly stronger than a one-time check at
+login — it catches tampering continuously, not only at a ceremony.
+See [§5](#5-continuous-drift-detection).
 
 **(c) Wallet ownership required for jurisdictional changes.** A leaked
 JWT cannot change locality. Country/region updates require fresh wallet
-signature; the JWT alone is insufficient. (This is the entire point of
-the wallet-signature-bound design.)
+signature; the JWT alone is insufficient. The wallet signs at
+`register`, where jurisdictional claims have trust meaning. Routine
+operations (heartbeat, login, logout, profile updates) use the JWT.
 
 **(d) Revoked credentials stay revoked.** JWT revocation list survives
 orchestrator restarts (MongoDB-backed). A node uninstalled today cannot
 have its JWT replayed tomorrow. The check is on every authenticated
 request, not just heartbeat.
 
-**(e) Signature freshness bounded.** All wallet signatures expire 5
-minutes after the embedded timestamp, with ±2 minutes orchestrator
-skew tolerance. Captured signatures cannot be replayed days later.
-The timestamp is part of the signed payload, so an attacker cannot
-adjust it without invalidating the signature.
+**(e) Signature freshness bounded.** Wallet signatures at registration
+expire 5 minutes after the embedded timestamp, with ±2 minutes
+orchestrator skew tolerance. Captured registration signatures cannot
+be replayed days later. The timestamp is part of the signed payload,
+so an attacker cannot adjust it without invalidating the signature.
 
 These five together mean: if a node is `ACTIVE` and heartbeating, the
-orchestrator has cryptographic proof that the node is currently running
-the locality settings the wallet authorized within the last few
-minutes.
+orchestrator has cryptographic proof that (a) the locality was
+wallet-authorized at registration time, (b) the node's local settings
+currently match what was registered, and (c) the node's operator has
+signaled readiness for scheduling.
 
 ---
 
-## 5. VM compliance handling
+## 5. Continuous drift detection
+
+Drift detection uses the heartbeat — the system's natural liveness
+boundary — rather than a separate ceremony.
+
+### How it works
+
+1. The node agent computes a SHA-256 hash of the canonical JSON
+   representation of `/etc/decloud/settings` (sorted keys, no
+   whitespace, excluding transient fields like `signature` and
+   `signed_at`).
+
+2. Every heartbeat payload includes this hash in the
+   `settingsHash` field.
+
+3. The orchestrator computes the expected hash from its stored
+   registration data and compares.
+
+4. On mismatch:
+   - The orchestrator logs a warning with the node ID
+   - The node's scheduling eligibility is suspended (even if ACTIVE)
+   - The heartbeat response includes a structured `settingsDrift`
+     error identifying the drifted field(s)
+   - The node agent logs the drift warning locally
+
+5. To resolve: the operator must re-register (which re-commits
+   settings with wallet authority) or revert the local edit.
+
+### What this replaces
+
+The earlier design used a wallet-signed locality message at login time
+as the drift detection mechanism. This had two problems: it only
+checked at login (not continuously), and it required the wallet for
+an operational action (login), which prevented unattended restart.
+
+Heartbeat-carried hash detection is strictly stronger: it checks every
+~30 seconds instead of once, and it doesn't require the wallet at
+login time. The wallet speaks at registration, where it has something
+to attest. The heartbeat carries operational state, where drift
+detection belongs.
+
+### What drift detection does NOT do
+
+Drift detection is an integrity check, not a security boundary. A
+compromised node agent could lie about its settings hash. The security
+boundary is the wallet signature at registration — the orchestrator
+will not accept new locality claims without a fresh wallet signature.
+Drift detection catches *accidental* divergence (operator edited the
+file and forgot to re-register) and *naive* tampering (someone edited
+the file without understanding the system). Sophisticated attacks
+against a compromised agent require different mitigations (remote
+attestation, hardware roots of trust) that are out of scope.
+
+---
+
+## 6. VM compliance handling
 
 When `decloud register` runs on an already-enrolled node and the
 locality has changed, the orchestrator:
@@ -406,7 +586,14 @@ over their node; the orchestrator doesn't refuse the locality change.
 Tenant workload safety is preserved by the migration scheduler picking
 up flagged VMs on its next cycle.
 
-The flagging mechanism uses two new fields on `VirtualMachine`:
+Because the operator must `logout` before changing locality, no new
+VMs are being scheduled onto the node during this window. Existing
+VMs continue running (heartbeat is active) while the migration
+scheduler moves non-compliant ones. The operator can monitor progress
+and `login` when the node is clean — or login immediately and let
+migrations complete asynchronously.
+
+The flagging mechanism uses two fields on `VirtualMachine`:
 
 ```csharp
 public DateTime? NonCompliantSince { get; set; }
@@ -419,30 +606,46 @@ as a trigger today.
 
 ---
 
-## 6. Trust model
+## 7. Trust model
 
-Three credentials, three purposes:
+Two credentials, two purposes:
 
 | Credential | Source | Lifetime | Used for |
 | --- | --- | --- | --- |
-| **Wallet** | Operator's external wallet (MetaMask, hardware wallet, etc.) | Forever (operator-controlled) | Initial registration; locality changes; rate changes |
-| **JWT** | Issued by orchestrator at register | Hours, refreshable | Heartbeat, profile updates, normal API calls |
-| **Locality signature** | Generated at register/login from wallet | 5 minutes from `signed_at` | Validating local settings match registered settings |
+| **Wallet** | Operator's external wallet (MetaMask, hardware wallet, etc.) | Forever (operator-controlled) | Registration; locality changes; rate changes |
+| **JWT** | Issued by orchestrator at register | Hours, refreshable | Heartbeat, login, logout, profile updates, all routine API calls |
 
 The wallet is the trust root. JWTs are convenience tokens issued after
-wallet authentication. Locality signatures are short-lived attestations
-that "yes, the wallet currently endorses these settings."
+wallet authentication.
 
-Three-credential split lets the JWT carry routine traffic without
-involving the wallet, while ensuring jurisdictionally-significant
-operations (initial register, locality change, rate change, etc.)
-require fresh wallet involvement.
+This two-credential split keeps the wallet involved only where it has
+genuine trust meaning — asserting jurisdictional claims and rate
+commitments. All routine operations run on the JWT. The wallet never
+needs to be present for day-to-day node operation, which is why
+unattended restart works.
+
+### Why not three credentials
+
+An earlier design revision included a third credential: a short-lived
+"locality signature" generated at login time, where the wallet re-signed
+the current settings as proof of ongoing endorsement. This was removed
+because:
+
+1. It required the wallet at login, preventing unattended restart
+2. Drift detection is better served continuously via heartbeat-carried
+   settings hash than by a one-time check at a ceremony
+3. The wallet's trust contribution happens at registration, where the
+   jurisdictional claim is made — re-attesting the same claim at login
+   adds ceremony without adding security
+
+The wallet signs once at register. The heartbeat validates continuously.
+Each mechanism does what it's good at.
 
 ---
 
 # Part 2 — Implementation Status
 
-## 7. What's deployed today
+## 8. What's deployed today
 
 The currently-deployed lifecycle is simpler than the target. Two
 operational states, four commands:
@@ -455,9 +658,9 @@ GONE ──install──► RUNNING ──login──► AUTHENTICATED ──log
 
 | Deployed command | Behavior | Target equivalent |
 | --- | --- | --- |
-| `install` | Prompts for wallet, country, region, zone, name; installs binaries; saves to `install-params` | `install` + `configure` (combined) |
+| `install` | Prompts for wallet, country, region, zone, name; installs binaries; saves to `install-params` | `install` (combined install + configure) |
 | `login` | Wallet signing flow → registers with orchestrator → obtains JWT → starts heartbeat | `register` + `login` (combined, no separate enrollment step) |
-| `logout` | Removes credentials; stops service | `logout` |
+| `logout` | Removes credentials; stops service | `logout` (but destructive — deletes credentials rather than preserving them) |
 | `uninstall` | Deregisters with orchestrator; removes binaries | `uninstall` (no JWT revocation list) |
 
 Today's `decloud login` does what target's `register` and `login`
@@ -471,14 +674,59 @@ support:
 - Settings updates without full reinstall (every change goes through
   edit-install-params + `decloud update`)
 - Distinct enroll vs activate steps
-- Cryptographic detection of local settings drift (no signature is
-  stored against which to validate)
+- Continuous drift detection (no settings hash in heartbeat)
 - VM compliance flagging on locality change (no re-register-with-
   validation flow)
 - JWT revocation list (uninstall removes node record but doesn't
   blacklist the JWT)
+- Non-destructive logout (current logout deletes credentials rather
+  than preserving enrollment)
+- Unattended restart (current login requires wallet ceremony)
 
-## 8. The deferred work
+### Signing message format gap
+
+The current `cli-decloud-node` produces a signing message that does
+not match the target canonical locality message. The current format:
+
+```
+Sign this message to authorize your DeCloud node:
+Machine ID: {machine_id}
+Wallet: {wallet_address}
+Hostname: {hostname}
+Timestamp: {unix_epoch}
+NO FUNDS WILL BE TRANSFERRED...
+```
+
+The target canonical format (§2, `decloud register`):
+
+```
+DeCloud Node Locality Declaration
+Country:    DE
+Region:     eu-central
+Machine ID: <machine-id>
+Wallet:     <wallet-address>
+Timestamp:  2026-05-09T11:42:30Z
+...
+```
+
+The current message contains **no country or region** — the fields
+that give the wallet signature its trust meaning. It uses Unix epoch
+timestamps instead of ISO 8601. And the orchestrator's
+`VerifyWalletSignature` checks signer identity but does not
+reconstruct the canonical message or validate timestamp freshness.
+
+The migration path requires the orchestrator to accept both message
+formats during a transition period, with a version flag on the node
+record indicating which format was used at last registration.
+
+### Deregister safety gap
+
+The orchestrator's deregister endpoint does not refuse deregistration
+when tenant VMs are still running. `uninstall.sh` destroys all VMs
+(system and tenant alike) before notifying the orchestrator. The
+target design expects the orchestrator to guard against this.
+
+## 9. The deferred work
 
 Implementing the target lifecycle requires changes across CLI, node
 agent runtime, and orchestrator:
@@ -486,49 +734,67 @@ agent runtime, and orchestrator:
 ### Node-side (CLI changes)
 
 - New `decloud configure` subcommand: read/write JSON settings;
-  regenerate appsettings; restart agent; refused for locality changes
-  while enrolled
+  regenerate appsettings; restart agent; refused for locality/rate
+  changes while ENROLLED or ACTIVE (must logout first)
 - Split current `decloud login` into:
   - `decloud register` — wallet signing + registration request +
-    credentials capture
-  - `decloud login` — sign current settings + activate heartbeat
+    credentials capture (the only command involving the wallet)
+  - `decloud login` — JWT-authenticated readiness signal (lightweight,
+    supports unattended restart)
+- Redesign `decloud logout` to preserve credentials and write
+  `/etc/decloud/logged-out` sentinel instead of deleting credentials
 - New `decloud vm drain` and `decloud vm migrate` stub subcommands
   (CLI surface for 2.5b)
 - Settings file format migration: `install-params` (newline-separated
   args) → `settings` (JSON with locality block)
-- `install.sh` slim-down: prompt for wallet only; locality moves to
-  `decloud configure`
+- `install.sh` updated to collect operational settings (country,
+  region, zone, name) alongside wallet, producing the CONFIGURED
+  state directly
+- Auto-login on agent startup: if credentials exist and no
+  `logged-out` sentinel, agent calls login endpoint automatically
 
 ### Node-agent runtime
 
 - Read settings from JSON `/etc/decloud/settings` instead of
   `install-params`-derived `appsettings.Production.json`
-- Locality signature generation hook (invoke wallet helper with
-  current canonical message)
-- Heartbeat-pause flag at `/etc/decloud/logged-out` (signals graceful
-  pause without removing credentials)
+- Compute settings hash (SHA-256 of canonical JSON) and include in
+  every heartbeat payload
+- Respect `/etc/decloud/logged-out` sentinel: heartbeat but do not
+  auto-login
+- Process `settingsDrift` errors from heartbeat response: log
+  warning, suspend scheduling eligibility locally
 
 ### Orchestrator-side
 
-- New `POST /api/nodes/{id}/login` endpoint: validates locality
-  signature against stored state; returns structured drift error
-  on mismatch
-- Locality signature validation in `RegisterNodeAsync`: canonical
-  message construction, timestamp window check, signature verification
+- New `POST /api/nodes/{id}/login` endpoint: validates JWT, checks
+  settings hash matches stored state, sets scheduling-ready flag.
+  Lightweight — no wallet signature involved.
+- New `POST /api/nodes/{id}/logout` endpoint: clears scheduling-ready
+  flag. Node continues heartbeating.
+- Settings hash validation in heartbeat processing: compare
+  `settingsHash` field against stored state, include drift error in
+  response on mismatch, suspend scheduling eligibility
+- Canonical locality message construction and timestamp validation
+  in `RegisterNodeAsync`: message format per §2, 5-minute window
+  with ±2-minute skew tolerance
 - `FlagNonCompliantVms` helper: walks running VMs, checks each
   against new locality, sets `NonCompliantSince` / `NonComplianceReason`
 - New `JwtRevocationService`: MongoDB collection `revoked_jwts`,
   in-memory cache, middleware integration in JWT validation
 - Deregister endpoint formalization: revoke JWT on success, refuse
   deregister with running tenant VMs unless `--force`
+- Add `NonCompliantSince` and `NonComplianceReason` fields to
+  `VirtualMachine` model
+- Add `RequiredCountry`, `RequiredJurisdictionTag`, and
+  `ForbiddenCountries` fields to VM placement constraints
 
 ### Documentation
 
 - Operator-facing migration guide: how existing nodes (using deployed
   model) move to the target lifecycle when it ships
 - The `decloud configure` reference page
-- The locality-signature semantics page (probably folded into
-  `LOCALITY_STANDARDS.md` since it's a locality concern)
+- The signing message format migration plan (dual-format support
+  during transition)
 
 ### Why deferred
 
@@ -559,7 +825,7 @@ when those land and a driver materializes.
 > verification, version management, and recovery, not with operator
 > command semantics.
 
-## 9. Overview of operations
+## 10. Overview of operations
 
 Three lifecycle operations, each with one canonical entry point:
 
@@ -572,7 +838,7 @@ Three lifecycle operations, each with one canonical entry point:
 Update is "install with saved parameters" — same script, same code path,
 just non-interactive. There is one installation procedure.
 
-## 10. Fresh install
+## 11. Fresh install
 
 The single command an operator pastes:
 
@@ -581,9 +847,10 @@ curl -fsSL https://github.com/bekirmfr/DeCloud.NodeAgent/releases/latest/downloa
   | sudo bash -s -- \
       --orchestrator https://decloud.stackfi.tech \
       --wallet 0xYourWalletAddress \
+      --country TR \
       --name "MyNode" \
-      --region "us-east-1" \
-      --zone "us-east-1-nyc-1a"
+      --region "eu-east" \
+      --zone "eu-east-ist-1a"
 ```
 
 Wall-clock time on a fresh Ubuntu box: 3–5 minutes. On a re-run with
@@ -597,7 +864,8 @@ most dependencies cached: ~30 seconds.
      in this mode)
 
 2. **Argument parse** (`install.sh`, ~5 s)
-   - Reads `--orchestrator`, `--wallet`, `--name`, `--region`, `--zone`
+   - Reads `--orchestrator`, `--wallet`, `--country`, `--name`,
+     `--region`, `--zone`
    - Persists arguments to `/etc/decloud/install-params` (used by
      `decloud update` later)
    - **If a required flag is missing**: prompts via `/dev/tty` if a
@@ -653,10 +921,10 @@ most dependencies cached: ~30 seconds.
    - Unit file: `/etc/systemd/system/decloud-node-agent.service`
    - `WorkingDirectory=/opt/decloud/publish`
    - `ExecStart=/usr/bin/dotnet /opt/decloud/publish/DeCloud.NodeAgent.dll`
-   - Service enabled and started; idle until login
+   - Service enabled and started; idle until register
 
 10. **Done**
-    - Summary box, next-steps prompt for `decloud login`
+    - Summary box, next-steps prompt for `decloud register`
 
 ### Interactive prompts
 
@@ -667,6 +935,7 @@ flags trigger interactive prompts:
 ```
 Orchestrator URL [https://decloud.stackfi.tech]: 
 Wallet address (0x...): 0x...
+Country code (ISO 3166-1 alpha-2): TR
 ```
 
 The orchestrator default is hardcoded; the wallet is required and
@@ -675,7 +944,7 @@ validated in a loop until a valid format is provided.
 When run truly non-interactively (CI, no controlling terminal),
 missing required flags abort with copy-pasteable usage examples.
 
-## 11. Update
+## 12. Update
 
 ```bash
 sudo decloud update
@@ -725,9 +994,9 @@ release. This means:
   re-run.
 - Does **not** roll back automatically on failure. If the new release
   fails to start, the symlink already points at the new version. See
-  [Recovery scenarios](#17-recovery-scenarios).
+  [Recovery scenarios](#18-recovery-scenarios).
 
-## 12. Uninstall
+## 13. Uninstall
 
 ```bash
 sudo decloud uninstall
@@ -754,7 +1023,7 @@ Same hybrid resolution as update: tries to fetch the latest
 The user is prompted to confirm before destructive actions unless
 `--force` is passed.
 
-## 13. On-disk layout
+## 14. On-disk layout
 
 After a successful install, the canonical tree:
 
@@ -813,8 +1082,9 @@ After a successful install, the canonical tree:
 
 /etc/decloud/
 ├── install-params                                   (mode 600, used by 'decloud update')
-├── credentials                                      (after 'decloud login')
-├── pending-auth                                     (during login flow)
+├── credentials                                      (after 'decloud register')
+├── logged-out                                       (sentinel: operator paused scheduling)
+├── pending-auth                                     (during register flow)
 └── ssh-ca/                                          (SSH CA private key + cert)
 
 /etc/systemd/system/decloud-node-agent.service       (uses /opt/decloud/publish symlink)
@@ -845,7 +1115,7 @@ When the target operator lifecycle (Part 1) ships,
 install/update under the new model. Until that work lands, the file
 remains `install-params` with the args-pair format described below.
 
-## 14. Configuration
+## 15. Configuration
 
 ### Where settings live (current implementation)
 
@@ -853,7 +1123,7 @@ remains `install-params` with the args-pair format described below.
 | --- | --- | --- |
 | Orchestrator URL, wallet, name, region, zone | `/etc/decloud/install-params` | Edit and re-run `decloud update` |
 | `appsettings.Production.json` | Generated by `install.sh` from install-params | Regenerated on each install |
-| Node ID, API key | `/etc/decloud/credentials` (after login) | Removed by `logout`, regenerated on next login |
+| Node ID, API key | `/etc/decloud/credentials` (after register) | Removed by `uninstall`, regenerated on next register |
 | Machine ID | `/etc/machine-id` | OS-level, do not edit |
 | Node identity | `SHA-256(machine-id + wallet)` | Derived; changes if either input changes |
 
@@ -872,10 +1142,11 @@ they will be saved to install-params and used on subsequent updates.
 
 > **Future:** Under the target lifecycle (Part 1), settings changes
 > happen via `decloud configure --country DE`, with locality changes
-> requiring `decloud register` to commit cryptographically. This
-> deferred work is documented above in [Part 2](#part-2--implementation-status).
+> requiring the full logout → configure → register → login sequence.
+> This deferred work is documented above in
+> [Part 2](#part-2--implementation-status).
 
-## 15. Trust chain at runtime
+## 16. Trust chain at runtime
 
 Three layered claims, each with a different cryptographic anchor.
 The same chain runs on every install and every update.
@@ -916,7 +1187,7 @@ What this chain does **not** prove:
   download it first and inspect before running. install.sh is small
   and human-readable.
 
-## 16. Common operator tasks
+## 17. Common operator tasks
 
 | Task | Command |
 | --- | --- |
@@ -925,13 +1196,15 @@ What this chain does **not** prove:
 | Tail logs live | `sudo journalctl -u decloud-node-agent -f` |
 | Restart service | `sudo systemctl restart decloud-node-agent` |
 | Update to latest release | `sudo decloud update` |
-| Re-authenticate | `sudo decloud logout && sudo decloud login` |
+| Pause scheduling | `sudo decloud logout` |
+| Resume scheduling | `sudo decloud login` |
+| Change locality | `sudo decloud logout && sudo decloud configure --country BR --region sa-east && sudo decloud register && sudo decloud login` |
 | Inspect installed version | `cat /opt/decloud/current-version` |
 | Manual rollback to previous version | `sudo ln -sfn /opt/decloud/publish.$(cat /opt/decloud/previous-version) /opt/decloud/publish && sudo systemctl restart decloud-node-agent` |
 | Check installed binaries | `ls -la /opt/decloud/publish/` |
 | View saved install params | `sudo cat /etc/decloud/install-params` |
 
-## 17. Recovery scenarios
+## 18. Recovery scenarios
 
 ### Service fails to start after update
 
@@ -941,7 +1214,7 @@ journalctl -u decloud-node-agent -n 100 --no-pager
 
 Look for missing dependencies, permission errors, or appsettings
 validation failures. If the new version is broken, manual rollback per
-[Common operator tasks](#16-common-operator-tasks) above.
+[Common operator tasks](#17-common-operator-tasks) above.
 
 ### Cosign verification fails
 
@@ -957,7 +1230,7 @@ causes:
 Never bypass signature verification. There is no flag to disable it,
 intentionally.
 
-### Install completed but `decloud login` doesn't reach the wallet prompt
+### Install completed but `decloud register` doesn't reach the wallet prompt
 
 The Python authentication CLI (`cli-decloud-node`) needs the system
 Python with `web3`, `eth-account`, `requests`, `qrcode`, `pillow`.
@@ -985,9 +1258,22 @@ sudo ls -la /etc/decloud/credentials
 sudo journalctl -u decloud-node-agent -n 50 | grep -i 'heartbeat\|orchestrator'
 ```
 
-If credentials are missing, run `sudo decloud login` to re-authenticate.
+If credentials are missing, run `sudo decloud register` to
+re-authenticate with the wallet.
 
-## 18. Migration from legacy installs
+### Settings drift detected
+
+If heartbeat responses contain `settingsDrift` errors, the node's
+local settings don't match what the orchestrator has from registration.
+Either:
+
+1. Someone edited `/etc/decloud/settings` without re-registering —
+   revert the edit or run the full logout → configure → register →
+   login sequence
+2. A bug produced inconsistent state — inspect both sides and
+   re-register to reconcile
+
+## 19. Migration from legacy installs
 
 Earlier (pre-2.2.0) installs used `git clone` of the source repo plus
 `dotnet publish` on the node, leaving:
@@ -1033,6 +1319,7 @@ runtime is installed independently as `aspnetcore-runtime-8.0`.
 | `vm-cleanup.sh` | Per-VM cleanup helper |
 | `/opt/decloud/publish` | Active version symlink — the systemd unit points here |
 | `/etc/decloud/install-params` | Saved install arguments for `decloud update` (current; will become `settings` JSON under target lifecycle) |
-| `/etc/decloud/credentials` | JWT credentials (after login) |
+| `/etc/decloud/credentials` | JWT credentials (after register) |
+| `/etc/decloud/logged-out` | Sentinel file indicating operator-initiated scheduling pause; prevents auto-login on restart |
 | `/usr/local/share/decloud/install.sh` | Offline fallback for `decloud update` |
 | `/usr/local/share/decloud/uninstall.sh` | Offline fallback for `decloud uninstall` |

@@ -21,6 +21,7 @@ import base64
 import urllib.parse
 from typing import Optional, Dict, Any
 import argparse
+import datetime
 
 # Check dependencies
 try:
@@ -133,22 +134,73 @@ def load_credentials() -> Optional[Dict[str, str]]:
 # =============================================================================
 
 def create_signing_message(machine_id: str, wallet_address: str) -> str:
-    """Create message to be signed (NO node_id needed!)"""
-    timestamp = int(time.time())
-    hostname = socket.gethostname()
+    """
+    Create canonical locality message for wallet signing.
     
-    message = f"""Sign this message to authorize your DeCloud node:
+    The message format is defined in NODE-LIFECYCLE.md §2 (decloud register).
+    Country and region are included because they carry jurisdictional trust
+    meaning — the wallet signature attests to the operator's locality claim.
+    
+    The orchestrator reconstructs this exact message from the registration
+    request fields and verifies that the recovered signer matches the
+    declared wallet. Any field mismatch between what was signed and what
+    was sent causes signature recovery to produce a different address,
+    which fails the wallet ownership check.
+    
+    Timestamp uses ISO 8601 UTC. The orchestrator enforces a 5-minute
+    validity window with ±2-minute skew tolerance.
+    """
+    timestamp = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+    
+    # Read country and region from install-params or settings.
+    # These must match what the registration request sends to the
+    # orchestrator, or signature verification will fail.
+    country = _read_locality_field('country') or 'ZZ'
+    region = _read_locality_field('region') or 'unknown'
+    
+    message = f"""DeCloud Node Locality Declaration
 
+Country:    {country}
+Region:     {region}
 Machine ID: {machine_id}
-Wallet: {wallet_address}
-Hostname: {hostname}
-Timestamp: {timestamp}
+Wallet:     {wallet_address}
+Timestamp:  {timestamp}
 
-This signature proves you own this wallet and authorizes the node to operate on your behalf.
-
-NO FUNDS WILL BE TRANSFERRED - This is only for node authorization."""
+This signature attests that the operator of this wallet declares
+the above DeCloud node to be located in the stated country and
+network region. The orchestrator will use this declaration for
+jurisdictional placement of tenant workloads."""
     
     return message
+
+
+def _read_locality_field(field: str) -> Optional[str]:
+    """
+    Read a locality field from install-params.
+    
+    install-params stores CLI arguments one per line:
+        --country
+        TR
+        --region
+        eu-east
+    
+    Returns the value following the --{field} flag, or None if not found.
+    """
+    install_params = '/etc/decloud/install-params'
+    if not os.path.exists(install_params):
+        return None
+    
+    try:
+        with open(install_params, 'r') as f:
+            lines = [l.strip() for l in f if l.strip() and not l.startswith('#')]
+        
+        for i, line in enumerate(lines):
+            if line == f'--{field}' and i + 1 < len(lines):
+                return lines[i + 1]
+    except Exception:
+        pass
+    
+    return None
 
 def generate_signing_url(message: str, wallet_address: str) -> str:
     """
