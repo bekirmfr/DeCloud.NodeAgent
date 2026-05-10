@@ -463,7 +463,7 @@ public class LibvirtVmManager : IVmManager
 
         try
         {
-            var result = await _executor.ExecuteAsync("qemu-img", $"info --output=json {diskPath}", ct);
+            var result = await _executor.ExecuteAsync("qemu-img", $"info --force-share --output=json \"{diskPath}\"", ct);
             if (result.Success)
             {
                 var json = System.Text.Json.JsonDocument.Parse(result.StandardOutput);

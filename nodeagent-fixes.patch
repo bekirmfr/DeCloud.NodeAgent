@@ -1,0 +1,213 @@
+diff --git a/src/DeCloud.NodeAgent.Infrastructure/Libvirt/LibvirtVmManager.cs b/src/DeCloud.NodeAgent.Infrastructure/Libvirt/LibvirtVmManager.cs
+index 1081fa5..4847bb4 100644
+--- a/src/DeCloud.NodeAgent.Infrastructure/Libvirt/LibvirtVmManager.cs
++++ b/src/DeCloud.NodeAgent.Infrastructure/Libvirt/LibvirtVmManager.cs
+@@ -463,7 +463,7 @@ public class LibvirtVmManager : IVmManager
+ 
+         try
+         {
+-            var result = await _executor.ExecuteAsync("qemu-img", $"info --output=json {diskPath}", ct);
++            var result = await _executor.ExecuteAsync("qemu-img", $"info --force-share --output=json \"{diskPath}\"", ct);
+             if (result.Success)
+             {
+                 var json = System.Text.Json.JsonDocument.Parse(result.StandardOutput);
+diff --git a/src/DeCloud.NodeAgent.Infrastructure/Services/CloudInitCleaner.cs b/src/DeCloud.NodeAgent.Infrastructure/Services/CloudInitCleaner.cs
+index ba81273..3363264 100644
+--- a/src/DeCloud.NodeAgent.Infrastructure/Services/CloudInitCleaner.cs
++++ b/src/DeCloud.NodeAgent.Infrastructure/Services/CloudInitCleaner.cs
+@@ -220,8 +220,12 @@ public class CloudInitCleaner : ICloudInitCleaner
+         // We clean multiple locations to handle different distros
+         var commands = new[]
+         {
+-            "rm -rf /var/lib/cloud/*",
+-            "rm -rf /var/log/cloud-init*",
++            // Use directory paths without globs — virt-customize runs each
++            // --run-command in a guest shell where an empty glob expands to
++            // the literal '*', causing 'rm: missing operand'. Deleting the
++            // directory and recreating it is equivalent and glob-safe.
++            "rm -rf /var/lib/cloud && mkdir -p /var/lib/cloud",
++            "rm -f /var/log/cloud-init.log /var/log/cloud-init-output.log 2>/dev/null || true",
+             "rm -f /etc/machine-id",
+             "rm -f /var/lib/dbus/machine-id",
+             "truncate -s 0 /etc/machine-id 2>/dev/null || true",
+diff --git a/src/DeCloud.NodeAgent.Infrastructure/Services/ImageManager.cs b/src/DeCloud.NodeAgent.Infrastructure/Services/ImageManager.cs
+index 0d719f2..d089006 100644
+--- a/src/DeCloud.NodeAgent.Infrastructure/Services/ImageManager.cs
++++ b/src/DeCloud.NodeAgent.Infrastructure/Services/ImageManager.cs
+@@ -71,10 +71,28 @@ public class ImageManager : IImageManager
+             await DownloadImageAsync(imageUrl, localPath, ct);
+ 
+             // Verify downloaded image
+-            if (!await VerifyImageAsync(localPath, expectedHash, ct))
++            if (!string.IsNullOrEmpty(expectedHash))
+             {
+-                File.Delete(localPath);
+-                throw new Exception($"Downloaded image hash does not match expected: {expectedHash}");
++                // Inline hash provided — verify directly
++                if (!await VerifyImageAsync(localPath, expectedHash, ct))
++                {
++                    File.Delete(localPath);
++                    throw new Exception($"Downloaded image hash does not match expected: {expectedHash}");
++                }
++            }
++            else
++            {
++                // No inline hash — try upstream checksum verification
++                var upstreamResult = await TryVerifyAgainstUpstreamChecksumAsync(localPath, imageUrl, ct);
++                if (upstreamResult == false)
++                {
++                    // Upstream checksum exists but doesn't match — reject
++                    File.Delete(localPath);
++                    throw new Exception(
++                        $"Downloaded image failed upstream checksum verification for {imageUrl}");
++                }
++                // upstreamResult == null means no upstream checksums available — proceed with warning
++                // upstreamResult == true means verified — proceed
+             }
+ 
+             // ========================================
+@@ -109,7 +127,11 @@ public class ImageManager : IImageManager
+     {
+         if (string.IsNullOrEmpty(expectedHash))
+         {
+-            _logger.LogWarning("No hash provided for image verification, skipping");
++            // No inline hash — caller's download path handles upstream verification.
++            // Debug level here because this also fires on cache-hit checks where
++            // the image was already verified at download time.
++            _logger.LogDebug(
++                "No inline hash provided for image verification, skipping inline check");
+             return true;
+         }
+ 
+@@ -132,6 +154,108 @@ public class ImageManager : IImageManager
+         return match;
+     }
+ 
++    /// <summary>
++    /// When no inline hash is provided, attempt to verify the downloaded image
++    /// against the upstream distributor's published checksum file (SHA256SUMS or
++    /// SHA512SUMS). This covers rolling-URL base images (e.g. Debian /latest/)
++    /// where a fixed hash cannot be baked into the template.
++    ///
++    /// Returns true if verified, false if checksum mismatch (caller should reject),
++    /// null if upstream checksums are unavailable (caller decides policy).
++    /// </summary>
++    private async Task<bool?> TryVerifyAgainstUpstreamChecksumAsync(
++        string imagePath, string imageUrl, CancellationToken ct)
++    {
++        if (!Uri.TryCreate(imageUrl, UriKind.Absolute, out var imageUri))
++            return null;
++
++        var fileName = Path.GetFileName(imageUri.LocalPath);
++        var baseDir = imageUrl[..imageUrl.LastIndexOf('/')];
++
++        // Try SHA256SUMS first (preferred — matches our local SHA256 computation),
++        // then SHA512SUMS (Debian publishes this).
++        string? expectedHash = null;
++        string hashAlgorithm = "SHA256";
++
++        foreach (var (checksumFile, algo) in new[] { ("SHA256SUMS", "SHA256"), ("SHA512SUMS", "SHA512") })
++        {
++            try
++            {
++                var checksumUrl = $"{baseDir}/{checksumFile}";
++                _logger.LogDebug("Attempting upstream checksum verification from {Url}", checksumUrl);
++
++                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
++                cts.CancelAfter(TimeSpan.FromSeconds(15));
++
++                var response = await _httpClient.GetAsync(checksumUrl, cts.Token);
++                if (!response.IsSuccessStatusCode) continue;
++
++                var content = await response.Content.ReadAsStringAsync(cts.Token);
++
++                // Format: "<hash>  <filename>" or "<hash> *<filename>"
++                foreach (var line in content.Split('\n', StringSplitOptions.RemoveEmptyEntries))
++                {
++                    var parts = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
++                    if (parts.Length >= 2)
++                    {
++                        // Last part is filename (may have leading * for binary mode)
++                        var entryFile = parts[^1].TrimStart('*');
++                        if (string.Equals(entryFile, fileName, StringComparison.OrdinalIgnoreCase))
++                        {
++                            expectedHash = parts[0].ToLowerInvariant();
++                            hashAlgorithm = algo;
++                            break;
++                        }
++                    }
++                }
++
++                if (expectedHash != null) break;
++            }
++            catch (Exception ex)
++            {
++                _logger.LogDebug(ex, "Could not fetch upstream {File}", checksumFile);
++            }
++        }
++
++        if (expectedHash == null)
++        {
++            _logger.LogWarning(
++                "No upstream checksum file found for {Url} — image integrity is unverified. " +
++                "Consider providing BaseImageHash in the VM template or switching to a " +
++                "distribution mirror that publishes SHA256SUMS/SHA512SUMS",
++                imageUrl);
++            return null;
++        }
++
++        // Compute the matching hash of the downloaded file
++        _logger.LogInformation("Verifying image against upstream {Algorithm} checksum", hashAlgorithm);
++
++        byte[] hashBytes;
++        await using (var stream = File.OpenRead(imagePath))
++        {
++            using var hasher = hashAlgorithm == "SHA512"
++                ? (System.Security.Cryptography.HashAlgorithm)System.Security.Cryptography.SHA512.Create()
++                : SHA256.Create();
++            hashBytes = await hasher.ComputeHashAsync(stream, ct);
++        }
++
++        var actualHash = Convert.ToHexString(hashBytes).ToLowerInvariant();
++
++        if (actualHash == expectedHash)
++        {
++            _logger.LogInformation(
++                "✓ Image verified against upstream {Algorithm} checksum ({Hash})",
++                hashAlgorithm, actualHash[..16]);
++            return true;
++        }
++
++        _logger.LogError(
++            "Image checksum mismatch! Expected {Expected}, got {Actual}. " +
++            "The downloaded image may be corrupted or tampered with",
++            expectedHash[..16], actualHash[..16]);
++        return false;
++    }
++
+     public async Task<string> CreateOverlayDiskAsync(string baseImagePath, string vmId, long sizeBytes, CancellationToken ct = default)
+     {
+         var vmDir = Path.Combine(_options.VmStoragePath, vmId);
+@@ -193,8 +317,12 @@ public class ImageManager : IImageManager
+ 
+         try
+         {
++            // --force-share: read through POSIX advisory locks held by concurrent
++            // processes (guestmount cloud-init cleaning, running QEMU instances).
++            // Without this flag, qemu-img info fails with "Failed to get shared
++            // write lock" when the base image is still mounted by CloudInitCleaner.
+             var result = await _executor.ExecuteAsync("qemu-img",
+-                $"info --output=json {imagePath}",
++                $"info --force-share --output=json \"{imagePath}\"",
+                 TimeSpan.FromSeconds(30),
+                 ct);
+ 
+@@ -361,7 +489,7 @@ public class ImageManager : IImageManager
+             var diskPath = Path.Combine(vmDir, "disk.qcow2");
+             if (!File.Exists(diskPath)) continue;
+ 
+-            var result = await _executor.ExecuteAsync("qemu-img", $"info {diskPath}", ct);
++            var result = await _executor.ExecuteAsync("qemu-img", $"info --force-share \"{diskPath}\"", ct);
+             if (result.Success && result.StandardOutput.Contains(imagePath))
+             {
+                 return true;

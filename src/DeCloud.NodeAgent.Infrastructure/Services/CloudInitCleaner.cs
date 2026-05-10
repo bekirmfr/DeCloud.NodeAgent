@@ -220,8 +220,12 @@ public class CloudInitCleaner : ICloudInitCleaner
         // We clean multiple locations to handle different distros
         var commands = new[]
         {
-            "rm -rf /var/lib/cloud/*",
-            "rm -rf /var/log/cloud-init*",
+            // Use directory paths without globs — virt-customize runs each
+            // --run-command in a guest shell where an empty glob expands to
+            // the literal '*', causing 'rm: missing operand'. Deleting the
+            // directory and recreating it is equivalent and glob-safe.
+            "rm -rf /var/lib/cloud && mkdir -p /var/lib/cloud",
+            "rm -f /var/log/cloud-init.log /var/log/cloud-init-output.log 2>/dev/null || true",
             "rm -f /etc/machine-id",
             "rm -f /var/lib/dbus/machine-id",
             "truncate -s 0 /etc/machine-id 2>/dev/null || true",
