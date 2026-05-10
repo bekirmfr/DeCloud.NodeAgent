@@ -2814,18 +2814,18 @@ main() {
            /etc/decloud/settings.json > "$tmp" \
            && mv "$tmp" /etc/decloud/settings.json
     else
-        cat > /etc/decloud/settings.json << SETTINGSEOF
-    {
-      "version": 1,
-      "orchestrator_url": "${ORCHESTRATOR_URL}",
-      "wallet": "${NODE_WALLET}",
-      "name": "$(hostname)",
-      "region": "default",
-      "zone": "default",
-      "agent_port": ${AGENT_PORT},
-      "wireguard_port": ${WIREGUARD_PORT}
-    }
-    SETTINGSEOF
+        cat > /etc/decloud/settings.json << 'SETTINGSEOF'
+{
+  "version": 1,
+  "orchestrator_url": "${ORCHESTRATOR_URL}",
+  "wallet": "${NODE_WALLET}",
+  "name": "$(hostname)",
+  "region": "default",
+  "zone": "default",
+  "agent_port": ${AGENT_PORT},
+  "wireguard_port": ${WIREGUARD_PORT}
+}
+SETTINGSEOF
     fi
     chmod 600 /etc/decloud/settings.json
 
