@@ -31,7 +31,7 @@ readonly SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 readonly CONFIG_DIR="/etc/decloud"
 readonly CREDENTIALS_FILE="$CONFIG_DIR/credentials"
 readonly PENDING_AUTH_FILE="$CONFIG_DIR/pending-auth"
-readonly INSTALL_PARAMS_FILE="$CONFIG_DIR/install-params"
+readonly SETTINGS_FILE="$CONFIG_DIR/settings.json"
 readonly VM_STORAGE_PATH="/var/lib/decloud/vms"
 readonly BACKUP_PATH="/var/backups/decloud"
 readonly LOG_DIR="/var/log/decloud"
@@ -145,12 +145,7 @@ get_api_key() {
 }
 
 get_orchestrator_url() {
-    if [[ -f "$PUBLISH_DIR/appsettings.Production.json" ]]; then
-        grep -oP '"BaseUrl"\s*:\s*"\K[^"]+' \
-            "$PUBLISH_DIR/appsettings.Production.json" 2>/dev/null || echo ""
-    else
-        echo ""
-    fi
+    _read_setting "orchestrator_url"
 }
 
 get_machine_id() {
@@ -256,30 +251,28 @@ api_delete() { api_call "DELETE" "$1"; }
 # INSTALL PARAMS HELPERS
 # ============================================================================
 
-# Save install parameters to /etc/decloud/install-params
-save_install_params() {
-    mkdir -p "$CONFIG_DIR"
-    {
-        echo "# DeCloud node install parameters — written by 'decloud install'"
-        echo "# Used by 'decloud update' to re-run the install with the same settings."
-        echo "# Generated: $(date '+%Y-%m-%d %H:%M:%S')"
-        for arg in "$@"; do
-            echo "$arg"
-        done
-    } > "$INSTALL_PARAMS_FILE"
-    chmod 600 "$INSTALL_PARAMS_FILE"
-    log_success "Install parameters saved to $INSTALL_PARAMS_FILE"
-}
-
 # Load install parameters from file into an array
 load_install_params() {
-    if [[ ! -f "$INSTALL_PARAMS_FILE" ]]; then
-        log_error "No saved install parameters found at $INSTALL_PARAMS_FILE"
-        log_info "Run 'sudo decloud install --orchestrator <url> ...' first"
+    if [[ ! -f "$SETTINGS_FILE" ]]; then
+        log_error "No settings file found at $SETTINGS_FILE"
+        log_info "Run 'sudo decloud install --orchestrator <url> --wallet <addr>' first"
         exit $EXIT_ERROR
     fi
-    # Read non-comment, non-empty lines
-    mapfile -t SAVED_PARAMS < <(grep -v '^#' "$INSTALL_PARAMS_FILE" | grep -v '^[[:space:]]*$')
+
+    local orch wallet
+    orch=$(_read_setting "orchestrator_url")
+    wallet=$(_read_setting "wallet")
+
+    SAVED_PARAMS=()
+    [[ -n "$orch" ]]   && SAVED_PARAMS+=(--orchestrator "$orch")
+    [[ -n "$wallet" ]] && SAVED_PARAMS+=(--wallet "$wallet")
+
+    # Infrastructure overrides
+    local port wg_port
+    port=$(_read_setting "agent_port")
+    wg_port=$(_read_setting "wireguard_port")
+    [[ -n "$port" ]]    && [[ "$port" != "5100" ]]  && SAVED_PARAMS+=(--port "$port")
+    [[ -n "$wg_port" ]] && [[ "$wg_port" != "51821" ]] && SAVED_PARAMS+=(--wg-port "$wg_port")
 }
 
 # Find the node agent install.sh script
@@ -425,7 +418,7 @@ cmd_configure() {
         local expected_region="${region}"
         if [[ -z "$expected_region" ]]; then
             # Read current region from install-params
-            expected_region=$(grep -A1 '^--region$' "$INSTALL_PARAMS_FILE" 2>/dev/null | tail -1)
+            expected_region=$(_read_setting "region")
         fi
         if [[ -n "$expected_region" ]] && [[ ! "$zone" =~ ^${expected_region}-[1-9][0-9]*$ ]]; then
             log_error "Invalid zone format: '$zone' (must be <region>-<n>, e.g. ${expected_region}-1)"
@@ -435,39 +428,39 @@ cmd_configure() {
 
     # ── Apply changes to install-params ───────────────────────────────────
     # Read existing params, update the specified ones, write back.
-    if [[ ! -f "$INSTALL_PARAMS_FILE" ]]; then
-        log_error "No install-params found — run 'decloud install' first"
+    if [[ ! -f "$SETTINGS_FILE" ]]; then
+        log_error "No settings file found — run 'decloud install' first"
         exit $EXIT_ERROR
     fi
 
     local params_changed=false
 
     if [[ -n "$country" ]]; then
-        _update_install_param "--country" "$country"
+        _write_setting "country" "$country"
         params_changed=true
         log_success "Country set to: $country"
     fi
 
     if [[ -n "$region" ]]; then
-        _update_install_param "--region" "$region"
+        _write_setting "region" "$region"
         params_changed=true
         log_success "Region set to: $region"
     fi
 
     if [[ -n "$zone" ]]; then
-        _update_install_param "--zone" "$zone"
+        _write_setting "zone" "$zone"
         params_changed=true
         log_success "Zone set to: $zone"
     fi
 
     if [[ -n "$name" ]]; then
-        _update_install_param "--name" "$name"
+        _write_setting "name" "$name"
         params_changed=true
         log_success "Name set to: $name"
     fi
 
     if [[ -n "$description" ]]; then
-        _update_install_param "--description" "$description"
+        _write_setting "description" "$description"
         params_changed=true
         log_success "Description set to: $description"
     fi
@@ -484,39 +477,29 @@ cmd_configure() {
     fi
 }
 
-# Helper: update a single flag-value pair in install-params.
-# If the flag exists, replace its value. If not, append it.
-_update_install_param() {
-    local flag="$1"
+# Read a single field from settings.json.
+_read_setting() {
+    local key="$1"
+    if [[ -f "$SETTINGS_FILE" ]]; then
+        jq -r --arg k "$key" '.[$k] // empty' "$SETTINGS_FILE" 2>/dev/null
+    fi
+}
+
+# Write a single field to settings.json.
+# Creates the file with version:1 if it doesn't exist.
+_write_setting() {
+    local key="$1"
     local value="$2"
-    local file="$INSTALL_PARAMS_FILE"
-    local tmp; tmp=$(mktemp)
 
-    local found=false
-    local skip_next=false
-
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        if $skip_next; then
-            skip_next=false
-            continue
-        fi
-        if [[ "$line" == "$flag" ]]; then
-            found=true
-            skip_next=true
-            echo "$flag" >> "$tmp"
-            echo "$value" >> "$tmp"
-        else
-            echo "$line" >> "$tmp"
-        fi
-    done < "$file"
-
-    if ! $found; then
-        echo "$flag" >> "$tmp"
-        echo "$value" >> "$tmp"
+    if [[ ! -f "$SETTINGS_FILE" ]]; then
+        echo '{"version":1}' > "$SETTINGS_FILE"
+        chmod 600 "$SETTINGS_FILE"
     fi
 
-    mv "$tmp" "$file"
-    chmod 600 "$file"
+    local tmp; tmp=$(mktemp)
+    jq --arg v "$value" ".[\"${key}\"] = \$v" "$SETTINGS_FILE" > "$tmp" \
+        && mv "$tmp" "$SETTINGS_FILE"
+    chmod 600 "$SETTINGS_FILE"
 }
 
 # ============================================================================
@@ -802,9 +785,6 @@ cmd_install() {
     log_info "Using install script: $install_script"
     log_info "Parameters: $*"
     echo ""
-
-    # Save parameters before running (so 'update' works even if install fails)
-    save_install_params "$@"
 
     # Change to a safe CWD before launching install.sh.
     # The caller may be sitting in /opt/decloud/DeCloud.NodeAgent which install.sh
@@ -2279,7 +2259,7 @@ ${BOLD}ENVIRONMENT VARIABLES:${NC}
 ${BOLD}KEY FILES:${NC}
     $CREDENTIALS_FILE
     $PENDING_AUTH_FILE
-    $INSTALL_PARAMS_FILE
+    $SETTINGS_FILE
     $VM_STORAGE_PATH
 
 ${BOLD}EXAMPLES:${NC}

@@ -174,31 +174,20 @@ jurisdictional placement of tenant workloads."""
 
 def _read_locality_field(field: str) -> Optional[str]:
     """
-    Read a locality field from install-params.
+    Read a locality field from settings.json.
 
-    install-params stores CLI arguments one per line:
-        --country
-        TR
-        --region
-        eu-east
-
-    Returns the value following the --{field} flag, or None if not found.
+    Returns the value for the given field, or None if not found.
     """
-    install_params = '/etc/decloud/install-params'
-    if not os.path.exists(install_params):
+    settings_file = '/etc/decloud/settings.json'
+    if not os.path.exists(settings_file):
         return None
 
     try:
-        with open(install_params, 'r') as f:
-            lines = [l.strip() for l in f if l.strip() and not l.startswith('#')]
-
-        for i, line in enumerate(lines):
-            if line == f'--{field}' and i + 1 < len(lines):
-                return lines[i + 1]
+        with open(settings_file, 'r') as f:
+            settings = json.load(f)
+        return settings.get(field)
     except Exception:
-        pass
-
-    return None
+        return None
 
 # =============================================================================
 # SIGNING URL AND QR CODE

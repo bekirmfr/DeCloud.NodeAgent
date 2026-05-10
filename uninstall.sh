@@ -296,9 +296,9 @@ remove_directories() {
 
     # Config (credentials, install-params, ssh_ca)
     # Back up install-params before removing in case of reinstall
-    if [[ -f "/etc/decloud/install-params" ]]; then
-        cp /etc/decloud/install-params /tmp/decloud-install-params.bak
-        log_info "Install params backed up to /tmp/decloud-install-params.bak"
+    if [[ -f "/etc/decloud/settings.json" ]]; then
+        cp /etc/decloud/settings.json /tmp/decloud-settings.json.bak
+        log_info "Settings backed up to /tmp/decloud-settings.json.bak"
     fi
     rm -rf "$CONFIG_DIR"
 

@@ -347,7 +347,7 @@ check_required_params() {
     # is missing those values. Re-save from current variable state so future
     # 'decloud update' invocations have everything they need.
     if [ "$prompted" = true ]; then
-        save_install_params_from_vars
+        save_settings_json
     fi
 
     log_success "Orchestrator: $ORCHESTRATOR_URL"
@@ -379,26 +379,29 @@ _missing_param_error() {
 # Reconstruct /etc/decloud/install-params from the current variable state.
 # Called after check_required_params if any value was prompted, so that
 # 'decloud update' has a complete params file to re-run install non-interactively.
-save_install_params_from_vars() {
+save_settings_json() {
     mkdir -p /etc/decloud
-    {
-        echo "# DeCloud node install parameters"
-        echo "# Written by install.sh on $(date '+%Y-%m-%d %H:%M:%S')"
-        echo "# Used by: decloud update"
-        echo "# Reconstructed from runtime state after interactive prompts."
-        echo "--orchestrator"
-        echo "$ORCHESTRATOR_URL"
-        echo "--wallet"
-        echo "$NODE_WALLET"
-        [ -n "${AGENT_PORT:-}" ]    && [ "$AGENT_PORT"     != "5100"  ] && { echo "--port"; echo "$AGENT_PORT"; }
-        [ -n "${WIREGUARD_PORT:-}" ] && [ "$WIREGUARD_PORT" != "51821" ] && { echo "--wg-port"; echo "$WIREGUARD_PORT"; }
-        [ "${SKIP_DOWNLOAD:-false}"  = true ] && echo "--skip-download"
-        [ "${SKIP_WIREGUARD:-false}" = true ] && echo "--skip-wireguard"
-        [ "${SKIP_LIBVIRT:-false}"   = true ] && echo "--skip-libvirt"
-        [ -n "${RELEASE_VERSION:-}" ]  && { echo "--version";          echo "$RELEASE_VERSION"; }
-        [ -n "${RELEASE_BASE_URL:-}" ] && { echo "--release-base-url"; echo "$RELEASE_BASE_URL"; }
-    } > /etc/decloud/install-params
-    chmod 600 /etc/decloud/install-params
+    if [ -f /etc/decloud/settings.json ]; then
+        local tmp; tmp=$(mktemp)
+        jq --arg o "$ORCHESTRATOR_URL" --arg w "$NODE_WALLET" \
+           '.orchestrator_url = $o | .wallet = $w' \
+           /etc/decloud/settings.json > "$tmp" \
+           && mv "$tmp" /etc/decloud/settings.json
+    else
+        cat > /etc/decloud/settings.json <<SETTINGSEOF
+{
+  "version": 1,
+  "orchestrator_url": "${ORCHESTRATOR_URL}",
+  "wallet": "${NODE_WALLET}",
+  "name": "$(hostname)",
+  "region": "default",
+  "zone": "default",
+  "agent_port": ${AGENT_PORT},
+  "wireguard_port": ${WIREGUARD_PORT}
+}
+SETTINGSEOF
+    fi
+    chmod 600 /etc/decloud/settings.json
 }
 
 # ============================================================
@@ -2781,6 +2784,19 @@ main() {
     
     parse_args "$@"
 
+    # Load operational settings from settings.json if they exist.
+    # On fresh install these default to hostname/default/default.
+    # On update (decloud update) they were set by prior configure calls.
+    if [ -f /etc/decloud/settings.json ]; then
+        NODE_NAME=$(jq -r '.name // empty' /etc/decloud/settings.json)
+        NODE_REGION=$(jq -r '.region // "default"' /etc/decloud/settings.json)
+        NODE_ZONE=$(jq -r '.zone // "default"' /etc/decloud/settings.json)
+    fi
+    # Defaults if not set
+    NODE_NAME="${NODE_NAME:-$(hostname)}"
+    NODE_REGION="${NODE_REGION:-default}"
+    NODE_ZONE="${NODE_ZONE:-default}"
+
     # ─────────────────────────────────────────────────────────────────────
     # Persist install parameters immediately after parsing.
     # 'decloud update' reads /etc/decloud/install-params to re-run this
@@ -2788,17 +2804,30 @@ main() {
     # Write before init_logging so the file exists even if logging setup fails.
     # ─────────────────────────────────────────────────────────────────────
     mkdir -p /etc/decloud
+    # Merge into existing settings.json if it exists (preserves
+    # configure-set fields like country/region across updates),
+    # or create fresh if this is a new install.
+    if [ -f /etc/decloud/settings.json ]; then
+        local tmp; tmp=$(mktemp)
+        jq --arg o "$ORCHESTRATOR_URL" --arg w "$NODE_WALLET" \
+           '.orchestrator_url = $o | .wallet = $w' \
+           /etc/decloud/settings.json > "$tmp" \
+           && mv "$tmp" /etc/decloud/settings.json
+    else
+        cat > /etc/decloud/settings.json << SETTINGSEOF
     {
-        echo "# DeCloud node install parameters"
-        echo "# Written by install.sh on $(date '+%Y-%m-%d %H:%M:%S')"
-        echo "# Used by: decloud update"
-        # Print each original argument on its own line.
-        # Handles values that contain spaces because mapfile + printf preserves quoting.
-        for arg in "$@"; do
-            printf '%s\n' "$arg"
-        done
-    } > /etc/decloud/install-params
-    chmod 600 /etc/decloud/install-params
+      "version": 1,
+      "orchestrator_url": "${ORCHESTRATOR_URL}",
+      "wallet": "${NODE_WALLET}",
+      "name": "$(hostname)",
+      "region": "default",
+      "zone": "default",
+      "agent_port": ${AGENT_PORT},
+      "wireguard_port": ${WIREGUARD_PORT}
+    }
+    SETTINGSEOF
+    fi
+    chmod 600 /etc/decloud/settings.json
 
     # Initialize logging
     init_logging

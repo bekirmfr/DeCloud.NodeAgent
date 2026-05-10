@@ -17,8 +17,8 @@ Maintainers debugging install/update/uninstall behavior can jump to
 
 > **Status notice.** Part 1 describes the operator lifecycle as
 > implemented. [Part 2](#part-2--implementation-status) covers
-> remaining work (install.sh alignment, settings JSON migration,
-> live migration). Part 3 describes infrastructure mechanics.
+> remaining work (settings JSON migration, live migration).
+> Part 3 describes infrastructure mechanics.
 
 > **Companion documents:**
 > - [`LOCALITY_STANDARDS.md`](LOCALITY_STANDARDS.md) — country/region/zone semantics
