@@ -1174,19 +1174,19 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                         });
                     }
                 }
+            }
 
-                // Process settings drift warning
-                if (data.TryGetProperty("settingsDrift", out var driftElement) &&
-                    driftElement.ValueKind == JsonValueKind.Object)
-                {
-                    var driftMessage = driftElement.TryGetProperty("message", out var msg)
-                        ? msg.GetString() : "Settings drift detected";
+            // Process settings drift warning
+            if (data.TryGetProperty("settingsDrift", out var driftElement) &&
+                driftElement.ValueKind == JsonValueKind.Object)
+            {
+                var driftMessage = driftElement.TryGetProperty("message", out var msg)
+                    ? msg.GetString() : "Settings drift detected";
 
-                    _logger.LogWarning(
-                        "⚠ Settings drift detected by orchestrator: {Message}. " +
-                        "Run 'decloud register' to re-commit settings, or revert local edits.",
-                        driftMessage);
-                }
+                _logger.LogWarning(
+                    "⚠ Settings drift detected by orchestrator: {Message}. " +
+                    "Run 'decloud register' to re-commit settings, or revert local edits.",
+                    driftMessage);
             }
 
             // ── Obligation state pull ──────────────────────────────────────────
