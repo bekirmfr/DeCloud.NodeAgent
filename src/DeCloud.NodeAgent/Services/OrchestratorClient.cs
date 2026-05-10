@@ -277,6 +277,68 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         return RegistrationResult.Failure("Max retries exceeded");
     }
 
+    public async Task<bool> LoginAsync(CancellationToken ct = default)
+    {
+        if (!_nodeState.IsAuthenticated || string.IsNullOrEmpty(_nodeId))
+        {
+            _logger.LogWarning("Cannot login — node not registered");
+            return false;
+        }
+
+        try
+        {
+            var requestPath = $"/api/nodes/{_nodeId}/login";
+            var response = await _httpClient.PostAsync(requestPath, null, ct);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("✓ Login successful — scheduling-ready");
+                return true;
+            }
+
+            var error = await response.Content.ReadAsStringAsync(ct);
+            _logger.LogWarning("Login failed ({Status}): {Error}",
+                response.StatusCode, error);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to call login endpoint");
+            return false;
+        }
+    }
+
+    public async Task<bool> LogoutAsync(CancellationToken ct = default)
+    {
+        if (!_nodeState.IsAuthenticated || string.IsNullOrEmpty(_nodeId))
+        {
+            _logger.LogWarning("Cannot logout — node not registered");
+            return false;
+        }
+
+        try
+        {
+            var requestPath = $"/api/nodes/{_nodeId}/logout";
+            var response = await _httpClient.PostAsync(requestPath, null, ct);
+
+            if (response.IsSuccessStatusCode)
+            {
+                _logger.LogInformation("✓ Logout successful — scheduling paused");
+                return true;
+            }
+
+            var error = await response.Content.ReadAsStringAsync(ct);
+            _logger.LogWarning("Logout failed ({Status}): {Error}",
+                response.StatusCode, error);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to call logout endpoint");
+            return false;
+        }
+    }
+
     /// <summary>
     /// Builds a dictionary of { roleName → storedVersion } from the local SQLite
     /// store for inclusion in the registration request.

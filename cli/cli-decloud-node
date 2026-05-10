@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
-DeCloud Node CLI - Web-Based WalletConnect Authentication
+DeCloud Node Wallet Authentication CLI
 
-Uses a web page with proper WalletConnect integration for mobile signing.
-The QR code contains a URL that opens the signing page on any device.
+Single-purpose tool: wallet-based registration for DeCloud nodes.
+Handles the wallet signing ceremony (QR code, signature verification,
+pending-auth file) that requires Python web3 libraries.
+
+Login, logout, status, and all other node management is handled by
+the main 'decloud' CLI (bash). This tool is called only by
+'decloud register'.
 
 Usage:
-    decloud-node login
-    decloud-node status
-    decloud-node logout
+    cli-decloud-node register
+    cli-decloud-node version
 """
 
 import sys
 import os
 import time
 import json
-import socket
-import subprocess
 import base64
 import urllib.parse
 from typing import Optional, Dict, Any
@@ -43,14 +45,10 @@ except ImportError as e:
 VERSION = "2.3.0"
 DEFAULT_ORCHESTRATOR_URL = "https://decloud.stackfi.tech"
 
-# Signing page URL (you'll host this)
+# Signing page URL
 SIGNING_PAGE_URL = "https://decloud.stackfi.tech/sign.html"
-# Alternative: Use localhost for testing
-# SIGNING_PAGE_URL = "http://localhost:8000/sign.html"
 
 # File paths
-CONFIG_DIR = os.path.expanduser("~/.config/decloud")
-CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 PENDING_AUTH_FILE = "/etc/decloud/pending-auth"
 CREDENTIALS_FILE = "/etc/decloud/credentials"
 
@@ -76,24 +74,24 @@ def print_banner():
     """Print CLI banner"""
     print()
     print(f"{Colors.CYAN}{'='*70}{Colors.NC}")
-    print(f"{Colors.BOLD}      🔐 DeCloud Node Authentication (WalletConnect){Colors.NC}")
+    print(f"{Colors.BOLD}      DeCloud Node Registration (Wallet Signing){Colors.NC}")
     print(f"{Colors.CYAN}{'='*70}{Colors.NC}")
     print()
 
 def log_info(msg):
-    print(f"{Colors.BLUE}ℹ{Colors.NC} {msg}")
+    print(f"{Colors.BLUE}[INFO]{Colors.NC} {msg}")
 
 def log_success(msg):
-    print(f"{Colors.GREEN}✓{Colors.NC} {msg}")
+    print(f"{Colors.GREEN}[OK]{Colors.NC} {msg}")
 
 def log_error(msg):
-    print(f"{Colors.RED}✗{Colors.NC} {msg}", file=sys.stderr)
+    print(f"{Colors.RED}[ERROR]{Colors.NC} {msg}", file=sys.stderr)
 
 def log_warn(msg):
-    print(f"{Colors.YELLOW}⚠{Colors.NC} {msg}")
+    print(f"{Colors.YELLOW}[WARN]{Colors.NC} {msg}")
 
 # =============================================================================
-# SYSTEM INFORMATION FUNCTIONS
+# SYSTEM INFORMATION
 # =============================================================================
 
 def get_machine_id() -> str:
@@ -104,7 +102,7 @@ def get_machine_id() -> str:
                 machine_id = f.read().strip()
                 if machine_id:
                     return machine_id
-        
+
         log_error("Could not read /etc/machine-id")
         sys.exit(1)
     except Exception as e:
@@ -112,52 +110,52 @@ def get_machine_id() -> str:
         sys.exit(1)
 
 # =============================================================================
-# CONFIGURATION MANAGEMENT
+# CREDENTIALS
 # =============================================================================
 
 def load_credentials() -> Optional[Dict[str, str]]:
-    """Load saved credentials"""
+    """Load saved credentials to check if already registered"""
     if not os.path.exists(CREDENTIALS_FILE):
         return None
-    
+
     credentials = {}
     with open(CREDENTIALS_FILE, 'r') as f:
         for line in f:
             if '=' in line:
                 key, value = line.strip().split('=', 1)
                 credentials[key] = value
-    
+
     return credentials if credentials else None
 
 # =============================================================================
-# SIGNING URL GENERATION
+# CANONICAL SIGNING MESSAGE
 # =============================================================================
 
 def create_signing_message(machine_id: str, wallet_address: str) -> str:
     """
     Create canonical locality message for wallet signing.
-    
-    The message format is defined in NODE-LIFECYCLE.md §2 (decloud register).
+
+    The message format is defined in NODE-LIFECYCLE.md section 2 (decloud register).
     Country and region are included because they carry jurisdictional trust
     meaning — the wallet signature attests to the operator's locality claim.
-    
+
     The orchestrator reconstructs this exact message from the registration
     request fields and verifies that the recovered signer matches the
     declared wallet. Any field mismatch between what was signed and what
     was sent causes signature recovery to produce a different address,
     which fails the wallet ownership check.
-    
+
     Timestamp uses ISO 8601 UTC. The orchestrator enforces a 5-minute
-    validity window with ±2-minute skew tolerance.
+    validity window with +/-2-minute skew tolerance.
     """
     timestamp = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
-    
-    # Read country and region from install-params or settings.
+
+    # Read country and region from install-params.
     # These must match what the registration request sends to the
     # orchestrator, or signature verification will fail.
     country = _read_locality_field('country') or 'ZZ'
     region = _read_locality_field('region') or 'unknown'
-    
+
     message = f"""DeCloud Node Locality Declaration
 
 Country:    {country}
@@ -170,56 +168,56 @@ This signature attests that the operator of this wallet declares
 the above DeCloud node to be located in the stated country and
 network region. The orchestrator will use this declaration for
 jurisdictional placement of tenant workloads."""
-    
+
     return message
 
 
 def _read_locality_field(field: str) -> Optional[str]:
     """
     Read a locality field from install-params.
-    
+
     install-params stores CLI arguments one per line:
         --country
         TR
         --region
         eu-east
-    
+
     Returns the value following the --{field} flag, or None if not found.
     """
     install_params = '/etc/decloud/install-params'
     if not os.path.exists(install_params):
         return None
-    
+
     try:
         with open(install_params, 'r') as f:
             lines = [l.strip() for l in f if l.strip() and not l.startswith('#')]
-        
+
         for i, line in enumerate(lines):
             if line == f'--{field}' and i + 1 < len(lines):
                 return lines[i + 1]
     except Exception:
         pass
-    
+
     return None
+
+# =============================================================================
+# SIGNING URL AND QR CODE
+# =============================================================================
 
 def generate_signing_url(message: str, wallet_address: str) -> str:
     """
-    Generate URL to signing page with parameters
-    
+    Generate URL to signing page with parameters.
+
     Format: https://decloud.stackfi.tech/sign.html?message=base64&wallet=0x...
     """
-    # Encode message to base64 for URL
     message_b64 = base64.b64encode(message.encode()).decode()
-    
-    # Build URL parameters
+
     params = {
         'message': message_b64,
         'wallet': wallet_address
     }
-    
-    # Create full URL
+
     url = f"{SIGNING_PAGE_URL}?{urllib.parse.urlencode(params)}"
-    
     return url
 
 def display_qr_code(data: str, title: str = "Scan to sign"):
@@ -232,7 +230,7 @@ def display_qr_code(data: str, title: str = "Scan to sign"):
     )
     qr.add_data(data)
     qr.make(fit=True)
-    
+
     print()
     print(f"{Colors.BOLD}{Colors.CYAN}{title}{Colors.NC}")
     print()
@@ -241,15 +239,14 @@ def display_qr_code(data: str, title: str = "Scan to sign"):
 
 def display_signing_instructions(signing_url: str, message: str, wallet_address: str):
     """Display signing instructions with QR code"""
-    
-    print(f"{Colors.BOLD}═══════════════════════════════════════════════════════════════════{Colors.NC}")
-    print(f"{Colors.BOLD}              📱 SCAN QR CODE TO SIGN WITH WALLET{Colors.NC}")
-    print(f"{Colors.BOLD}═══════════════════════════════════════════════════════════════════{Colors.NC}")
+
+    print(f"{Colors.BOLD}{'='*70}{Colors.NC}")
+    print(f"{Colors.BOLD}              SCAN QR CODE TO SIGN WITH WALLET{Colors.NC}")
+    print(f"{Colors.BOLD}{'='*70}{Colors.NC}")
     print()
-    
-    # Display QR code with signing URL
+
     display_qr_code(signing_url, "Scan with ANY QR scanner or camera app:")
-    
+
     print(f"{Colors.BOLD}How it works:{Colors.NC}")
     print("  1. Scan QR code with your phone's camera")
     print("  2. Opens signing page in your browser")
@@ -257,19 +254,18 @@ def display_signing_instructions(signing_url: str, message: str, wallet_address:
     print("  4. Copy the signature")
     print("  5. Paste it below")
     print()
-    
+
     print(f"{Colors.CYAN}Or open this URL manually:{Colors.NC}")
     print(f"  {signing_url}")
     print()
-    
-    print(f"{Colors.BOLD}═══════════════════════════════════════════════════════════════════{Colors.NC}")
+
+    print(f"{Colors.BOLD}{'='*70}{Colors.NC}")
     print()
-    
-    # Also show the message for reference
+
     print(f"{Colors.YELLOW}Message being signed (for reference):{Colors.NC}")
-    print(f"{Colors.YELLOW}{'─'*70}{Colors.NC}")
+    print(f"{Colors.YELLOW}{'-'*70}{Colors.NC}")
     print(message)
-    print(f"{Colors.YELLOW}{'─'*70}{Colors.NC}")
+    print(f"{Colors.YELLOW}{'-'*70}{Colors.NC}")
     print()
 
 # =============================================================================
@@ -277,15 +273,10 @@ def display_signing_instructions(signing_url: str, message: str, wallet_address:
 # =============================================================================
 
 def verify_signature(message: str, signature: str, expected_address: str) -> bool:
-    """Verify that signature matches expected address"""
+    """Verify that signature matches expected wallet address"""
     try:
-        # Encode message for EIP-191
         encoded_message = encode_defunct(text=message)
-        
-        # Recover address from signature
         recovered_address = Account.recover_message(encoded_message, signature=signature)
-        
-        # Compare (case-insensitive)
         return recovered_address.lower() == expected_address.lower()
     except Exception as e:
         log_error(f"Signature verification failed: {e}")
@@ -294,74 +285,75 @@ def verify_signature(message: str, signature: str, expected_address: str) -> boo
 def save_pending_auth(auth_data: Dict[str, Any]):
     """Save pending authentication for node agent to process"""
     os.makedirs(os.path.dirname(PENDING_AUTH_FILE), exist_ok=True)
-    
+
     with open(PENDING_AUTH_FILE, 'w') as f:
         json.dump(auth_data, f, indent=2)
-    
+
     os.chmod(PENDING_AUTH_FILE, 0o600)
     log_success(f"Authentication saved to {PENDING_AUTH_FILE}")
 
 # =============================================================================
-# WEB-BASED AUTHENTICATION FLOW
+# WALLET SIGNING FLOW
 # =============================================================================
 
-def login_with_web_signing(orchestrator_url: str, wallet_address: str = None, force: bool = False, verbose: bool = False):
-    """Login using web-based WalletConnect signing"""
+def run_wallet_signing(orchestrator_url: str, wallet_address: str = None,
+                       force: bool = False, verbose: bool = False):
+    """Run the wallet signing ceremony for node registration"""
     print_banner()
-    
-    # Check if already authenticated
+
+    # Check if pending auth already exists
     if os.path.exists(PENDING_AUTH_FILE) and not force:
         log_warn("Pending authentication already exists")
         print("Use --force to overwrite")
-        return
+        return False
 
     # Get machine_id
     machine_id = get_machine_id()
-    
+
     # Get wallet address if not provided
     if not wallet_address:
         log_info("Enter your Ethereum wallet address:")
         wallet_address = input(f"  {Colors.BOLD}Wallet (0x...):{Colors.NC} ").strip()
         print()
-    
+
     if not wallet_address.startswith('0x') or len(wallet_address) != 42:
         log_error("Invalid wallet address format")
         return False
 
     print(f"Machine ID: {machine_id}")
-    
-    # Create message
+
+    # Create canonical signing message
     message = create_signing_message(machine_id, wallet_address)
-    
+
     # Generate signing URL
     signing_url = generate_signing_url(message, wallet_address)
-    
+
     # Display instructions with QR code
     display_signing_instructions(signing_url, message, wallet_address)
-    
+
     # Wait for signature
     log_info(f"{Colors.BOLD}After signing on the web page, paste the signature below:{Colors.NC}")
     print()
-    
+
     signature = input(f"  {Colors.BOLD}Signature (0x...):{Colors.NC} ").strip()
-    
+
     if not signature.startswith('0x'):
         log_error("Invalid signature format")
         return False
-    
+
     print()
     log_success("Signature received!")
-    
-    # Verify signature
+
+    # Verify signature locally before saving
     log_info("Verifying signature...")
     if not verify_signature(message, signature, wallet_address):
         log_error("Signature verification failed!")
         log_error("Make sure you signed the exact message shown")
         return False
-    
+
     log_success("Signature verified!")
 
-    # Save pending authentication
+    # Save pending authentication for the node agent to pick up
     auth_data = {
         "walletAddress": wallet_address,
         "signature": signature,
@@ -369,113 +361,47 @@ def login_with_web_signing(orchestrator_url: str, wallet_address: str = None, fo
         "timestamp": int(time.time()),
         "machineId": machine_id
     }
-    
+
     save_pending_auth(auth_data)
 
     print()
-    print(f"{Colors.GREEN}{'═'*70}{Colors.NC}")
-    print(f"{Colors.BOLD}              ✅ Authentication Saved!{Colors.NC}")
-    print(f"{Colors.GREEN}{'═'*70}{Colors.NC}")
+    print(f"{Colors.GREEN}{'='*70}{Colors.NC}")
+    print(f"{Colors.BOLD}              Registration Saved{Colors.NC}")
+    print(f"{Colors.GREEN}{'='*70}{Colors.NC}")
     print()
     print("Node agent will complete registration automatically.")
     print()
-    print("Check status:")
+    print("Check progress:")
     print("  sudo journalctl -u decloud-node-agent -f")
     print()
+
+    return True
 
 # =============================================================================
 # COMMAND HANDLERS
 # =============================================================================
 
-def cmd_login(args):
-    """Handle login command"""
-    # Check if already logged in
+def cmd_register(args):
+    """Handle register command — wallet signing ceremony"""
+    # Check if already registered
     creds = load_credentials()
     if creds and not args.force:
-        log_warn("Node already authorized")
+        log_warn("Node already registered")
         print()
         print(f"  Node ID:  {creds.get('NODE_ID', 'Unknown')}")
         print(f"  Wallet:   {creds.get('WALLET_ADDRESS', 'Unknown')}")
         print(f"  API Key:  {creds.get('API_KEY', 'Unknown')[:20]}...")
         print()
-        print("Use --force to re-authorize")
+        print("Use --force to re-register")
         return
-    
-    # Get orchestrator URL
+
     orchestrator_url = args.orchestrator
-    
-    # Perform login
-    success = login_with_web_signing(orchestrator_url, args.wallet, args.force)
+    success = run_wallet_signing(orchestrator_url, args.wallet, args.force)
     sys.exit(0 if success else 1)
-
-def cmd_status(args):
-    """Handle status command"""
-    print_banner()
-    
-    creds = load_credentials()
-    if not creds:
-        log_warn("Node not authorized")
-        print()
-        print("Run: decloud-node login")
-        return
-    
-    print(f"{Colors.BOLD}Node Status:{Colors.NC}")
-    print()
-    print(f"  Node ID:       {creds.get('NODE_ID', 'Unknown')}")
-    print(f"  Wallet:        {creds.get('WALLET_ADDRESS', 'Unknown')}")
-    print(f"  API Key:       {creds.get('API_KEY', 'Unknown')[:20]}...")
-    print(f"  Authorized:    {creds.get('AUTHORIZED_AT', 'Unknown')}")
-    print()
-    
-    try:
-        result = subprocess.run(
-            ['systemctl', 'is-active', 'decloud-node-agent'],
-            capture_output=True,
-            text=True
-        )
-        
-        if result.stdout.strip() == 'active':
-            log_success("Node agent is running")
-        else:
-            log_warn("Node agent is not running")
-            print("Start with: sudo systemctl start decloud-node-agent")
-    except:
-        log_warn("Could not check service status")
-
-def cmd_logout(args):
-    """Handle logout command"""
-    print_banner()
-    
-    creds = load_credentials()
-    if not creds:
-        log_info("Node not authorized - nothing to do")
-        return
-    
-    log_warn(f"This will remove authorization for node: {creds.get('NODE_ID', 'Unknown')}")
-    
-    if not args.force:
-        response = input("Continue? (y/N): ")
-        if response.lower() != 'y':
-            log_info("Cancelled")
-            return
-    
-    if os.path.exists(CREDENTIALS_FILE):
-        os.remove(CREDENTIALS_FILE)
-        log_success("Credentials removed")
-    
-    try:
-        subprocess.run(['systemctl', 'stop', 'decloud-node-agent'], check=False)
-        log_success("Node agent stopped")
-    except:
-        pass
-    
-    print()
-    log_info("Node logged out successfully")
-    print("Run 'decloud-node login' to authorize again")
 
 def cmd_version(args):
     """Handle version command"""
-    print(f"DeCloud Node CLI v{VERSION} (WalletConnect Web Edition)")
+    print(f"DeCloud Node CLI v{VERSION} (Wallet Authentication)")
 
 # =============================================================================
 # MAIN ENTRY POINT
@@ -484,43 +410,40 @@ def cmd_version(args):
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(
-        description="DeCloud Node CLI - Web-Based WalletConnect Authentication",
-        epilog="For support, visit: https://docs.decloud.io"
+        description="DeCloud Node Wallet Authentication CLI",
+        epilog=(
+            "This tool handles wallet signing for node registration.\n"
+            "For node management (login, logout, status, configure),\n"
+            "use the main 'decloud' CLI."
+        )
     )
-    
+
     subparsers = parser.add_subparsers(dest='command', help='Command to execute')
-    
-    # Login command
-    login_parser = subparsers.add_parser('login', help='Login with WalletConnect')
-    login_parser.add_argument('--orchestrator', help='Orchestrator URL (optional)')
-    login_parser.add_argument('--wallet', help='Wallet address (optional, will prompt if not provided)')
-    login_parser.add_argument('--force', action='store_true', help='Force re-authorization')
-    login_parser.add_argument('--verbose', action='store_true', help='Verbose output')
-    
-    # Status command
-    status_parser = subparsers.add_parser('status', help='Show node status')
-    
-    # Logout command
-    logout_parser = subparsers.add_parser('logout', help='Logout and remove credentials')
-    logout_parser.add_argument('--force', action='store_true', help='Skip confirmation')
-    
+
+    # Register command — the only operational command
+    register_parser = subparsers.add_parser('register',
+        help='Register node with wallet signature')
+    register_parser.add_argument('--orchestrator',
+        help='Orchestrator URL (optional)')
+    register_parser.add_argument('--wallet',
+        help='Wallet address (optional, will prompt if not provided)')
+    register_parser.add_argument('--force', action='store_true',
+        help='Force re-registration')
+    register_parser.add_argument('--verbose', action='store_true',
+        help='Verbose output')
+
     # Version command
-    version_parser = subparsers.add_parser('version', help='Show version')
-    
+    subparsers.add_parser('version', help='Show version')
+
     args = parser.parse_args()
-    
-    # Check root for login/logout
-    if os.geteuid() != 0 and args.command in ['login', 'logout']:
+
+    # Root check for register
+    if os.geteuid() != 0 and args.command == 'register':
         log_error("This command must be run as root (use sudo)")
         sys.exit(1)
-    
-    # Execute command
-    if args.command == 'login':
-        cmd_login(args)
-    elif args.command == 'status':
-        cmd_status(args)
-    elif args.command == 'logout':
-        cmd_logout(args)
+
+    if args.command == 'register':
+        cmd_register(args)
     elif args.command == 'version':
         cmd_version(args)
     else:

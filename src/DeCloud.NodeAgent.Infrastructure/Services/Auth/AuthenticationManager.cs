@@ -62,6 +62,11 @@ public class AuthenticationManager : BackgroundService
 
                     case AuthenticationState.Registered:
                         _logger.LogInformation("✓ Node authenticated and registered");
+
+                        // Auto-login: set SchedulingReady at orchestrator unless
+                        // operator explicitly logged out (sentinel file present).
+                        await AutoLoginIfNotLoggedOutAsync(ct);
+
                         return; // Exit - normal operation can proceed
 
                     case AuthenticationState.CredentialsInvalid:
@@ -290,6 +295,52 @@ public class AuthenticationManager : BackgroundService
         {
             _logger.LogWarning(ex, "Failed to verify node authorization with orchestrator");
             return false;
+        }
+    }
+
+    private const string LoggedOutSentinelPath = "/etc/decloud/logged-out";
+
+    /// <summary>
+    /// Call the login endpoint to set SchedulingReady = true,
+    /// unless the operator has explicitly logged out (sentinel file exists).
+    ///
+    /// This enables unattended restart: a node that reboots comes back
+    /// online and schedulable without operator intervention. A node that
+    /// was deliberately logged out stays paused across restarts.
+    /// </summary>
+    private async Task AutoLoginIfNotLoggedOutAsync(CancellationToken ct)
+    {
+        if (File.Exists(LoggedOutSentinelPath))
+        {
+            _logger.LogInformation(
+                "Logged-out sentinel exists at {Path} — heartbeating but not scheduling-ready. " +
+                "Run 'decloud login' to resume scheduling.",
+                LoggedOutSentinelPath);
+            return;
+        }
+
+        try
+        {
+            var success = await _orchestratorClient.LoginAsync(ct);
+
+            if (success)
+            {
+                _logger.LogInformation("✓ Auto-login successful — node is scheduling-ready");
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Auto-login failed — node is heartbeating but not scheduling-ready. " +
+                    "Run 'decloud login' manually to resume scheduling.");
+            }
+        }
+        catch (Exception ex)
+        {
+            // Non-fatal: the node is enrolled and heartbeating. Scheduling
+            // readiness is a convenience, not a requirement for operation.
+            // The operator can run 'decloud login' manually.
+            _logger.LogWarning(ex,
+                "Auto-login failed — node is heartbeating but not scheduling-ready");
         }
     }
 

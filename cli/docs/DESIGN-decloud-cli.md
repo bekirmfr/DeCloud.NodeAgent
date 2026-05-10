@@ -158,7 +158,7 @@ get_node_id(), get_machine_id()
 api_call(), api_get(), api_post(), api_delete()
 
 # Command Handlers
-cmd_login(), cmd_logout()
+cmd_register(), cmd_logout()
 cmd_status(), cmd_info(), cmd_resources(), cmd_heartbeat()
 cmd_vm_list(), cmd_vm_info(), cmd_vm_cleanup()
 cmd_start(), cmd_stop(), cmd_restart(), cmd_logs()

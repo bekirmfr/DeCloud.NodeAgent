@@ -272,6 +272,18 @@ public interface IOrchestratorClient
 
     Task<bool> IsOrchestratorReachableAsync(CancellationToken ct = default);
 
+    /// <summary>
+    /// Call POST /api/nodes/{id}/login to set SchedulingReady = true.
+    /// Returns true on success.
+    /// </summary>
+    Task<bool> LoginAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Call POST /api/nodes/{id}/logout to set SchedulingReady = false.
+    /// Returns true on success.
+    /// </summary>
+    Task<bool> LogoutAsync(CancellationToken ct = default);
+
     Task<bool> RegisterManifestAsync(
         string vmId,
         string rootCid,

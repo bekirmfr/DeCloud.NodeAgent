@@ -123,7 +123,7 @@ check_service_running() {
 
 check_authenticated() {
     if [[ ! -f "$CREDENTIALS_FILE" ]]; then
-        log_error "Node not authenticated. Run: sudo $SCRIPT_NAME login"
+        log_error "Node not registered. Run: sudo $SCRIPT_NAME register"
         exit $EXIT_NO_AUTH
     fi
 }
@@ -131,6 +131,23 @@ check_authenticated() {
 get_node_id() {
     if [[ -f "$CREDENTIALS_FILE" ]]; then
         grep "^NODE_ID=" "$CREDENTIALS_FILE" | cut -d= -f2 2>/dev/null || echo ""
+    else
+        echo ""
+    fi
+}
+
+get_api_key() {
+    if [[ -f "$CREDENTIALS_FILE" ]]; then
+        grep "^API_KEY=" "$CREDENTIALS_FILE" | cut -d= -f2 2>/dev/null || echo ""
+    else
+        echo ""
+    fi
+}
+
+get_orchestrator_url() {
+    if [[ -f "$PUBLISH_DIR/appsettings.Production.json" ]]; then
+        grep -oP '"BaseUrl"\s*:\s*"\K[^"]+' \
+            "$PUBLISH_DIR/appsettings.Production.json" 2>/dev/null || echo ""
     else
         echo ""
     fi
@@ -330,12 +347,183 @@ find_uninstall_script() {
     return 1
 }
 
+cmd_configure() {
+    check_root
+
+    local country="" region="" zone="" name="" description=""
+    local has_locality_change=false
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --country)     country="$2";     has_locality_change=true; shift 2 ;;
+            --region)      region="$2";      has_locality_change=true; shift 2 ;;
+            --zone)        zone="$2";        has_locality_change=true; shift 2 ;;
+            --name)        name="$2";        shift 2 ;;
+            --description) description="$2"; shift 2 ;;
+            -h|--help)
+                echo "Usage: $SCRIPT_NAME configure [options]"
+                echo ""
+                echo "Locality/rate changes (require logout first):"
+                echo "  --country <CC>       ISO 3166-1 alpha-2 country code"
+                echo "  --region <region>    DeCloud region code"
+                echo "  --zone <zone>        Zone (format: <region>-<n>)"
+                echo ""
+                echo "Cosmetic changes (allowed anytime):"
+                echo "  --name <text>        Node display name"
+                echo "  --description <text> Node description"
+                echo ""
+                echo "After locality changes, run 'decloud register' to commit."
+                exit $EXIT_SUCCESS
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                exit $EXIT_USAGE
+                ;;
+        esac
+    done
+
+    if [[ -z "$country$region$zone$name$description" ]]; then
+        log_error "No settings specified"
+        echo "Run '$SCRIPT_NAME configure --help' for usage"
+        exit $EXIT_USAGE
+    fi
+
+    # ── Gate: locality changes require logout ──────────────────────────────
+    if $has_locality_change; then
+        if [[ -f "$CREDENTIALS_FILE" ]] && [[ ! -f "$CONFIG_DIR/logged-out" ]]; then
+            echo ""
+            log_error "Cannot change locality while logged in"
+            echo ""
+            echo "  The full sequence for locality/rate changes:"
+            echo "    1. sudo $SCRIPT_NAME logout          # pause scheduling"
+            echo "    2. sudo $SCRIPT_NAME configure ...   # change settings"
+            echo "    3. sudo $SCRIPT_NAME register        # wallet-sign and commit"
+            echo "    4. sudo $SCRIPT_NAME login            # resume when ready"
+            echo ""
+            exit $EXIT_ERROR
+        fi
+    fi
+
+    # ── Format validation ─────────────────────────────────────────────────
+    if [[ -n "$country" ]]; then
+        if [[ ! "$country" =~ ^[A-Z]{2}$ ]]; then
+            log_error "Invalid country code: '$country' (must be 2 uppercase letters, e.g. TR, DE, US)"
+            exit $EXIT_USAGE
+        fi
+    fi
+
+    if [[ -n "$region" ]]; then
+        if [[ ! "$region" =~ ^[a-z]+(-[a-z]+)*$ ]]; then
+            log_error "Invalid region format: '$region' (must be lowercase with hyphens, e.g. eu-east, na-west)"
+            exit $EXIT_USAGE
+        fi
+    fi
+
+    if [[ -n "$zone" ]]; then
+        # Zone must start with region prefix
+        local expected_region="${region}"
+        if [[ -z "$expected_region" ]]; then
+            # Read current region from install-params
+            expected_region=$(grep -A1 '^--region$' "$INSTALL_PARAMS_FILE" 2>/dev/null | tail -1)
+        fi
+        if [[ -n "$expected_region" ]] && [[ ! "$zone" =~ ^${expected_region}-[1-9][0-9]*$ ]]; then
+            log_error "Invalid zone format: '$zone' (must be <region>-<n>, e.g. ${expected_region}-1)"
+            exit $EXIT_USAGE
+        fi
+    fi
+
+    # ── Apply changes to install-params ───────────────────────────────────
+    # Read existing params, update the specified ones, write back.
+    if [[ ! -f "$INSTALL_PARAMS_FILE" ]]; then
+        log_error "No install-params found — run 'decloud install' first"
+        exit $EXIT_ERROR
+    fi
+
+    local params_changed=false
+
+    if [[ -n "$country" ]]; then
+        _update_install_param "--country" "$country"
+        params_changed=true
+        log_success "Country set to: $country"
+    fi
+
+    if [[ -n "$region" ]]; then
+        _update_install_param "--region" "$region"
+        params_changed=true
+        log_success "Region set to: $region"
+    fi
+
+    if [[ -n "$zone" ]]; then
+        _update_install_param "--zone" "$zone"
+        params_changed=true
+        log_success "Zone set to: $zone"
+    fi
+
+    if [[ -n "$name" ]]; then
+        _update_install_param "--name" "$name"
+        params_changed=true
+        log_success "Name set to: $name"
+    fi
+
+    if [[ -n "$description" ]]; then
+        _update_install_param "--description" "$description"
+        params_changed=true
+        log_success "Description set to: $description"
+    fi
+
+    if $params_changed; then
+        echo ""
+        if $has_locality_change; then
+            log_info "Settings updated locally. Run 'sudo $SCRIPT_NAME register' to commit to orchestrator."
+        else
+            log_info "Settings updated."
+            # Cosmetic changes on enrolled nodes: push to orchestrator
+            # via profile endpoint (future enhancement, not blocking)
+        fi
+    fi
+}
+
+# Helper: update a single flag-value pair in install-params.
+# If the flag exists, replace its value. If not, append it.
+_update_install_param() {
+    local flag="$1"
+    local value="$2"
+    local file="$INSTALL_PARAMS_FILE"
+    local tmp; tmp=$(mktemp)
+
+    local found=false
+    local skip_next=false
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if $skip_next; then
+            skip_next=false
+            continue
+        fi
+        if [[ "$line" == "$flag" ]]; then
+            found=true
+            skip_next=true
+            echo "$flag" >> "$tmp"
+            echo "$value" >> "$tmp"
+        else
+            echo "$line" >> "$tmp"
+        fi
+    done < "$file"
+
+    if ! $found; then
+        echo "$flag" >> "$tmp"
+        echo "$value" >> "$tmp"
+    fi
+
+    mv "$tmp" "$file"
+    chmod 600 "$file"
+}
 
 # ============================================================================
 # AUTHENTICATION COMMANDS
 # ============================================================================
 
-cmd_login() {
+cmd_register() {
     check_root
 
     # cli-decloud-node handles the full auth flow:
@@ -363,10 +551,10 @@ cmd_login() {
     # Already authenticated?
     if [[ -f "$CREDENTIALS_FILE" ]]; then
         local node_id; node_id=$(get_node_id)
-        log_warn "Node is already authenticated (Node ID: $node_id)"
-        read -rp "Re-authenticate? This will re-register the node. [y/N]: " confirm
+        log_warn "Node is already registered (Node ID: $node_id)"
+        read -rp "Re-register? This will re-register the node with new settings. [y/N]: " confirm
         if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-            log_info "Login cancelled"
+            log_info "Registration cancelled"
             exit $EXIT_SUCCESS
         fi
         rm -f "$CREDENTIALS_FILE"
@@ -375,10 +563,13 @@ cmd_login() {
     # Remove any stale pending-auth before starting
     rm -f "$PENDING_AUTH_FILE"
 
-    # ── Step 1: run cli-decloud-node login ──────────────────────────────────
+    # Clear logged-out sentinel — re-registration implies intent to become active
+    rm -f "$CONFIG_DIR/logged-out"
+
+    # ── Step 1: run cli-decloud-node register ───────────────────────────────
     # This prompts for wallet, shows QR code, waits for signature,
     # verifies it locally, and writes the JSON pending-auth file.
-    "$wallet_cli" login
+    "$wallet_cli" register
     local cli_exit=$?
 
     if (( cli_exit != 0 )); then
@@ -428,29 +619,144 @@ cmd_login() {
     exit $EXIT_ERROR
 }
 
+cmd_login() {
+    check_root
+
+    # Must be enrolled (credentials exist)
+    if [[ ! -f "$CREDENTIALS_FILE" ]]; then
+        log_error "Node is not registered — no credentials found"
+        echo ""
+        echo "  To register this node (wallet ceremony):"
+        echo "    sudo $SCRIPT_NAME register"
+        echo ""
+        exit $EXIT_NO_AUTH
+    fi
+
+    local node_id; node_id=$(get_node_id)
+    local api_key; api_key=$(get_api_key)
+    local orchestrator_url; orchestrator_url=$(get_orchestrator_url)
+
+    if [[ -z "$node_id" || -z "$api_key" || -z "$orchestrator_url" ]]; then
+        log_error "Credentials file is incomplete — re-register"
+        log_info "  sudo $SCRIPT_NAME register"
+        exit $EXIT_ERROR
+    fi
+
+    log_info "Logging in node $node_id..."
+
+    local response http_code body
+    local tmp; tmp=$(mktemp)
+    local code_file; code_file=$(mktemp)
+
+    curl -s -o "$tmp" -w "%{http_code}" \
+        -X POST \
+        -H "Authorization: Bearer $api_key" \
+        -H "Content-Type: application/json" \
+        --connect-timeout 10 \
+        "${orchestrator_url}/api/nodes/${node_id}/login" \
+        2>/dev/null > "$code_file" || true
+
+    http_code=$(cat "$code_file" 2>/dev/null | tr -d '[:space:]' | head -c 3 || echo "0")
+    body=$(cat "$tmp" 2>/dev/null || echo "")
+    rm -f "$tmp" "$code_file"
+
+    if [[ "$http_code" =~ ^2 ]]; then
+        # Remove logged-out sentinel
+        rm -f "$CONFIG_DIR/logged-out"
+
+        echo ""
+        log_success "Node logged in — scheduling resumed"
+        echo ""
+
+        # Check for drift warning in response
+        local drift_warning
+        drift_warning=$(echo "$body" | jq -r '.data.settingsDriftWarning // empty' 2>/dev/null)
+        if [[ -n "$drift_warning" ]]; then
+            log_warn "Settings drift detected: $drift_warning"
+            log_info "Run 'sudo $SCRIPT_NAME register' to re-commit settings"
+        fi
+    else
+        log_error "Login failed (HTTP $http_code)"
+        echo "$body" | jq -r '.error // .message // .' 2>/dev/null || echo "$body"
+        exit $EXIT_ERROR
+    fi
+}
+
 cmd_logout() {
     check_root
 
-    log_info "Logging out node..."
-
-    local removed=0
-    if [[ -f "$CREDENTIALS_FILE" ]]; then
-        rm -f "$CREDENTIALS_FILE"
-        log_success "Credentials removed"
-        (( removed++ ))
-    fi
-    if [[ -f "$PENDING_AUTH_FILE" ]]; then
-        rm -f "$PENDING_AUTH_FILE"
-        log_success "Pending auth removed"
-        (( removed++ ))
+    # Check if already logged out
+    if [[ -f "$CONFIG_DIR/logged-out" ]]; then
+        log_info "Node is already logged out (scheduling paused)"
+        return 0
     fi
 
-    if (( removed == 0 )); then
-        log_info "Node was not authenticated"
+    # Must be enrolled
+    if [[ ! -f "$CREDENTIALS_FILE" ]]; then
+        log_info "Node is not registered — nothing to log out from"
+        return 0
+    fi
+
+    local node_id; node_id=$(get_node_id)
+    local api_key; api_key=$(get_api_key)
+    local orchestrator_url; orchestrator_url=$(get_orchestrator_url)
+
+    if [[ -z "$orchestrator_url" ]]; then
+        log_warn "Cannot determine orchestrator URL — writing sentinel only"
+        touch "$CONFIG_DIR/logged-out"
+        chmod 600 "$CONFIG_DIR/logged-out"
+        log_success "Node logged out (local only — orchestrator not notified)"
+        return 0
+    fi
+
+    log_info "Logging out node $node_id..."
+
+    local response http_code body
+    local tmp; tmp=$(mktemp)
+    local code_file; code_file=$(mktemp)
+
+    curl -s -o "$tmp" -w "%{http_code}" \
+        -X POST \
+        -H "Authorization: Bearer $api_key" \
+        -H "Content-Type: application/json" \
+        --connect-timeout 10 \
+        "${orchestrator_url}/api/nodes/${node_id}/logout" \
+        2>/dev/null > "$code_file" || true
+
+    http_code=$(cat "$code_file" 2>/dev/null | tr -d '[:space:]' | head -c 3 || echo "0")
+    body=$(cat "$tmp" 2>/dev/null || echo "")
+    rm -f "$tmp" "$code_file"
+
+    # Write sentinel regardless of API response — operator intent is clear
+    touch "$CONFIG_DIR/logged-out"
+    chmod 600 "$CONFIG_DIR/logged-out"
+
+    if [[ "$http_code" =~ ^2 ]]; then
+        local active_vms
+        active_vms=$(echo "$body" | jq -r '.data.activeVmCount // 0' 2>/dev/null)
+
+        echo ""
+        log_success "Node logged out — scheduling paused"
+
+        if [[ "$active_vms" -gt 0 ]]; then
+            echo ""
+            log_info "$active_vms VM(s) still running on this node."
+            log_info "Existing VMs continue operating — only new scheduling is paused."
+            echo ""
+            echo "  To change locality/rate settings:"
+            echo "    sudo $SCRIPT_NAME configure --country BR --region sa-east"
+            echo "    sudo $SCRIPT_NAME register"
+            echo "    sudo $SCRIPT_NAME login"
+            echo ""
+            echo "  To resume scheduling without changes:"
+            echo "    sudo $SCRIPT_NAME login"
+        fi
     else
-        log_success "Node logged out"
-        log_info "Re-authenticate with: sudo $SCRIPT_NAME login"
+        log_warn "Orchestrator notification failed (HTTP $http_code) — logged out locally"
+        log_info "The orchestrator will detect the pause via heartbeat"
     fi
+
+    echo ""
 }
 
 # ============================================================================
@@ -465,23 +771,15 @@ cmd_install() {
         echo ""
         echo "Usage: sudo $SCRIPT_NAME install --orchestrator <url> --wallet <address> [options]"
         echo ""
-        echo "Options passed directly to the node agent install.sh:"
+        echo "Options:"
         echo "  --orchestrator <url>     Orchestrator URL (required)"
         echo "  --wallet <address>       Node operator wallet address (required)"
-        echo "  --region <region>        Node region (e.g. us-east-1)"
-        echo "  --zone <zone>            Node availability zone (e.g. us-east-1-nyc-1a)"
-        echo "  --name <name>            Node display name"
         echo "  --gpu                    Enable GPU support"
         echo "  (any other flags are passed through to install.sh)"
         echo ""
-        echo "Example:"
-        echo "  sudo $SCRIPT_NAME install \\"
-        echo "    --orchestrator https://decloud.stackfi.tech \\"
-        echo "    --wallet 0x86b8... \\"
-        echo "    --region us-east-1 \\"
-        echo "    --zone us-east-1-nyc-1a \\"
-        echo "    --name MyNode"
-        exit $EXIT_USAGE
+        echo "After install, configure your node:"
+        echo "  sudo $SCRIPT_NAME configure --country TR --region eu-east --name MyNode"
+        echo "  sudo $SCRIPT_NAME register"
     fi
 
     echo ""
@@ -522,7 +820,7 @@ cmd_install() {
     if (( exit_code == 0 )); then
         echo ""
         log_success "Installation complete"
-        log_info "Authenticate now: sudo $SCRIPT_NAME login"
+        log_info "Register now: sudo $SCRIPT_NAME register"
     else
         log_error "Installation failed (exit code $exit_code)"
         exit $exit_code
@@ -685,7 +983,7 @@ cmd_status() {
         echo "  API Key:  ${api_key:0:20}..."
     else
         log_warn "Not authenticated"
-        echo "  Run: sudo $SCRIPT_NAME login"
+        echo "  Run: sudo $SCRIPT_NAME register"
     fi
     echo ""
 
@@ -1218,6 +1516,32 @@ cmd_vm_reboot() {
     fi
 }
 
+cmd_vm_drain() {
+    echo ""
+    echo -e "${YELLOW}[NOT YET IMPLEMENTED]${NC} VM drain"
+    echo ""
+    echo "  'decloud vm drain' will migrate all VMs off this node."
+    echo "  Equivalent to: logout + request migration of existing VMs."
+    echo ""
+    echo "  For now, to prepare for uninstall:"
+    echo "    1. sudo $SCRIPT_NAME logout"
+    echo "    2. Wait for tenants to migrate or manually destroy VMs"
+    echo "    3. sudo $SCRIPT_NAME uninstall"
+    echo ""
+    exit $EXIT_ERROR
+}
+
+cmd_vm_migrate() {
+    echo ""
+    echo -e "${YELLOW}[NOT YET IMPLEMENTED]${NC} VM migration"
+    echo ""
+    echo "  'decloud vm migrate <vm-id> --to <node-id>' will move a single VM."
+    echo ""
+    echo "  This requires the Phase 2.5b migration scheduler."
+    echo ""
+    exit $EXIT_ERROR
+}
+
 cmd_vm_diagnose_system() {
     echo ""
     echo -e "${BOLD}═══════════════════════════════════════════════════════════${NC}"
@@ -1467,7 +1791,7 @@ cmd_reset() {
     echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
     echo ""
     echo "Next steps:"
-    echo "  1. Re-authenticate: ${BOLD}sudo $SCRIPT_NAME login${NC}"
+    echo "  1. Re-register: ${BOLD}sudo $SCRIPT_NAME register${NC}"
     echo "  2. Check status:    ${BOLD}$SCRIPT_NAME status${NC}"
     echo ""
 }
@@ -1645,7 +1969,7 @@ cmd_diagnose() {
         local node_id; node_id=$(get_node_id)
         [[ -n "$node_id" ]] && echo "  Node ID: $node_id" || log_warn "Node ID not found in credentials"
     else
-        log_error "Not authenticated — run: sudo $SCRIPT_NAME login"
+        log_error "Not registered — run: sudo $SCRIPT_NAME register"
     fi
     echo ""
 
@@ -1870,9 +2194,16 @@ ${BOLD}SETUP COMMANDS:${NC}
       --keep-wg               Preserve WireGuard keys and config in /etc/wireguard
       --help                  Show this help
                           
-${BOLD}AUTHENTICATION COMMANDS:${NC}
-    login                   Authenticate node with the orchestrator
-    logout                  Remove node authentication
+${BOLD}NODE LIFECYCLE:${NC}
+    register                Register node with wallet signature (first time or re-register)
+    login                   Resume scheduling (lightweight, no wallet needed)
+    logout                  Pause scheduling (credentials preserved, VMs keep running)
+    configure [options]     Update node settings (locality requires logout first)
+      --country <CC>          ISO 3166-1 alpha-2 country code
+      --region <region>       DeCloud region code
+      --zone <zone>           Zone (format: <region>-<n>)
+      --name <text>           Node display name
+      --description <text>    Node description
 
 ${BOLD}STATUS & INFORMATION:${NC}
     status                  Show comprehensive node status
@@ -1896,6 +2227,8 @@ ${BOLD}VM MANAGEMENT:${NC}
     vm cleanup --all        Clean up all VMs (requires confirmation)
       --dry-run               Preview without executing
       --force                 Skip confirmation
+    vm drain                Drain all VMs off this node (not yet implemented)
+    vm migrate <vm-id>      Migrate a single VM (not yet implemented)
 
 ${BOLD}SERVICE MANAGEMENT:${NC}
     start                   Start the node agent service
@@ -1953,18 +2286,22 @@ ${BOLD}EXAMPLES:${NC}
     # Install the node agent
     sudo $SCRIPT_NAME install \\
       --orchestrator https://decloud.stackfi.tech \\
-      --wallet 0x86b8... \\
-      --region us-east-1 \\
-      --zone us-east-1-nyc-1a \\
-      --name MyNode
+      --wallet 0x86b8...
 
     # Update (re-run install with saved params)
     sudo $SCRIPT_NAME update
 
-    # Pull latest code (replaces: sudo git -C /opt/decloud/DeCloud.NodeAgent pull origin main)
-    sudo $SCRIPT_NAME pull
+    # Configure node settings
+    sudo $SCRIPT_NAME configure \\
+      --country US \\
+      --region na-east \\
+      --zone na-east-1 \\
+      --name MyNode
 
-    # Authenticate
+    # Register with wallet signature
+    sudo $SCRIPT_NAME register
+
+    # Resume scheduling
     sudo $SCRIPT_NAME login
 
     # Check status
@@ -2052,8 +2389,10 @@ main() {
         update)       cmd_update     "$@" ;;
         pull)         cmd_pull       "$@" ;;
         uninstall)    cmd_remove     "$@" ;;
+        register)     cmd_register   "$@" ;;
         login)        cmd_login      "$@" ;;
         logout)       cmd_logout     "$@" ;;
+        configure)    cmd_configure  "$@" ;; 
         status)       cmd_status     "$@" ;;
         info)         cmd_info       "$@" ;;
         resources)    cmd_resources  "$@" ;;
@@ -2075,6 +2414,8 @@ main() {
                 info|show)             cmd_vm_info              "$@" ;;
                 cleanup|clean|delete|rm) cmd_vm_cleanup         "$@" ;;
                 reboot|hard-reboot)    cmd_vm_reboot            "$@" ;;
+                migrate)               cmd_vm_migrate           "$@" ;;
+                drain)                 cmd_vm_drain             "$@" ;;
                 diagnose-system|sysdiag) cmd_vm_diagnose_system "$@" ;;
                 *)
                     log_error "Unknown VM subcommand: $vm_cmd"
@@ -2085,6 +2426,10 @@ main() {
                     echo "  cleanup <vm-id>         Destroy and remove a VM and its data"
                     echo "  reboot <vm-id>          Hard reboot a VM (virsh destroy+start)"
                     echo "                          Use when virsh reboot/ACPI is unresponsive"
+                    echo "  migrate <vm-id>         Migrate a VM to another node"
+                    echo "    --to <target-node-id>     primary migration target"
+                    echo "  drain                   Drain the node of all VMs"
+                    echo "     -to <target-node-id>     primary drain target"
                     echo "  diagnose-system         Check system VM health (WG mesh, libvirt,"
                     echo "                          DHT/BlockStore services, relay connectivity)"
                     exit $EXIT_USAGE
