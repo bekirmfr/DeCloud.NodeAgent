@@ -465,6 +465,29 @@ cmd_configure() {
         log_success "Description set to: $description"
     fi
 
+    # Sync settings.json → appsettings.Production.json so the running
+    # agent sees the new values. Without this, the agent reads stale
+    # defaults from appsettings and the heartbeat hash mismatches.
+    if $params_changed; then
+        local appsettings="$PUBLISH_DIR/appsettings.Production.json"
+        if [[ -f "$appsettings" ]]; then
+            local tmp_ap; tmp_ap=$(mktemp)
+            jq --arg c "$(_read_setting "country" || echo "ZZ")" \
+               --arg r "$(_read_setting "region" || echo "default")" \
+               --arg z "$(_read_setting "zone" || echo "default")" \
+               --arg n "$(_read_setting "name" || echo "$(hostname)")" \
+               '.Node.Country = $c | .Node.Region = $r | .Node.Zone = $z | .Node.Name = $n' \
+               "$appsettings" > "$tmp_ap" && mv "$tmp_ap" "$appsettings"
+            chmod 640 "$appsettings"
+        fi
+
+        # Restart agent to pick up new appsettings
+        if check_service_running; then
+            systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+            log_info "Agent restarted to apply new settings"
+        fi
+    fi
+
     if $params_changed; then
         echo ""
         if $has_locality_change; then

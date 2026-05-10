@@ -66,6 +66,7 @@ NODE_WALLET=""  # MANDATORY - must be provided
 NODE_NAME=$(hostname)
 NODE_REGION="default"
 NODE_ZONE="default"
+NODE_COUNTRY="ZZ"
 
 # Paths
 INSTALL_DIR="/opt/decloud"
@@ -2338,6 +2339,7 @@ create_configuration() {
   },
   "Node": {
     "Name": "${NODE_NAME}",
+    "Country": "${NODE_COUNTRY}",
     "Region": "${NODE_REGION}",
     "Zone": "${NODE_ZONE}"
   },
@@ -2789,11 +2791,13 @@ main() {
     # On update (decloud update) they were set by prior configure calls.
     if [ -f /etc/decloud/settings.json ]; then
         NODE_NAME=$(jq -r '.name // empty' /etc/decloud/settings.json)
+        NODE_COUNTRY=$(jq -r '.country // "ZZ"' /etc/decloud/settings.json)
         NODE_REGION=$(jq -r '.region // "default"' /etc/decloud/settings.json)
         NODE_ZONE=$(jq -r '.zone // "default"' /etc/decloud/settings.json)
     fi
     # Defaults if not set
     NODE_NAME="${NODE_NAME:-$(hostname)}"
+    NODE_COUNTRY="${NODE_COUNTRY:-ZZ}"
     NODE_REGION="${NODE_REGION:-default}"
     NODE_ZONE="${NODE_ZONE:-default}"
 
