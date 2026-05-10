@@ -248,6 +248,10 @@ public class HeartbeatService : BackgroundService
                 SchedulingConfigVersion = _nodeState.SchedulingConfig?.Version ?? 0,
                 CgnatInfo = cgnatInfo,
                 ObligationHealth = await BuildObligationHealthAsync(ct),
+                SettingsHash = DeCloud.Shared.SettingsHash.Compute(
+                    _nodeMetadata.WalletAddress,
+                    _nodeMetadata.Country,
+                    _nodeMetadata.Region)
             };
 
             // Send heartbeat - OrchestratorClient will transform to API format

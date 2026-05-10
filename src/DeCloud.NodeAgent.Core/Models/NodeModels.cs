@@ -85,6 +85,14 @@ public class Heartbeat
     /// Absent or zero values mean the node has no template for that role.
     /// </summary>
     public Dictionary<string, int>? SystemTemplateVersions { get; set; }
+
+    /// <summary>
+    /// SHA-256 hash of authoritative settings (wallet, country, region, zone).
+    /// Computed by SettingsHash.Compute() from DeCloud.Shared.
+    /// The orchestrator compares this against its stored registration state
+    /// to detect local edits that weren't committed via re-register.
+    /// </summary>
+    public string? SettingsHash { get; set; }
 }
 
 

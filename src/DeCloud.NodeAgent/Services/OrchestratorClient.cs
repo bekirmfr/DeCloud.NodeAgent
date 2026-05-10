@@ -1059,7 +1059,8 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             } : null,
             obligationStateVersions = await BuildObligationStateVersionsAsync(ct),
             obligationHealth = heartbeat.ObligationHealth,
-            systemTemplateVersions = await BuildSystemTemplateVersionsAsync(ct)
+            systemTemplateVersions = await BuildSystemTemplateVersionsAsync(ct),
+            settingsHash = heartbeat.SettingsHash,
         };
 
         return payload;
@@ -1172,6 +1173,19 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                             IssuedAt = DateTime.UtcNow
                         });
                     }
+                }
+
+                // Process settings drift warning
+                if (data.TryGetProperty("settingsDrift", out var driftElement) &&
+                    driftElement.ValueKind == JsonValueKind.Object)
+                {
+                    var driftMessage = driftElement.TryGetProperty("message", out var msg)
+                        ? msg.GetString() : "Settings drift detected";
+
+                    _logger.LogWarning(
+                        "⚠ Settings drift detected by orchestrator: {Message}. " +
+                        "Run 'decloud register' to re-commit settings, or revert local edits.",
+                        driftMessage);
                 }
             }
 
