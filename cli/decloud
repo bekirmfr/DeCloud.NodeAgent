@@ -340,6 +340,22 @@ find_uninstall_script() {
     return 1
 }
 
+cmd_settings() {
+    local settings="$SETTINGS_FILE"
+
+    if [[ ! -f "$settings" ]]; then
+        log_error "No settings file found at $settings"
+        log_info "Run 'sudo $SCRIPT_NAME install' first"
+        exit $EXIT_ERROR
+    fi
+
+    echo ""
+    echo -e "${BOLD}Node Settings${NC} ($settings)"
+    echo ""
+    jq . "$settings"
+    echo ""
+}
+
 cmd_configure() {
     check_root
 
@@ -2227,6 +2243,7 @@ ${BOLD}NODE LIFECYCLE:${NC}
     register                Register node with wallet signature (first time or re-register)
     login                   Resume scheduling (lightweight, no wallet needed)
     logout                  Pause scheduling (credentials preserved, VMs keep running)
+    settings                Show current node settings (settings.json)
     configure [options]     Update node settings (locality requires logout first)
       --country <CC>          ISO 3166-1 alpha-2 country code
       --region <region>       DeCloud region code
@@ -2421,6 +2438,7 @@ main() {
         register)     cmd_register   "$@" ;;
         login)        cmd_login      "$@" ;;
         logout)       cmd_logout     "$@" ;;
+        settings)     cmd_settings   "$@" ;;
         configure)    cmd_configure  "$@" ;; 
         status)       cmd_status     "$@" ;;
         info)         cmd_info       "$@" ;;
