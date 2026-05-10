@@ -417,7 +417,7 @@ cmd_configure() {
         # Zone must start with region prefix
         local expected_region="${region}"
         if [[ -z "$expected_region" ]]; then
-            # Read current region from install-params
+            # Read current region from settings JSON
             expected_region=$(_read_setting "region")
         fi
         if [[ -n "$expected_region" ]] && [[ ! "$zone" =~ ^${expected_region}-[1-9][0-9]*$ ]]; then
@@ -426,7 +426,7 @@ cmd_configure() {
         fi
     fi
 
-    # ── Apply changes to install-params ───────────────────────────────────
+    # ── Apply changes to settings JSON ───────────────────────────────────
     # Read existing params, update the specified ones, write back.
     if [[ ! -f "$SETTINGS_FILE" ]]; then
         log_error "No settings file found — run 'decloud install' first"
@@ -471,8 +471,34 @@ cmd_configure() {
             log_info "Settings updated locally. Run 'sudo $SCRIPT_NAME register' to commit to orchestrator."
         else
             log_info "Settings updated."
-            # Cosmetic changes on enrolled nodes: push to orchestrator
-            # via profile endpoint (future enhancement, not blocking)
+
+            # Push cosmetic changes to orchestrator if enrolled
+            if [[ -f "$CREDENTIALS_FILE" ]]; then
+                local api_key; api_key=$(get_api_key)
+                local orchestrator_url; orchestrator_url=$(get_orchestrator_url)
+
+                if [[ -n "$orchestrator_url" && -n "$api_key" ]]; then
+                    local payload="{}"
+                    [[ -n "$name" ]]        && payload=$(echo "$payload" | jq --arg v "$name" '.name = $v')
+                    [[ -n "$description" ]] && payload=$(echo "$payload" | jq --arg v "$description" '.description = $v')
+
+                    local http_code
+                    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+                        -X PATCH \
+                        -H "Authorization: Bearer $api_key" \
+                        -H "Content-Type: application/json" \
+                        -d "$payload" \
+                        --connect-timeout 10 \
+                        "${orchestrator_url}/api/nodes/me/profile" 2>/dev/null || echo "0")
+
+                    if [[ "$http_code" =~ ^2 ]]; then
+                        log_success "Profile updated on orchestrator"
+                    else
+                        log_warn "Could not push profile to orchestrator (HTTP $http_code)"
+                        log_info "Changes saved locally — will take effect on next register"
+                    fi
+                fi
+            fi
         fi
     fi
 }
