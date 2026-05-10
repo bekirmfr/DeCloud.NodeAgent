@@ -17,7 +17,7 @@ Maintainers debugging install/update/uninstall behavior can jump to
 
 > **Status notice.** Part 1 describes the operator lifecycle as
 > implemented. [Part 2](#part-2--implementation-status) covers
-> remaining work (settings JSON migration, live migration).
+> remaining work (live migration).
 > Part 3 describes infrastructure mechanics.
 
 > **Companion documents:**
@@ -152,7 +152,7 @@ Operational settings (locality, name) are handled separately by
 | --- | --- |
 | **Inputs** | `--wallet 0x...` (required), `--orchestrator <URL>` (defaults to `https://decloud.stackfi.tech`) |
 | **State change** | `GONE` → `CONFIGURED` |
-| **Side effects** | Binaries placed at `/opt/decloud/`; CLI at `/usr/local/bin/decloud`; systemd unit installed; `/etc/decloud/install-params` written with identity fields; `appsettings.Production.json` generated with defaults |
+| **Side effects** | Binaries placed at `/opt/decloud/`; CLI at `/usr/local/bin/decloud`; systemd unit installed; `/etc/decloud/settings.json` written with identity fields; `appsettings.Production.json` generated with defaults |
 | **Network** | Fetches release artifacts from GitHub; verifies cosign + SHA-256 |
 | **Failure mode** | Binaries removed on rollback; node remains GONE |
 | **Validation** | Wallet format (0x + 40 hex, not null address) |
@@ -170,7 +170,7 @@ Updates operational settings: locality, display name, service rates.
 | --- | --- |
 | **Inputs** | `--country <CC>`, `--region <region>`, `--zone <zone>`, `--name <text>`, `--description <text>` |
 | **State change** | `CONFIGURED` → `CONFIGURED'` (settings updated locally) |
-| **Side effects** | Updates `/etc/decloud/install-params` |
+| **Side effects** | Updates `/etc/decloud/settings.json`; pushes cosmetic changes (name, description) to orchestrator if enrolled |
 | **Network** | None — purely local |
 | **Validation** | Country: `^[A-Z]{2}$`; region: `^[a-z]+(-[a-z]+)*$`; zone: `^<region>-[1-9][0-9]*$` (client-side format check; existence validated server-side at register) |
 | **Refused if** | Node is ENROLLED or ACTIVE and the change includes locality or rate fields. Operator must `logout` first, then configure, then `register` to commit. |
@@ -680,10 +680,11 @@ The lifecycle described in Part 1 is implemented across four tiers.
   removes `/etc/decloud/logged-out` sentinel
 - `cmd_logout` — non-destructive, calls logout endpoint, writes
   sentinel, credentials preserved
-- `cmd_configure` — reads/writes `install-params` via
-  `_update_install_param` helper; refuses locality changes while
-  logged in (credentials exist AND no sentinel); cosmetic changes
-  allowed anytime
+- `cmd_configure` — reads/writes `settings.json` via
+  `_read_setting` / `_write_setting` helpers; refuses locality
+  changes while logged in (credentials exist AND no sentinel);
+  cosmetic changes allowed anytime and pushed to orchestrator
+  via `PATCH /api/nodes/me/profile` if enrolled
 - `cmd_vm_drain` / `cmd_vm_migrate` — stubs printing "not yet
   implemented" with manual alternative guidance
 - `get_api_key` / `get_orchestrator_url` utility helpers
@@ -754,15 +755,6 @@ The lifecycle described in Part 1 is implemented across four tiers.
 
 ## 9. Remaining work
 
-### Settings JSON migration
-
-`install-params` (newline-separated `--flag\nvalue`) →
-`/etc/decloud/settings` (JSON with locality block, version field,
-wallet, orchestrator URL). The current `_update_install_param`
-helper in the bash CLI works but is fragile for complex values.
-JSON would be cleaner. Not blocking anything — the current format
-is functional.
-
 ### Live migration (Phase 2.5b)
 
 The `vm drain` and `vm migrate` stubs exist in the CLI. The
@@ -779,14 +771,6 @@ future enhancement could re-check flagged VMs on each heartbeat
 cycle and clear the flag if the node is now compliant. Edge case,
 low priority — the operator can avoid it by not logging in until
 committed to the new locality.
-
-### Cosmetic profile push
-
-`decloud configure --name X` on an enrolled node updates
-`install-params` locally but does not push to the orchestrator.
-The design doc says cosmetic changes should flow through a profile
-endpoint without re-register. Not implemented — cosmetic changes
-take effect on next `register`.
 
 ---
 
@@ -842,7 +826,7 @@ most dependencies cached: ~30 seconds.
 
 2. **Argument parse** (`install.sh`, ~5 s)
    - Reads `--orchestrator`, `--wallet`
-   - Persists arguments to `/etc/decloud/install-params` (used by
+   - Persists arguments to `/etc/decloud/settings.json` (used by
      `decloud update` later)
    - **If a required flag is missing**: prompts via `/dev/tty` if a
      controlling terminal is available, otherwise errors with copy-
@@ -878,7 +862,7 @@ most dependencies cached: ~30 seconds.
 
 7. **Binary placement (atomic version swap)**
    - Tarballs extracted to `/opt/decloud/publish.<version>/`
-   - `appsettings.Production.json` generated from install-params
+   - `appsettings.Production.json` generated from settings.json
    - Active symlink swapped: `/opt/decloud/publish` → `publish.<version>`
    - Previous version preserved as `publish.<previous-version>` for
      rollback
@@ -928,7 +912,7 @@ sudo decloud update
 
 ### What runs, in order
 
-1. **Read saved parameters** from `/etc/decloud/install-params`
+1. **Read saved parameters** from `/etc/decloud/settings.json`
 2. **Hybrid install.sh resolution:**
    - **Primary**: `curl` from `releases/latest/download/install.sh`
      (30 s timeout). On success, writes to `/tmp/decloud-install-XXXX.sh`.
@@ -965,7 +949,7 @@ release. This means:
 
 - Does **not** preserve appsettings hand-edits across upgrades. Each
   install regenerates `appsettings.Production.json` from
-  `/etc/decloud/install-params`. To change operational settings, use
+  `/etc/decloud/settings.json`. To change operational settings, use
   `decloud configure` followed by `decloud register`.
 - Does **not** roll back automatically on failure. If the new release
   fails to start, the symlink already points at the new version. See
@@ -991,7 +975,7 @@ Same hybrid resolution as update: tries to fetch the latest
 5. Removes systemd unit file
 6. Removes `/usr/local/bin/decloud`, `/usr/local/bin/cli-decloud-node`,
    and other CLI bits
-7. Removes `/etc/decloud/` (credentials, install-params, SSH CA)
+7. Removes `/etc/decloud/` (credentials, settings.json, SSH CA)
 8. Optionally removes the `decloud` system user
 9. Reverts sshd config additions
 
@@ -1056,7 +1040,7 @@ After a successful install, the canonical tree:
 └── DESIGN.md
 
 /etc/decloud/
-├── install-params                                   (mode 600, used by 'decloud update')
+├── settings.json                                    (mode 600, used by 'decloud update' and 'decloud configure')
 ├── credentials                                      (after 'decloud register')
 ├── logged-out                                       (sentinel: operator paused scheduling)
 ├── pending-auth                                     (during register flow)
@@ -1084,14 +1068,11 @@ After a successful install, the canonical tree:
 
 ### Settings file format
 
-`/etc/decloud/install-params` stores identity and infrastructure
-parameters (orchestrator URL, wallet, port overrides) in a
-newline-separated flag-value format. Operational settings (country,
-region, zone, name) are managed by `decloud configure` and stored
-in the same file.
-
-A future migration will replace this with `/etc/decloud/settings`
-(JSON format). See [§9 Remaining work](#9-remaining-work).
+`/etc/decloud/settings.json` stores all node settings in JSON format.
+Identity fields (orchestrator URL, wallet) are written by `install.sh`.
+Operational settings (country, region, zone, name) are managed by
+`decloud configure`. The file is merged on `decloud update` —
+identity fields are refreshed while operational settings are preserved.
 
 ## 15. Configuration
 
@@ -1099,9 +1080,9 @@ A future migration will replace this with `/etc/decloud/settings`
 
 | Setting | Source | Mutability |
 | --- | --- | --- |
-| Orchestrator URL, wallet | `/etc/decloud/install-params` | Set at install; change requires reinstall |
-| Country, region, zone, name | `/etc/decloud/install-params` | Set via `decloud configure`; locality changes require logout → configure → register → login |
-| `appsettings.Production.json` | Generated by `install.sh` from install-params | Regenerated on each install/update |
+| Orchestrator URL, wallet | `/etc/decloud/settings.json` | Set at install; change requires reinstall |
+| Country, region, zone, name | `/etc/decloud/settings.json` | Set via `decloud configure`; locality changes require logout → configure → register → login |
+| `appsettings.Production.json` | Generated by `install.sh` from settings.json | Regenerated on each install/update |
 | Node ID, API key | `/etc/decloud/credentials` (after register) | Removed by `uninstall`, regenerated on next register |
 | Machine ID | `/etc/machine-id` | OS-level, do not edit |
 | Node identity | `SHA-256(machine-id + wallet)` | Derived; changes if either input changes |
@@ -1181,7 +1162,7 @@ What this chain does **not** prove:
 | Inspect installed version | `cat /opt/decloud/current-version` |
 | Manual rollback to previous version | `sudo ln -sfn /opt/decloud/publish.$(cat /opt/decloud/previous-version) /opt/decloud/publish && sudo systemctl restart decloud-node-agent` |
 | Check installed binaries | `ls -la /opt/decloud/publish/` |
-| View saved install params | `sudo cat /etc/decloud/install-params` |
+| View saved settings | `sudo cat /etc/decloud/settings.json` |
 
 ## 18. Recovery scenarios
 
@@ -1297,7 +1278,7 @@ runtime is installed independently as `aspnetcore-runtime-8.0`.
 | `decloud-relay-nat` | NAT helper for relay-mode nodes |
 | `vm-cleanup.sh` | Per-VM cleanup helper |
 | `/opt/decloud/publish` | Active version symlink — the systemd unit points here |
-| `/etc/decloud/install-params` | Saved install arguments and operational settings; used by `decloud update` and `decloud configure` |
+| `/etc/decloud/settings.json` | Node settings (JSON); identity fields written by install, operational fields by configure |
 | `/etc/decloud/credentials` | JWT credentials (after register) |
 | `/etc/decloud/logged-out` | Sentinel file indicating operator-initiated scheduling pause; prevents auto-login on restart |
 | `/usr/local/share/decloud/install.sh` | Offline fallback for `decloud update` |
