@@ -144,21 +144,23 @@ Seven commands cover every state transition.
 
 ### `decloud install`
 
-Installs binaries, prompts for wallet address, records orchestrator
-URL, and collects operational settings (locality, name).
+Installs binaries, records wallet address and orchestrator URL.
+Operational settings (locality, name) are handled separately by
+`decloud configure`.
 
 | Aspect | Detail |
 | --- | --- |
-| **Inputs** | `--wallet 0x...` (required), `--orchestrator <URL>` (defaults to `https://decloud.stackfi.tech`), `--country <CC>`, `--region <region>`, `--zone <zone>`, `--name <text>` |
+| **Inputs** | `--wallet 0x...` (required), `--orchestrator <URL>` (defaults to `https://decloud.stackfi.tech`) |
 | **State change** | `GONE` → `CONFIGURED` |
-| **Side effects** | Binaries placed at `/opt/decloud/`; CLI at `/usr/local/bin/decloud`; systemd unit installed; `/etc/decloud/settings` written |
+| **Side effects** | Binaries placed at `/opt/decloud/`; CLI at `/usr/local/bin/decloud`; systemd unit installed; `/etc/decloud/install-params` written with identity fields; `appsettings.Production.json` generated with defaults |
 | **Network** | Fetches release artifacts from GitHub; verifies cosign + SHA-256 |
 | **Failure mode** | Binaries removed on rollback; node remains GONE |
-| **Validation** | Country must be in `countries.json`; region in `regions.json`; zone format validated |
+| **Validation** | Wallet format (0x + 40 hex, not null address) |
 
-After install the node is on disk with full settings but the
-orchestrator hasn't seen them. The agent service is installed but
-idle. The operator must `register` next.
+After install the node is on disk with binaries and identity but no
+operational settings. The agent service is installed and starts with
+defaults (hostname for name, "default" for region/zone). The operator
+must `configure` and then `register` to become operational.
 
 ### `decloud configure`
 
@@ -166,11 +168,11 @@ Updates operational settings: locality, display name, service rates.
 
 | Aspect | Detail |
 | --- | --- |
-| **Inputs** | `--country <CC>`, `--region <region>`, `--zone <zone>`, `--name <text>`, `--description <text>`, `--rate-cpu-hour <amount>`, etc. |
-| **State change** | `CONFIGURED` → `CONFIGURED'` (pre-enrollment updates) |
-| **Side effects** | Updates `/etc/decloud/settings`; regenerates `appsettings.Production.json`; restarts agent service |
+| **Inputs** | `--country <CC>`, `--region <region>`, `--zone <zone>`, `--name <text>`, `--description <text>` |
+| **State change** | `CONFIGURED` → `CONFIGURED'` (settings updated locally) |
+| **Side effects** | Updates `/etc/decloud/install-params` |
 | **Network** | None — purely local |
-| **Validation** | Country must be in `countries.json`; region in `regions.json`; zone format validated; client-side check via `--validate` |
+| **Validation** | Country: `^[A-Z]{2}$`; region: `^[a-z]+(-[a-z]+)*$`; zone: `^<region>-[1-9][0-9]*$` (client-side format check; existence validated server-side at register) |
 | **Refused if** | Node is ENROLLED or ACTIVE and the change includes locality or rate fields. Operator must `logout` first, then configure, then `register` to commit. |
 
 The settings written are *staged*: the agent will read them on next
@@ -752,16 +754,6 @@ The lifecycle described in Part 1 is implemented across four tiers.
 
 ## 9. Remaining work
 
-### install.sh alignment
-
-`install.sh` still prompts for country, region, zone, and name
-alongside wallet and orchestrator URL. The Tier 2 design says install
-handles identity only (wallet + orchestrator) and `decloud configure`
-handles operational settings. Until install.sh is updated, fresh
-installs get the old combined flow. This is a UX inconsistency but
-not a correctness issue — the system works either way. High blast
-radius due to the file's ~3000-line size.
-
 ### Settings JSON migration
 
 `install-params` (newline-separated `--flag\nvalue`) →
@@ -801,11 +793,10 @@ take effect on next `register`.
 # Part 3 — Infrastructure Mechanics
 
 > **Scope:** This part describes how `install.sh`, `decloud update`,
-> and `decloud uninstall` work on disk today. The mechanics here apply
-> regardless of which operator-facing model (deployed or target) is
-> active — they're concerned with binary placement, signature
-> verification, version management, and recovery, not with operator
-> command semantics.
+> and `decloud uninstall` work on disk. These mechanics are concerned
+> with binary placement, signature verification, version management,
+> and recovery — not with operator command semantics (which are
+> covered in Part 1).
 
 ## 10. Overview of operations
 
@@ -828,19 +819,16 @@ The single command an operator pastes:
 curl -fsSL https://github.com/bekirmfr/DeCloud.NodeAgent/releases/latest/download/install.sh \
   | sudo bash -s -- \
       --orchestrator https://decloud.stackfi.tech \
-      --wallet 0xYourWalletAddress \
-      --country TR \
-      --name "MyNode" \
-      --region "eu-east" \
-      --zone "eu-east-ist-1a"
+      --wallet 0xYourWalletAddress
 ```
 
-> **Note:** `install.sh` currently accepts locality parameters
-> (country, region, zone, name) alongside wallet and orchestrator URL.
-> Under the lifecycle design, install should handle identity only
-> (wallet + orchestrator) and `decloud configure` should handle
-> operational settings afterward. See [§9 Remaining work](#9-remaining-work)
-> for the install.sh alignment plan.
+After install completes, configure operational settings and register:
+
+```bash
+sudo decloud configure --country TR --region eu-east --name MyNode
+sudo decloud register
+sudo decloud login
+```
 
 Wall-clock time on a fresh Ubuntu box: 3–5 minutes. On a re-run with
 most dependencies cached: ~30 seconds.
@@ -853,8 +841,7 @@ most dependencies cached: ~30 seconds.
      in this mode)
 
 2. **Argument parse** (`install.sh`, ~5 s)
-   - Reads `--orchestrator`, `--wallet`, `--country`, `--name`,
-     `--region`, `--zone`
+   - Reads `--orchestrator`, `--wallet`
    - Persists arguments to `/etc/decloud/install-params` (used by
      `decloud update` later)
    - **If a required flag is missing**: prompts via `/dev/tty` if a
@@ -978,9 +965,8 @@ release. This means:
 
 - Does **not** preserve appsettings hand-edits across upgrades. Each
   install regenerates `appsettings.Production.json` from
-  `/etc/decloud/install-params`. To change orchestrator/wallet/etc.,
-  edit that file (or pass new flags via `decloud install ...`) and
-  re-run.
+  `/etc/decloud/install-params`. To change operational settings, use
+  `decloud configure` followed by `decloud register`.
 - Does **not** roll back automatically on failure. If the new release
   fails to start, the symlink already points at the new version. See
   [Recovery scenarios](#18-recovery-scenarios).
@@ -1096,13 +1082,16 @@ After a successful install, the canonical tree:
 - Disk layout cleanup keeps current + 1 previous publish.* directory.
   Older versions are pruned on each successful install.
 
-### Future change (target operator lifecycle)
+### Settings file format
 
-When the target operator lifecycle (Part 1) ships,
-`/etc/decloud/install-params` will be replaced by `/etc/decloud/settings`
-(JSON format). Existing nodes will be migrated automatically on first
-install/update under the new model. Until that work lands, the file
-remains `install-params` with the args-pair format described below.
+`/etc/decloud/install-params` stores identity and infrastructure
+parameters (orchestrator URL, wallet, port overrides) in a
+newline-separated flag-value format. Operational settings (country,
+region, zone, name) are managed by `decloud configure` and stored
+in the same file.
+
+A future migration will replace this with `/etc/decloud/settings`
+(JSON format). See [§9 Remaining work](#9-remaining-work).
 
 ## 15. Configuration
 
@@ -1110,29 +1099,31 @@ remains `install-params` with the args-pair format described below.
 
 | Setting | Source | Mutability |
 | --- | --- | --- |
-| Orchestrator URL, wallet, name, region, zone | `/etc/decloud/install-params` | Edit and re-run `decloud update` |
-| `appsettings.Production.json` | Generated by `install.sh` from install-params | Regenerated on each install |
+| Orchestrator URL, wallet | `/etc/decloud/install-params` | Set at install; change requires reinstall |
+| Country, region, zone, name | `/etc/decloud/install-params` | Set via `decloud configure`; locality changes require logout → configure → register → login |
+| `appsettings.Production.json` | Generated by `install.sh` from install-params | Regenerated on each install/update |
 | Node ID, API key | `/etc/decloud/credentials` (after register) | Removed by `uninstall`, regenerated on next register |
 | Machine ID | `/etc/machine-id` | OS-level, do not edit |
 | Node identity | `SHA-256(machine-id + wallet)` | Derived; changes if either input changes |
 
 ### Changing parameters after install
 
-```bash
-# Edit
-sudo nano /etc/decloud/install-params
+Operational settings (locality, name):
 
-# Apply (regenerates appsettings, restarts service)
-sudo decloud update
+```bash
+sudo decloud configure --country DE --region eu-central --name MyNode
+sudo decloud register       # commit to orchestrator with wallet signature
+sudo decloud login           # resume scheduling
 ```
 
-Or, override individual flags by re-running install with new values —
-they will be saved to install-params and used on subsequent updates.
+For locality changes on an enrolled node, logout first:
 
-> **Note:** Settings changes now go through `decloud configure --country DE`,
-> with locality changes requiring the full logout → configure → register →
-> login sequence. The `install-params` format is still used until the
-> settings JSON migration (§9) lands.
+```bash
+sudo decloud logout
+sudo decloud configure --country BR --region sa-east
+sudo decloud register
+sudo decloud login
+```
 
 ## 16. Trust chain at runtime
 
@@ -1306,7 +1297,7 @@ runtime is installed independently as `aspnetcore-runtime-8.0`.
 | `decloud-relay-nat` | NAT helper for relay-mode nodes |
 | `vm-cleanup.sh` | Per-VM cleanup helper |
 | `/opt/decloud/publish` | Active version symlink — the systemd unit points here |
-| `/etc/decloud/install-params` | Saved install arguments for `decloud update` (current; will become `settings` JSON under target lifecycle) |
+| `/etc/decloud/install-params` | Saved install arguments and operational settings; used by `decloud update` and `decloud configure` |
 | `/etc/decloud/credentials` | JWT credentials (after register) |
 | `/etc/decloud/logged-out` | Sentinel file indicating operator-initiated scheduling pause; prevents auto-login on restart |
 | `/usr/local/share/decloud/install.sh` | Offline fallback for `decloud update` |

@@ -144,18 +144,6 @@ parse_args() {
                 NODE_WALLET="$2"
                 shift 2
                 ;;
-            --name)
-                NODE_NAME="$2"
-                shift 2
-                ;;
-            --region)
-                NODE_REGION="$2"
-                shift 2
-                ;;
-            --zone)
-                NODE_ZONE="$2"
-                shift 2
-                ;;
             --port)
                 AGENT_PORT="$2"
                 shift 2
@@ -228,18 +216,11 @@ show_help() {
     cat << EOF
 DeCloud Node Agent Installer v${VERSION}
 
-Usage: $0 --orchestrator <url> [options]
+Usage: $0 --orchestrator <url> --wallet <address> [options]
 
-Required (MANDATORY):
-  --orchestrator <url>   Orchestrator URL (e.g., https://decloud.stackfi.tech)
-  --wallet <address>     **MANDATORY** Ethereum wallet address (0x...)
-                         Must be valid 42-char address, not null (0x000...000)
-
-Node Identity:
-  --wallet <address>     Node operator wallet address
-  --name <name>          Node name (default: hostname)
-  --region <region>      Region identifier (default: default)
-  --zone <zone>          Zone identifier (default: default)
+Required:
+  --orchestrator <url>   Orchestrator URL (default: https://decloud.stackfi.tech)
+  --wallet <address>     Node operator wallet address (0x...)
 
 Network (all ports are configurable!):
   --port <port>          Agent API port (default: 5100)
@@ -261,15 +242,17 @@ PORT REQUIREMENTS:
   Ports 80/443 are NOT required! Your existing web servers stay untouched.
   HTTP ingress is handled centrally by the Orchestrator.
 
+After install, configure your node:
+  sudo decloud configure --country TR --region eu-east --name MyNode
+  sudo decloud register
+  sudo decloud login
+
 Examples:
   # Basic installation
-  $0 --orchestrator https://decloud.stackfi.tech
+  $0 --orchestrator https://decloud.stackfi.tech --wallet 0xYourWallet
 
   # Custom ports (if defaults conflict)
-  $0 --orchestrator https://decloud.stackfi.tech --port 5200 --wg-port 51821
-
-  # With wallet and region
-  $0 --orchestrator https://decloud.stackfi.tech --wallet 0xYourWallet --region us-east
+  $0 --orchestrator https://decloud.stackfi.tech --wallet 0xYourWallet --port 5200 --wg-port 51821
 EOF
 }
 
@@ -369,7 +352,6 @@ check_required_params() {
 
     log_success "Orchestrator: $ORCHESTRATOR_URL"
     log_success "Wallet:       $NODE_WALLET"
-    [ -n "$NODE_NAME" ] && log_success "Node Name:    $NODE_NAME"
 }
 
 # Print a clear, copy-pasteable error for non-interactive invocations
@@ -385,10 +367,7 @@ _missing_param_error() {
     log_error "  curl -fsSL https://github.com/bekirmfr/DeCloud.NodeAgent/releases/latest/download/install.sh \\"
     log_error "    | sudo bash -s -- \\"
     log_error "        --orchestrator https://decloud.stackfi.tech \\"
-    log_error "        --wallet 0xYourWalletAddress \\"
-    log_error "        --name \"MyNode\" \\"
-    log_error "        --region us-east-1 \\"
-    log_error "        --zone us-east-1-nyc-1a"
+    log_error "        --wallet 0xYourWalletAddress"
     echo ""
     log_error "Or download install.sh first and run it interactively to be prompted:"
     log_error "  curl -fsSL https://github.com/bekirmfr/DeCloud.NodeAgent/releases/latest/download/install.sh -o install.sh"
@@ -411,9 +390,6 @@ save_install_params_from_vars() {
         echo "$ORCHESTRATOR_URL"
         echo "--wallet"
         echo "$NODE_WALLET"
-        [ -n "$NODE_NAME" ]   && { echo "--name";   echo "$NODE_NAME"; }
-        [ -n "$NODE_REGION" ] && { echo "--region"; echo "$NODE_REGION"; }
-        [ -n "$NODE_ZONE" ]   && { echo "--zone";   echo "$NODE_ZONE"; }
         [ -n "${AGENT_PORT:-}" ]    && [ "$AGENT_PORT"     != "5100"  ] && { echo "--port"; echo "$AGENT_PORT"; }
         [ -n "${WIREGUARD_PORT:-}" ] && [ "$WIREGUARD_PORT" != "51821" ] && { echo "--wg-port"; echo "$WIREGUARD_PORT"; }
         [ "${SKIP_DOWNLOAD:-false}"  = true ] && echo "--skip-download"
@@ -2703,18 +2679,23 @@ print_summary() {
     echo "  Next Steps:"
     echo "  ─────────────────────────────────────────────────────────────"
     echo ""
-    echo "    1. Authenticate your node:"
-    echo -e "       ${BOLD}sudo decloud login${NC}"
-    echo "       (or: sudo cli-decloud-node login)"
+    echo "    1. Configure your node:"
+    echo -e "       ${BOLD}sudo decloud configure --country TR --region eu-east --name MyNode${NC}"
     echo ""
-    echo "    2. Check node status:"
+    echo "    2. Register with wallet signature:"
+    echo -e "       ${BOLD}sudo decloud register${NC}"
+    echo ""
+    echo "    3. Resume scheduling:"
+    echo -e "       ${BOLD}sudo decloud login${NC}"
+    echo ""
+    echo "    4. Check node status:"
     echo -e "       ${BOLD}decloud status${NC}"
     echo ""
-    echo "    3. Monitor logs:"
+    echo "    5. Monitor logs:"
     echo -e "       ${BOLD}decloud logs -f${NC}"
     echo "       (or: sudo journalctl -u decloud-node-agent -f)"
     echo ""
-    echo "    4. View all commands:"
+    echo "    6. View all commands:"
     echo -e "       ${BOLD}decloud --help${NC}"
     echo ""
     echo "  ─────────────────────────────────────────────────────────────"
