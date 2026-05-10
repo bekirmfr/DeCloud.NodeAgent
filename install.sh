@@ -2814,7 +2814,7 @@ main() {
            /etc/decloud/settings.json > "$tmp" \
            && mv "$tmp" /etc/decloud/settings.json
     else
-        cat > /etc/decloud/settings.json << 'SETTINGSEOF'
+        cat > /etc/decloud/settings.json <<SETTINGSEOF
 {
   "version": 1,
   "orchestrator_url": "${ORCHESTRATOR_URL}",
