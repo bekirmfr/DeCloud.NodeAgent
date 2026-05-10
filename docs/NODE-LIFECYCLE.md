@@ -15,11 +15,10 @@ New readers should start with [Part 1](#part-1--operator-lifecycle).
 Maintainers debugging install/update/uninstall behavior can jump to
 [Part 3](#part-3--infrastructure-mechanics).
 
-> **Status notice.** Part 1 describes the **target** operator
-> lifecycle — agreed in design but not yet fully implemented.
-> [Part 2](#part-2--implementation-status) enumerates the gap between
-> target and current. Part 3 describes infrastructure mechanics that
-> apply today regardless of which operator-facing model is active.
+> **Status notice.** Part 1 describes the operator lifecycle as
+> implemented. [Part 2](#part-2--implementation-status) covers
+> remaining work (install.sh alignment, settings JSON migration,
+> live migration). Part 3 describes infrastructure mechanics.
 
 > **Companion documents:**
 > - [`LOCALITY_STANDARDS.md`](LOCALITY_STANDARDS.md) — country/region/zone semantics
@@ -30,7 +29,7 @@ Maintainers debugging install/update/uninstall behavior can jump to
 
 ## Table of Contents
 
-**Part 1 — Operator Lifecycle (target)**
+**Part 1 — Operator Lifecycle**
 - [1. States](#1-states)
 - [2. Commands](#2-commands)
 - [3. Settings model](#3-settings-model)
@@ -40,10 +39,10 @@ Maintainers debugging install/update/uninstall behavior can jump to
 - [7. Trust model](#7-trust-model)
 
 **Part 2 — Implementation Status**
-- [8. What's deployed today](#8-whats-deployed-today)
-- [9. The deferred work](#9-the-deferred-work)
+- [8. What's implemented](#8-whats-implemented)
+- [9. Remaining work](#9-remaining-work)
 
-**Part 3 — Infrastructure Mechanics (current)**
+**Part 3 — Infrastructure Mechanics**
 - [10. Overview of operations](#10-overview-of-operations)
 - [11. Fresh install](#11-fresh-install)
 - [12. Update](#12-update)
@@ -560,16 +559,22 @@ locality has changed, the orchestrator:
 1. Validates the new locality (country in `countries.json`, region in
    `regions.json`)
 2. Verifies wallet signature over canonical message
-3. Walks all running VMs on this node, checking each against the new
-   locality:
-   - `RequiredJurisdictionTag` — does the new country still carry it?
-   - `RequiredCountry` — does the new country match?
-   - `ForbiddenCountries` — is the new country in the forbidden list?
+3. Walks all running tenant VMs on this node. For each VM with
+   `spec.Constraints`, evaluates every constraint against the node's
+   new locality using the same `IConstraintEvaluator` that FILTER 10
+   uses at scheduling time. This covers jurisdiction tags, country
+   requirements, region filtering, and any other constraint the tenant
+   specified — one evaluator, one answer.
 4. For each non-compliant VM:
    - Sets `VirtualMachine.NonCompliantSince` and `NonComplianceReason`
    - Migration scheduler picks them up on next cycle and moves them
      to compliant nodes
 5. Returns the registration response with the list of flagged VMs
+
+VMs without constraints are always compliant — they placed no
+locality demands at creation time. System VMs (Relay, DHT,
+BlockStore) are never compliance-checked — they are
+orchestrator-controlled infrastructure, not tenant workloads.
 
 The operator sees:
 
@@ -645,174 +650,151 @@ Each mechanism does what it's good at.
 
 # Part 2 — Implementation Status
 
-## 8. What's deployed today
+## 8. What's implemented
 
-The currently-deployed lifecycle is simpler than the target. Two
-operational states, four commands:
+The lifecycle described in Part 1 is implemented across four tiers.
 
-```
-GONE ──install──► RUNNING ──login──► AUTHENTICATED ──logout──► RUNNING ──uninstall──► GONE
-                                                       │ uninstall
-                                                       └────────────────────────────────► GONE
-```
+### Tier 1 — Foundation (Orchestrator + CLI)
 
-| Deployed command | Behavior | Target equivalent |
-| --- | --- | --- |
-| `install` | Prompts for wallet, country, region, zone, name; installs binaries; saves to `install-params` | `install` (combined install + configure) |
-| `login` | Wallet signing flow → registers with orchestrator → obtains JWT → starts heartbeat | `register` + `login` (combined, no separate enrollment step) |
-| `logout` | Removes credentials; stops service | `logout` (but destructive — deletes credentials rather than preserving them) |
-| `uninstall` | Deregisters with orchestrator; removes binaries | `uninstall` (no JWT revocation list) |
+- `Node.SchedulingReady` boolean field (default `true`, preserved on
+  re-registration)
+- `POST /api/nodes/{id}/login` and `POST /api/nodes/{id}/logout`
+  endpoints on `NodesController`
+- `LoginNodeAsync` / `LogoutNodeAsync` in `NodeService`
+- FILTER 1.5 in `VmSchedulingService.ApplyHardFiltersAsync` —
+  rejects nodes with `!SchedulingReady` ("Node not scheduling-ready
+  (operator logged out)")
+- Canonical signing message in `cli-decloud-node` with country,
+  region, ISO 8601 timestamp
+- `ValidateSignatureTimestamp` in `RegisterNodeAsync` — 5-minute
+  window, ±2-minute skew, legacy format passthrough
 
-Today's `decloud login` does what target's `register` and `login`
-together do — wallet signature, registration request, JWT receipt,
-heartbeat start, all in one flow. There's no distinction between
-"enrolled" and "active."
+### Tier 2 — Core lifecycle (CLI + Agent)
 
-The deployed model works for the basic case (install once, declare
-locality at install, run forever, eventually uninstall). It does not
-support:
-- Settings updates without full reinstall (every change goes through
-  edit-install-params + `decloud update`)
-- Distinct enroll vs activate steps
-- Continuous drift detection (no settings hash in heartbeat)
-- VM compliance flagging on locality change (no re-register-with-
-  validation flow)
-- JWT revocation list (uninstall removes node record but doesn't
-  blacklist the JWT)
-- Non-destructive logout (current logout deletes credentials rather
-  than preserving enrollment)
-- Unattended restart (current login requires wallet ceremony)
+**Bash CLI (`cli/decloud`):**
+- `cmd_register` — wallet ceremony, delegates to `cli-decloud-node
+  register`, waits for `AuthenticationManager` to complete
+- `cmd_login` — lightweight `curl` to orchestrator login endpoint,
+  removes `/etc/decloud/logged-out` sentinel
+- `cmd_logout` — non-destructive, calls logout endpoint, writes
+  sentinel, credentials preserved
+- `cmd_configure` — reads/writes `install-params` via
+  `_update_install_param` helper; refuses locality changes while
+  logged in (credentials exist AND no sentinel); cosmetic changes
+  allowed anytime
+- `cmd_vm_drain` / `cmd_vm_migrate` — stubs printing "not yet
+  implemented" with manual alternative guidance
+- `get_api_key` / `get_orchestrator_url` utility helpers
+- Help text updated: NODE LIFECYCLE section with register, login,
+  logout, configure; install examples use wallet + orchestrator only
 
-### Signing message format gap
+**Python CLI (`cli/cli-decloud-node`):**
+- Single-purpose wallet ceremony tool: `register` + `version` only
+- `cmd_status`, `cmd_logout`, and their parsers removed (dead paths)
+- `run_wallet_signing` (renamed from `login_with_web_signing`)
 
-The current `cli-decloud-node` produces a signing message that does
-not match the target canonical locality message. The current format:
+**Node agent:**
+- `AutoLoginIfNotLoggedOutAsync` in `AuthenticationManager` — checks
+  sentinel, calls `LoginAsync` if absent, non-fatal on failure
+- `LoginAsync` / `LogoutAsync` on `OrchestratorClient`
 
-```
-Sign this message to authorize your DeCloud node:
-Machine ID: {machine_id}
-Wallet: {wallet_address}
-Hostname: {hostname}
-Timestamp: {unix_epoch}
-NO FUNDS WILL BE TRANSFERRED...
-```
+### Tier 3 — Security & integrity (Shared + Agent + Orchestrator)
 
-The target canonical format (§2, `decloud register`):
+**Settings hash drift detection:**
+- `SettingsHash.Compute()` in `DeCloud.Shared` — SHA-256 over
+  canonical concatenation of wallet, country, region (zone excluded,
+  consistent with non-signed status)
+- `Heartbeat.SettingsHash` field computed in `HeartbeatService`,
+  included in wire payload via `BuildHeartbeatPayload`
+- `Node.RegisteredSettingsHash` computed in `RegisterNodeAsync`
+- `ProcessHeartbeatAsync` compares hashes, returns
+  `SettingsDriftInfo` on mismatch; both-null skip for backward compat
+- Agent-side `ProcessHeartbeatResponseAsync` reads `settingsDrift`
+  from heartbeat response and logs warning
 
-```
-DeCloud Node Locality Declaration
-Country:    DE
-Region:     eu-central
-Machine ID: <machine-id>
-Wallet:     <wallet-address>
-Timestamp:  2026-05-09T11:42:30Z
-...
-```
+**JWT revocation:**
+- `JwtRevocationService` — MongoDB `revoked_jwts` collection +
+  `ConcurrentDictionary` in-memory cache; O(1) hot-path check
+- `IJwtRevocationService` interface
+- `OnTokenValidated` hook in JWT bearer pipeline checks revocation
+- `Node.CurrentJti` stores latest JTI; `jti` generated before JWT
+  creation in `RegisterNodeAsync` and passed to
+  `GenerateNodeJwtToken`
+- Cache loaded from MongoDB on startup via `LoadFromStoreAsync`
 
-The current message contains **no country or region** — the fields
-that give the wallet signature its trust meaning. It uses Unix epoch
-timestamps instead of ISO 8601. And the orchestrator's
-`VerifyWalletSignature` checks signer identity but does not
-reconstruct the canonical message or validate timestamp freshness.
+**Deregister safety guard:**
+- `POST /api/nodes/{nodeId}/deregister` endpoint
+  (`NodesController`) — called by `uninstall.sh`
+- Refuses with 409 Conflict if tenant VMs running and `!force`;
+  system VMs not counted
+- Revokes JWT on success via `JwtRevocationService`
+- Removes node record from DataStore
 
-The migration path requires the orchestrator to accept both message
-formats during a transition period, with a version flag on the node
-record indicating which format was used at last registration.
+### Tier 4 — VM compliance (Orchestrator)
 
-### Deregister safety gap
+- `VirtualMachine.NonCompliantSince` (DateTime?) and
+  `NonComplianceReason` (string?) fields
+- `FlagNonCompliantVmsAsync` in `NodeService` — walks running tenant
+  VMs, evaluates `spec.Constraints` against new node locality using
+  `IConstraintEvaluator` (same evaluator as FILTER 10; no parallel
+  bespoke field checks)
+- Called in `RegisterNodeAsync` after node save, only on
+  re-registration with locality change
+- `NodeRegistrationResponse` extended with `NonCompliantVms`
+  (List\<NonCompliantVmInfo\>?)
+- Migration scheduler extended: `ScanMigratingVmsAsync` scans for
+  `NonCompliantSince != null + Running + General`, transitions to
+  Error for existing migration pipeline
+- Compliance flag cleared in `ProcessCommandAcknowledgmentAsync`
+  after successful migration ack
+- `TransitionContext.Compliance` and `TransitionTrigger.Compliance`
+  in `VmLifecycleManager`
 
-The orchestrator's deregister endpoint does not refuse deregistration
-when tenant VMs are still running. `uninstall.sh` destroys all VMs
-(system and tenant alike) before notifying the orchestrator. The
-target design expects the orchestrator to guard against this.
+## 9. Remaining work
 
-## 9. The deferred work
+### install.sh alignment
 
-Implementing the target lifecycle requires changes across CLI, node
-agent runtime, and orchestrator:
+`install.sh` still prompts for country, region, zone, and name
+alongside wallet and orchestrator URL. The Tier 2 design says install
+handles identity only (wallet + orchestrator) and `decloud configure`
+handles operational settings. Until install.sh is updated, fresh
+installs get the old combined flow. This is a UX inconsistency but
+not a correctness issue — the system works either way. High blast
+radius due to the file's ~3000-line size.
 
-### Node-side (CLI changes)
+### Settings JSON migration
 
-- New `decloud configure` subcommand: read/write JSON settings;
-  regenerate appsettings; restart agent; refused for locality/rate
-  changes while ENROLLED or ACTIVE (must logout first)
-- Split current `decloud login` into:
-  - `decloud register` — wallet signing + registration request +
-    credentials capture (the only command involving the wallet)
-  - `decloud login` — JWT-authenticated readiness signal (lightweight,
-    supports unattended restart)
-- Redesign `decloud logout` to preserve credentials and write
-  `/etc/decloud/logged-out` sentinel instead of deleting credentials
-- New `decloud vm drain` and `decloud vm migrate` stub subcommands
-  (CLI surface for 2.5b)
-- Settings file format migration: `install-params` (newline-separated
-  args) → `settings` (JSON with locality block)
-- `install.sh` updated to collect operational settings (country,
-  region, zone, name) alongside wallet, producing the CONFIGURED
-  state directly
-- Auto-login on agent startup: if credentials exist and no
-  `logged-out` sentinel, agent calls login endpoint automatically
+`install-params` (newline-separated `--flag\nvalue`) →
+`/etc/decloud/settings` (JSON with locality block, version field,
+wallet, orchestrator URL). The current `_update_install_param`
+helper in the bash CLI works but is fragile for complex values.
+JSON would be cleaner. Not blocking anything — the current format
+is functional.
 
-### Node-agent runtime
+### Live migration (Phase 2.5b)
 
-- Read settings from JSON `/etc/decloud/settings` instead of
-  `install-params`-derived `appsettings.Production.json`
-- Compute settings hash (SHA-256 of canonical JSON) and include in
-  every heartbeat payload
-- Respect `/etc/decloud/logged-out` sentinel: heartbeat but do not
-  auto-login
-- Process `settingsDrift` errors from heartbeat response: log
-  warning, suspend scheduling eligibility locally
+The `vm drain` and `vm migrate` stubs exist in the CLI. The
+compliance migration currently transitions VMs to Error (stops
+them) before migrating. True live migration (start on target, then
+stop on source) requires coordination the current pipeline does
+not have. This is the largest remaining piece of work.
 
-### Orchestrator-side
+### Reverse compliance check
 
-- New `POST /api/nodes/{id}/login` endpoint: validates JWT, checks
-  settings hash matches stored state, sets scheduling-ready flag.
-  Lightweight — no wallet signature involved.
-- New `POST /api/nodes/{id}/logout` endpoint: clears scheduling-ready
-  flag. Node continues heartbeating.
-- Settings hash validation in heartbeat processing: compare
-  `settingsHash` field against stored state, include drift error in
-  response on mismatch, suspend scheduling eligibility
-- Canonical locality message construction and timestamp validation
-  in `RegisterNodeAsync`: message format per §2, 5-minute window
-  with ±2-minute skew tolerance
-- `FlagNonCompliantVms` helper: walks running VMs, checks each
-  against new locality, sets `NonCompliantSince` / `NonComplianceReason`
-- New `JwtRevocationService`: MongoDB collection `revoked_jwts`,
-  in-memory cache, middleware integration in JWT validation
-- Deregister endpoint formalization: revoke JWT on success, refuse
-  deregister with running tenant VMs unless `--force`
-- Add `NonCompliantSince` and `NonComplianceReason` fields to
-  `VirtualMachine` model
-- Add `RequiredCountry`, `RequiredJurisdictionTag`, and
-  `ForbiddenCountries` fields to VM placement constraints
+If the operator changes locality back to a compliant state before
+migration completes, flagged VMs still migrate unnecessarily. A
+future enhancement could re-check flagged VMs on each heartbeat
+cycle and clear the flag if the node is now compliant. Edge case,
+low priority — the operator can avoid it by not logging in until
+committed to the new locality.
 
-### Documentation
+### Cosmetic profile push
 
-- Operator-facing migration guide: how existing nodes (using deployed
-  model) move to the target lifecycle when it ships
-- The `decloud configure` reference page
-- The signing message format migration plan (dual-format support
-  during transition)
-
-### Why deferred
-
-The deployed model meets current operational needs. There is no
-production-driving requirement that the simpler model fails. The
-target design above is documented now to:
-1. Prevent design churn next time the topic comes up
-2. Give a clear contract for when the work does become priority
-3. Anchor any partial work (e.g., adding JWT revocation alone)
-   against an agreed end state
-
-When operators have a real, repeated need to change settings without
-reinstalling — or when a security review elevates JWT revocation to
-required — this work moves from deferred to scheduled.
-
-The current focus per project priorities is **scheduling and locality
-implementation**, not the lifecycle redesign. Lifecycle work resumes
-when those land and a driver materializes.
+`decloud configure --name X` on an enrolled node updates
+`install-params` locally but does not push to the orchestrator.
+The design doc says cosmetic changes should flow through a profile
+endpoint without re-register. Not implemented — cosmetic changes
+take effect on next `register`.
 
 ---
 
@@ -852,6 +834,13 @@ curl -fsSL https://github.com/bekirmfr/DeCloud.NodeAgent/releases/latest/downloa
       --region "eu-east" \
       --zone "eu-east-ist-1a"
 ```
+
+> **Note:** `install.sh` currently accepts locality parameters
+> (country, region, zone, name) alongside wallet and orchestrator URL.
+> Under the lifecycle design, install should handle identity only
+> (wallet + orchestrator) and `decloud configure` should handle
+> operational settings afterward. See [§9 Remaining work](#9-remaining-work)
+> for the install.sh alignment plan.
 
 Wall-clock time on a fresh Ubuntu box: 3–5 minutes. On a re-run with
 most dependencies cached: ~30 seconds.
@@ -1140,11 +1129,10 @@ sudo decloud update
 Or, override individual flags by re-running install with new values —
 they will be saved to install-params and used on subsequent updates.
 
-> **Future:** Under the target lifecycle (Part 1), settings changes
-> happen via `decloud configure --country DE`, with locality changes
-> requiring the full logout → configure → register → login sequence.
-> This deferred work is documented above in
-> [Part 2](#part-2--implementation-status).
+> **Note:** Settings changes now go through `decloud configure --country DE`,
+> with locality changes requiring the full logout → configure → register →
+> login sequence. The `install-params` format is still used until the
+> settings JSON migration (§9) lands.
 
 ## 16. Trust chain at runtime
 
