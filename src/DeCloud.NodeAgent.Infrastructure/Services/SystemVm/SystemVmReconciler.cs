@@ -239,7 +239,7 @@ public sealed class SystemVmReconciler : BackgroundService
                     intent.DepsMet ? "depsMet" : "!depsMet",
                     reality.State, reality.VmState?.ToString() ?? "-",
                     pendingDesc, reality.VmId, decision.Reason);
-                await ActDeleteAsync(role, reality.VmId!, ct);
+                await ActDeleteAsync(role, reality.VmId!, decision.Reason, ct);
                 break;
 
             case MatrixAction.IssueCreate:
@@ -271,7 +271,7 @@ public sealed class SystemVmReconciler : BackgroundService
     /// Note on NAT cleanup: relay VM iptables rules are swept within ~60s by
     /// <c>VmHealthService.CleanStaleRelayNatIfNotRelayNodeAsync</c>.
     /// </summary>
-    private async Task ActDeleteAsync(string role, string vmId, CancellationToken ct)
+    private async Task ActDeleteAsync(string role, string vmId, string reason, CancellationToken ct)
     {
         var commandId = Guid.NewGuid().ToString();
 
@@ -285,6 +285,19 @@ public sealed class SystemVmReconciler : BackgroundService
 
         try
         {
+            // Stamp the matrix decision reason on the VM record before deletion.
+            // The soft-delete preserves the record — reason + ServicesJson become
+            // the post-mortem for this VM's lifecycle.
+            try
+            {
+                await _repository.SetDeletionReasonAsync(vmId, reason);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex,
+                "SystemVmReconciler [{Role}]: failed to stamp deletion reason on {VmId} — non-fatal",
+                role, vmId);
+            }
             var result = await _vmManager.DeleteVmAsync(vmId, ct);
 
             if (result.Success)

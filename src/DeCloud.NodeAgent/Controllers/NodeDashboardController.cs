@@ -393,7 +393,8 @@ public class NodeDashboardController : ControllerBase
                     diskGb = Math.Round(v.DiskBytes / 1073741824.0, 2),
                     v.CreatedAt,
                     v.LastUpdated,
-                    v.TargetNodeId
+                    v.TargetNodeId,
+                    v.DeletionReason
                 }),
                 portMappings = portRows.Select(p => new
                 {

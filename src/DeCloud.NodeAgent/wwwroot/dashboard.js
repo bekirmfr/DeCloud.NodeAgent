@@ -446,6 +446,7 @@ async function fetchAndRenderDatabase() {
                     <td>${v.vncPort ?? '—'}</td>
                     <td class="mono" title="${esc(v.ownerId ?? '')}">${v.ownerId ? v.ownerId.slice(0, 8) + '…' : '—'}</td>
                     <td>${fmtRelativeTime(v.lastUpdated)}</td>
+                    <td title="${esc(v.deletionReason ?? '')}" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.72rem;color:var(--text-muted)">${v.deletionReason ? esc(v.deletionReason) : '—'}</td>
                 </tr>`).join('');
         }
 

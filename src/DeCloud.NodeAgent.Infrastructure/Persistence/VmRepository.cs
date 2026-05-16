@@ -23,7 +23,7 @@ public class VmRepository : IDisposable
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly bool _encrypted;
 
-    private const int CURRENT_SCHEMA_VERSION = 6; // Incremented when schema changes
+    private const int CURRENT_SCHEMA_VERSION = 7; // Incremented when schema changes
 
     public VmRepository(string databasePath, ILogger logger, string? encryptionKey = null)
     {
@@ -182,7 +182,8 @@ public class VmRepository : IDisposable
                 EncryptedPassword TEXT,
                 VmType TEXT NOT NULL DEFAULT 'General',
                 LabelsJson TEXT,
-                TargetNodeId TEXT
+                TargetNodeId TEXT,
+                DeletionReason TEXT
             );
             
             CREATE INDEX IF NOT EXISTS idx_tenant ON VmRecords(OwnerId);
@@ -245,6 +246,13 @@ public class VmRepository : IDisposable
                 _logger.LogInformation("Applying migration: v{From} → v6 (TargetNodeId column)", Math.Max(fromVersion, 5));
                 MigrateToV6();
                 SetSchemaVersion(6);
+            }
+
+            if (fromVersion < 7)
+            {
+                _logger.LogInformation("Applying migration: v{From} → v7 (DeletionReason column)", Math.Max(fromVersion, 6));
+                MigrateToV7();
+                SetSchemaVersion(7);
             }
 
             transaction.Commit();
@@ -408,6 +416,21 @@ public class VmRepository : IDisposable
             cmd.CommandText = "ALTER TABLE VmRecords ADD COLUMN TargetNodeId TEXT";
             cmd.ExecuteNonQuery();
             _logger.LogInformation("Added TargetNodeId column to VmRecords");
+        }
+    }
+
+    /// <summary>
+    /// Migrate to schema v7: Add DeletionReason column so the reconciliation
+    /// matrix's decision reason is persisted on deleted system VM records.
+    /// </summary>
+    private void MigrateToV7()
+    {
+        if (!ColumnExists("VmRecords", "DeletionReason"))
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "ALTER TABLE VmRecords ADD COLUMN DeletionReason TEXT";
+            cmd.ExecuteNonQuery();
+            _logger.LogInformation("Added DeletionReason column to VmRecords");
         }
     }
 
@@ -644,6 +667,28 @@ public class VmRepository : IDisposable
     }
 
     /// <summary>
+    /// Stamp a deletion reason on a VM record before it is soft-deleted.
+    /// Called by SystemVmReconciler to persist the matrix decision reason
+    /// so it survives in the Deleted record for post-mortem diagnosis.
+    /// </summary>
+    public async Task SetDeletionReasonAsync(string vmId, string reason)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "UPDATE VmRecords SET DeletionReason = @Reason WHERE VmId = @VmId";
+            cmd.Parameters.AddWithValue("@VmId", vmId);
+            cmd.Parameters.AddWithValue("@Reason", reason);
+            await cmd.ExecuteNonQueryAsync();
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>
     /// Permanently remove deleted VMs older than specified age
     /// </summary>
     public async Task PurgeDeletedVmsAsync(TimeSpan olderThan)
@@ -751,7 +796,8 @@ public class VmRepository : IDisposable
             SELECT VmId, Name, State, VmType, OwnerId,
                    IpAddress, VncPort, ReplicationFactor,
                    VirtualCpuCores, MemoryBytes, DiskBytes,
-                   CreatedAt, LastUpdated, TargetNodeId
+                   CreatedAt, LastUpdated, TargetNodeId,
+                   DeletionReason
             FROM VmRecords
             ORDER BY CreatedAt DESC";
 
@@ -777,6 +823,7 @@ public class VmRepository : IDisposable
                     CreatedAt = reader.GetString(reader.GetOrdinal("CreatedAt")),
                     LastUpdated = reader.GetString(reader.GetOrdinal("LastUpdated")),
                     TargetNodeId = reader.IsDBNull(reader.GetOrdinal("TargetNodeId")) ? null : reader.GetString(reader.GetOrdinal("TargetNodeId")),
+                    DeletionReason = reader.IsDBNull(reader.GetOrdinal("DeletionReason")) ? null : reader.GetString(reader.GetOrdinal("DeletionReason")),
                 });
             }
             return records;

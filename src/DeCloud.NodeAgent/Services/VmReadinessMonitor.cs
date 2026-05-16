@@ -238,7 +238,7 @@ public class VmReadinessMonitor : BackgroundService
             }
 
             // Execute the check
-            var (success, failed) = await ExecuteServiceCheckAsync(domainName, service, ct);
+            var (success, failed, diagnostic) = await ExecuteServiceCheckAsync(domainName, service, ct);
             var previousStatus = service.Status;
 
             if (success)
@@ -257,6 +257,7 @@ public class VmReadinessMonitor : BackgroundService
                 service.Status = ServiceReadiness.Ready;
                 service.ReadyAt = DateTime.UtcNow;
                 service.LastCheckAt = DateTime.UtcNow;
+                service.StatusMessage = null; // clear stale failure message
 
                 // If System just became ready, allow other services to start checking
                 if (service.Name == "System") systemReady = true;
@@ -264,6 +265,7 @@ public class VmReadinessMonitor : BackgroundService
             else if (failed)
             {
                 service.Status = ServiceReadiness.Failed;
+                service.StatusMessage = diagnostic;
                 service.LastCheckAt = DateTime.UtcNow;
                 if (previousStatus != ServiceReadiness.Failed)
                     _logger.LogWarning("Service {Service} on VM {VmId} FAILED", service.Name, vm.VmId);
@@ -275,7 +277,7 @@ public class VmReadinessMonitor : BackgroundService
                     // Liveness re-check failure: service was Ready but no longer
                     // responding. Revert so IsFullyReady reflects reality.
                     service.Status = ServiceReadiness.Failed;
-                    service.StatusMessage = "Liveness check failed";
+                    service.StatusMessage = diagnostic ?? "Liveness check failed";
                     service.LastCheckAt = DateTime.UtcNow;
                     _logger.LogWarning(
                         "Service {Service} on VM {VmId} FAILED liveness check (port {Port})",
@@ -334,7 +336,7 @@ public class VmReadinessMonitor : BackgroundService
     /// Execute a service check via qemu-guest-agent guest-exec.
     /// Returns (success, hardFailed). hardFailed is true only for cloud-init error state.
     /// </summary>
-    private async Task<(bool success, bool failed)> ExecuteServiceCheckAsync(
+    private async Task<(bool success, bool failed, string? diagnostic)> ExecuteServiceCheckAsync(
         string domain, VmServiceStatus service, CancellationToken ct)
     {
         string path;
@@ -355,9 +357,10 @@ public class VmReadinessMonitor : BackgroundService
             case CheckType.HttpGet:
                 path = "/usr/bin/curl";
                 var url = $"http://localhost:{service.Port}{service.HttpPath ?? "/"}";
-                // Use -s (silent) without -f: any HTTP response (including 401 auth)
-                // means the service is running. Only connection refused/timeout = not ready.
-                args = new[] { "-s", "-o", "/dev/null", "-m", "5", url };
+                // -s: silent (no progress bar). No -f: any HTTP response means
+                // the service is running. No -o /dev/null: response body is
+                // captured by guest-exec so it can be read on failure for diagnostics.
+                args = new[] { "-s", "-m", "5", url };
                 break;
 
             case CheckType.ExecCommand:
@@ -366,7 +369,7 @@ public class VmReadinessMonitor : BackgroundService
                 break;
 
             default:
-                return (false, false);
+                return (false, false, null);
         }
 
         // Build guest-exec JSON
@@ -380,7 +383,7 @@ public class VmReadinessMonitor : BackgroundService
                 "virsh", VirshQemuAgentArgs(domain, execCmd),
                 TimeSpan.FromSeconds(10), ct);
 
-            if (execResult.ExitCode != 0) return (false, false);
+            if (execResult.ExitCode != 0) return (false, false, null);
 
             var execJson = JsonDocument.Parse(execResult.StandardOutput.Trim());
             var pid = execJson.RootElement.GetProperty("return").GetProperty("pid").GetInt64();
@@ -393,7 +396,7 @@ public class VmReadinessMonitor : BackgroundService
                 "virsh", VirshQemuAgentArgs(domain, statusCmd),
                 TimeSpan.FromSeconds(10), ct);
 
-            if (statusResult.ExitCode != 0) return (false, false);
+            if (statusResult.ExitCode != 0) return (false, false, null);
 
             var statusJson = JsonDocument.Parse(statusResult.StandardOutput.Trim());
             var ret = statusJson.RootElement.GetProperty("return");
@@ -401,20 +404,75 @@ public class VmReadinessMonitor : BackgroundService
             if (!ret.GetProperty("exited").GetBoolean())
             {
                 // Process still running — not ready yet
-                return (false, false);
+                return (false, false, null);
             }
 
             var exitCode = ret.GetProperty("exitcode").GetInt32();
 
-            return (exitCode == 0, false);
+            // Extract stdout/stderr from guest-exec-status for diagnostics.
+            // Fields are base64-encoded and optional — only present when the
+            // command produced output and capture-output was true.
+            string ? diagnostic = null;
+            if (exitCode != 0)
+            {
+                diagnostic = DecodeGuestExecOutput(ret);
+            }
+            
+            return (exitCode == 0, false, diagnostic);
         }
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Guest-exec failed for {Service} on {Domain}", service.Name, domain);
-            return (false, false);
+            return (false, false, ex.Message);
         }
     }
 
     private static string EscapeJson(string s) =>
         s.Replace("\\", "\\\\").Replace("\"", "\\\"");
+
+    /// <summary>
+    /// Decode stdout and stderr from a guest-exec-status return object.
+    /// Both fields are base64-encoded and optional. Returns a combined
+    /// string truncated to 512 chars to avoid bloating ServicesJson.
+    /// </summary>
+    private static string? DecodeGuestExecOutput(JsonElement ret)
+    {
+        const int MaxLen = 512;
+
+        var parts = new List<string>(2);
+
+        if (ret.TryGetProperty("out-data", out var outData))
+        {
+            try
+            {
+                var decoded = Encoding.UTF8.GetString(
+                    Convert.FromBase64String(outData.GetString() ?? ""));
+                var trimmed = decoded.Trim();
+                if (trimmed.Length > 0)
+                    parts.Add(trimmed);
+            }
+            catch { /* malformed base64 — skip */ }
+        }
+
+        if (ret.TryGetProperty("err-data", out var errData))
+        {
+            try
+            {
+                var decoded = Encoding.UTF8.GetString(
+                    Convert.FromBase64String(errData.GetString() ?? ""));
+                var trimmed = decoded.Trim();
+                if (trimmed.Length > 0)
+                    parts.Add("stderr: " + trimmed);
+            }
+            catch { /* malformed base64 — skip */ }
+        }
+
+        if (parts.Count == 0)
+            return null;
+
+        var combined = string.Join(" | ", parts);
+        return combined.Length > MaxLen
+            ? combined[..MaxLen]
+            : combined;
+    }
 }

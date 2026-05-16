@@ -455,4 +455,5 @@ public record VmDashboardRecord
     public string CreatedAt { get; init; } = "";
     public string LastUpdated { get; init; } = "";
     public string? TargetNodeId { get; init; }
+    public string? DeletionReason { get; init; }
 }
