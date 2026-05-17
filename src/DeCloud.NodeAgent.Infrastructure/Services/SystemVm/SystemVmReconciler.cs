@@ -423,6 +423,12 @@ public sealed class SystemVmReconciler : BackgroundService
             DiskBytes = template.DiskBytes > 0
                                   ? template.DiskBytes
                                   : 2L * 1024 * 1024 * 1024,
+            QualityTier = template.QualityTier >= 0
+                                  ? (QualityTier)template.QualityTier
+                                  : QualityTier.Burstable,
+            ComputePointCost = template.ComputePointCost > 0
+                                  ? template.ComputePointCost
+                                  : 1,
             BaseImageUrl = template.BaseImageUrl,
             BaseImageHash = template.BaseImageHash,
             CloudInitUserData = cloudInit,
