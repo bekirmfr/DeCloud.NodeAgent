@@ -259,6 +259,12 @@ public class VmReadinessMonitor : BackgroundService
                 service.LastCheckAt = DateTime.UtcNow;
                 service.StatusMessage = null; // clear stale failure message
 
+                // Persist last successful response for HttpGet checks.
+                // When the VM dies, this snapshot shows the pre-crash state
+                // (memory pressure, OOM count) in ServicesJson on the deleted record.
+                if (service.CheckType == CheckType.HttpGet && diagnostic is not null)
+                    service.LastSuccessBody = diagnostic;
+
                 // If System just became ready, allow other services to start checking
                 if (service.Name == "System") systemReady = true;
             }
@@ -412,12 +418,11 @@ public class VmReadinessMonitor : BackgroundService
             // Extract stdout/stderr from guest-exec-status for diagnostics.
             // Fields are base64-encoded and optional — only present when the
             // command produced output and capture-output was true.
-            string ? diagnostic = null;
-            if (exitCode != 0)
-            {
-                diagnostic = DecodeGuestExecOutput(ret);
-            }
-            
+            // Capture output on both success and failure.
+            // Success: health endpoint response body (memory, peers, OOM count).
+            // Failure: curl error message (connection refused, timeout).
+            string? diagnostic = DecodeGuestExecOutput(ret);
+
             return (exitCode == 0, false, diagnostic);
         }
         catch (Exception ex)

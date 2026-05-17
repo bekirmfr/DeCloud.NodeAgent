@@ -361,6 +361,14 @@ public class VmServiceStatus
     public bool LivenessCheck { get; set; } = false;
 
     public string? StatusMessage { get; set; }
+
+    /// <summary>
+    /// Last successful HTTP response body from this service's health endpoint
+    /// (truncated to 512 chars). Persists across status transitions so the
+    /// pre-crash state (memory pressure, OOM count, peer info) survives in
+    /// ServicesJson when the VM is deleted. Only populated for HttpGet checks.
+    /// </summary>
+    public string? LastSuccessBody { get; set; }
     public DateTime? ReadyAt { get; set; }
     public DateTime? LastCheckAt { get; set; }
     public int TimeoutSeconds { get; set; } = 300;

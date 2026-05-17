@@ -2,7 +2,6 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
-using DeCloud.Shared.Models;
 using Microsoft.AspNetCore.Mvc;
 
 namespace DeCloud.NodeAgent.Controllers;
