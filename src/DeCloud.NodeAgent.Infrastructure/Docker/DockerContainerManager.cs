@@ -2,7 +2,6 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using Microsoft.Extensions.Logging;
-using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Infrastructure.Docker;
 
@@ -484,5 +483,20 @@ public class DockerContainerManager : IVmManager
         if (arg.Contains(' ') && !arg.StartsWith('"'))
             return $"\"{arg}\"";
         return arg;
+    }
+
+    public IReadOnlyCollection<VmInstance> GetAllVms(VmType? vmType = null, VmState? vmState = null)
+    {
+        throw new NotImplementedException();
+    }
+
+    public IReadOnlyCollection<VmInstance> GetSystemVms(VmState? vmState = null)
+    {
+        throw new NotImplementedException();
+    }
+
+    public VmInstance? GetRunningSystemVm(VmType? vmType = null)
+    {
+        throw new NotImplementedException();
     }
 }

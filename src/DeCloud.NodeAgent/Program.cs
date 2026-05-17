@@ -188,6 +188,7 @@ builder.Services.AddHttpClient<INodeRelayConfigProvider, NodeRelayConfigProvider
 {
     client.Timeout = TimeSpan.FromSeconds(5);
 });
+builder.Services.AddSingleton<ISystemVmService, SystemVmService>();
 
 // =====================================================
 // Smart Port Allocation Services

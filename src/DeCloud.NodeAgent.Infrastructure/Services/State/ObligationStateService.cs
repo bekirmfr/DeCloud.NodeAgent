@@ -33,6 +33,13 @@ public sealed class ObligationStateService : IObligationStateService
         _logger = logger;
     }
 
+    public static Dictionary<string, VmType> RoleToVmType = new Dictionary<string, VmType>
+    {
+        ["relay"] = VmType.Relay,
+        ["dht"] = VmType.Dht,
+        ["blockstore"] = VmType.BlockStore,
+    };
+
     // ════════════════════════════════════════════════════════════════════
     // Identity
     // ════════════════════════════════════════════════════════════════════

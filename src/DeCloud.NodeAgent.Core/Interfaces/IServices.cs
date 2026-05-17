@@ -57,8 +57,10 @@ public interface IVmManager
     Task<VmOperationResult> ResumeVmAsync(string vmId, CancellationToken ct = default);
     
     Task<VmInstance?> GetVmAsync(string vmId, CancellationToken ct = default);
-    IReadOnlyCollection<VmInstance> GetAllVms();
+    IReadOnlyCollection<VmInstance> GetAllVms(VmType? vmType = null, VmState? vmState = null);
+    IReadOnlyCollection<VmInstance> GetSystemVms(VmState? vmState = null);
     IReadOnlyCollection<VmInstance> GetRunningVms();
+    VmInstance? GetRunningSystemVm(VmType? vmType = null);
     Task<VmResourceUsage> GetVmUsageAsync(string vmId, CancellationToken ct = default);
     Task ReconcileAllWithLibvirtAsync(CancellationToken ct = default);
     Task<bool> VmExistsAsync(string vmId, CancellationToken ct = default);

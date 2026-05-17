@@ -1,3 +1,4 @@
+using DeCloud.NodeAgent.Core.Constants;
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Interfaces.UserNetwork;
@@ -24,7 +25,6 @@ public class LibvirtVmManagerOptions
 
 public class LibvirtVmManager : IVmManager
 {
-    private readonly INodeMetadataService _nodeMetadata;
     private readonly INodeStateService _nodeState;
     private readonly ICommandExecutor _executor;
     private readonly IImageManager _imageManager;
@@ -35,12 +35,6 @@ public class LibvirtVmManager : IVmManager
     private readonly GpuProxyService _gpuProxy;
     private readonly bool _isWindows;
     private readonly bool _isWsl2;
-    /// <summary>
-    /// True if /dev/kvm exists and the kernel module is loaded.
-    /// Detected once at startup. Controls domain type and CPU mode in libvirt XML.
-    /// On VPS/cloud hosts without nested virt, falls back to QEMU TCG (type='qemu').
-    /// </summary>
-    private bool _kvmAvailable;
 
     // Track our VMs in memory
     private readonly Dictionary<string, VmInstance> _vms = new();
@@ -50,7 +44,6 @@ public class LibvirtVmManager : IVmManager
     private int _nextVncPort;
     private uint _nextVsockCid = 3; // CID 0=hypervisor, 1=reserved, 2=host, 3+=guests
     private bool _initialized = false;
-    private string _hostArchitecture = "x86_64"; // Default, will be detected
 
     public LibvirtVmManager(
         ICommandExecutor executor,
@@ -58,14 +51,12 @@ public class LibvirtVmManager : IVmManager
         IOptions<LibvirtVmManagerOptions> options,
         VmRepository repository,
         IUserWireGuardManager userWireGuardManager,
-        INodeMetadataService nodeMetadata,
         INodeStateService nodeState,
         GpuProxyService gpuProxy,
         ILogger<LibvirtVmManager> logger)
     {
         _executor = executor;
         _imageManager = imageManager;
-        _nodeMetadata = nodeMetadata;
         _nodeState = nodeState;
         _userWireGuardManager = userWireGuardManager;
         _gpuProxy = gpuProxy;
@@ -1473,12 +1464,34 @@ public class LibvirtVmManager : IVmManager
         return Task.FromResult(vm);
     }
 
-    public IReadOnlyCollection<VmInstance> GetAllVms()
+    public IReadOnlyCollection<VmInstance> GetAllVms(VmType? vmType = null, VmState? vmState = null)
     {
         lock (_vms)
         {
+            var filteredVms = new List<VmInstance>();
+            if (vmType != null)
+                filteredVms = _vms.Values.Where(vm => vm.Spec.VmType == vmType).ToList();
+            if (vmState != null)
+                filteredVms = filteredVms.Where(vm => vm.State == vmState).ToList();
             return _vms.Values.ToList();
         }
+    }
+
+    public IReadOnlyCollection<VmInstance> GetSystemVms(VmState? vmState = null)
+    {
+        lock (_vms)
+        {
+            var systemVms = _vms.Values.Where(vm => SystemVmConstants.Types.Contains(vm.Spec.VmType)).ToList();
+            if (vmState != null)
+                systemVms = systemVms.Where(vm => vm.State == vmState).ToList();
+            return _vms.Values.ToList();
+        }
+    }
+
+    public VmInstance? GetRunningSystemVm(VmType? vmType = null)
+    {
+        var systemVms = GetSystemVms(VmState.Running);
+        return systemVms.Where(vm => vm.Spec.VmType == vmType).FirstOrDefault();
     }
 
     public IReadOnlyCollection<VmInstance> GetRunningVms()

@@ -1,4 +1,5 @@
 using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using Microsoft.Extensions.Logging;
@@ -61,6 +62,7 @@ public class PortForwardingManager : IPortForwardingManager
     private readonly ICommandExecutor _executor;
     private readonly PortMappingRepository _repository;
     private readonly IVmManager _vmManager;
+    private readonly ISystemVmService _systemVmService;
     private readonly ILogger<PortForwardingManager> _logger;
     private readonly bool _isLinux;
     private readonly SemaphoreSlim _lock = new(1, 1);
@@ -75,11 +77,13 @@ public class PortForwardingManager : IPortForwardingManager
         ICommandExecutor executor,
         PortMappingRepository repository,
         IVmManager vmManager,
+        ISystemVmService systemVmService,
         ILogger<PortForwardingManager> logger)
     {
         _executor = executor;
         _repository = repository;
         _vmManager = vmManager;
+        _systemVmService = systemVmService;
         _logger = logger;
         _isLinux = Environment.OSVersion.Platform == PlatformID.Unix;
     }
@@ -629,19 +633,10 @@ public class PortForwardingManager : IPortForwardingManager
     {
         try
         {
-            var relayVm = _vmManager.GetAllVms()
-                .FirstOrDefault(v =>
-                    v.Spec.VmType == VmType.Relay &&
-                    v.State == VmState.Running);
-
-            if (relayVm != null && !string.IsNullOrEmpty(relayVm.Spec.IpAddress))
-            {
-                _logger.LogDebug(
-                    "Found relay VM {VmId} at {IpAddress}",
-                    relayVm.Spec.Id, relayVm.Spec.IpAddress);
+            var relayVm = _systemVmService.GetRunningVm("relay");
+            if (relayVm is not null)
                 return relayVm.Spec.IpAddress;
-            }
-            
+
             _logger.LogDebug("No relay VM found on this node");
             return null;
         }

@@ -1,4 +1,5 @@
-﻿using DeCloud.NodeAgent.Core.Interfaces;
+﻿using DeCloud.NodeAgent.Core.Constants;
+using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -25,13 +26,6 @@ public class SystemVmWatchdogService : BackgroundService
     private readonly IVmManager _vmManager;
     private readonly ICommandExecutor _executor;
     private readonly ILogger<SystemVmWatchdogService> _logger;
-
-    private static readonly HashSet<VmType> SystemVmTypes =
-    [
-        VmType.Relay,
-        VmType.Dht,
-        VmType.BlockStore
-    ];
 
     public SystemVmWatchdogService(
         IVmManager vmManager,
@@ -276,7 +270,7 @@ public class SystemVmWatchdogService : BackgroundService
         // After re-attaching tap interfaces, give the VMs' network stacks time to
         // recover before probing them. Without this delay, health checks fire while
         // the bridge attachment is still propagating and timeout erroneously.
-        if (_vmManager.GetAllVms().Any(v => SystemVmTypes.Contains(v.Spec.VmType)
+        if (_vmManager.GetAllVms().Any(v => SystemVmConstants.Types.Contains(v.Spec.VmType)
                                          && v.State is VmState.Running or VmState.Failed))
         {
             _logger.LogDebug(
@@ -294,7 +288,7 @@ public class SystemVmWatchdogService : BackgroundService
         // the watchdog fired, but they are still physically running in libvirt.
         // A Failed system VM with a dead guest agent is a zombie and must be hard-reset.
         var candidateZombies = _vmManager.GetAllVms()
-            .Where(v => SystemVmTypes.Contains(v.Spec.VmType)
+            .Where(v => SystemVmConstants.Types.Contains(v.Spec.VmType)
                      && v.Spec.VmType != VmType.Relay
                      && v.State is VmState.Running or VmState.Failed
                      && !string.IsNullOrEmpty(v.Spec.IpAddress))
@@ -363,7 +357,7 @@ public class SystemVmWatchdogService : BackgroundService
                 zombieVms.Count);
 
         var vms = _vmManager.GetAllVms()
-            .Where(v => SystemVmTypes.Contains(v.Spec.VmType)
+            .Where(v => SystemVmConstants.Types.Contains(v.Spec.VmType)
                      && v.State is VmState.Stopped or VmState.Failed)
             .ToList();
 

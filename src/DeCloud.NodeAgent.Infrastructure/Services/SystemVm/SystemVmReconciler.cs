@@ -94,6 +94,7 @@ public sealed class SystemVmReconciler : BackgroundService
     // ── Dependencies ────────────────────────────────────────────────────
 
     private readonly IObligationStateService _obligationState;
+    private readonly ISystemVmService _systemVmService;
     private readonly IIntentComputation _intent;
     private readonly IRealityProjection _reality;
     private readonly IOutstandingCommands _outstanding;
@@ -104,6 +105,7 @@ public sealed class SystemVmReconciler : BackgroundService
 
     public SystemVmReconciler(
         IObligationStateService obligationState,
+        ISystemVmService systemVmService,
         IIntentComputation intent,
         IRealityProjection reality,
         IOutstandingCommands outstanding,
@@ -113,6 +115,7 @@ public sealed class SystemVmReconciler : BackgroundService
         ILogger<SystemVmReconciler> logger)
     {
         _obligationState = obligationState;
+        _systemVmService = systemVmService;
         _intent = intent;
         _reality = reality;
         _outstanding = outstanding;
@@ -298,6 +301,7 @@ public sealed class SystemVmReconciler : BackgroundService
                 "SystemVmReconciler [{Role}]: failed to stamp deletion reason on {VmId} — non-fatal",
                 role, vmId);
             }
+            _systemVmService.InvalidateVersionCache(role);
             var result = await _vmManager.DeleteVmAsync(vmId, ct);
 
             if (result.Success)

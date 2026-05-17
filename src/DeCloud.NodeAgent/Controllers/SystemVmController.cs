@@ -1,4 +1,5 @@
 using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.Shared.Models;
@@ -25,30 +26,23 @@ namespace DeCloud.NodeAgent.Controllers;
 [Route("api/system-vms")]
 public class SystemVmController : ControllerBase
 {
-    private const int DashboardPort = 8080;
-
-    private readonly IVmManager _vmManager;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly IVmManager _vmManager;
     private readonly ObligationStateRepository _obligationStore;
+    private readonly ISystemVmService _systemVmService;
     private readonly ILogger<SystemVmController> _logger;
 
-    private static readonly Dictionary<string, VmType> RoleMap =
-        new(StringComparer.OrdinalIgnoreCase)
-        {
-            [ObligationRole.Relay]      = VmType.Relay,
-            [ObligationRole.Dht]        = VmType.Dht,
-            [ObligationRole.BlockStore] = VmType.BlockStore,
-        };
-
     public SystemVmController(
-        IVmManager vmManager,
         IHttpClientFactory httpClientFactory,
+        IVmManager vmManager,
         ObligationStateRepository obligationStore,
+        ISystemVmService systemVmService,
         ILogger<SystemVmController> logger)
     {
-        _vmManager  = vmManager;
         _httpClientFactory = httpClientFactory;
+        _vmManager = vmManager;
         _obligationStore = obligationStore;
+        _systemVmService = systemVmService;
         _logger = logger;
     }
 
@@ -66,8 +60,8 @@ public class SystemVmController : ControllerBase
         string? path = null,
         CancellationToken ct = default)
     {
-        // ── 1. Resolve role → VmType ────────────────────────────────────
-        if (!RoleMap.TryGetValue(role, out var vmType))
+        // ── 1. Validate role ────────────────────────────────────────────
+        if (!ISystemVmService.RoleToVmType.ContainsKey(role))
         {
             return NotFound(new
             {
@@ -75,15 +69,9 @@ public class SystemVmController : ControllerBase
             });
         }
 
-        // ── 2. Find the running VM ──────────────────────────────────────
-        var vm = _vmManager
-            .GetAllVms()
-            .FirstOrDefault(v =>
-                v.Spec.VmType == vmType &&
-                v.State == VmState.Running &&
-                !string.IsNullOrEmpty(v.Spec.IpAddress));
-
-        if (vm == null)
+        // ── 2. Resolve dashboard URL ────────────────────────────────────
+        var vm = _systemVmService.GetRunningVm(role);
+        if (vm is null)
         {
             return NotFound(new
             {
@@ -95,7 +83,7 @@ public class SystemVmController : ControllerBase
         // ── 3. Build target URL ─────────────────────────────────────────
         var targetPath  = string.IsNullOrEmpty(path) ? "/" : "/" + path;
         var queryString = Request.QueryString.HasValue ? Request.QueryString.Value : "";
-        var targetUrl   = $"http://{vm.Spec.IpAddress}:{DashboardPort}{targetPath}{queryString}";
+        var targetUrl = $"{_systemVmService.GetDashboardBaseUrl(role)}{targetPath}{queryString}";
 
         _logger.LogDebug(
             "System VM dashboard proxy: {Role} {Method} {Path} → {TargetUrl}",
@@ -193,7 +181,7 @@ public class SystemVmController : ControllerBase
             {
                 _logger.LogWarning(
                     "System VM dashboard {Role} at {Ip}:{Port} refused connection — service may still be starting",
-                    role, vm.Spec.IpAddress, DashboardPort);
+                    role, vm.Spec.IpAddress, ISystemVmService.DashboardPort);
 
                 return StatusCode(503, new
                 {
@@ -205,7 +193,7 @@ public class SystemVmController : ControllerBase
 
             _logger.LogWarning(ex,
                 "System VM dashboard proxy failed for {Role} at {Ip}:{Port}",
-                role, vm.Spec.IpAddress, DashboardPort);
+                role, vm.Spec.IpAddress, ISystemVmService.DashboardPort);
 
             return StatusCode(502, new { error = "Failed to reach system VM dashboard.", details = ex.Message });
         }
@@ -229,7 +217,7 @@ public class SystemVmController : ControllerBase
     [HttpGet("{role}/peer-info")]
     public async Task<IActionResult> GetPeerInfo(string role)
     {
-        var vmType = RoleMap.TryGetValue(role, out var vt) ? vt : (VmType?)null;
+        var vmType = ISystemVmService.RoleToVmType.TryGetValue(role, out var vt) ? vt : (VmType?)null;
         if (vmType is null) return NotFound();
 
         var vm = _vmManager.GetRunningVms()

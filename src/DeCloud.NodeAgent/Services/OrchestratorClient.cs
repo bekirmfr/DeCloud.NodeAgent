@@ -1,15 +1,19 @@
 // OrchestratorClient with Wallet Signature Authentication
 // Stateless authentication - no tokens, no expiration, no re-registration!
 
+using DeCloud.NodeAgent.Core.Constants;
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
+using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Core.Models.State;
 using DeCloud.NodeAgent.Infrastructure.Services;
+using DeCloud.NodeAgent.Infrastructure.Services.State;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Options;
 using Orchestrator.Models;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net;
 using System.Reflection;
 using System.Text.Json;
@@ -32,7 +36,9 @@ public partial class OrchestratorClient : IOrchestratorClient
     private readonly ILogger<OrchestratorClient> _logger;
     private readonly IResourceDiscoveryService _resourceDiscovery;
     private readonly INodeStateService _nodeState;
+    private readonly IVmManager _vmManager;
     private readonly IObligationStateService _obligationState;
+    private readonly ISystemVmService _systemVmService;
     private readonly IArtifactCacheService _artifactCache;
     private readonly INodeMetadataService _nodeMetadata;
     private readonly OrchestratorClientOptions _options;
@@ -43,6 +49,7 @@ public partial class OrchestratorClient : IOrchestratorClient
     private string? _walletAddress;
     private HeartbeatDto? _lastHeartbeat = null;
     private const string SshCaPublicKeyPath = "/etc/ssh/decloud_ca.pub";
+    private const int SystemVmDashboardPort = 8080;
 
     // Queue for pending commands received from heartbeat responses
     // Shared singleton with CommandProcessorService via DI
@@ -66,7 +73,9 @@ public partial class OrchestratorClient : IOrchestratorClient
         IOptions<OrchestratorClientOptions> options,
         IResourceDiscoveryService resourceDiscovery,
         INodeStateService nodeState,
+        IVmManager vmManager,
         IObligationStateService obligationState,
+        ISystemVmService systemVmService,
         IArtifactCacheService artifactCache,
         INodeMetadataService nodeMetadata,
         ConcurrentQueue<PendingCommand> pendingCommands,
@@ -79,7 +88,9 @@ public partial class OrchestratorClient : IOrchestratorClient
         _nodeMetadata = nodeMetadata;
         _walletAddress = _options.WalletAddress;
         _nodeState = nodeState;
+        _vmManager = vmManager;
         _obligationState = obligationState;
+        _systemVmService = systemVmService;
         _artifactCache = artifactCache;
         _pendingCommands = pendingCommands;
         _httpClient.BaseAddress = new Uri(_options.BaseUrl.TrimEnd('/'));
@@ -225,7 +236,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             RegisteredAt = DateTime.UtcNow,
             SshCaPublicKey = sshCaPublicKey,                              // ← new
             ObligationStateVersions = await BuildObligationStateVersionsAsync(ct),
-            SystemTemplateVersions = await BuildSystemTemplateVersionsAsync(ct)
+            SystemTemplateVersions = await _systemVmService.GetTemplateRevisionsAsync(ct)
         };
 
         // Register with retry logic
@@ -411,17 +422,6 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 "will retry when template is re-pulled on next heartbeat",
                 role);
         }
-    }
-
-    /// <summary>
-    /// Build a { role → storedRevision } map from the local SQLite store for
-    /// inclusion in the heartbeat. Parallel to BuildObligationStateVersionsAsync.
-    /// </summary>
-    private async Task<Dictionary<string, int>> BuildSystemTemplateVersionsAsync(CancellationToken ct)
-    {
-        var revisions = await _obligationState.GetSystemTemplateRevisionsAsync(ct);
-        _logger.LogDebug("Reporting system template revisions: {@Revisions}", revisions);
-        return revisions; // always non-null; empty = no templates stored yet
     }
 
     /// <summary>
@@ -1059,7 +1059,8 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             } : null,
             obligationStateVersions = await BuildObligationStateVersionsAsync(ct),
             obligationHealth = heartbeat.ObligationHealth,
-            systemTemplateVersions = await BuildSystemTemplateVersionsAsync(ct),
+            systemTemplateVersions = await _systemVmService.GetTemplateRevisionsAsync(ct),
+            systemBinaryVersions = await _systemVmService.GetAllBinaryVersionsAsync(ct),
             settingsHash = heartbeat.SettingsHash,
         };
 
