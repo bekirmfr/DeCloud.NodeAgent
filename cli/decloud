@@ -379,20 +379,42 @@ cmd_configure() {
             -h|--help)
                 echo "Usage: $SCRIPT_NAME configure [options]"
                 echo ""
-                echo "Locality/rate changes (require logout first):"
+                echo "Locality (require logout first):"
                 echo "  --country <CC>       ISO 3166-1 alpha-2 country code"
                 echo "  --region <region>    DeCloud region code"
                 echo "  --zone <zone>        Zone (format: <region>-<n>)"
                 echo ""
                 echo "Resource allocation (require logout first):"
-                echo "  --allocated-memory-percent <1-95>  Percent of physical RAM to offer"
-                echo "  --allocated-memory-mb <MB>         Absolute MB of RAM to offer (min 256)"
+                echo "  --allocated-memory-percent <1-95>"
+                echo "      Percent of physical RAM to offer to the platform."
+                echo "      Default: 90 (when neither flag is set)."
                 echo ""
-                echo "Cosmetic changes (allowed anytime):"
+                echo "  --allocated-memory-mb <MB>"
+                echo "      Absolute megabytes of RAM to offer (minimum: 256)."
+                echo "      Mutually exclusive with --allocated-memory-percent."
+                echo ""
+                echo "Cosmetic (allowed anytime, no logout needed):"
                 echo "  --name <text>        Node display name"
                 echo "  --description <text> Node description"
                 echo ""
-                echo "After locality or resource changes, run 'decloud register' to commit."
+                echo "Examples:"
+                echo "  # Offer 70% of RAM to the platform"
+                echo "  sudo $SCRIPT_NAME configure --allocated-memory-percent 70"
+                echo ""
+                echo "  # Offer exactly 4 GB of RAM"
+                echo "  sudo $SCRIPT_NAME configure --allocated-memory-mb 4096"
+                echo ""
+                echo "  # Change country and memory allocation together"
+                echo "  sudo $SCRIPT_NAME configure --country DE --allocated-memory-percent 80"
+                echo ""
+                echo "After locality or resource changes, commit with:"
+                echo "  sudo $SCRIPT_NAME register"
+                echo ""
+                echo "Full sequence for changes on an enrolled node:"
+                echo "  1. sudo $SCRIPT_NAME logout"
+                echo "  2. sudo $SCRIPT_NAME configure <flags>"
+                echo "  3. sudo $SCRIPT_NAME register"
+                echo "  4. sudo $SCRIPT_NAME login"
                 exit $EXIT_SUCCESS
                 ;;
             *)
@@ -2319,12 +2341,16 @@ ${BOLD}NODE LIFECYCLE:${NC}
     login                   Resume scheduling (lightweight, no wallet needed)
     logout                  Pause scheduling (credentials preserved, VMs keep running)
     settings                Show current node settings (settings.json)
-    configure [options]     Update node settings (locality requires logout first)
+    configure [options]     Update node settings (locality/resources require logout first)
       --country <CC>          ISO 3166-1 alpha-2 country code
       --region <region>       DeCloud region code
       --zone <zone>           Zone (format: <region>-<n>)
       --name <text>           Node display name
       --description <text>    Node description
+      --allocated-memory-percent <1-95>
+                              Percent of physical RAM to offer (default: 90)
+      --allocated-memory-mb <MB>
+                              Absolute MB of RAM to offer (min: 256)
 
 ${BOLD}STATUS & INFORMATION:${NC}
     status                  Show comprehensive node status
