@@ -2363,7 +2363,23 @@ create_configuration() {
 EOF
 
     chmod 640 "${CONFIG_DIR}/appsettings.Production.json"
-    
+
+    # Merge resource allocation settings from settings.json (if configured)
+    if [ -f /etc/decloud/settings.json ]; then
+        local mem_mode mem_value
+        mem_mode=$(jq -r '.resources.memory.mode // empty' /etc/decloud/settings.json 2>/dev/null)
+        mem_value=$(jq -r '.resources.memory.value // empty' /etc/decloud/settings.json 2>/dev/null)
+        if [ -n "$mem_mode" ] && [ -n "$mem_value" ]; then
+            local tmp_ap; tmp_ap=$(mktemp)
+            jq --arg mm "$mem_mode" --arg mv "$mem_value" \
+               '.Node.Resources.Memory.Mode = $mm | .Node.Resources.Memory.Value = ($mv | tonumber)' \
+               "${CONFIG_DIR}/appsettings.Production.json" > "$tmp_ap" \
+               && mv "$tmp_ap" "${CONFIG_DIR}/appsettings.Production.json"
+            chmod 640 "${CONFIG_DIR}/appsettings.Production.json"
+            log_info "Resource allocation (memory): ${mem_mode} ${mem_value}"
+        fi
+    fi
+
     # Display machine ID for reference
     if [ -f "/etc/machine-id" ]; then
         MACHINE_ID=$(cat /etc/machine-id)
