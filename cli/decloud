@@ -361,6 +361,8 @@ cmd_configure() {
 
     local country="" region="" zone="" name="" description=""
     local has_locality_change=false
+    local has_resource_change=false
+    local alloc_mem_percent="" alloc_mem_mb=""
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -370,6 +372,10 @@ cmd_configure() {
             --zone)        zone="$2";        has_locality_change=true; shift 2 ;;
             --name)        name="$2";        shift 2 ;;
             --description) description="$2"; shift 2 ;;
+            --allocated-memory-percent)
+                alloc_mem_percent="$2"; has_resource_change=true; shift 2 ;;
+            --allocated-memory-mb)
+                alloc_mem_mb="$2"; has_resource_change=true; shift 2 ;;
             -h|--help)
                 echo "Usage: $SCRIPT_NAME configure [options]"
                 echo ""
@@ -378,11 +384,15 @@ cmd_configure() {
                 echo "  --region <region>    DeCloud region code"
                 echo "  --zone <zone>        Zone (format: <region>-<n>)"
                 echo ""
+                echo "Resource allocation (require logout first):"
+                echo "  --allocated-memory-percent <1-95>  Percent of physical RAM to offer"
+                echo "  --allocated-memory-mb <MB>         Absolute MB of RAM to offer (min 256)"
+                echo ""
                 echo "Cosmetic changes (allowed anytime):"
                 echo "  --name <text>        Node display name"
                 echo "  --description <text> Node description"
                 echo ""
-                echo "After locality changes, run 'decloud register' to commit."
+                echo "After locality or resource changes, run 'decloud register' to commit."
                 exit $EXIT_SUCCESS
                 ;;
             *)
@@ -392,7 +402,7 @@ cmd_configure() {
         esac
     done
 
-    if [[ -z "$country$region$zone$name$description" ]]; then
+    if [[ -z "$country$region$zone$name$description$alloc_mem_percent$alloc_mem_mb" ]]; then
         log_error "No settings specified"
         echo "Run '$SCRIPT_NAME configure --help' for usage"
         exit $EXIT_USAGE
@@ -405,6 +415,22 @@ cmd_configure() {
             log_error "Cannot change locality while logged in"
             echo ""
             echo "  The full sequence for locality/rate changes:"
+            echo "    1. sudo $SCRIPT_NAME logout          # pause scheduling"
+            echo "    2. sudo $SCRIPT_NAME configure ...   # change settings"
+            echo "    3. sudo $SCRIPT_NAME register        # wallet-sign and commit"
+            echo "    4. sudo $SCRIPT_NAME login            # resume when ready"
+            echo ""
+            exit $EXIT_ERROR
+        fi
+    fi
+
+    # ── Gate: resource allocation changes require logout ───────────────────
+    if $has_resource_change; then
+        if [[ -f "$CREDENTIALS_FILE" ]] && [[ ! -f "$CONFIG_DIR/logged-out" ]]; then
+            echo ""
+            log_error "Cannot change resource allocation while logged in"
+            echo ""
+            echo "  The full sequence for resource allocation changes:"
             echo "    1. sudo $SCRIPT_NAME logout          # pause scheduling"
             echo "    2. sudo $SCRIPT_NAME configure ...   # change settings"
             echo "    3. sudo $SCRIPT_NAME register        # wallet-sign and commit"
@@ -438,6 +464,28 @@ cmd_configure() {
         fi
         if [[ -n "$expected_region" ]] && [[ ! "$zone" =~ ^${expected_region}-[1-9][0-9]*$ ]]; then
             log_error "Invalid zone format: '$zone' (must be <region>-<n>, e.g. ${expected_region}-1)"
+            exit $EXIT_USAGE
+        fi
+    fi
+
+    # ── Validate resource allocation flags ─────────────────────────────────
+    if [[ -n "$alloc_mem_percent" ]] && [[ -n "$alloc_mem_mb" ]]; then
+        log_error "Cannot set both --allocated-memory-percent and --allocated-memory-mb"
+        log_info "They are mutually exclusive. Use one or the other."
+        exit $EXIT_USAGE
+    fi
+
+    if [[ -n "$alloc_mem_percent" ]]; then
+        if ! [[ "$alloc_mem_percent" =~ ^[0-9]+$ ]] || \
+           [[ "$alloc_mem_percent" -lt 1 ]] || [[ "$alloc_mem_percent" -gt 95 ]]; then
+            log_error "Invalid memory percent: '$alloc_mem_percent' (must be 1-95)"
+            exit $EXIT_USAGE
+        fi
+    fi
+
+    if [[ -n "$alloc_mem_mb" ]]; then
+        if ! [[ "$alloc_mem_mb" =~ ^[0-9]+$ ]] || [[ "$alloc_mem_mb" -lt 256 ]]; then
+            log_error "Invalid memory MB: '$alloc_mem_mb' (must be >= 256)"
             exit $EXIT_USAGE
         fi
     fi
@@ -481,18 +529,45 @@ cmd_configure() {
         log_success "Description set to: $description"
     fi
 
+    # ── Resource allocation writes ──────────────────────────────────────
+    if [[ -n "$alloc_mem_percent" ]]; then
+        local tmp; tmp=$(mktemp)
+        jq '.resources.memory = {"mode":"percent","value":'"$alloc_mem_percent"'}' \
+            "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
+        chmod 600 "$SETTINGS_FILE"
+        params_changed=true
+        log_success "Memory allocation set to: ${alloc_mem_percent}%"
+    fi
+
+    if [[ -n "$alloc_mem_mb" ]]; then
+        local tmp; tmp=$(mktemp)
+        jq '.resources.memory = {"mode":"mb","value":'"$alloc_mem_mb"'}' \
+            "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
+        chmod 600 "$SETTINGS_FILE"
+        params_changed=true
+        log_success "Memory allocation set to: ${alloc_mem_mb} MB"
+    fi
+
     # Sync settings.json → appsettings.Production.json so the running
     # agent sees the new values. Without this, the agent reads stale
     # defaults from appsettings and the heartbeat hash mismatches.
     if $params_changed; then
         local appsettings="$PUBLISH_DIR/appsettings.Production.json"
         if [[ -f "$appsettings" ]]; then
+            # Read resource allocation from settings.json
+            local mem_mode mem_value
+            mem_mode=$(jq -r '.resources.memory.mode // empty' "$SETTINGS_FILE" 2>/dev/null)
+            mem_value=$(jq -r '.resources.memory.value // empty' "$SETTINGS_FILE" 2>/dev/null)
+
             local tmp_ap; tmp_ap=$(mktemp)
             jq --arg c "$(_read_setting "country" || echo "ZZ")" \
                --arg r "$(_read_setting "region" || echo "default")" \
                --arg z "$(_read_setting "zone" || echo "default")" \
                --arg n "$(_read_setting "name" || echo "$(hostname)")" \
-               '.Node.Country = $c | .Node.Region = $r | .Node.Zone = $z | .Node.Name = $n' \
+               --arg mm "${mem_mode}" \
+               --arg mv "${mem_value}" \
+               '.Node.Country = $c | .Node.Region = $r | .Node.Zone = $z | .Node.Name = $n |
+                if $mm != "" then .Node.Resources.Memory.Mode = $mm | .Node.Resources.Memory.Value = ($mv | tonumber) else . end' \
                "$appsettings" > "$tmp_ap" && mv "$tmp_ap" "$appsettings"
             chmod 640 "$appsettings"
         fi

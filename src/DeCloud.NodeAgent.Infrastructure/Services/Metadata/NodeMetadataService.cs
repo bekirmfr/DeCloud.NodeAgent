@@ -23,6 +23,13 @@ public interface INodeMetadataService
     NodePricing? Pricing { get; }
     HardwareInventory? Inventory { get; }
 
+    /// <summary>
+    /// Operator-allocated memory in bytes, resolved from settings.
+    /// Null until UpdateInventory is called (percent mode needs TotalBytes).
+    /// Null also means "use platform default (90%)".
+    /// </summary>
+    long? AllocatedMemoryBytes { get; }
+
     Task InitializeAsync(CancellationToken ct = default);
     void UpdatePublicIp(string publicIp);
     void UpdateInventory(HardwareInventory inventory);
@@ -45,6 +52,11 @@ public class NodeMetadataService : INodeMetadataService
     public string Country { get; private set; } = "ZZ";
     public NodePricing? Pricing { get; private set; }
     public HardwareInventory? Inventory { get; private set; } = null;
+    public long? AllocatedMemoryBytes { get; private set; }
+
+    // Raw config values — resolved against hardware in UpdateInventory
+    private string? _memoryAllocMode;
+    private int? _memoryAllocValue;
 
     public NodeMetadataService(IConfiguration configuration, ILogger<NodeMetadataService> logger)
     {
@@ -74,6 +86,33 @@ public class NodeMetadataService : INodeMetadataService
             "Node locality: Country={Country}, Region={Region}, Zone={Zone}",
             Country, Region, Zone);
 
+        // Resource allocation settings (from decloud configure)
+        _memoryAllocMode = _configuration["Node:Resources:Memory:Mode"];
+        if (int.TryParse(_configuration["Node:Resources:Memory:Value"], out var memVal))
+            _memoryAllocValue = memVal;
+
+        // If mode is "mb", resolve immediately (doesn't need hardware discovery)
+        if (string.Equals(_memoryAllocMode, "mb", StringComparison.OrdinalIgnoreCase)
+            && _memoryAllocValue.HasValue)
+        {
+            AllocatedMemoryBytes = (long)_memoryAllocValue.Value * 1024 * 1024;
+            _logger.LogInformation(
+                "Resource allocation (memory): {Mb} MB (absolute, from settings)",
+                _memoryAllocValue.Value);
+        }
+        else if (string.Equals(_memoryAllocMode, "percent", StringComparison.OrdinalIgnoreCase)
+            && _memoryAllocValue.HasValue)
+        {
+            // Percent mode — deferred to UpdateInventory when TotalBytes is known
+            _logger.LogInformation(
+                "Resource allocation (memory): {Pct}% (deferred until hardware discovery)",
+                _memoryAllocValue.Value);
+        }
+        else
+        {
+            _logger.LogInformation(
+                "Resource allocation (memory): not configured, platform default (90%) will apply");
+        }
 
         // Load operator pricing from config (optional)
         var pricingSection = _configuration.GetSection("Node:Pricing");
@@ -124,5 +163,29 @@ public class NodeMetadataService : INodeMetadataService
     public void UpdateInventory(HardwareInventory inventory)
     {
         Inventory = inventory;
+        ResolveAllocatedMemory(inventory);
+    }
+
+    /// <summary>
+    /// Resolve percent-based memory allocation now that hardware info is available.
+    /// Called from UpdateInventory after discovery completes.
+    /// </summary>
+    private void ResolveAllocatedMemory(HardwareInventory inventory)
+    {
+        if (AllocatedMemoryBytes.HasValue)
+            return; // Already resolved (absolute mode set in InitializeAsync)
+
+        if (string.Equals(_memoryAllocMode, "percent", StringComparison.OrdinalIgnoreCase)
+            && _memoryAllocValue.HasValue)
+        {
+            var pct = Math.Clamp(_memoryAllocValue.Value, 1, 95) / 100.0;
+            AllocatedMemoryBytes = (long)(inventory.Memory.TotalBytes * pct);
+            _logger.LogInformation(
+                "Resource allocation (memory): resolved {Pct}% of {TotalMb} MB = {AllocMb} MB",
+                _memoryAllocValue.Value,
+                inventory.Memory.TotalBytes / (1024 * 1024),
+                AllocatedMemoryBytes.Value / (1024 * 1024));
+        }
+        // else: no config → AllocatedMemoryBytes stays null → orchestrator applies 90% default
     }
 }

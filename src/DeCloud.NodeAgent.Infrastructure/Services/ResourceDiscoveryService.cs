@@ -1095,6 +1095,14 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         var performanceEval = _nodeState.PerformanceEvaluation;
         var totalComputePoints = performanceEval?.TotalComputePoints ?? 0;
 
+        // Operator ceiling for memory: if configured, report it as TotalMemoryBytes
+        // so heartbeat discrepancy checks align with orchestrator's TotalResources.
+        // Falls back to platform default (90% of physical) if not configured.
+        var allocatedMemory = _nodeMetadata.AllocatedMemoryBytes
+            ?? (long)(memory.TotalBytes * DeCloud.Shared.AllocatedResources.DefaultPercent);
+        // Never exceed physical
+        allocatedMemory = Math.Min(allocatedMemory, memory.TotalBytes);
+
         return new ResourceSnapshot
         {
             TotalPhysicalCores = cpu.PhysicalCores,
@@ -1106,7 +1114,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             TotalComputePoints = (int)totalComputePoints,
             UsedComputePoints = 0, // Will be calculated by HeartbeatService
 
-            TotalMemoryBytes = memory.TotalBytes,
+            TotalMemoryBytes = allocatedMemory,
             UsedMemoryBytes = memory.UsedBytes,
             TotalStorageBytes = storage.Sum(s => s.TotalBytes),
             UsedStorageBytes = storage.Sum(s => s.UsedBytes),

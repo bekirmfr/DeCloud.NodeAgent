@@ -287,7 +287,13 @@ public class NodeRegistration
     /// Allows the orchestrator to skip sending templates already current on the node.
     /// Absent or zero-valued entries mean no template stored for that role.
     /// </summary>
-    public Dictionary<string, int> SystemTemplateVersions { get; set; } = new();
+    public Dictionary<string, int>? SystemTemplateVersions { get; set; }
+
+    /// <summary>
+    /// Operator-configured resource allocation limits, resolved to absolute
+    /// values. Null = use platform default (90%).
+    /// </summary>
+    public DeCloud.Shared.AllocatedResources? AllocatedResources { get; set; }
 }
 
 public class NodePricing

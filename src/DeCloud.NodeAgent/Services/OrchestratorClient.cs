@@ -234,9 +234,15 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             Country = _nodeMetadata.Country,
             Pricing = _nodeMetadata.Pricing,
             RegisteredAt = DateTime.UtcNow,
-            SshCaPublicKey = sshCaPublicKey,                              // ← new
+            SshCaPublicKey = sshCaPublicKey,
             ObligationStateVersions = await BuildObligationStateVersionsAsync(ct),
-            SystemTemplateVersions = await _systemVmService.GetTemplateRevisionsAsync(ct)
+            SystemTemplateVersions = await _systemVmService.GetTemplateRevisionsAsync(ct),
+            AllocatedResources = _nodeMetadata.AllocatedMemoryBytes.HasValue
+                ? new DeCloud.Shared.AllocatedResources
+                {
+                    MemoryBytes = _nodeMetadata.AllocatedMemoryBytes
+                }
+                : null
         };
 
         // Register with retry logic
