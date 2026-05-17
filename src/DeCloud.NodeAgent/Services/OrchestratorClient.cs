@@ -1061,6 +1061,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             obligationHealth = heartbeat.ObligationHealth,
             systemTemplateVersions = await _systemVmService.GetTemplateRevisionsAsync(ct),
             systemBinaryVersions = await _systemVmService.GetAllBinaryVersionsAsync(ct),
+            agentVersion = _nodeState.AgentVersion,
             settingsHash = heartbeat.SettingsHash,
         };
 

@@ -18,6 +18,12 @@ namespace DeCloud.NodeAgent.Core.Interfaces.State;
 /// </summary>
 public interface INodeStateService
 {
+    /// <summary>
+    /// Node agent assembly version. Immutable for the process lifetime.
+    /// Includes git hash when built by CI (InformationalVersion attribute).
+    /// </summary>
+    string AgentVersion { get; }
+
     // ================================================================
     // OPERATIONAL STATUS
     // ================================================================

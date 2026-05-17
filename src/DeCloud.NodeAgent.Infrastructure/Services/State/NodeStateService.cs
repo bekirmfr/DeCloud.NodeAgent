@@ -2,6 +2,7 @@ using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Logging;
 using Orchestrator.Models;
+using System.Reflection;
 
 namespace DeCloud.NodeAgent.Infrastructure.Services;
 
@@ -65,6 +66,13 @@ public class NodeStateService : INodeStateService
     // ================================================================
     // PROPERTIES - Operational Status
     // ================================================================
+
+    public string AgentVersion { get; } =
+        typeof(NodeStateService).Assembly
+            .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion
+        ?? typeof(NodeStateService).Assembly.GetName().Version?.ToString()
+        ?? "unknown";
 
     public NodeStatus Status
     {

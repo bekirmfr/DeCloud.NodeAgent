@@ -132,7 +132,7 @@ public class NodeDashboardController : ControllerBase
             nodeId = nodeId ?? "unregistered",
             hostname = Environment.MachineName,
             walletAddress = _orchestratorClient.WalletAddress,
-            agentVersion = GetAgentVersion(),
+            agentVersion = _nodeStateService.AgentVersion,
             uptimeSeconds = uptimeTask.Result,
             os = osTask.Result,
             ingressBaseDomain = ingressTask.Result,   // e.g. "vms.stackfi.tech" — null if not configured
@@ -1215,9 +1215,6 @@ public class NodeDashboardController : ControllerBase
         catch { }
         return Environment.OSVersion.ToString();
     }
-
-    private static string GetAgentVersion() =>
-        typeof(NodeDashboardController).Assembly.GetName().Version?.ToString() ?? "dev";
 
     private static string FallbackHtml() =>
         """
