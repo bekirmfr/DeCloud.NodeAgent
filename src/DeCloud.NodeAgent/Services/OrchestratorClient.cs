@@ -1009,8 +1009,8 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 cpuUsagePercent = heartbeat.Resources.VirtualCpuUsagePercent,
                 // Usage percent measures against physical RAM (host-level metric),
                 // not the allocated ceiling (scheduling concept).
-                memoryUsagePercent = heartbeat.Resources.PhysicalMemoryBytes > 0
-                    ? (double)heartbeat.Resources.UsedMemoryBytes / heartbeat.Resources.PhysicalMemoryBytes * 100
+                memoryUsagePercent = heartbeat.Resources.TotalMemoryBytes > 0
+                    ? (double)heartbeat.Resources.UsedMemoryBytes / heartbeat.Resources.TotalMemoryBytes * 100
                     : 0,
                 storageUsagePercent = heartbeat.Resources.TotalStorageBytes > 0
                     ? (double)heartbeat.Resources.UsedStorageBytes / heartbeat.Resources.TotalStorageBytes * 100

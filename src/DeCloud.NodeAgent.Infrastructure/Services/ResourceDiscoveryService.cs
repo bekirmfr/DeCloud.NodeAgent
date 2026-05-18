@@ -1111,7 +1111,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             VirtualCpuUsagePercent = cpu.UsagePercent,
             TotalComputePoints = (int)totalComputePoints,
             UsedComputePoints = 0, // Will be calculated by HeartbeatService
-            PhysicalMemoryBytes = memory.TotalBytes,
+            TotalMemoryBytes = memory.TotalBytes,
             AllocatedMemoryBytes = allocatedMemory,
             UsedMemoryBytes = memory.UsedBytes,
             TotalStorageBytes = storage.Sum(s => s.TotalBytes),

@@ -149,11 +149,11 @@ public class ResourceSnapshot
 
     // Memory
     /// <summary>Total physical RAM on the host.</summary>
-    public long PhysicalMemoryBytes { get; set; }
+    public long TotalMemoryBytes { get; set; }
     /// <summary>Operator-allocated memory ceiling (for scheduling alignment).</summary>
     public long AllocatedMemoryBytes { get; set; }
     public long UsedMemoryBytes { get; set; }
-    public long AvailableMemoryBytes => Math.Max(0, AllocatedMemoryBytes - UsedMemoryBytes);
+    public long AvailableMemoryBytes => Math.Max(0, TotalMemoryBytes - UsedMemoryBytes);
 
     // Storage
     public long TotalStorageBytes { get; set; }
