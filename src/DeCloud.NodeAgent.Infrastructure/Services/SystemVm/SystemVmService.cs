@@ -5,6 +5,7 @@ using DeCloud.NodeAgent.Core.Models;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
+using System.Text;
 using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Infrastructure.Services.SystemVm;
@@ -27,6 +28,7 @@ public sealed class SystemVmService : ISystemVmService
 {
     private readonly IVmManager _vmManager;
     private readonly IObligationStateService _obligationState;
+    private readonly ICommandExecutor _commandExecutor;
     private readonly ILogger<SystemVmService> _logger;
 
     /// <summary>
@@ -39,10 +41,12 @@ public sealed class SystemVmService : ISystemVmService
     public SystemVmService(
         IVmManager vmManager,
         IObligationStateService obligationState,
+        ICommandExecutor commandExecutor,
         ILogger<SystemVmService> logger)
     {
         _vmManager = vmManager;
         _obligationState = obligationState;
+        _commandExecutor = commandExecutor;
         _logger = logger;
     }
 
@@ -130,6 +134,61 @@ public sealed class SystemVmService : ISystemVmService
     public Task<Dictionary<string, int>> GetTemplateRevisionsAsync(
         CancellationToken ct = default) =>
         _obligationState.GetSystemTemplateRevisionsAsync(ct);
+
+    public async Task<string?> CaptureVmJournalAsync(string vmId, int lines = 100, CancellationToken ct = default)
+    {
+        try
+        {
+            // Step 1: guest-exec journalctl inside the VM
+            var argsJson = string.Join(",",
+                new[] { "--no-pager", "-n", lines.ToString(), "--since=-30min" }
+                    .Select(a => $"\"{a}\""));
+            var execCmd = $"{{\"execute\":\"guest-exec\",\"arguments\":{{\"path\":\"/usr/bin/journalctl\",\"arg\":[{argsJson}],\"capture-output\":true}}}}";
+
+            var execResult = await _commandExecutor.ExecuteAsync(
+                "virsh",
+                $"-c qemu:///system qemu-agent-command {vmId} '{execCmd}'",
+                TimeSpan.FromSeconds(5), ct);
+
+            if (execResult.ExitCode != 0) return null;
+
+            var execJson = JsonDocument.Parse(execResult.StandardOutput.Trim());
+            var pid = execJson.RootElement.GetProperty("return").GetProperty("pid").GetInt64();
+
+            // Step 2: Wait briefly, then fetch output
+            await Task.Delay(2000, ct);
+
+            var statusCmd = $"{{\"execute\":\"guest-exec-status\",\"arguments\":{{\"pid\":{pid}}}}}";
+            var statusResult = await _commandExecutor.ExecuteAsync(
+                "virsh",
+                $"-c qemu:///system qemu-agent-command {vmId} '{statusCmd}'",
+                TimeSpan.FromSeconds(5), ct);
+
+            if (statusResult.ExitCode != 0) return null;
+
+            var statusJson = JsonDocument.Parse(statusResult.StandardOutput.Trim());
+            var ret = statusJson.RootElement.GetProperty("return");
+
+            if (!ret.GetProperty("exited").GetBoolean()) return null;
+
+            // Decode base64 stdout
+            if (ret.TryGetProperty("out-data", out var outData))
+            {
+                var decoded = Encoding.UTF8.GetString(
+                    Convert.FromBase64String(outData.GetString() ?? ""));
+                var trimmed = decoded.Trim();
+                // Cap at 8KB to avoid bloating SQLite
+                return trimmed.Length > 8192 ? trimmed[..8192] : trimmed;
+            }
+
+            return null;
+        }
+        catch
+        {
+            // Guest agent unreachable — expected when that's the failure mode.
+            return null;
+        }
+    }
 
     // ── Internal ─────────────────────────────────────────────────────────
 

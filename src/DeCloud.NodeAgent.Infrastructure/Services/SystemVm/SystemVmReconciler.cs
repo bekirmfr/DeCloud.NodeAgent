@@ -298,10 +298,28 @@ public sealed class SystemVmReconciler : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogDebug(ex,
-                "SystemVmReconciler [{Role}]: failed to stamp deletion reason on {VmId} — non-fatal",
-                role, vmId);
+                    "SystemVmReconciler [{Role}]: failed to stamp deletion reason on {VmId} — non-fatal",
+                    role, vmId);
             }
+
+            // Capture VM journal for post-mortem (best-effort, 5s timeout).
+            // If the guest agent is dead, this returns null — DeletionReason
+            // and ServicesJson still provide host-side diagnostics.
+            try
+            {
+                var journal = await _systemVmService.CaptureVmJournalAsync(vmId, lines: 100, ct);
+                if (journal is not null)
+                    await _repository.SetCrashJournalAsync(vmId, journal);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex,
+                    "SystemVmReconciler [{Role}]: journal capture failed for {VmId} — non-fatal",
+                    role, vmId);
+            }
+
             _systemVmService.InvalidateVersionCache(role);
+
             var result = await _vmManager.DeleteVmAsync(vmId, ct);
 
             if (result.Success)

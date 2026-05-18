@@ -23,7 +23,7 @@ public class VmRepository : IDisposable
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly bool _encrypted;
 
-    private const int CURRENT_SCHEMA_VERSION = 7; // Incremented when schema changes
+    private const int CURRENT_SCHEMA_VERSION = 8; // Incremented when schema changes
 
     public VmRepository(string databasePath, ILogger logger, string? encryptionKey = null)
     {
@@ -183,7 +183,8 @@ public class VmRepository : IDisposable
                 VmType TEXT NOT NULL DEFAULT 'General',
                 LabelsJson TEXT,
                 TargetNodeId TEXT,
-                DeletionReason TEXT
+                DeletionReason TEXT,
+                CrashJournal TEXT
             );
             
             CREATE INDEX IF NOT EXISTS idx_tenant ON VmRecords(OwnerId);
@@ -253,6 +254,13 @@ public class VmRepository : IDisposable
                 _logger.LogInformation("Applying migration: v{From} → v7 (DeletionReason column)", Math.Max(fromVersion, 6));
                 MigrateToV7();
                 SetSchemaVersion(7);
+            }
+
+            if (fromVersion < 8)
+            {
+                _logger.LogInformation("Applying migration: v{From} → v8 (CrashJournal column)", Math.Max(fromVersion, 7));
+                MigrateToV8();
+                SetSchemaVersion(8);
             }
 
             transaction.Commit();
@@ -431,6 +439,17 @@ public class VmRepository : IDisposable
             cmd.CommandText = "ALTER TABLE VmRecords ADD COLUMN DeletionReason TEXT";
             cmd.ExecuteNonQuery();
             _logger.LogInformation("Added DeletionReason column to VmRecords");
+        }
+    }
+
+    private void MigrateToV8()
+    {
+        if (!ColumnExists("VmRecords", "CrashJournal"))
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "ALTER TABLE VmRecords ADD COLUMN CrashJournal TEXT";
+            cmd.ExecuteNonQuery();
+            _logger.LogInformation("Added CrashJournal column to VmRecords");
         }
     }
 
@@ -680,6 +699,23 @@ public class VmRepository : IDisposable
             cmd.CommandText = "UPDATE VmRecords SET DeletionReason = @Reason WHERE VmId = @VmId";
             cmd.Parameters.AddWithValue("@VmId", vmId);
             cmd.Parameters.AddWithValue("@Reason", reason);
+            await cmd.ExecuteNonQueryAsync();
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task SetCrashJournalAsync(string vmId, string journal)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "UPDATE VmRecords SET CrashJournal = @Journal WHERE VmId = @VmId";
+            cmd.Parameters.AddWithValue("@VmId", vmId);
+            cmd.Parameters.AddWithValue("@Journal", journal);
             await cmd.ExecuteNonQueryAsync();
         }
         finally

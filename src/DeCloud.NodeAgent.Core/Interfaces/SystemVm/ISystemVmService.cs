@@ -72,4 +72,10 @@ public interface ISystemVmService
     /// Returns { role → revision }. Used in heartbeat payload.
     /// </summary>
     Task<Dictionary<string, int>> GetTemplateRevisionsAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Capture the last N lines of systemd journal from inside a VM via guest-exec.
+    /// Best-effort with a short timeout — returns null if the guest agent is dead.
+    /// </summary>
+    Task<string?> CaptureVmJournalAsync(string vmId, int lines = 100, CancellationToken ct = default);
 }

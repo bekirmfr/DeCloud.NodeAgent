@@ -692,12 +692,12 @@ function paintSysVm(key, vm) {
         servicesEl.className = 'svc-chips';
         card.appendChild(servicesEl);
     }
-    const svcs = (running) ? (vm?.services ?? []) : [];
-    const readyAll = vm.isFullyReady;
+    const svcs = (running && vmMatchesObligation && oblIsActive) ? (vm?.services ?? []) : [];
+    const readyCount = svcs.filter(s => svcReadiness(s) === 'ready').length;
+    const readyAll = vm?.isFullyReady ?? false;
     const rdotFailed = svcs.some(s => ['timedout', 'failed'].includes(svcReadiness(s)));
     const rdot = readyAll ? 'ready' : readyCount > 0 ? 'partial' : 'pending';
     if (svcs.length) {
-        const readyCount = svcs.filter(s => svcReadiness(s) === 'ready').length;
         servicesEl.innerHTML =
             `<div class="sysvm-ready-row">
             <span class="sysvm-ready-dot ${rdotFailed ? 'failed' : rdot}"></span>
