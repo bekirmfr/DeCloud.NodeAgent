@@ -1007,8 +1007,10 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             {
                 timestamp = heartbeat.Timestamp.ToString("O"),
                 cpuUsagePercent = heartbeat.Resources.VirtualCpuUsagePercent,
-                memoryUsagePercent = heartbeat.Resources.TotalMemoryBytes > 0
-                    ? (double)heartbeat.Resources.UsedMemoryBytes / heartbeat.Resources.TotalMemoryBytes * 100
+                // Usage percent measures against physical RAM (host-level metric),
+                // not the allocated ceiling (scheduling concept).
+                memoryUsagePercent = heartbeat.Resources.PhysicalMemoryBytes > 0
+                    ? (double)heartbeat.Resources.UsedMemoryBytes / heartbeat.Resources.PhysicalMemoryBytes * 100
                     : 0,
                 storageUsagePercent = heartbeat.Resources.TotalStorageBytes > 0
                     ? (double)heartbeat.Resources.UsedStorageBytes / heartbeat.Resources.TotalStorageBytes * 100

@@ -265,8 +265,8 @@ public class HeartbeatService : BackgroundService
                 _logger.LogDebug("Heartbeat sent: {VmCount} VMs, CPU {Cpu}%, MEM {Mem}%",
                     activeVms.Count,
                     snapshot.VirtualCpuUsagePercent,
-                    snapshot.TotalMemoryBytes > 0
-                        ? (double)snapshot.UsedMemoryBytes / snapshot.TotalMemoryBytes * 100
+                    snapshot.AllocatedMemoryBytes > 0
+                        ? (double)snapshot.UsedMemoryBytes / snapshot.AllocatedMemoryBytes * 100
                         : 0);
             }
             else

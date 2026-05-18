@@ -212,7 +212,7 @@ class HardwareScreen(BaseScreen):
                        f"{used_cp}/{total_cp} compute points allocated")
 
         # ── Memory card ───────────────────────────────────────────
-        total_m = snap.get("totalMemoryBytes")
+        total_m = snap.get("physicalMemoryBytes", 0) or snapshot.get("totalMemoryBytes", 0)
         used_m = snap.get("usedMemoryBytes")
         avail_m = snap.get("availableMemoryBytes")
 

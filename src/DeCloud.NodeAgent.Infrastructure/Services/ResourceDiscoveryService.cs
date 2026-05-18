@@ -1109,12 +1109,10 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             TotalVirtualCpuCores = cpu.LogicalCores,
             UsedVirtualCpuCores = cpu.LogicalCores - cpu.AvailableVCpus,
             VirtualCpuUsagePercent = cpu.UsagePercent,
-
-            // ✅ FIXED: Compute points from performance evaluation
             TotalComputePoints = (int)totalComputePoints,
             UsedComputePoints = 0, // Will be calculated by HeartbeatService
-
-            TotalMemoryBytes = allocatedMemory,
+            PhysicalMemoryBytes = memory.TotalBytes,
+            AllocatedMemoryBytes = allocatedMemory,
             UsedMemoryBytes = memory.UsedBytes,
             TotalStorageBytes = storage.Sum(s => s.TotalBytes),
             UsedStorageBytes = storage.Sum(s => s.UsedBytes),

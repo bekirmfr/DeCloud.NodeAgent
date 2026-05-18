@@ -101,9 +101,18 @@ public sealed class SystemVmService : ISystemVmService
                     result[role] = version;
                 }
             }
+            catch (HttpRequestException)
+            {
+                // Expected during VM boot — dashboard port not listening yet.
+                // Version will be cached on the next successful query.
+            }
+            catch (TaskCanceledException)
+            {
+                // Timeout — VM is slow to respond, will retry next heartbeat.
+            }
             catch (Exception ex)
             {
-                _logger.LogDebug(ex, "Could not query /version for {Role}", role);
+                _logger.LogDebug("Could not query /version for {Role}: {Message}", role, ex.Message);
             }
         }
 

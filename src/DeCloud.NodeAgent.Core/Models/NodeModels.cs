@@ -148,9 +148,12 @@ public class ResourceSnapshot
     public double ComputePointUsagePercent => TotalComputePoints == 0 ? 0 : (double)UsedComputePoints / TotalComputePoints * 100.0;
 
     // Memory
-    public long TotalMemoryBytes { get; set; }
+    /// <summary>Total physical RAM on the host.</summary>
+    public long PhysicalMemoryBytes { get; set; }
+    /// <summary>Operator-allocated memory ceiling (for scheduling alignment).</summary>
+    public long AllocatedMemoryBytes { get; set; }
     public long UsedMemoryBytes { get; set; }
-    public long AvailableMemoryBytes => Math.Max(0, TotalMemoryBytes - UsedMemoryBytes);
+    public long AvailableMemoryBytes => Math.Max(0, AllocatedMemoryBytes - UsedMemoryBytes);
 
     // Storage
     public long TotalStorageBytes { get; set; }
