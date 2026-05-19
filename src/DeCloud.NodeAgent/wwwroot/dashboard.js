@@ -279,8 +279,11 @@ function pushHistory(key, value) {
 
 function renderHardware() {
     const snap = S.snapshot; if (!snap) return;
+
+    // ── Physical hardware stats (measure against physical totals) ────
     const cpu = snap.virtualCpuUsagePercent ?? 0;
-    const ramP = snap.totalMemoryBytes > 0 ? snap.usedMemoryBytes / snap.totalMemoryBytes * 100 : 0;
+    const physMem = snap.totalMemoryBytes ?? 0;
+    const ramP = physMem > 0 ? (snap.usedMemoryBytes ?? 0) / physMem * 100 : 0;
     const stP = snap.totalStorageBytes > 0 ? snap.usedStorageBytes / snap.totalStorageBytes * 100 : 0;
 
     set('hw-cpu-pct', cpu.toFixed(1) + '%');
@@ -288,7 +291,7 @@ function renderHardware() {
     setHwBar('hw-cpu-bar', cpu);
 
     set('hw-ram-pct', ramP.toFixed(1) + '%');
-    set('hw-ram-detail', `${fmtBytes(snap.usedMemoryBytes ?? 0)} / ${fmtBytes(snap.totalMemoryBytes ?? 0)}`);
+    set('hw-ram-detail', `${fmtBytes(snap.usedMemoryBytes ?? 0)} / ${fmtBytes(physMem)}`);
     setHwBar('hw-ram-bar', ramP);
 
     set('hw-stor-pct', stP.toFixed(1) + '%');
@@ -312,6 +315,39 @@ function renderHardware() {
     sparkEl('hw-cpu-spark', 'cpu', 'var(--primary)');
     sparkEl('hw-ram-spark', 'ram', 'var(--primary)');
     sparkEl('hw-stor-spark', 'stor', 'var(--primary)');
+
+    // ── Resource Allocation section ──────────────────────────────────
+    const allocMem = snap.allocatedMemoryBytes ?? 0;
+    const totalPts = snap.totalComputePoints ?? 0;
+    const usedPts = snap.usedComputePoints ?? 0;
+
+    // Memory allocation: show allocated vs physical with bar
+    if (allocMem > 0 && physMem > 0) {
+        const allocPct = (allocMem / physMem * 100);
+        const usedOfAlloc = allocMem > 0 ? ((snap.usedMemoryBytes ?? 0) / allocMem * 100) : 0;
+        set('hw-alloc-mem-pct', `${allocPct.toFixed(0)}% of physical`);
+        set('hw-alloc-mem-detail', `${fmtBytes(allocMem)} allocated / ${fmtBytes(physMem)} physical`);
+        setHwBar('hw-alloc-mem-bar', usedOfAlloc);
+    } else {
+        set('hw-alloc-mem-pct', 'Default (90%)');
+        set('hw-alloc-mem-detail', `${fmtBytes(Math.floor(physMem * 0.9))} allocated / ${fmtBytes(physMem)} physical`);
+        setHwBar('hw-alloc-mem-bar', 0);
+    }
+
+    // Compute points
+    if (totalPts > 0) {
+        set('hw-alloc-cpu', `${usedPts} / ${totalPts}`);
+        set('hw-alloc-cpu-detail', `${totalPts - usedPts} available`);
+    }
+
+    // Storage allocation (operator limit not yet exposed in snapshot — show physical)
+    set('hw-alloc-stor', fmtBytes(snap.totalStorageBytes ?? 0));
+    set('hw-alloc-stor-detail', 'Default (90%)');
+
+    // GPUs
+    const gpus = snap.totalGpus ?? 0;
+    set('hw-alloc-gpu', gpus > 0 ? `${gpus} detected` : 'None');
+    set('hw-alloc-gpu-detail', gpus > 0 ? `${gpus - (snap.usedGpus ?? 0)} available` : '—');
 }
 
 // ============================================================
