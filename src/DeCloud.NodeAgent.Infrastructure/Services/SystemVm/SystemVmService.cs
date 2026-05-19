@@ -145,9 +145,10 @@ public sealed class SystemVmService : ISystemVmService
                     .Select(a => $"\"{a}\""));
             var execCmd = $"{{\"execute\":\"guest-exec\",\"arguments\":{{\"path\":\"/usr/bin/journalctl\",\"arg\":[{argsJson}],\"capture-output\":true}}}}";
 
+            var escapedExec = execCmd.Replace("\\", "\\\\").Replace("\"", "\\\"");
             var execResult = await _commandExecutor.ExecuteAsync(
                 "virsh",
-                $"-c qemu:///system qemu-agent-command {vmId} '{execCmd}'",
+                $"-c qemu:///system qemu-agent-command {vmId} \"{escapedExec}\"",
                 TimeSpan.FromSeconds(5), ct);
 
             if (execResult.ExitCode != 0) return null;
@@ -159,9 +160,10 @@ public sealed class SystemVmService : ISystemVmService
             await Task.Delay(2000, ct);
 
             var statusCmd = $"{{\"execute\":\"guest-exec-status\",\"arguments\":{{\"pid\":{pid}}}}}";
+            var escapedStatus = statusCmd.Replace("\\", "\\\\").Replace("\"", "\\\"");
             var statusResult = await _commandExecutor.ExecuteAsync(
                 "virsh",
-                $"-c qemu:///system qemu-agent-command {vmId} '{statusCmd}'",
+                $"-c qemu:///system qemu-agent-command {vmId} \"{escapedStatus}\"",
                 TimeSpan.FromSeconds(5), ct);
 
             if (statusResult.ExitCode != 0) return null;
