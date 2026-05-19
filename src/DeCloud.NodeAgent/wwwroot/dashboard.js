@@ -626,10 +626,19 @@ function paintSysVm(key, vm) {
     // State badge: shows obligation status when VM not deployed, VM state when running
     badge.className = 'sysvm-badge other';
     let badgeHtml;
+    // Check for active download on this obligation's VM
+    const dl = obl?.vmId ? (S.downloads ?? []).find(d => d.vmId === obl.vmId) : null;
+
     if (running) {
         badgeHtml = `<span class="obl-badge active">Running</span>`;
     } else if (isUnmet) {
         badgeHtml = `<span class="obl-badge unmet" title="Obligation Active but VM not running">Unmet</span>`;
+    } else if (dl && dl.totalBytes > 0) {
+        const mb = (dl.downloadedBytes / 1024 / 1024).toFixed(0);
+        const totalMb = (dl.totalBytes / 1024 / 1024).toFixed(0);
+        badgeHtml = `<span class="obl-badge deploying">Downloading ${dl.percentComplete}%</span>`
+            + `<div class="dl-progress-bar"><div class="dl-progress-fill" style="width:${dl.percentComplete}%"></div></div>`
+            + `<span class="dl-detail">${mb} / ${totalMb} MB</span>`;
     } else if (oblStatus === 1) {
         badgeHtml = `<span class="obl-badge deploying">Deploying</span>`;
     } else if (oblStatus === 0) {
@@ -670,7 +679,10 @@ function paintSysVm(key, vm) {
         }
         detailHtml = `<span style="font-family:var(--mono);font-size:0.78rem">${esc(ip)}</span>${dashLink}`;
     } else if (obl?.vmId) {
-        detailHtml = `<span style="font-size:0.73rem;color:var(--text-muted)">VM ${truncId(obl.vmId)} — booting</span>`;
+        const dlInfo = dl && dl.totalBytes > 0
+            ? `downloading base image (${dl.percentComplete}%)`
+            : 'booting';
+        detailHtml = `<span style="font-size:0.73rem;color:var(--text-muted)">VM ${truncId(obl.vmId)} — ${dlInfo}</span>`;
     } else if (oblStatus === 0) {
         detailHtml = `<span style="font-size:0.73rem;color:var(--text-muted)">Waiting for scheduler…</span>`;
     } else {
