@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DeCloud</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <!-- SignalR client -->
+  <script src="https://cdn.jsdelivr.net/npm/@microsoft/signalr@8.0.0/dist/browser/signalr.min.js"></script>
+
+  <!-- Component scripts — load in dependency order -->
+  <script type="text/babel" src="dc-tokens.jsx"></script>
+  <script type="text/babel" src="dc-atoms.jsx"></script>
+  <script type="text/babel" src="dc-realtime.jsx"></script>
+  <script type="text/babel" src="dc-auth.jsx"></script>
+  <script type="text/babel" src="dc-modals.jsx"></script>
+  <script type="text/babel" src="dc-pages.jsx"></script>
+  <script type="text/babel" src="dc-shell.jsx"></script>
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0b0f; font-family: 'Outfit', sans-serif; }
+    #root { width: 100vw; height: 100vh; overflow: hidden; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+    input, select, textarea, button { font-family: inherit; }
+    select option { background: #1a1d26; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+const {
+  BASE, ThemeCtx, useTheme, useBreakpoint,
+  Toasts,
+  useAuth, LoginOverlay,
+  useSignalR,
+  CreateVMModal, AddSSHKeyModal,
+  DirectAccessModal, CustomDomainsModal,
+  PaymentModal, VmEventsModal,
+  DashboardPage, VMsPage, NodesPage, TemplatesPage,
+  MyTemplatesPage, SSHKeysPage, SettingsPage,
+  CommandBar, Sidebar, TweaksPanel,
+} = window;
+
+/* ━━ TWEAK DEFAULTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{"accent":"#00d4aa","compact":false}/*EDITMODE-END*/;
+
+/* ━━ HASH ROUTING ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+function useRoute() {
+  const VALID = new Set(['dashboard','templates','my-templates','vms','nodes','ssh-keys','settings']);
+  const getPage = () => {
+    const h = window.location.hash.replace('#/','');
+    return VALID.has(h) ? h : 'dashboard';
+  };
+  const [page, setPage_] = useState(getPage);
+
+  const navigate = useCallback(pg => {
+    window.location.hash = '#/' + pg;
+    setPage_(pg);
+  }, []);
+
+  useEffect(() => {
+    const h = () => setPage_(getPage());
+    window.addEventListener('hashchange', h);
+    return () => window.removeEventListener('hashchange', h);
+  }, []);
+
+  return [page, navigate];
+}
+
+/* ━━ APP ROOT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
+function App() {
+  const [page, navigate_]   = useRoute();
+  const [modal, setModal]   = useState(null);   // { type, vm? }
+  const [toasts, setToasts] = useState([]);
+  const [tweaks, setTweaks] = useState(TWEAK_DEFAULTS);
+  const [tweaksOpen, setTweaksOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const auth = useAuth();
+  const bp   = useBreakpoint();
+  const { rtStatus, hub } = useSignalR(auth.token);
+
+  // Auto-close drawer on navigate (mobile/tablet)
+  const navigate = useCallback((pg) => {
+    navigate_(pg);
+    setSidebarOpen(false);
+  }, [navigate_]);
+
+  /* Toast helper */
+  const toast = useCallback((msg, type='info') => {
+    const id = Date.now();
+    setToasts(t => [...t, {id, msg, type}]);
+    setTimeout(() => setToasts(t => t.filter(x => x.id!==id)), 3500);
+  }, []);
+  const dismiss = id => setToasts(t => t.filter(x => x.id!==id));
+
+  /* Edit-mode / tweaks protocol */
+  useEffect(() => {
+    const handler = e => {
+      if (e.data?.type === '__activate_edit_mode')   setTweaksOpen(true);
+      if (e.data?.type === '__deactivate_edit_mode')  setTweaksOpen(false);
+      if (e.data?.type === '__edit_mode_set_keys')    setTweaks(t => ({...t, ...e.data.edits}));
+    };
+    window.addEventListener('message', handler);
+    window.parent.postMessage({ type:'__edit_mode_available' }, '*');
+    return () => window.removeEventListener('message', handler);
+  }, []);
+
+  const sharedProps = { setModal, toast, auth, hub };
+
+  /* ── Login gate ──────────────────────────────────────────── */
+  if (!auth.isLoggedIn) {
+    return (
+      <ThemeCtx.Provider value={tweaks}>
+        <LoginOverlay onLogin={() => auth.login()}/>
+      </ThemeCtx.Provider>
+    );
+  }
+
+  /* ── Main app ────────────────────────────────────────────── */
+  return (
+    <ThemeCtx.Provider value={tweaks}>
+      <div style={{width:'100vw',height:'100vh',background:BASE.bg0,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+
+        <CommandBar auth={auth} setModal={setModal} sidebarOpen={sidebarOpen} setSidebarOpen={setSidebarOpen} rtStatus={rtStatus}/>
+
+        <div style={{display:'flex',flex:1,overflow:'hidden'}}>
+          <Sidebar page={page} navigate={navigate} open={sidebarOpen} onClose={()=>setSidebarOpen(false)}/>
+
+          <main style={{flex:1,display:'flex',flexDirection:'column',overflow:'hidden'}}>
+            {page==='dashboard'    && <DashboardPage  {...sharedProps}/>}
+            {page==='vms'          && <VMsPage         {...sharedProps}/>}
+            {page==='nodes'        && <NodesPage        {...sharedProps}/>}
+            {page==='templates'    && <TemplatesPage    {...sharedProps}/>}
+            {page==='my-templates' && <MyTemplatesPage/>}
+            {page==='ssh-keys'     && <SSHKeysPage      {...sharedProps}/>}
+            {page==='settings'     && <SettingsPage     toast={toast} auth={auth}/>}
+          </main>
+        </div>
+
+        {/* ── Modal dispatch ────────────────────────────────── */}
+        {modal?.type==='create-vm'      && <CreateVMModal      onClose={()=>setModal(null)} toast={toast}/>}
+        {modal?.type==='add-ssh-key'    && <AddSSHKeyModal      onClose={()=>setModal(null)} toast={toast}/>}
+        {modal?.type==='direct-access'  && <DirectAccessModal   vm={modal.vm} onClose={()=>setModal(null)} toast={toast}/>}
+        {modal?.type==='custom-domains' && <CustomDomainsModal  vm={modal.vm} onClose={()=>setModal(null)} toast={toast}/>}
+        {modal?.type==='payment'        && <PaymentModal        balance={auth.balance} onClose={()=>setModal(null)} toast={toast}/>}
+        {modal?.type==='vm-events'      && <VmEventsModal       vm={modal.vm} onClose={()=>setModal(null)}/>}
+
+        <Toasts toasts={toasts} dismiss={dismiss}/>
+
+        {tweaksOpen && (
+          <TweaksPanel tweaks={tweaks} setTweaks={setTweaks}
+            onClose={()=>{ setTweaksOpen(false); window.parent.postMessage({type:'__edit_mode_dismissed'},'*'); }}/>
+        )}
+      </div>
+    </ThemeCtx.Provider>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
