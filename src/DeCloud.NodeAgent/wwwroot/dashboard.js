@@ -320,11 +320,21 @@ function renderHardware() {
     const allocMem = snap.allocatedMemoryBytes ?? 0;
     const totalPts = snap.totalComputePoints ?? 0;
     const usedPts = snap.usedComputePoints ?? 0;
+    const totalStor = snap.totalStorageBytes ?? 0;
+    const usedStor = snap.usedStorageBytes ?? 0;
 
-    // Memory allocation: show allocated vs physical with bar
+    // Compute points: used / total with bar
+    if (totalPts > 0) {
+        const cpuAllocPct = usedPts / totalPts * 100;
+        set('hw-alloc-cpu', `${usedPts} / ${totalPts} pts`);
+        set('hw-alloc-cpu-detail', `${totalPts - usedPts} available`);
+        setHwBar('hw-alloc-cpu-bar', cpuAllocPct);
+    }
+
+    // Memory: allocated vs physical with usage bar
     if (allocMem > 0 && physMem > 0) {
         const allocPct = (allocMem / physMem * 100);
-        const usedOfAlloc = allocMem > 0 ? ((snap.usedMemoryBytes ?? 0) / allocMem * 100) : 0;
+        const usedOfAlloc = (snap.usedMemoryBytes ?? 0) / allocMem * 100;
         set('hw-alloc-mem-pct', `${allocPct.toFixed(0)}% of physical`);
         set('hw-alloc-mem-detail', `${fmtBytes(allocMem)} allocated / ${fmtBytes(physMem)} physical`);
         setHwBar('hw-alloc-mem-bar', usedOfAlloc);
@@ -334,15 +344,17 @@ function renderHardware() {
         setHwBar('hw-alloc-mem-bar', 0);
     }
 
-    // Compute points
-    if (totalPts > 0) {
-        set('hw-alloc-cpu', `${usedPts} / ${totalPts}`);
-        set('hw-alloc-cpu-detail', `${totalPts - usedPts} available`);
+    // Storage: used / total with bar
+    if (totalStor > 0) {
+        const storAllocPct = usedStor / totalStor * 100;
+        set('hw-alloc-stor', fmtBytes(totalStor));
+        set('hw-alloc-stor-detail', `${fmtBytes(usedStor)} used / ${fmtBytes(totalStor - usedStor)} free`);
+        setHwBar('hw-alloc-stor-bar', storAllocPct);
+    } else {
+        set('hw-alloc-stor', '—');
+        set('hw-alloc-stor-detail', 'Default (90%)');
+        setHwBar('hw-alloc-stor-bar', 0);
     }
-
-    // Storage allocation (operator limit not yet exposed in snapshot — show physical)
-    set('hw-alloc-stor', fmtBytes(snap.totalStorageBytes ?? 0));
-    set('hw-alloc-stor-detail', 'Default (90%)');
 
     // GPUs
     const gpus = snap.totalGpus ?? 0;
