@@ -1943,7 +1943,11 @@ cmd_logs() {
     local subcommand=""
     local lines=50
     local follow=false
-    local source="file"
+    local source="journal"  # journal is now the primary source
+    local since=""
+    local until_time=""
+    local grep_pattern=""
+    local priority=""
 
     # Check if first arg is a subcommand word (not a flag)
     if [[ $# -gt 0 ]] && [[ "$1" != -* ]]; then
@@ -1960,7 +1964,7 @@ cmd_logs() {
             ;;  # continue to view
         *)
             log_error "Unknown logs subcommand: $subcommand"
-            echo "Usage: $SCRIPT_NAME logs [view|clear] [-f] [-n <lines>] [--journal]"
+            echo "Usage: $SCRIPT_NAME logs [view|clear] [-f] [-n <lines>] [--since <time>] [--until <time>] [--grep <pattern>] [-p <priority>]"
             exit $EXIT_USAGE
             ;;
     esac
@@ -1968,33 +1972,64 @@ cmd_logs() {
     # Parse view options
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -f|--follow)  follow=true;   shift ;;
-            -n|--lines)   lines="$2";    shift 2 ;;
-            --journal)    source="journal"; shift ;;
-            --file)       source="file";    shift ;;
-            *)            shift ;;
+            -f|--follow)    follow=true;          shift ;;
+            -n|--lines)     lines="$2";           shift 2 ;;
+            --journal)      source="journal";     shift ;;
+            --file)         source="file";        shift ;;
+            --since)        since="$2";           shift 2 ;;
+            --until)        until_time="$2";      shift 2 ;;
+            --grep|-g)      grep_pattern="$2";    shift 2 ;;
+            -p|--priority)  priority="$2";        shift 2 ;;
+            *)              shift ;;
         esac
     done
 
-    if [[ "$source" == "journal" ]]; then
-        if $follow; then
-            exec journalctl -u "$SERVICE_NAME" -f
-        else
-            exec journalctl -u "$SERVICE_NAME" -n "$lines" --no-pager
-        fi
-    else
+    if [[ "$source" == "file" ]]; then
+        # Legacy file mode — kept for backward compatibility with pre-journal installs
         if [[ ! -f "$LOG_FILE" ]]; then
             log_warn "Log file not found: $LOG_FILE"
-            echo "The service may be logging via systemd journal. Try:"
+            echo "Logs are in systemd journal. Use without --file, or:"
             echo "  $SCRIPT_NAME logs --journal"
             exit $EXIT_ERROR
         fi
-        if $follow; then
-            exec tail -f "$LOG_FILE"
+
+        if [[ -n "$since" || -n "$until_time" || -n "$priority" ]]; then
+            log_warn "Time and priority filters require journal. Switching to journal source."
+            source="journal"
         else
-            exec tail -n "$lines" "$LOG_FILE"
+            # File mode with optional grep
+            if [[ -n "$grep_pattern" ]]; then
+                if $follow; then
+                    tail -f "$LOG_FILE" | grep --line-buffered -- "$grep_pattern"
+                else
+                    tail -n "$lines" "$LOG_FILE" | grep -- "$grep_pattern"
+                fi
+            else
+                if $follow; then
+                    exec tail -f "$LOG_FILE"
+                else
+                    exec tail -n "$lines" "$LOG_FILE"
+                fi
+            fi
+            return
         fi
     fi
+
+    # Journal mode (default)
+    local -a jctl_args=( -u "$SERVICE_NAME" --no-pager )
+
+    if $follow; then
+        jctl_args+=( -f )
+    else
+        jctl_args+=( -n "$lines" )
+    fi
+
+    [[ -n "$since" ]]        && jctl_args+=( --since "$since" )
+    [[ -n "$until_time" ]]   && jctl_args+=( --until "$until_time" )
+    [[ -n "$grep_pattern" ]] && jctl_args+=( --grep "$grep_pattern" )
+    [[ -n "$priority" ]]     && jctl_args+=( -p "$priority" )
+
+    exec journalctl "${jctl_args[@]}"
 }
 
 cmd_logs_clear() {
