@@ -230,7 +230,7 @@ public class HeartbeatService : BackgroundService
             snapshot.UsedMemoryBytes = activeVms.Where(v => v.State == VmState.Running)
                 .Sum(v => v.Spec.MemoryBytes);
             // Calculate used compute points
-            snapshot.UsedComputePoints = activeVms.Where(v => v.State == VmState.Running)
+            snapshot.UsedComputePoints = activeVms.Where(v => v.State != VmState.Deleted)
                 .Sum(v => v.Spec.ComputePointCost);
 
             // Get CGNAT info from last heartbeat response (if available)

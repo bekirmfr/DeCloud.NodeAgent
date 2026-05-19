@@ -12,6 +12,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     private readonly ICommandExecutor _executor;
     private readonly INodeStateService _nodeState;
     private readonly INodeMetadataService _nodeMetadata;
+    private readonly IVmManager _vmManager;
     private readonly ILogger<ResourceDiscoveryService> _logger;
     private readonly ICpuBenchmarkService _benchmarkService;
     private readonly bool _isWindows;
@@ -32,12 +33,14 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         ICommandExecutor executor,
         INodeStateService nodeState,
         INodeMetadataService nodeMetadata,
+        IVmManager vmManager,
         ILogger<ResourceDiscoveryService> logger,
         ICpuBenchmarkService benchmarkService)
     {
         _executor = executor;
         _nodeState = nodeState;
         _nodeMetadata = nodeMetadata;
+        _vmManager = vmManager;
         _logger = logger;
         _benchmarkService = benchmarkService;
         _isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
@@ -1110,7 +1113,9 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             UsedVirtualCpuCores = cpu.LogicalCores - cpu.AvailableVCpus,
             VirtualCpuUsagePercent = cpu.UsagePercent,
             TotalComputePoints = (int)totalComputePoints,
-            UsedComputePoints = 0, // Will be calculated by HeartbeatService
+            UsedComputePoints = _vmManager.GetAllVms()
+                .Where(v => v.State != VmState.Deleted)
+                .Sum(v => v.Spec.ComputePointCost),
             TotalMemoryBytes = memory.TotalBytes,
             AllocatedMemoryBytes = allocatedMemory,
             UsedMemoryBytes = memory.UsedBytes,

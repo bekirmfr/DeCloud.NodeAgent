@@ -317,38 +317,52 @@ function renderHardware() {
     sparkEl('hw-stor-spark', 'stor', 'var(--primary)');
 
     // ── Resource Allocation section ──────────────────────────────────
+    // Compute VM-spec-based usage from S.vms (same data source as heartbeat).
+    // This matches what the orchestrator sees in UsedResources.
+    const allVms = (S.vms ?? []).filter(v =>
+        v.state !== 'Deleted' && v.state !== 5);
+    const vmUsedPts = allVms.reduce((s, v) =>
+        s + ((v.spec?.computePointCost ?? v.computePointCost) || 0), 0);
+    const vmUsedMem = allVms.reduce((s, v) =>
+        s + ((v.spec?.memoryBytes ?? v.memoryBytes) || 0), 0);
+    const vmUsedStor = allVms.reduce((s, v) =>
+        s + ((v.spec?.diskBytes ?? v.diskBytes) || 0), 0);
+
     const allocMem = snap.allocatedMemoryBytes ?? 0;
     const totalPts = snap.totalComputePoints ?? 0;
-    const usedPts = snap.usedComputePoints ?? 0;
     const totalStor = snap.totalStorageBytes ?? 0;
-    const usedStor = snap.usedStorageBytes ?? 0;
 
-    // Compute points: used / total with bar
+    // Compute points: vm-used / total with bar
     if (totalPts > 0) {
-        const cpuAllocPct = usedPts / totalPts * 100;
-        set('hw-alloc-cpu', `${usedPts} / ${totalPts} pts`);
-        set('hw-alloc-cpu-detail', `${totalPts - usedPts} available`);
+        const cpuAllocPct = vmUsedPts / totalPts * 100;
+        set('hw-alloc-cpu', `${vmUsedPts} / ${totalPts} pts`);
+        set('hw-alloc-cpu-detail', `${totalPts - vmUsedPts} available`);
         setHwBar('hw-alloc-cpu-bar', cpuAllocPct);
     }
 
-    // Memory: allocated vs physical with usage bar
+    // Memory: vm-used of allocated, allocated vs physical
     if (allocMem > 0 && physMem > 0) {
         const allocPct = (allocMem / physMem * 100);
-        const usedOfAlloc = (snap.usedMemoryBytes ?? 0) / allocMem * 100;
+        const usedOfAlloc = vmUsedMem / allocMem * 100;
         set('hw-alloc-mem-pct', `${allocPct.toFixed(0)}% of physical`);
-        set('hw-alloc-mem-detail', `${fmtBytes(allocMem)} allocated / ${fmtBytes(physMem)} physical`);
+        set('hw-alloc-mem-detail',
+            `${fmtBytes(vmUsedMem)} used / ${fmtBytes(allocMem)} allocated / ${fmtBytes(physMem)} physical`);
         setHwBar('hw-alloc-mem-bar', usedOfAlloc);
     } else {
+        const defaultAlloc = Math.floor(physMem * 0.9);
+        const usedOfDefault = defaultAlloc > 0 ? vmUsedMem / defaultAlloc * 100 : 0;
         set('hw-alloc-mem-pct', 'Default (90%)');
-        set('hw-alloc-mem-detail', `${fmtBytes(Math.floor(physMem * 0.9))} allocated / ${fmtBytes(physMem)} physical`);
-        setHwBar('hw-alloc-mem-bar', 0);
+        set('hw-alloc-mem-detail',
+            `${fmtBytes(vmUsedMem)} used / ${fmtBytes(defaultAlloc)} allocated / ${fmtBytes(physMem)} physical`);
+        setHwBar('hw-alloc-mem-bar', usedOfDefault);
     }
 
-    // Storage: used / total with bar
+    // Storage: vm-used / total with bar
     if (totalStor > 0) {
-        const storAllocPct = usedStor / totalStor * 100;
+        const storAllocPct = vmUsedStor / totalStor * 100;
         set('hw-alloc-stor', fmtBytes(totalStor));
-        set('hw-alloc-stor-detail', `${fmtBytes(usedStor)} used / ${fmtBytes(totalStor - usedStor)} free`);
+        set('hw-alloc-stor-detail',
+            `${fmtBytes(vmUsedStor)} used / ${fmtBytes(totalStor - vmUsedStor)} free`);
         setHwBar('hw-alloc-stor-bar', storAllocPct);
     } else {
         set('hw-alloc-stor', '—');
@@ -358,8 +372,10 @@ function renderHardware() {
 
     // GPUs
     const gpus = snap.totalGpus ?? 0;
+    const usedGpus = allVms.filter(v =>
+        (v.spec?.gpuPciAddress ?? v.gpuPciAddress)).length;
     set('hw-alloc-gpu', gpus > 0 ? `${gpus} detected` : 'None');
-    set('hw-alloc-gpu-detail', gpus > 0 ? `${gpus - (snap.usedGpus ?? 0)} available` : '—');
+    set('hw-alloc-gpu-detail', gpus > 0 ? `${gpus - usedGpus} available` : '—');
 }
 
 // ============================================================
