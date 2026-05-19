@@ -216,14 +216,14 @@ public class CloudInitCleaner : ICloudInitCleaner
 
         _logger.LogDebug("Attempting cloud-init clean with virt-customize");
 
-        // Build command to clean cloud-init state
-        // We clean multiple locations to handle different distros
-        var commands = new[]
+        // Write each command to a temp script file to avoid nested-quote
+        // breakage in .NET's ProcessStartInfo.Arguments parser, which uses
+        // Windows-style rules even on Linux (see VmReadinessMonitor comment).
+        var scriptPath = Path.GetTempFileName();
+        try
         {
-            // Use directory paths without globs — virt-customize runs each
-            // --run-command in a guest shell where an empty glob expands to
-            // the literal '*', causing 'rm: missing operand'. Deleting the
-            // directory and recreating it is equivalent and glob-safe.
+            var script = string.Join("\n", new[]
+            {
             "rm -rf /var/lib/cloud && mkdir -p /var/lib/cloud",
             "rm -f /var/log/cloud-init.log /var/log/cloud-init-output.log 2>/dev/null || true",
             "rm -f /etc/machine-id",
@@ -231,25 +231,28 @@ public class CloudInitCleaner : ICloudInitCleaner
             "truncate -s 0 /etc/machine-id 2>/dev/null || true",
             "rm -f /etc/cloud/cloud-init.disabled",
             "mkdir -p /etc/cloud/cloud.cfg.d && echo 'datasource_list: [NoCloud, None]' > /etc/cloud/cloud.cfg.d/99_datasource.cfg",
-        };
+        });
+            await File.WriteAllTextAsync(scriptPath, script, ct);
 
-        var runCommands = string.Join(" ", commands.Select(c => $"--run-command \"{c}\""));
+            var result = await _executor.ExecuteAsync(
+                "/bin/bash",
+                $"-c \"LIBGUESTFS_BACKEND=direct virt-customize -a {diskPath} --run {scriptPath} 2>&1\"",
+                TimeSpan.FromMinutes(3),
+                ct);
 
-        // Set LIBGUESTFS_BACKEND to direct to avoid issues with libvirt
-        var result = await _executor.ExecuteAsync(
-            "/bin/bash",
-            $"-c \"LIBGUESTFS_BACKEND=direct virt-customize -a {diskPath} {runCommands} 2>&1\"",
-            TimeSpan.FromMinutes(3),
-            ct);
+            if (result.Success)
+            {
+                _logger.LogDebug("virt-customize completed successfully");
+                return true;
+            }
 
-        if (result.Success)
-        {
-            _logger.LogDebug("virt-customize completed successfully");
-            return true;
+            _logger.LogDebug("virt-customize failed: {Error}", result.StandardError);
+            return false;
         }
-
-        _logger.LogDebug("virt-customize failed: {Error}", result.StandardError);
-        return false;
+        finally
+        {
+            try { File.Delete(scriptPath); } catch { }
+        }
     }
 
     /// <summary>
