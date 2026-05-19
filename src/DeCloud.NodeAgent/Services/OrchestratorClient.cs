@@ -242,6 +242,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 {
                     MemoryBytes = _nodeMetadata.AllocatedMemoryBytes,
                     ComputePoints = _nodeMetadata.AllocatedComputePoints,
+                    ComputePointsPercent = _nodeMetadata.AllocatedComputePointsPercent,
                     StorageBytes = _nodeMetadata.AllocatedStorageBytes,
                     GpuCount = _nodeMetadata.AllocatedGpuCount,
                 }

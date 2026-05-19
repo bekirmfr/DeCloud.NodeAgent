@@ -129,8 +129,10 @@ check_authenticated() {
 }
 
 get_node_id() {
-    if [[ -f "$CREDENTIALS_FILE" ]]; then
-        grep "^NODE_ID=" "$CREDENTIALS_FILE" | cut -d= -f2 2>/dev/null || echo ""
+    # Derive from agent API (agent knows its own ID)
+    if check_service_running 2>/dev/null; then
+        api_get "/api/node/summary" 2>/dev/null \
+            | jq -r '.nodeId // empty' 2>/dev/null || echo ""
     else
         echo ""
     fi
@@ -388,8 +390,9 @@ cmd_configure() {
                 echo "      Absolute MB of RAM to offer (min: 256)."
                 echo "      Mutually exclusive with --allocated-memory-percent."
                 echo ""
-                echo "  --allocated-cpu-percent <1-95>"
+                echo "  --allocated-cpu-percent <1-100>"
                 echo "      Percent of compute points to offer. Default: 90."
+                echo "      Use 100 to offer all evaluated compute points."
                 echo "  --allocated-cpu-points <n>"
                 echo "      Absolute compute points to offer (min: 1)."
                 echo "      Mutually exclusive with --allocated-cpu-percent."
@@ -529,8 +532,8 @@ cmd_configure() {
 
     if [[ -n "$alloc_cpu_percent" ]]; then
         if ! [[ "$alloc_cpu_percent" =~ ^[0-9]+$ ]] || \
-           [[ "$alloc_cpu_percent" -lt 1 ]] || [[ "$alloc_cpu_percent" -gt 95 ]]; then
-            log_error "Invalid CPU percent: '$alloc_cpu_percent' (must be 1-95)"
+           [[ "$alloc_cpu_percent" -lt 1 ]] || [[ "$alloc_cpu_percent" -gt 100 ]]; then
+            log_error "Invalid CPU percent: '$alloc_cpu_percent' (must be 1-100)"
             exit $EXIT_USAGE
         fi
     fi
@@ -1323,13 +1326,42 @@ cmd_resources() {
 
     # ── Operator allocation (from settings.json) ──────────────────────────
     echo -e "${BOLD}Operator Allocation (settings.json):${NC}"
-    local mem_mode mem_value
-    mem_mode=$( jq -r '.resources.memory.mode  // "default (90%)"' "$SETTINGS_FILE" 2>/dev/null || echo "default (90%)")
-    mem_value=$(jq -r '.resources.memory.value // ""'               "$SETTINGS_FILE" 2>/dev/null || echo "")
+
+    local mem_mode mem_value cpu_mode cpu_value stor_mode stor_value gpu_count
+    mem_mode=$(  jq -r '.resources.memory.mode    // ""' "$SETTINGS_FILE" 2>/dev/null)
+    mem_value=$( jq -r '.resources.memory.value   // ""' "$SETTINGS_FILE" 2>/dev/null)
+    cpu_mode=$(  jq -r '.resources.cpu.mode       // ""' "$SETTINGS_FILE" 2>/dev/null)
+    cpu_value=$( jq -r '.resources.cpu.value      // ""' "$SETTINGS_FILE" 2>/dev/null)
+    stor_mode=$( jq -r '.resources.storage.mode   // ""' "$SETTINGS_FILE" 2>/dev/null)
+    stor_value=$(jq -r '.resources.storage.value  // ""' "$SETTINGS_FILE" 2>/dev/null)
+    gpu_count=$( jq -r '.resources.gpu.count      // ""' "$SETTINGS_FILE" 2>/dev/null)
+
     if [[ -n "$mem_value" ]]; then
-        echo "  Memory:   $mem_value ($mem_mode)"
+        echo "  Memory:   ${mem_value} (${mem_mode})"
     else
         echo "  Memory:   platform default (90% of physical)"
+    fi
+
+    if [[ -n "$cpu_value" ]]; then
+        echo "  CPU:      ${cpu_value} (${cpu_mode})"
+    else
+        echo "  CPU:      platform default (90% of compute points)"
+    fi
+
+    if [[ -n "$stor_value" ]]; then
+        echo "  Storage:  ${stor_value} (${stor_mode})"
+    else
+        echo "  Storage:  platform default (90% of physical)"
+    fi
+
+    if [[ -n "$gpu_count" ]]; then
+        if [[ "$gpu_count" == "0" ]]; then
+            echo "  GPUs:     disabled (0 offered)"
+        else
+            echo "  GPUs:     ${gpu_count} GPU(s)"
+        fi
+    else
+        echo "  GPUs:     all detected GPUs offered"
     fi
     echo ""
 
@@ -1337,18 +1369,24 @@ cmd_resources() {
     echo -e "${BOLD}Live Snapshot:${NC}"
     local snap
     if snap=$(api_get "/api/node/snapshot" 2>/dev/null); then
-        local phys_mem alloc_mem used_mem used_pts total_pts phys_stor used_stor
-        phys_mem=$(  echo "$snap" | jq -r '.totalMemoryBytes  // .totalMemoryBytes  // 0')
-        alloc_mem=$( echo "$snap" | jq -r '.allocatedMemoryBytes // 0')
-        used_mem=$(  echo "$snap" | jq -r '.usedMemoryBytes      // 0')
-        used_pts=$(  echo "$snap" | jq -r '.usedComputePoints    // 0')
-        total_pts=$( echo "$snap" | jq -r '.totalComputePoints   // 0')
-        phys_stor=$( echo "$snap" | jq -r '.totalStorageBytes    // 0')
-        used_stor=$( echo "$snap" | jq -r '.usedStorageBytes     // 0')
+        local total_mem alloc_mem used_mem used_pts total_pts total_stor alloc_stor used_stor total_gpus alloc_gpus
+        total_mem=$(   echo "$snap" | jq -r '.totalMemoryBytes   // .totalMemoryBytes   // 0')
+        alloc_mem=$(  echo "$snap" | jq -r '.allocatedMemoryBytes  // 0')
+        used_mem=$(   echo "$snap" | jq -r '.usedMemoryBytes       // 0')
+        used_pts=$(   echo "$snap" | jq -r '.usedComputePoints     // 0')
+        total_pts=$(  echo "$snap" | jq -r '.totalComputePoints    // 0')
+        total_stor=$(  echo "$snap" | jq -r '.totalStorageBytes     // 0')
+        alloc_stor=$( echo "$snap" | jq -r '.allocatedStorageBytes // .totalStorageBytes // 0')
+        used_stor=$(  echo "$snap" | jq -r '.usedStorageBytes      // 0')
+        total_gpus=$( echo "$snap" | jq -r '.totalGpus             // 0')
+        alloc_gpus=$( echo "$snap" | jq -r '.allocatedGpus         // .totalGpus // 0')
 
         echo "  Compute:  ${used_pts} / ${total_pts} pts used"
-        echo "  Memory:   $(human_bytes "$used_mem") used / $(human_bytes "$alloc_mem") allocated / $(human_bytes "$phys_mem") physical"
-        echo "  Storage:  $(human_bytes "$used_stor") used / $(human_bytes "$phys_stor") total"
+        echo "  Memory:   $(human_bytes "$used_mem") used / $(human_bytes "$alloc_mem") allocated / $(human_bytes "$total_mem") physical"
+        echo "  Storage:  $(human_bytes "$used_stor") used / $(human_bytes "$alloc_stor") allocated / $(human_bytes "$total_stor") physical"
+        if (( total_gpus > 0 )); then
+            echo "  GPUs:     ${alloc_gpus} / ${total_gpus} offered"
+        fi
     else
         log_warn "Could not fetch snapshot"
     fi

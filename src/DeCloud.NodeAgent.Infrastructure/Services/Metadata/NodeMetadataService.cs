@@ -30,6 +30,7 @@ public interface INodeMetadataService
     /// </summary>
     long? AllocatedMemoryBytes { get; }
     int? AllocatedComputePoints { get; }
+    int? AllocatedComputePointsPercent { get; }
     long? AllocatedStorageBytes { get; }
     int? AllocatedGpuCount { get; }
 
@@ -62,6 +63,7 @@ public class NodeMetadataService : INodeMetadataService
     private string? _cpuAllocMode;
     private int? _cpuAllocValue;
     public int? AllocatedComputePoints { get; private set; }
+    public int? AllocatedComputePointsPercent { get; private set; }
 
     private string? _storageAllocMode;
     private int? _storageAllocValue;
@@ -283,17 +285,11 @@ public class NodeMetadataService : INodeMetadataService
         if (string.Equals(_cpuAllocMode, "percent", StringComparison.OrdinalIgnoreCase)
             && _cpuAllocValue.HasValue)
         {
-            // Percent of logical cores — orchestrator derives points from cores
-            var pct = Math.Clamp(_cpuAllocValue.Value, 1, 95) / 100.0;
-            var allocatedCores = (int)Math.Floor(inventory.Cpu.PhysicalCores * pct);
-            // Store as a negative sentinel meaning "percent-of-cores" — the
-            // orchestrator can't use raw core count directly, so we resolve to
-            // actual compute points using the node's benchmark on the orchestrator
-            // side. For now, send null and let orchestrator apply 90% default.
-            // TODO: resolve to compute points once benchmark score is available locally.
-            _ = allocatedCores; // suppress unused warning
+            // Node agent doesn't know its own benchmark score — send the percent
+            // to the orchestrator which applies it after evaluation.
+            AllocatedComputePointsPercent = Math.Clamp(_cpuAllocValue.Value, 1, 100);
             _logger.LogInformation(
-                "Resource allocation (CPU): {Pct}% → orchestrator will apply proportionally",
+                "Resource allocation (CPU): {Pct}% → orchestrator will apply to evaluated points",
                 _cpuAllocValue.Value);
         }
         // else: null → orchestrator applies 90% default
