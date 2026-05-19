@@ -20,10 +20,14 @@ using DeCloud.NodeAgent.Services;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Operator settings — written exclusively by 'decloud configure'.
+// Survives updates (install.sh never touches this file).
+// Added after the default sources so operator values override appsettings.
+builder.Configuration.AddJsonFile(
+    "/etc/decloud/settings.json", optional: true, reloadOnChange: true);
 
 // Configuration
 builder.Services.Configure<LibvirtVmManagerOptions>(

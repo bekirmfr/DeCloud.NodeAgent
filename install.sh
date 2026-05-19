@@ -2321,6 +2321,10 @@ build_node_agent() {
 create_configuration() {
     log_step "Creating configuration..."
 
+    # Infrastructure-only config. Operator settings (wallet, name, country,
+    # region, zone, resources) live in /etc/decloud/settings.json and are
+    # read directly by the agent via ASP.NET Core config layering.
+    # This file is safe to regenerate on every install/update.
     cat > "${CONFIG_DIR}/appsettings.Production.json" << EOF
 {
   "Logging": {
@@ -2333,15 +2337,8 @@ create_configuration() {
   "Urls": "http://0.0.0.0:${AGENT_PORT}",
   "OrchestratorClient": {
     "BaseUrl": "${ORCHESTRATOR_URL}",
-    "WalletAddress": "${NODE_WALLET}",
     "Timeout": "00:00:30",
     "CommandPollInterval": "00:00:05"
-  },
-  "Node": {
-    "Name": "${NODE_NAME}",
-    "Country": "${NODE_COUNTRY}",
-    "Region": "${NODE_REGION}",
-    "Zone": "${NODE_ZONE}"
   },
   "WireGuard": {
     "Interface": "wg0",
@@ -2363,22 +2360,6 @@ create_configuration() {
 EOF
 
     chmod 640 "${CONFIG_DIR}/appsettings.Production.json"
-
-    # Merge resource allocation settings from settings.json (if configured)
-    if [ -f /etc/decloud/settings.json ]; then
-        local mem_mode mem_value
-        mem_mode=$(jq -r '.resources.memory.mode // empty' /etc/decloud/settings.json 2>/dev/null)
-        mem_value=$(jq -r '.resources.memory.value // empty' /etc/decloud/settings.json 2>/dev/null)
-        if [ -n "$mem_mode" ] && [ -n "$mem_value" ]; then
-            local tmp_ap; tmp_ap=$(mktemp)
-            jq --arg mm "$mem_mode" --arg mv "$mem_value" \
-               '.Node.Resources.Memory.Mode = $mm | .Node.Resources.Memory.Value = ($mv | tonumber)' \
-               "${CONFIG_DIR}/appsettings.Production.json" > "$tmp_ap" \
-               && mv "$tmp_ap" "${CONFIG_DIR}/appsettings.Production.json"
-            chmod 640 "${CONFIG_DIR}/appsettings.Production.json"
-            log_info "Resource allocation (memory): ${mem_mode} ${mem_value}"
-        fi
-    fi
 
     # Display machine ID for reference
     if [ -f "/etc/machine-id" ]; then
@@ -2803,20 +2784,10 @@ main() {
     
     parse_args "$@"
 
-    # Load operational settings from settings.json if they exist.
-    # On fresh install these default to hostname/default/default.
-    # On update (decloud update) they were set by prior configure calls.
-    if [ -f /etc/decloud/settings.json ]; then
-        NODE_NAME=$(jq -r '.name // empty' /etc/decloud/settings.json)
-        NODE_COUNTRY=$(jq -r '.country // "ZZ"' /etc/decloud/settings.json)
-        NODE_REGION=$(jq -r '.region // "default"' /etc/decloud/settings.json)
-        NODE_ZONE=$(jq -r '.zone // "default"' /etc/decloud/settings.json)
-    fi
-    # Defaults if not set
-    NODE_NAME="${NODE_NAME:-$(hostname)}"
-    NODE_COUNTRY="${NODE_COUNTRY:-ZZ}"
-    NODE_REGION="${NODE_REGION:-default}"
-    NODE_ZONE="${NODE_ZONE:-default}"
+    # settings.json is the operator's file. On update, only refresh
+    # install-time identity fields (orchestrator_url, wallet).
+    # On first install, create with defaults. Never touch operator
+    # fields (name, country, region, zone, resources).
 
     # ─────────────────────────────────────────────────────────────────────
     # Persist install parameters immediately after parsing.
@@ -2829,22 +2800,23 @@ main() {
     # configure-set fields like country/region across updates),
     # or create fresh if this is a new install.
     if [ -f /etc/decloud/settings.json ]; then
+        # Update: refresh install-time identity fields only
         local tmp; tmp=$(mktemp)
         jq --arg o "$ORCHESTRATOR_URL" --arg w "$NODE_WALLET" \
            '.orchestrator_url = $o | .wallet = $w' \
            /etc/decloud/settings.json > "$tmp" \
            && mv "$tmp" /etc/decloud/settings.json
     else
+        # First install: create with identity + defaults
         cat > /etc/decloud/settings.json <<SETTINGSEOF
 {
   "version": 1,
   "orchestrator_url": "${ORCHESTRATOR_URL}",
   "wallet": "${NODE_WALLET}",
   "name": "$(hostname)",
+  "country": "ZZ",
   "region": "default",
-  "zone": "default",
-  "agent_port": ${AGENT_PORT},
-  "wireguard_port": ${WIREGUARD_PORT}
+  "zone": "default"
 }
 SETTINGSEOF
     fi

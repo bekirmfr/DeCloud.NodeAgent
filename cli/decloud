@@ -570,31 +570,10 @@ cmd_configure() {
         log_success "Memory allocation set to: ${alloc_mem_mb} MB"
     fi
 
-    # Sync settings.json → appsettings.Production.json so the running
-    # agent sees the new values. Without this, the agent reads stale
-    # defaults from appsettings and the heartbeat hash mismatches.
+    # Agent reads settings.json directly via ASP.NET Core config layering
+    # (reloadOnChange: true). No appsettings sync needed. Restart the
+    # agent so it picks up the new values immediately.
     if $params_changed; then
-        local appsettings="$PUBLISH_DIR/appsettings.Production.json"
-        if [[ -f "$appsettings" ]]; then
-            # Read resource allocation from settings.json
-            local mem_mode mem_value
-            mem_mode=$(jq -r '.resources.memory.mode // empty' "$SETTINGS_FILE" 2>/dev/null)
-            mem_value=$(jq -r '.resources.memory.value // empty' "$SETTINGS_FILE" 2>/dev/null)
-
-            local tmp_ap; tmp_ap=$(mktemp)
-            jq --arg c "$(_read_setting "country" || echo "ZZ")" \
-               --arg r "$(_read_setting "region" || echo "default")" \
-               --arg z "$(_read_setting "zone" || echo "default")" \
-               --arg n "$(_read_setting "name" || echo "$(hostname)")" \
-               --arg mm "${mem_mode}" \
-               --arg mv "${mem_value}" \
-               '.Node.Country = $c | .Node.Region = $r | .Node.Zone = $z | .Node.Name = $n |
-                if $mm != "" then .Node.Resources.Memory.Mode = $mm | .Node.Resources.Memory.Value = ($mv | tonumber) else . end' \
-               "$appsettings" > "$tmp_ap" && mv "$tmp_ap" "$appsettings"
-            chmod 640 "$appsettings"
-        fi
-
-        # Restart agent to pick up new appsettings
         if check_service_running; then
             systemctl restart "$SERVICE_NAME" 2>/dev/null || true
             log_info "Agent restarted to apply new settings"

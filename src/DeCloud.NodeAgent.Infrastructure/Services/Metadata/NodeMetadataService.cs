@@ -69,26 +69,44 @@ public class NodeMetadataService : INodeMetadataService
         // Get machine ID
         MachineId = NodeIdGenerator.GetMachineId();
 
-        // Get wallet from config
-        WalletAddress = _configuration["OrchestratorClient:WalletAddress"] ?? "";
+        // Operator identity — settings.json (flat keys) override appsettings (nested keys).
+        // settings.json: { "wallet": "0x..." }  → key "wallet"
+        // appsettings:   { "OrchestratorClient": { "WalletAddress": "0x..." } } → key "OrchestratorClient:WalletAddress"
+        WalletAddress = _configuration["wallet"]
+                     ?? _configuration["OrchestratorClient:WalletAddress"]
+                     ?? "";
 
-        OrchestratorUrl = _configuration["OrchestratorClient:BaseUrl"] ?? "";
+        OrchestratorUrl = _configuration["orchestrator_url"]
+                       ?? _configuration["OrchestratorClient:BaseUrl"]
+                       ?? "";
 
         // Generate deterministic node ID
         NodeId = NodeIdGenerator.GenerateNodeId(MachineId, WalletAddress);
 
-        // Get name, region, zone from config
-        Name = _configuration["Node:Name"] ?? Environment.MachineName;
-        Region = _configuration["Node:Region"] ?? "default";
-        Zone = _configuration["Node:Zone"] ?? "default";
-        Country = (_configuration["Node:Country"] ?? "ZZ").ToUpperInvariant();
+        // Operator locality — settings.json flat keys override Node:* from appsettings
+        Name = _configuration["name"]
+            ?? _configuration["Node:Name"]
+            ?? Environment.MachineName;
+        Region = _configuration["region"]
+              ?? _configuration["Node:Region"]
+              ?? "default";
+        Zone = _configuration["zone"]
+            ?? _configuration["Node:Zone"]
+            ?? "default";
+        Country = (_configuration["country"]
+                ?? _configuration["Node:Country"]
+                ?? "ZZ").ToUpperInvariant();
+
         _logger.LogInformation(
             "Node locality: Country={Country}, Region={Region}, Zone={Zone}",
             Country, Region, Zone);
 
-        // Resource allocation settings (from decloud configure)
-        _memoryAllocMode = _configuration["Node:Resources:Memory:Mode"];
-        if (int.TryParse(_configuration["Node:Resources:Memory:Value"], out var memVal))
+        // Resource allocation — settings.json flat keys override appsettings nested keys
+        _memoryAllocMode = _configuration["resources:memory:mode"]
+                        ?? _configuration["Node:Resources:Memory:Mode"];
+        var memValStr = _configuration["resources:memory:value"]
+                     ?? _configuration["Node:Resources:Memory:Value"];
+        if (int.TryParse(memValStr, out var memVal))
             _memoryAllocValue = memVal;
 
         // If mode is "mb", resolve immediately (doesn't need hardware discovery)
