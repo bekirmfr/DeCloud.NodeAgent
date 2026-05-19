@@ -817,6 +817,43 @@ sudo decloud login
 Wall-clock time on a fresh Ubuntu box: 3–5 minutes. On a re-run with
 most dependencies cached: ~30 seconds.
 
+### About the install URL
+
+`/releases/latest/download/install.sh` is a GitHub-native redirect pattern.
+GitHub resolves `latest` to the most recent release that is published as
+a **stable (non-pre-release)** release, then issues a transparent redirect
+to the actual download URL for the asset named `install.sh` in that release.
+`curl -fsSL` follows the redirect automatically — the operator never sees
+the version number.
+
+**Pre-releases are excluded from `latest`.** A release tagged `vX.Y.Z-rc1`
+and marked as a pre-release on GitHub is not returned by this URL. If the
+current published release is a release candidate, the `latest` URL either
+resolves to the previous stable release (if one exists) or to nothing.
+
+To install a specific version — including a release candidate — use the
+version-tagged URL directly:
+
+```bash
+# Install a specific version (e.g. during rc testing)
+curl -fsSL https://github.com/bekirmfr/DeCloud.NodeAgent/releases/download/v2.2.0-rc1/install.sh \
+  | sudo bash -s -- \
+      --orchestrator https://decloud.stackfi.tech \
+      --wallet 0xYourWalletAddress
+```
+
+**The version-agnostic URL is the stable-release install path.** Once an
+rc is promoted to stable (uncheck "This is a pre-release" in the GitHub
+release editor), the `latest` URL immediately resolves to it — no code
+change, no new release, no workflow run required.
+
+**Two-layer version resolution.** Once `install.sh` is running, it uses
+the GitHub Releases API (`RELEASE_API_LATEST`) to independently resolve
+which version of the agent binaries to download. The URL you curl
+determines which `install.sh` you get; the `install.sh` itself determines
+which binaries it installs (always the latest stable unless overridden).
+Under normal circumstances both layers point to the same version.
+
 ### What runs, in order
 
 1. **Bootstrap fetch** (`curl`, ~1 s)
@@ -916,6 +953,7 @@ sudo decloud update
 2. **Hybrid install.sh resolution:**
    - **Primary**: `curl` from `releases/latest/download/install.sh`
      (30 s timeout). On success, writes to `/tmp/decloud-install-XXXX.sh`.
+     `latest` resolves to the most recent stable (non-pre-release) release.
    - **Fallback**: if curl fails (offline, GitHub unreachable, network
      restricted), uses `/usr/local/share/decloud/install.sh` — the copy
      left by the previous successful install
@@ -1155,7 +1193,8 @@ What this chain does **not** prove:
 | Read recent logs | `sudo journalctl -u decloud-node-agent -n 100 --no-pager` |
 | Tail logs live | `sudo journalctl -u decloud-node-agent -f` |
 | Restart service | `sudo systemctl restart decloud-node-agent` |
-| Update to latest release | `sudo decloud update` |
+| Update to latest stable | `sudo decloud update` |
+| Install a specific version | `curl -fsSL https://github.com/bekirmfr/DeCloud.NodeAgent/releases/download/vX.Y.Z/install.sh \| sudo bash -s -- --orchestrator <URL> --wallet <addr>` |
 | Pause scheduling | `sudo decloud logout` |
 | Resume scheduling | `sudo decloud login` |
 | Change locality | `sudo decloud logout && sudo decloud configure --country BR --region sa-east && sudo decloud register && sudo decloud login` |

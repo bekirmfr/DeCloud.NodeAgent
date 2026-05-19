@@ -4,7 +4,7 @@
 // State
 // ============================================================
 const S = {
-    summary: null, snapshot: null, vms: null,
+    summary: null, snapshot: null, vms: null, downloads: [],
     network: null, ports: null, firewall: null, services: null,
     logs: null, logsVisible: false, allLogs: [],
     activeCmapTab: 'interfaces',
@@ -44,7 +44,7 @@ document.addEventListener('keydown', e => {
 });
 
 async function loadFast() {
-    const [sum, snap, vms, net, ports, svcs, vmIngress, oblResp] = await Promise.all([
+    const [sum, snap, vms, net, ports, svcs, vmIngress, oblResp, downloads] = await Promise.all([
         get('/api/dashboard/summary'),
         get('/api/node/snapshot'),
         get('/api/vms'),
@@ -53,10 +53,12 @@ async function loadFast() {
         get('/api/dashboard/services'),
         get('/api/dashboard/vm-ingress'),
         get('/api/dashboard/obligations'),
+        get('/api/downloads'),
     ]);
     S.summary = sum;
     S.snapshot = snap;
     S.vms = vms;
+    S.downloads = downloads ?? [];
     S.network = net;
     S.ports = ports;
     S.services = svcs;
@@ -464,7 +466,7 @@ function renderVMs() {
         return `<tr>
           <td class="vm-name-cell">${esc(vm.name ?? spec.name ?? '—')}</td>
           <td class="vm-id-cell">${truncId(vm.vmId ?? '—')}</td>
-          <td>${stateBadge(vm.state)}</td>
+          <td>${stateBadge(vm.state, vm.vmId ?? vm.spec?.id)}</td>
           <td class="health-cell">${renderHealthCell(vm)}</td>
           <td>${spec.virtualCpuCores ?? '—'}</td>
           <td>${spec.memoryBytes ? fmtBytes(spec.memoryBytes) : '—'}</td>
@@ -1390,12 +1392,25 @@ function vmStateName(state) {
     return map[state] ?? String(state);
 }
 
-function stateBadge(state) {
+function stateBadge(state, vmId) {
     const name = vmStateName(state);
     const cls = name === 'Running' ? 'state-running'
         : name === 'Failed' || name === 'NotFound' ? 'state-error'
             : name === 'Stopped' || name === 'Deleted' ? 'state-stopped'
                 : 'state-other';
+
+    // Show download progress for VMs in Creating state
+    if (name === 'Creating' && vmId) {
+        const dl = (S.downloads ?? []).find(d => d.vmId === vmId);
+        if (dl && dl.totalBytes > 0) {
+            const mb = (dl.downloadedBytes / 1024 / 1024).toFixed(0);
+            const totalMb = (dl.totalBytes / 1024 / 1024).toFixed(0);
+            return `<span class="state-badge state-other">Downloading ${dl.percentComplete}%</span>`
+                + `<div class="dl-progress-bar"><div class="dl-progress-fill" style="width:${dl.percentComplete}%"></div></div>`
+                + `<span class="dl-detail">${mb} / ${totalMb} MB</span>`;
+        }
+    }
+
     return `<span class="state-badge ${cls}">${name}</span>`;
 }
 

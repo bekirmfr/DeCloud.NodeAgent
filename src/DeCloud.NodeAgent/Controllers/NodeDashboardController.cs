@@ -2,6 +2,7 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
+using DeCloud.NodeAgent.Infrastructure.Services;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 using System.Text.Json;
@@ -21,6 +22,7 @@ public class NodeDashboardController : ControllerBase
 {
     private readonly ICommandExecutor _executor;
     private readonly IVmManager _vmManager;
+    private readonly IImageManager _imageManager;
     private readonly IOrchestratorClient _orchestratorClient;
     private readonly INodeStateService _nodeStateService;
     private readonly IWebHostEnvironment _env;
@@ -53,6 +55,7 @@ public class NodeDashboardController : ControllerBase
     public NodeDashboardController(
         ICommandExecutor executor,
         IVmManager vmManager,
+        IImageManager imageManager,
         IOrchestratorClient orchestratorClient,
         INodeStateService nodeStateService,
         IWebHostEnvironment env,
@@ -65,6 +68,7 @@ public class NodeDashboardController : ControllerBase
     {
         _executor = executor;
         _vmManager = vmManager;
+        _imageManager = imageManager;
         _orchestratorClient = orchestratorClient;
         _nodeStateService = nodeStateService;
         _env = env;
@@ -190,6 +194,13 @@ public class NodeDashboardController : ControllerBase
         {
             _vmIngressCacheLock.Release();
         }
+    }
+
+    [HttpGet("/api/downloads")]
+    public IActionResult GetActiveDownloads()
+    {
+        var downloads = _imageManager.ActiveDownloads.Values.ToList();
+        return Ok(downloads);
     }
 
     // ==========================================================================

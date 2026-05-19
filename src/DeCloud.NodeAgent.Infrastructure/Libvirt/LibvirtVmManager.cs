@@ -680,6 +680,9 @@ public class LibvirtVmManager : IVmManager
             _logger.LogInformation("VM {VmId}: Downloading/preparing base image from {Url}",
                 spec.Id, spec.BaseImageUrl);
 
+            // Register for progress tracking before starting download
+            _imageManager.TrackDownload(spec.Id, spec.BaseImageUrl);
+
             string baseImagePath;
             try
             {

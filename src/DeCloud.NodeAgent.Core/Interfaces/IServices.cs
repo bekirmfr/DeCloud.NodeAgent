@@ -86,7 +86,20 @@ public interface IImageManager
     Task DeleteDiskAsync(string diskPath, CancellationToken ct = default);
     Task<List<CachedImage>> GetCachedImagesAsync(CancellationToken ct = default);
     Task PruneUnusedImagesAsync(TimeSpan maxAge, CancellationToken ct = default);
+
+    /// <summary>Active image downloads. Empty when idle.</summary>
+    IReadOnlyDictionary<string, ImageDownloadProgress> ActiveDownloads { get; }
+
+    /// <summary>Associate a VM ID with an upcoming download for progress tracking.</summary>
+    void TrackDownload(string vmId, string imageUrl);
 }
+
+public record ImageDownloadProgress(
+    string VmId,
+    string ImageUrl,
+    long DownloadedBytes,
+    long TotalBytes,
+    int PercentComplete);
 
 public class CachedImage
 {

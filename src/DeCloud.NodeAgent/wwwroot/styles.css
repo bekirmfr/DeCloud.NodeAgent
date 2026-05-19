@@ -2550,3 +2550,24 @@ pre, code {
     background: var(--bg);
     border-radius: 0 0 var(--radius) 0;
 }
+
+.dl-progress-bar {
+    width: 100%;
+    height: 4px;
+    background: var(--card-bg, #1a1a2e);
+    border-radius: 2px;
+    margin: 4px 0;
+    overflow: hidden;
+}
+
+.dl-progress-fill {
+    height: 100%;
+    background: var(--primary, #00d4aa);
+    border-radius: 2px;
+    transition: width 0.5s ease;
+}
+
+.dl-detail {
+    font-size: 0.7rem;
+    color: var(--text-dim, #888);
+}

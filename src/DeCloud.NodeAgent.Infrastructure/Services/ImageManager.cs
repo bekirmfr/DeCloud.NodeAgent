@@ -1,7 +1,8 @@
-using System.Security.Cryptography;
 using DeCloud.NodeAgent.Core.Interfaces;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Collections.Concurrent;
+using System.Security.Cryptography;
 
 namespace DeCloud.NodeAgent.Infrastructure.Services;
 
@@ -20,6 +21,17 @@ public class ImageManager : IImageManager
     private readonly ILogger<ImageManager> _logger;
     private readonly ImageManagerOptions _options;
     private readonly SemaphoreSlim _downloadLock = new(3); // Max 3 concurrent downloads
+    private readonly ConcurrentDictionary<string, ImageDownloadProgress> _activeDownloads = new();
+    // Maps imageUrl → vmId so the download loop can update by vmId
+    private readonly ConcurrentDictionary<string, string> _downloadVmMap = new();
+
+    public IReadOnlyDictionary<string, ImageDownloadProgress> ActiveDownloads => _activeDownloads;
+
+    public void TrackDownload(string vmId, string imageUrl)
+    {
+        _downloadVmMap[imageUrl] = vmId;
+        _activeDownloads[vmId] = new ImageDownloadProgress(vmId, imageUrl, 0, 0, 0);
+    }
 
     public ImageManager(
         ICommandExecutor executor,
@@ -452,6 +464,14 @@ public class ImageManager : IImageManager
                 await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), cts.Token);
                 downloadedBytes += bytesRead;
 
+                // Update progress tracking (every iteration for responsive UI)
+                if (_downloadVmMap.TryGetValue(url, out var trackingVmId))
+                {
+                    var pct = totalBytes > 0 ? (int)(downloadedBytes * 100 / totalBytes) : 0;
+                    _activeDownloads[trackingVmId] = new ImageDownloadProgress(
+                        trackingVmId, url, downloadedBytes, totalBytes, pct);
+                }
+
                 // Log progress every 10 seconds
                 if ((DateTime.UtcNow - lastLogTime).TotalSeconds >= 10)
                 {
@@ -466,17 +486,23 @@ public class ImageManager : IImageManager
 
             // Move to final location
             File.Move(tempPath, destPath, overwrite: true);
-            
+
             _logger.LogInformation("Download complete: {Path} ({Size}MB)",
                 destPath, downloadedBytes / 1024 / 1024);
+
+            // Clean up progress tracking
+            if (_downloadVmMap.TryRemove(url, out var completedVmId))
+                _activeDownloads.TryRemove(completedVmId, out _);
         }
         catch
         {
-            // Clean up temp file on failure
+            // Clean up temp file and progress tracking on failure
             if (File.Exists(tempPath))
             {
                 File.Delete(tempPath);
             }
+            if (_downloadVmMap.TryRemove(url, out var failedVmId))
+                _activeDownloads.TryRemove(failedVmId, out _);
             throw;
         }
     }
