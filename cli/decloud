@@ -192,26 +192,10 @@ api_call() {
 
     # Use a temp file so we can separate body from http_code without subshell +
     # set -e interaction from arithmetic on a non-numeric string.
-    tmp=$(mktemp)
-
-    if [[ -n "$data" ]]; then
-        curl -s -o "$tmp" -w "%{http_code}" \
-            -X "$method" \
-            -H "Content-Type: application/json" \
-            -d "$data" \
-            --connect-timeout 5 \
-            "$url" 2>/dev/null
-    else
-        curl -s -o "$tmp" -w "%{http_code}" \
-            -X "$method" \
-            --connect-timeout 5 \
-            "$url" 2>/dev/null
-    fi
-    http_code=$?   # curl exit code first
-
-    # Re-read actual HTTP code from curl's -w output (captured via $())
-    # We need a different approach: write http_code to a separate tmp file.
+    # Body goes to tmp file (-o), HTTP code goes to stdout (-w), stdout
+    # redirected to code_file. One curl call — no leakage.
     local code_file
+    tmp=$(mktemp)
     code_file=$(mktemp)
 
     if [[ -n "$data" ]]; then
@@ -1094,10 +1078,14 @@ cmd_status() {
     # Authentication status
     echo -e "${BOLD}Authentication:${NC}"
     if [[ -f "$CREDENTIALS_FILE" ]]; then
-        local node_id wallet api_key
-        node_id=$(grep "^NODE_ID="      "$CREDENTIALS_FILE" | cut -d= -f2 || echo "Unknown")
-        wallet=$(grep  "^WALLET_ADDRESS=" "$CREDENTIALS_FILE" | cut -d= -f2 || echo "Unknown")
-        api_key=$(grep "^API_KEY="      "$CREDENTIALS_FILE" | cut -d= -f2 || echo "Unknown")
+        local api_key node_id wallet
+        # Wallet from settings.json (authoritative source).
+        # Node ID: fall back to credentials file (pre-cleanup nodes) or
+        # indicate it is derived.
+        wallet=$(_read_setting "wallet" || echo "Unknown")
+        node_id=$(grep "^NODE_ID=" "$CREDENTIALS_FILE" 2>/dev/null | cut -d= -f2 \
+               || echo "(derived from wallet + machine-id)")
+        api_key=$(grep "^API_KEY=" "$CREDENTIALS_FILE" | cut -d= -f2 || echo "Unknown")
         log_success "Authenticated"
         echo "  Node ID:  $node_id"
         echo "  Wallet:   $wallet"
@@ -1211,16 +1199,52 @@ cmd_resources() {
         log_error "Service not running"; exit $EXIT_ERROR
     fi
 
-    for resource in cpu memory storage network; do
-        echo -e "${BOLD}${resource^}:${NC}"
-        local result
-        if result=$(api_get "/api/node/$resource" 2>/dev/null); then
-            echo "$result" | jq -C '.' 2>/dev/null || echo "$result"
-        else
-            log_warn "Could not fetch $resource info"
-        fi
-        echo ""
-    done
+    # ── Operator allocation (from settings.json) ──────────────────────────
+    echo -e "${BOLD}Operator Allocation (settings.json):${NC}"
+    local mem_mode mem_value
+    mem_mode=$( jq -r '.resources.memory.mode  // "default (90%)"' "$SETTINGS_FILE" 2>/dev/null || echo "default (90%)")
+    mem_value=$(jq -r '.resources.memory.value // ""'               "$SETTINGS_FILE" 2>/dev/null || echo "")
+    if [[ -n "$mem_value" ]]; then
+        echo "  Memory:   $mem_value ($mem_mode)"
+    else
+        echo "  Memory:   platform default (90% of physical)"
+    fi
+    echo ""
+
+    # ── Live snapshot from agent ──────────────────────────────────────────
+    echo -e "${BOLD}Live Snapshot:${NC}"
+    local snap
+    if snap=$(api_get "/api/node/snapshot" 2>/dev/null); then
+        local phys_mem alloc_mem used_mem used_pts total_pts phys_stor used_stor
+        phys_mem=$(  echo "$snap" | jq -r '.totalMemoryBytes  // .totalMemoryBytes  // 0')
+        alloc_mem=$( echo "$snap" | jq -r '.allocatedMemoryBytes // 0')
+        used_mem=$(  echo "$snap" | jq -r '.usedMemoryBytes      // 0')
+        used_pts=$(  echo "$snap" | jq -r '.usedComputePoints    // 0')
+        total_pts=$( echo "$snap" | jq -r '.totalComputePoints   // 0')
+        phys_stor=$( echo "$snap" | jq -r '.totalStorageBytes    // 0')
+        used_stor=$( echo "$snap" | jq -r '.usedStorageBytes     // 0')
+
+        echo "  Compute:  ${used_pts} / ${total_pts} pts used"
+        echo "  Memory:   $(human_bytes "$used_mem") used / $(human_bytes "$alloc_mem") allocated / $(human_bytes "$phys_mem") physical"
+        echo "  Storage:  $(human_bytes "$used_stor") used / $(human_bytes "$phys_stor") total"
+    else
+        log_warn "Could not fetch snapshot"
+    fi
+    echo ""
+
+    # ── Hardware inventory (detailed) ─────────────────────────────────────
+    if [[ "${VERBOSE:-0}" == "1" ]] || [[ "${DEBUG:-0}" == "1" ]]; then
+        for resource in cpu memory storage network; do
+            echo -e "${BOLD}${resource^} (detail):${NC}"
+            local result
+            if result=$(api_get "/api/node/$resource" 2>/dev/null); then
+                echo "$result" | jq -C '.' 2>/dev/null || echo "$result"
+            else
+                log_warn "Could not fetch $resource info"
+            fi
+            echo ""
+        done
+    fi
 }
 
 cmd_heartbeat() {
@@ -1302,8 +1326,8 @@ cmd_capacity() {
               available_points utilization points_per_core allocated_memory vm_count
 
         cpu_cores=$(echo       "$capacity" | jq -r '.physicalCores           // "N/A"')
-        memory_bytes=$(echo    "$capacity" | jq -r '.physicalMemoryBytes     // "N/A"')
-        storage_bytes=$(echo   "$capacity" | jq -r '.physicalStorageBytes    // "N/A"')
+        memory_bytes=$(echo    "$capacity" | jq -r '.totalMemoryBytes     // "N/A"')
+        storage_bytes=$(echo   "$capacity" | jq -r '.totalStorageBytes    // "N/A"')
         total_points=$(echo    "$capacity" | jq -r '.totalComputePoints      // "N/A"')
         allocated_points=$(echo "$capacity" | jq -r '.allocatedComputePoints // "N/A"')
         available_points=$(echo "$capacity" | jq -r '.availableComputePoints // "N/A"')

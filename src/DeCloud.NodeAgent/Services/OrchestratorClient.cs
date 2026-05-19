@@ -170,9 +170,7 @@ public partial class OrchestratorClient : IOrchestratorClient
 
         File.Create(credentialsFile).Dispose();
 
-        var content = $@"NODE_ID={_nodeId}
-WALLET_ADDRESS={_walletAddress}
-API_KEY={_apiKey}
+        var content = $@"API_KEY={_apiKey}
 REGISTERED_AT={DateTime.UtcNow:O}";
         await File.WriteAllTextAsync(credentialsFile, content, ct);
 
