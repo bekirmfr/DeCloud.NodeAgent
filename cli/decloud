@@ -1938,6 +1938,52 @@ cmd_reset() {
     echo ""
 }
 
+cmd_logs_help() {
+    cat << EOF
+Usage: $SCRIPT_NAME logs [view|clear] [OPTIONS]
+
+View and manage node agent logs.
+
+${BOLD}VIEW (default):${NC}
+  $SCRIPT_NAME logs [view] [OPTIONS]
+
+  Options:
+    -f, --follow            Follow log output in real-time
+    -n, --lines <N>         Number of lines to show (default: 50)
+    --since <TIME>          Show entries since TIME
+    --until <TIME>          Show entries until TIME
+    --grep, -g <PATTERN>    Filter lines matching PATTERN
+    -p, --priority <LEVEL>  Filter by syslog priority (emerg..debug)
+    --file                  Read from log file instead of journal
+
+  TIME accepts journalctl formats:
+    "1 hour ago"   "30 min ago"   "yesterday"
+    "2025-06-01"   "09:00"        "2025-06-01 09:00:00"
+
+  PRIORITY levels (most to least severe):
+    emerg  alert  crit  err  warning  notice  info  debug
+
+${BOLD}CLEAR:${NC}
+  sudo $SCRIPT_NAME logs clear [OPTIONS]
+
+  Options:
+    --before-last-start     Clear only entries before the last service start
+    --force                 Skip confirmation prompt
+
+${BOLD}EXAMPLES:${NC}
+  $SCRIPT_NAME logs                              Last 50 lines
+  $SCRIPT_NAME logs -f                           Follow live
+  $SCRIPT_NAME logs -f --grep "error"            Follow, errors only
+  $SCRIPT_NAME logs --since "1 hour ago"         Last hour
+  $SCRIPT_NAME logs --since "09:00" --until "10:00"   Time window
+  $SCRIPT_NAME logs --since yesterday -p err     Errors since yesterday
+  $SCRIPT_NAME logs --grep "vm-cleanup" -n 200   Pattern search
+  $SCRIPT_NAME logs --file                       Legacy file mode
+  sudo $SCRIPT_NAME logs clear                   Clear all logs
+  sudo $SCRIPT_NAME logs clear --before-last-start   Keep recent
+EOF
+}
+
 cmd_logs() {
     # Defaults
     local subcommand=""
@@ -1972,6 +2018,7 @@ cmd_logs() {
     # Parse view options
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            -h|--help)      cmd_logs_help; exit $EXIT_SUCCESS ;;
             -f|--follow)    follow=true;          shift ;;
             -n|--lines)     lines="$2";           shift 2 ;;
             --journal)      source="journal";     shift ;;
@@ -2039,6 +2086,7 @@ cmd_logs_clear() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            -h|--help)           cmd_logs_help; exit $EXIT_SUCCESS ;;
             --before-last-start) before_last_start=true; shift ;;
             --force)             force=true;             shift ;;
             *)                   shift ;;
