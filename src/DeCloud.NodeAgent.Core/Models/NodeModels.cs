@@ -157,11 +157,13 @@ public class ResourceSnapshot
 
     // Storage
     public long TotalStorageBytes { get; set; }
+    public long AllocatedStorageBytes { get; set; }
     public long UsedStorageBytes { get; set; }
     public long AvailableStorageBytes => Math.Max(0, TotalStorageBytes - UsedStorageBytes);
 
     // GPU (if any)
     public int TotalGpus { get; set; }
+    public int AllocatedGpus { get; set; }
     public int UsedGpus { get; set; }
     public int AvailableGpus => TotalGpus - UsedGpus;
 }

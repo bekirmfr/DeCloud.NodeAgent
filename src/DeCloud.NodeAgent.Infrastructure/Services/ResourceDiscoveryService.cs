@@ -1119,8 +1119,12 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             AllocatedMemoryBytes = allocatedMemory,
             UsedMemoryBytes = memory.UsedBytes,
             TotalStorageBytes = storage.Sum(s => s.TotalBytes),
+            AllocatedStorageBytes = _nodeMetadata.AllocatedStorageBytes
+                ?? (long)(storage.Sum(s => s.TotalBytes) * DeCloud.Shared.AllocatedResources.DefaultPercent),
             UsedStorageBytes = storage.Sum(s => s.UsedBytes),
             TotalGpus = gpus.Count,
+            // Honour operator GPU ceiling; 0 = GPUs present but not offered
+            AllocatedGpus = _nodeMetadata.AllocatedGpuCount ?? gpus.Count,
             UsedGpus = 0
         };
     }

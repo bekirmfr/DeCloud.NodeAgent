@@ -233,12 +233,19 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             SshCaPublicKey = sshCaPublicKey,
             ObligationStateVersions = await BuildObligationStateVersionsAsync(ct),
             SystemTemplateVersions = await _systemVmService.GetTemplateRevisionsAsync(ct),
-            AllocatedResources = _nodeMetadata.AllocatedMemoryBytes.HasValue
+            AllocatedResources =
+                _nodeMetadata.AllocatedMemoryBytes.HasValue ||
+                _nodeMetadata.AllocatedComputePoints.HasValue ||
+                _nodeMetadata.AllocatedStorageBytes.HasValue ||
+                _nodeMetadata.AllocatedGpuCount.HasValue
                 ? new DeCloud.Shared.AllocatedResources
                 {
-                    MemoryBytes = _nodeMetadata.AllocatedMemoryBytes
+                    MemoryBytes = _nodeMetadata.AllocatedMemoryBytes,
+                    ComputePoints = _nodeMetadata.AllocatedComputePoints,
+                    StorageBytes = _nodeMetadata.AllocatedStorageBytes,
+                    GpuCount = _nodeMetadata.AllocatedGpuCount,
                 }
-                : null
+                : null,
         };
 
         // Register with retry logic

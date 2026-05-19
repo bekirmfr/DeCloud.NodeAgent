@@ -347,6 +347,9 @@ cmd_configure() {
     local has_locality_change=false
     local has_resource_change=false
     local alloc_mem_percent="" alloc_mem_mb=""
+    local alloc_cpu_percent="" alloc_cpu_points=""
+    local alloc_storage_percent="" alloc_storage_mb=""
+    local alloc_gpu_count=""
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -360,6 +363,16 @@ cmd_configure() {
                 alloc_mem_percent="$2"; has_resource_change=true; shift 2 ;;
             --allocated-memory-mb)
                 alloc_mem_mb="$2"; has_resource_change=true; shift 2 ;;
+            --allocated-cpu-percent)
+                alloc_cpu_percent="$2"; has_resource_change=true; shift 2 ;;
+            --allocated-cpu-points)
+                alloc_cpu_points="$2"; has_resource_change=true; shift 2 ;;
+            --allocated-storage-percent)
+                alloc_storage_percent="$2"; has_resource_change=true; shift 2 ;;
+            --allocated-storage-mb)
+                alloc_storage_mb="$2"; has_resource_change=true; shift 2 ;;
+            --allocated-gpu-count)
+                alloc_gpu_count="$2"; has_resource_change=true; shift 2 ;;
             -h|--help)
                 echo "Usage: $SCRIPT_NAME configure [options]"
                 echo ""
@@ -370,12 +383,25 @@ cmd_configure() {
                 echo ""
                 echo "Resource allocation (require logout first):"
                 echo "  --allocated-memory-percent <1-95>"
-                echo "      Percent of physical RAM to offer to the platform."
-                echo "      Default: 90 (when neither flag is set)."
-                echo ""
+                echo "      Percent of physical RAM to offer. Default: 90."
                 echo "  --allocated-memory-mb <MB>"
-                echo "      Absolute megabytes of RAM to offer (minimum: 256)."
+                echo "      Absolute MB of RAM to offer (min: 256)."
                 echo "      Mutually exclusive with --allocated-memory-percent."
+                echo ""
+                echo "  --allocated-cpu-percent <1-95>"
+                echo "      Percent of compute points to offer. Default: 90."
+                echo "  --allocated-cpu-points <n>"
+                echo "      Absolute compute points to offer (min: 1)."
+                echo "      Mutually exclusive with --allocated-cpu-percent."
+                echo ""
+                echo "  --allocated-storage-percent <1-95>"
+                echo "      Percent of physical storage to offer. Default: 90."
+                echo "  --allocated-storage-mb <MB>"
+                echo "      Absolute MB of storage to offer (min: 1024)."
+                echo "      Mutually exclusive with --allocated-storage-percent."
+                echo ""
+                echo "  --allocated-gpu-count <n>"
+                echo "      Number of GPUs to offer (0 = disable GPU offering)."
                 echo ""
                 echo "Cosmetic (allowed anytime, no logout needed):"
                 echo "  --name <text>        Node display name"
@@ -408,7 +434,7 @@ cmd_configure() {
         esac
     done
 
-    if [[ -z "$country$region$zone$name$description$alloc_mem_percent$alloc_mem_mb" ]]; then
+    if [[ -z "$country$region$zone$name$description$alloc_mem_percent$alloc_mem_mb$alloc_cpu_percent$alloc_cpu_points$alloc_storage_percent$alloc_storage_mb$alloc_gpu_count" ]]; then
         log_error "No settings specified"
         echo "Run '$SCRIPT_NAME configure --help' for usage"
         exit $EXIT_USAGE
@@ -496,6 +522,53 @@ cmd_configure() {
         fi
     fi
 
+    if [[ -n "$alloc_cpu_percent" ]] && [[ -n "$alloc_cpu_points" ]]; then
+        log_error "Cannot set both --allocated-cpu-percent and --allocated-cpu-points"
+        exit $EXIT_USAGE
+    fi
+
+    if [[ -n "$alloc_cpu_percent" ]]; then
+        if ! [[ "$alloc_cpu_percent" =~ ^[0-9]+$ ]] || \
+           [[ "$alloc_cpu_percent" -lt 1 ]] || [[ "$alloc_cpu_percent" -gt 95 ]]; then
+            log_error "Invalid CPU percent: '$alloc_cpu_percent' (must be 1-95)"
+            exit $EXIT_USAGE
+        fi
+    fi
+
+    if [[ -n "$alloc_cpu_points" ]]; then
+        if ! [[ "$alloc_cpu_points" =~ ^[0-9]+$ ]] || [[ "$alloc_cpu_points" -lt 1 ]]; then
+            log_error "Invalid CPU points: '$alloc_cpu_points' (must be >= 1)"
+            exit $EXIT_USAGE
+        fi
+    fi
+
+    if [[ -n "$alloc_storage_percent" ]] && [[ -n "$alloc_storage_mb" ]]; then
+        log_error "Cannot set both --allocated-storage-percent and --allocated-storage-mb"
+        exit $EXIT_USAGE
+    fi
+
+    if [[ -n "$alloc_storage_percent" ]]; then
+        if ! [[ "$alloc_storage_percent" =~ ^[0-9]+$ ]] || \
+           [[ "$alloc_storage_percent" -lt 1 ]] || [[ "$alloc_storage_percent" -gt 95 ]]; then
+            log_error "Invalid storage percent: '$alloc_storage_percent' (must be 1-95)"
+            exit $EXIT_USAGE
+        fi
+    fi
+
+    if [[ -n "$alloc_storage_mb" ]]; then
+        if ! [[ "$alloc_storage_mb" =~ ^[0-9]+$ ]] || [[ "$alloc_storage_mb" -lt 1024 ]]; then
+            log_error "Invalid storage MB: '$alloc_storage_mb' (must be >= 1024)"
+            exit $EXIT_USAGE
+        fi
+    fi
+
+    if [[ -n "$alloc_gpu_count" ]]; then
+        if ! [[ "$alloc_gpu_count" =~ ^[0-9]+$ ]]; then
+            log_error "Invalid GPU count: '$alloc_gpu_count' (must be a non-negative integer)"
+            exit $EXIT_USAGE
+        fi
+    fi
+
     # ── Apply changes to settings JSON ───────────────────────────────────
     # Read existing params, update the specified ones, write back.
     if [[ ! -f "$SETTINGS_FILE" ]]; then
@@ -552,6 +625,55 @@ cmd_configure() {
         chmod 600 "$SETTINGS_FILE"
         params_changed=true
         log_success "Memory allocation set to: ${alloc_mem_mb} MB"
+    fi
+
+    if [[ -n "$alloc_cpu_percent" ]]; then
+        local tmp; tmp=$(mktemp)
+        jq '.resources.cpu = {"mode":"percent","value":'"$alloc_cpu_percent"'}' \
+            "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
+        chmod 600 "$SETTINGS_FILE"
+        params_changed=true
+        log_success "CPU allocation set to: ${alloc_cpu_percent}%"
+    fi
+
+    if [[ -n "$alloc_cpu_points" ]]; then
+        local tmp; tmp=$(mktemp)
+        jq '.resources.cpu = {"mode":"points","value":'"$alloc_cpu_points"'}' \
+            "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
+        chmod 600 "$SETTINGS_FILE"
+        params_changed=true
+        log_success "CPU allocation set to: ${alloc_cpu_points} compute points"
+    fi
+
+    if [[ -n "$alloc_storage_percent" ]]; then
+        local tmp; tmp=$(mktemp)
+        jq '.resources.storage = {"mode":"percent","value":'"$alloc_storage_percent"'}' \
+            "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
+        chmod 600 "$SETTINGS_FILE"
+        params_changed=true
+        log_success "Storage allocation set to: ${alloc_storage_percent}%"
+    fi
+
+    if [[ -n "$alloc_storage_mb" ]]; then
+        local tmp; tmp=$(mktemp)
+        jq '.resources.storage = {"mode":"mb","value":'"$alloc_storage_mb"'}' \
+            "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
+        chmod 600 "$SETTINGS_FILE"
+        params_changed=true
+        log_success "Storage allocation set to: ${alloc_storage_mb} MB"
+    fi
+
+    if [[ -n "$alloc_gpu_count" ]]; then
+        local tmp; tmp=$(mktemp)
+        jq '.resources.gpu = {"count":'"$alloc_gpu_count"'}' \
+            "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
+        chmod 600 "$SETTINGS_FILE"
+        params_changed=true
+        if [[ "$alloc_gpu_count" == "0" ]]; then
+            log_success "GPU offering disabled"
+        else
+            log_success "GPU allocation set to: ${alloc_gpu_count} GPU(s)"
+        fi
     fi
 
     # Agent reads settings.json directly via ASP.NET Core config layering
