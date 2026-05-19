@@ -1107,24 +1107,32 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         // Never exceed physical
         allocatedMemory = Math.Min(allocatedMemory, memory.TotalBytes);
 
+        // Apply operator CPU ceiling so the local snapshot matches what the
+        // orchestrator schedules against. Absolute points: hard cap.
+        // Percent: apply to hardware-computed points as an approximation
+        // (orchestrator applies the same percent to its benchmark-evaluated
+        // total, so values may differ slightly due to overcommit ratios).
+        var effectiveComputePoints = _nodeMetadata.AllocatedComputePoints.HasValue
+            ? Math.Min(_nodeMetadata.AllocatedComputePoints.Value, (int)totalComputePoints)
+            : _nodeMetadata.AllocatedComputePointsPercent.HasValue
+                ? (int)Math.Floor((int)totalComputePoints
+                      * Math.Clamp(_nodeMetadata.AllocatedComputePointsPercent.Value, 1, 100) / 100.0)
+                : (int)totalComputePoints;
+
         return new ResourceSnapshot
         {
             TotalPhysicalCores = cpu.PhysicalCores,
             TotalVirtualCpuCores = cpu.LogicalCores,
             UsedVirtualCpuCores = cpu.LogicalCores - cpu.AvailableVCpus,
             VirtualCpuUsagePercent = cpu.UsagePercent,
-            TotalComputePoints = (int)totalComputePoints,
+            TotalComputePoints = effectiveComputePoints,
             UsedComputePoints = GetUsedComputePoints(),
             TotalMemoryBytes = memory.TotalBytes,
             AllocatedMemoryBytes = allocatedMemory,
             UsedMemoryBytes = memory.UsedBytes,
             TotalStorageBytes = storage.Sum(s => s.TotalBytes),
-            AllocatedStorageBytes = _nodeMetadata.AllocatedStorageBytes
-                ?? (long)(storage.Sum(s => s.TotalBytes) * DeCloud.Shared.AllocatedResources.DefaultPercent),
             UsedStorageBytes = storage.Sum(s => s.UsedBytes),
             TotalGpus = gpus.Count,
-            // Honour operator GPU ceiling; 0 = GPUs present but not offered
-            AllocatedGpus = _nodeMetadata.AllocatedGpuCount ?? gpus.Count,
             UsedGpus = 0
         };
     }
