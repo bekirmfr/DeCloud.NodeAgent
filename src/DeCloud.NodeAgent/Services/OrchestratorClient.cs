@@ -86,7 +86,7 @@ public partial class OrchestratorClient : IOrchestratorClient
         _options = options.Value;
         _resourceDiscovery = resourceDiscovery;
         _nodeMetadata = nodeMetadata;
-        _walletAddress = _options.WalletAddress;
+        // Wallet set in InitializeAsync from NodeMetadataService (settings.json)
         _nodeState = nodeState;
         _vmManager = vmManager;
         _obligationState = obligationState;
@@ -102,6 +102,11 @@ public partial class OrchestratorClient : IOrchestratorClient
 
     public async Task InitializeAsync(CancellationToken ct = default)
     {
+        // Wallet and node ID from operator settings (settings.json) via
+        // NodeMetadataService — single source of truth for identity.
+        _walletAddress = _nodeMetadata.WalletAddress;
+        _nodeId = _nodeMetadata.NodeId;
+
         await LoadCredentialsAsync();
 
         var isInternetReachable = await IsInternetReachableAsync(ct);
@@ -134,30 +139,23 @@ public partial class OrchestratorClient : IOrchestratorClient
 
         foreach (var line in lines)
         {
-            if (line.StartsWith("NODE_ID="))
-                _nodeId = line.Split('=')[1];
-            else if (line.StartsWith("WALLET_ADDRESS="))
-                _walletAddress = line.Split('=')[1];
-            else if (line.StartsWith("API_KEY="))
-                _apiKey = line.Split('=')[1];
+            // API_KEY is the only true credential — issued by orchestrator
+            // during registration. Wallet and NodeId come from
+            // NodeMetadataService (settings.json + machineId).
+            if (line.StartsWith("API_KEY="))
+                _apiKey = line.Split('=', 2)[1];
         }
 
-
-        if (string.IsNullOrWhiteSpace(_nodeId) ||
-           string.IsNullOrWhiteSpace(_apiKey))
+        if (string.IsNullOrWhiteSpace(_apiKey))
         {
-            _logger.LogWarning("Incomplete credentials in file - node not registered");
+            _logger.LogWarning("No API key in credentials file - node not registered");
             return;
         }
 
-        if (!string.IsNullOrWhiteSpace(_apiKey))
-        {
-            // Set Authorization header
-            _httpClient.DefaultRequestHeaders.Authorization =
-                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _apiKey);
+        _httpClient.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _apiKey);
 
-            _logger.LogInformation("✓ API key loaded from {File}", credentialsFilePath);
-        }
+        _logger.LogInformation("✓ API key loaded from {File}", credentialsFilePath);
     }
 
     private async Task SaveCredentialsAsync(CancellationToken ct)
