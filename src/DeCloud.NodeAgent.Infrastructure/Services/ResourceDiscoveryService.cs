@@ -1,9 +1,10 @@
-using System.Runtime.InteropServices;
-using System.Text.RegularExpressions;
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Infrastructure.Persistence;
 using Microsoft.Extensions.Logging;
+using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 
 namespace DeCloud.NodeAgent.Infrastructure.Services;
 
@@ -12,7 +13,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     private readonly ICommandExecutor _executor;
     private readonly INodeStateService _nodeState;
     private readonly INodeMetadataService _nodeMetadata;
-    private readonly IVmManager _vmManager;
+    private readonly VmRepository _vmRepository;
     private readonly ILogger<ResourceDiscoveryService> _logger;
     private readonly ICpuBenchmarkService _benchmarkService;
     private readonly bool _isWindows;
@@ -33,14 +34,14 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         ICommandExecutor executor,
         INodeStateService nodeState,
         INodeMetadataService nodeMetadata,
-        IVmManager vmManager,
+        VmRepository vmRepository,
         ILogger<ResourceDiscoveryService> logger,
         ICpuBenchmarkService benchmarkService)
     {
         _executor = executor;
         _nodeState = nodeState;
         _nodeMetadata = nodeMetadata;
-        _vmManager = vmManager;
+        _vmRepository = vmRepository;
         _logger = logger;
         _benchmarkService = benchmarkService;
         _isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
@@ -1113,9 +1114,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             UsedVirtualCpuCores = cpu.LogicalCores - cpu.AvailableVCpus,
             VirtualCpuUsagePercent = cpu.UsagePercent,
             TotalComputePoints = (int)totalComputePoints,
-            UsedComputePoints = _vmManager.GetAllVms()
-                .Where(v => v.State != VmState.Deleted)
-                .Sum(v => v.Spec.ComputePointCost),
+            UsedComputePoints = GetUsedComputePoints(),
             TotalMemoryBytes = memory.TotalBytes,
             AllocatedMemoryBytes = allocatedMemory,
             UsedMemoryBytes = memory.UsedBytes,
@@ -1160,6 +1159,28 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// Sum compute points from non-deleted VMs in the local SQLite database.
+    /// Uses VmRepository (lightweight SQLite) instead of IVmManager (requires
+    /// libvirt connection) to avoid initialization deadlock — IVmManager is
+    /// not safe to resolve during early DI construction.
+    /// </summary>
+    private int GetUsedComputePoints()
+    {
+        try
+        {
+            var vms = _vmRepository.LoadAllVmsAsync().GetAwaiter().GetResult();
+            return vms
+                .Where(v => v.State != VmState.Deleted)
+                .Sum(v => v.Spec.ComputePointCost);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to query VmRepository for used compute points");
+            return 0;
+        }
     }
 
     // =========================================================================
