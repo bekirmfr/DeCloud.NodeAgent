@@ -37,10 +37,7 @@ namespace DeCloud.NodeAgent.Core.Models
 
                 var data = JsonSerializer.Deserialize<T>(
                         dataJson.GetRawText(),
-                        new JsonSerializerOptions
-                        {
-                            PropertyNameCaseInsensitive = true
-                        });
+                        Json.JsonOptions.Wire);
                 if (data == null)
                 {
                     throw new ArgumentException("Http response 'data' property could not be deserialized");

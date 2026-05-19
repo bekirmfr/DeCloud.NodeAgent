@@ -1112,10 +1112,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             {
                 var schedulingConfig = JsonSerializer.Deserialize<SchedulingConfig>(
                     schedulingConfigProp.GetRawText(),
-                    new JsonSerializerOptions
-                    {
-                        PropertyNameCaseInsensitive = true
-                    });
+                    Core.Json.JsonOptions.Wire);
                 if (schedulingConfig != null)
                 {
                     _logger.LogInformation("Received updated scheduling configuration version {Version}",

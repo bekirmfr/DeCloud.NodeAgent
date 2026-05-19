@@ -3,6 +3,7 @@ using DeCloud.NodeAgent.Core.Interfaces.Qmp;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Interfaces.UserNetwork;
+using DeCloud.NodeAgent.Core.Json;
 using DeCloud.NodeAgent.Core.Settings;
 using DeCloud.NodeAgent.Infrastructure.Docker;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
@@ -56,9 +57,10 @@ builder.Services.Configure<ProxySettings>(
 // =====================================================
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
-    options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
-    options.SerializerOptions.PropertyNameCaseInsensitive = true;
-    options.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
+    var wire = JsonOptions.Wire;
+    options.SerializerOptions.PropertyNamingPolicy = wire.PropertyNamingPolicy;
+    options.SerializerOptions.PropertyNameCaseInsensitive = wire.PropertyNameCaseInsensitive;
+    options.SerializerOptions.DefaultIgnoreCondition = wire.DefaultIgnoreCondition;
 });
 
 builder.Services.AddHttpClient<IImageManager, ImageManager>();
@@ -343,11 +345,14 @@ builder.Services.AddSingleton<IAuditService, AuditService>();
 // =====================================================
 // API
 // =====================================================
+// Program.cs
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
     {
-        options.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
-        options.JsonSerializerOptions.PropertyNameCaseInsensitive = true;
+        var wire = DeCloud.NodeAgent.Core.Json.JsonOptions.Wire;
+        options.JsonSerializerOptions.PropertyNamingPolicy = wire.PropertyNamingPolicy;
+        options.JsonSerializerOptions.PropertyNameCaseInsensitive = wire.PropertyNameCaseInsensitive;
+        options.JsonSerializerOptions.DefaultIgnoreCondition = wire.DefaultIgnoreCondition;
     });
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>

@@ -741,7 +741,7 @@ public class LazysyncDaemon : BackgroundService
             try
             {
                 var json = await File.ReadAllTextAsync(path);
-                var state = JsonSerializer.Deserialize<LazysyncState>(json);
+                var state = JsonSerializer.Deserialize<LazysyncState>(json, Core.Json.JsonOptions.Wire);
                 if (state != null)
                 {
                     _states[vmId] = state;
@@ -764,7 +764,7 @@ public class LazysyncDaemon : BackgroundService
         var path = StatePath(vmId);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         await File.WriteAllTextAsync(path,
-            JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = false }));
+            JsonSerializer.Serialize(state, Core.Json.JsonOptions.Wire));
     }
 
     private string StatePath(string vmId) =>

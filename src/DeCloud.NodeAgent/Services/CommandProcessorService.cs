@@ -399,7 +399,7 @@ public class CommandProcessorService : BackgroundService
                 {
                     artifacts = JsonSerializer.Deserialize<List<TemplateArtifact>>(
                         artifactsElement.GetRawText(),
-                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                        Core.Json.JsonOptions.Wire)
                         ?? new List<TemplateArtifact>();
                 }
                 catch (JsonException ex)

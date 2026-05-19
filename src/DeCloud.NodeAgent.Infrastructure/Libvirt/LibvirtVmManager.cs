@@ -2,6 +2,7 @@ using DeCloud.NodeAgent.Core.Constants;
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Interfaces.UserNetwork;
+using DeCloud.NodeAgent.Core.Json;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
@@ -254,15 +255,40 @@ public class LibvirtVmManager : IVmManager
                 }
                 else
                 {
-                    // VM exists in libvirt but not in our tracking - attempt recovery
-                    var vmInstance = await ReconstructVmInstanceAsync(vmId, ct);
+                    // VM exists in libvirt but not in our tracking — attempt recovery.
+                    // SQLite is the authoritative source of truth for DeCloud-specific
+                    // fields (QualityTier, ComputePointCost, BaseImageUrl). Load from
+                    // there first and only reconstruct from libvirt XML if the record
+                    // is truly orphaned (not in SQLite either).
+                    //
+                    // Without this guard, a transient gap where _vms is empty during
+                    // startup causes ReconstructVmInstanceAsync to create a VmSpec with
+                    // default scheduling fields, and the subsequent SaveVmAsync
+                    // overwrites the correct SQLite record with defaults.
+                    var dbVm = await _repository.LoadVmAsync(vmId);
+                    VmInstance? vmInstance;
+                    if (dbVm != null)
+                    {
+                        dbVm.State = actualState;
+                        vmInstance = dbVm;
+                        _logger.LogInformation(
+                            "Re-adopted VM {VmId} from SQLite (state: {State}, tier: {Tier}, pts: {Pts})",
+                            vmId, actualState, dbVm.Spec.QualityTier, dbVm.Spec.ComputePointCost);
+                    }
+                    else
+                    {
+                        vmInstance = await ReconstructVmInstanceAsync(vmId, ct);
+                        if (vmInstance != null)
+                        {
+                            _logger.LogWarning(
+                                "Recovered orphaned VM {VmId} from libvirt XML — " +
+                                "no SQLite record exists (state: {State})",
+                                vmId, vmInstance.State);
+                        }
+                    }
                     if (vmInstance != null)
                     {
                         _vms[vmId] = vmInstance;
-
-                        _logger.LogWarning("Recovered orphaned VM {VmId} from libvirt (state: {State})",
-                            vmId, vmInstance.State);
-
                         isDirty = true;
                     }
                 }
@@ -343,30 +369,25 @@ public class LibvirtVmManager : IVmManager
             var state = await GetVmStateFromLibvirtAsync(vmId, ct);
 
             var vmDir = Path.Combine(_options.VmStoragePath, vmId);
-            string? ownerId = null;
-            string? vmName = null;
-            var vmType = VmType.General;
+            VmSpec? savedSpec = null;
 
             var metadataPath = Path.Combine(vmDir, "metadata.json");
             if (File.Exists(metadataPath))
             {
                 try
                 {
-                    var metadata = System.Text.Json.JsonDocument.Parse(
-                        await File.ReadAllTextAsync(metadataPath, ct));
-                    ownerId = metadata.RootElement.TryGetProperty("ownerId", out var t) ? t.GetString() : null;
-                    vmName = metadata.RootElement.TryGetProperty("name", out var n) ? n.GetString() : null;
-
-                    if (metadata.RootElement.TryGetProperty("vmType", out var vt) &&
-                        Enum.TryParse<VmType>(vt.GetString(), ignoreCase: true, out var parsedType))
-                    {
-                        vmType = parsedType;
-                    }
+                    var json = await File.ReadAllTextAsync(metadataPath, ct);
+                    savedSpec = JsonSerializer.Deserialize<VmSpec>(json, JsonOptions.Default);
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to deserialize metadata.json for VM {VmId}", vmId);
+                }
             }
 
-            var resolvedName = vmName ?? domain.Element("name")?.Value ?? vmId;
+            // Merge: metadata.json is authoritative for DeCloud-specific fields,
+            // libvirt XML is authoritative for runtime fields (vCPUs, memory).
+            var resolvedName = savedSpec?.Name ?? domain.Element("name")?.Value ?? vmId;
 
             var instance = new VmInstance
             {
@@ -374,13 +395,23 @@ public class LibvirtVmManager : IVmManager
                 Name = resolvedName,
                 Spec = new VmSpec
                 {
+                    // Runtime fields from libvirt XML (always current)
                     Id = vmId,
                     Name = resolvedName,
                     VirtualCpuCores = vcpus,
                     MemoryBytes = memoryBytes,
                     DiskBytes = await GetDiskSizeAsync(diskPath, ct),
-                    OwnerId = ownerId ?? "unknown",
-                    VmType = vmType,
+                    // DeCloud fields from metadata.json (or defaults)
+                    OwnerId = savedSpec?.OwnerId ?? "unknown",
+                    VmType = savedSpec?.VmType ?? VmType.General,
+                    QualityTier = savedSpec?.QualityTier ?? QualityTier.Burstable,
+                    ComputePointCost = savedSpec?.ComputePointCost ?? 0,
+                    BaseImageUrl = savedSpec?.BaseImageUrl,
+                    SshPublicKey = savedSpec?.SshPublicKey,
+                    ReplicationFactor = savedSpec?.ReplicationFactor ?? 0,
+                    GpuPciAddress = savedSpec?.GpuPciAddress,
+                    GpuMode = savedSpec?.GpuMode ?? GpuMode.None,
+                    TargetNodeId = savedSpec?.TargetNodeId,
                 },
                 State = state,
                 DiskPath = diskPath,
@@ -419,7 +450,7 @@ public class LibvirtVmManager : IVmManager
             // Re-populate the System service StatusMessage so heartbeats report
             // the peer ID without waiting for a callback that won't re-fire.
             // -----------------------------------------------------------------
-            if (vmType == VmType.Dht)
+            if ((savedSpec?.VmType ?? VmType.General) == VmType.Dht)
             {
                 var peerIdPath = Path.Combine(vmDir, "dht-peer-id");
                 if (File.Exists(peerIdPath))
@@ -1120,24 +1151,9 @@ public class LibvirtVmManager : IVmManager
 
     private async Task SaveVmMetadataAsync(string vmDir, VmSpec spec, CancellationToken ct)
     {
-        var metadata = new
-        {
-            vmId = spec.Id,
-            name = spec.Name,
-            ownerId = spec.OwnerId,
-            vmType = spec.VmType.ToString(),
-            createdAt = DateTime.UtcNow,
-            virtualCpuCores = spec.VirtualCpuCores,
-            memoryBytes = spec.MemoryBytes,
-            diskBytes = spec.DiskBytes
-        };
-
         var metadataPath = Path.Combine(vmDir, "metadata.json");
         await File.WriteAllTextAsync(metadataPath,
-            JsonSerializer.Serialize(metadata, new System.Text.Json.JsonSerializerOptions
-            {
-                WriteIndented = true
-            }), ct);
+            JsonSerializer.Serialize(spec, JsonOptions.Default), ct);
     }
 
     public async Task<VmOperationResult> StartVmAsync(string vmId, CancellationToken ct = default)
