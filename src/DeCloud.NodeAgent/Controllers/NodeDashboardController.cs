@@ -719,57 +719,48 @@ public class NodeDashboardController : ControllerBase
 
     // ==========================================================================
     // GET /api/dashboard/logs?lines=100
-    // Returns the last N lines from /var/log/decloud/nodeagent.log.
-    // Falls back to journald if the file does not exist (e.g. first boot
-    // before the logger has written anything, or non-systemd deployments).
+    // Returns the last N lines from the systemd journal (primary) or
+    // /var/log/decloud/nodeagent.log (fallback for pre-journal installs).
     // ==========================================================================
-
-    private const string LogFilePath = "/var/log/decloud/nodeagent.log";
 
     [HttpGet("/api/dashboard/logs")]
     public async Task<IActionResult> GetLogs(
-        [FromQuery] int lines = 100,
-        CancellationToken ct = default)
+    [FromQuery] int lines = 100,
+    CancellationToken ct = default)
     {
         lines = Math.Clamp(lines, 10, 500);
 
-        // --- Primary: dedicated log file ---
-        if (System.IO.File.Exists(LogFilePath))
-        {
-            try
-            {
-                var logLines = await ReadLastLinesAsync(LogFilePath, lines, ct);
-                return Ok(new
-                {
-                    source = "file",
-                    logFile = LogFilePath,
-                    logLines,
-                    count = logLines.Count,
-                    collectedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-                });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to read log file {Path}, falling back to journald", LogFilePath);
-            }
-        }
-
-        // --- Fallback: systemd journal ---
+        // --- Primary: systemd journal (timestamped, filterable) ---
         var result = await _executor.ExecuteAsync(
             "journalctl",
             $"-u decloud-node-agent -n {lines} --no-pager --output=short-iso",
             TimeSpan.FromSeconds(10), ct);
 
-        var journalLines = result.Success
-            ? result.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries).ToList()
-            : [$"[error] log file not found at {LogFilePath} and journalctl failed: {result.StandardError}"];
+        if (result.Success)
+        {
+            var journalLines = result.StandardOutput
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .ToList();
+
+            if (journalLines.Count > 0)
+            {
+                return Ok(new
+                {
+                    source = "journal",
+                    logFile = (string?)null,
+                    logLines = journalLines,
+                    count = journalLines.Count,
+                    collectedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+                });
+            }
+        }
 
         return Ok(new
         {
-            source = "journal",
+            source = "none",
             logFile = (string?)null,
-            logLines = journalLines,
-            count = journalLines.Count,
+            logLines = new List<string> { "[no logs available — journal empty and log file not found]" },
+            count = 0,
             collectedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
         });
     }

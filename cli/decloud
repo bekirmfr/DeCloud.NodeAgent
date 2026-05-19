@@ -1938,98 +1938,94 @@ cmd_reset() {
     echo ""
 }
 
-cmd_logs() {
-    # Defaults
-    local subcommand=""
-    local lines=50
-    local follow=false
-    local source="journal"  # journal is now the primary source
-    local since=""
-    local until_time=""
-    local grep_pattern=""
-    local priority=""
+cmd_logs_clear() {
+    check_root
 
-    # Check if first arg is a subcommand word (not a flag)
-    if [[ $# -gt 0 ]] && [[ "$1" != -* ]]; then
-        subcommand="$1"
-        shift
-    fi
+    local before_last_start=false force=false
 
-    case "$subcommand" in
-        clear|empty)
-            cmd_logs_clear "$@"
-            return
-            ;;
-        view|"")
-            ;;  # continue to view
-        *)
-            log_error "Unknown logs subcommand: $subcommand"
-            echo "Usage: $SCRIPT_NAME logs [view|clear] [-f] [-n <lines>] [--since <time>] [--until <time>] [--grep <pattern>] [-p <priority>]"
-            exit $EXIT_USAGE
-            ;;
-    esac
-
-    # Parse view options
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -f|--follow)    follow=true;          shift ;;
-            -n|--lines)     lines="$2";           shift 2 ;;
-            --journal)      source="journal";     shift ;;
-            --file)         source="file";        shift ;;
-            --since)        since="$2";           shift 2 ;;
-            --until)        until_time="$2";      shift 2 ;;
-            --grep|-g)      grep_pattern="$2";    shift 2 ;;
-            -p|--priority)  priority="$2";        shift 2 ;;
-            *)              shift ;;
+            --before-last-start) before_last_start=true; shift ;;
+            --force)             force=true;             shift ;;
+            *)                   shift ;;
         esac
     done
 
-    if [[ "$source" == "file" ]]; then
-        # Legacy file mode — kept for backward compatibility with pre-journal installs
-        if [[ ! -f "$LOG_FILE" ]]; then
-            log_warn "Log file not found: $LOG_FILE"
-            echo "Logs are in systemd journal. Use without --file, or:"
-            echo "  $SCRIPT_NAME logs --journal"
-            exit $EXIT_ERROR
+    echo ""
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    $before_last_start \
+        && echo -e "${BOLD}  Clear Logs Before Last Service Start${NC}" \
+        || echo -e "${BOLD}  Clear All Node Agent Logs${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+
+    if ! $force; then
+        $before_last_start \
+            && read -rp "Clear logs before last start? [y/N]: " confirm \
+            || read -rp "Clear ALL logs? [y/N]: " confirm
+        [[ "$confirm" =~ ^[Yy]$ ]] || { log_info "Cancelled"; exit $EXIT_SUCCESS; }
+    fi
+
+    set +e
+
+    if $before_last_start; then
+        # Vacuum journal entries before last service start
+        local last_start
+        last_start=$(systemctl show -p ActiveEnterTimestamp "$SERVICE_NAME" | cut -d= -f2)
+        if [[ -z "$last_start" || "$last_start" == "0" ]]; then
+            log_warn "Could not determine last service start time"
+            set -e; exit $EXIT_ERROR
         fi
 
-        if [[ -n "$since" || -n "$until_time" || -n "$priority" ]]; then
-            log_warn "Time and priority filters require journal. Switching to journal source."
-            source="journal"
+        log_info "[1/2] Vacuuming journal entries before last start..."
+        journalctl --rotate >/dev/null 2>&1 || true
+        journalctl -u "$SERVICE_NAME" --vacuum-time="$(( $(date +%s) - $(date -d "$last_start" +%s) ))s" >/dev/null 2>&1 \
+            && log_success "Journal entries before $last_start removed" \
+            || log_warn "Could not vacuum journal (may need elevated privileges)"
+
+        # Clean stale log file if present (pre-journal installs)
+        log_info "[2/2] Cleaning stale log file..."
+        if [[ -f "$LOG_FILE" ]]; then
+            rm -f "$LOG_FILE" && log_success "Removed stale $LOG_FILE" || true
         else
-            # File mode with optional grep
-            if [[ -n "$grep_pattern" ]]; then
-                if $follow; then
-                    tail -f "$LOG_FILE" | grep --line-buffered -- "$grep_pattern"
-                else
-                    tail -n "$lines" "$LOG_FILE" | grep -- "$grep_pattern"
-                fi
-            else
-                if $follow; then
-                    exec tail -f "$LOG_FILE"
-                else
-                    exec tail -n "$lines" "$LOG_FILE"
-                fi
-            fi
-            return
+            log_info "No stale log file found"
         fi
-    fi
-
-    # Journal mode (default)
-    local -a jctl_args=( -u "$SERVICE_NAME" --no-pager )
-
-    if $follow; then
-        jctl_args+=( -f )
     else
-        jctl_args+=( -n "$lines" )
+        # Step 1: Vacuum service journal (primary log store)
+        log_info "[1/3] Clearing systemd journal for $SERVICE_NAME..."
+        journalctl --rotate >/dev/null 2>&1 || true
+        journalctl -u "$SERVICE_NAME" --vacuum-size=1K >/dev/null 2>&1 \
+            && log_success "Journal cleared for $SERVICE_NAME" \
+            || log_warn "Could not vacuum journal (may need elevated privileges)"
+
+        # Step 2: Remove stale log file (pre-journal installs)
+        log_info "[2/3] Removing stale log file..."
+        if [[ -f "$LOG_FILE" ]]; then
+            local sz; sz=$(du -h "$LOG_FILE" 2>/dev/null | cut -f1 || echo "?")
+            rm -f "$LOG_FILE" && log_success "Removed $LOG_FILE (was $sz)" || log_warn "Could not remove $LOG_FILE"
+        else
+            log_info "No stale log file found"
+        fi
+
+        # Step 3: Clear rotated log files (audit.log.* etc.)
+        log_info "[3/3] Clearing rotated log files..."
+        local n=0
+        while IFS= read -r -d '' f; do
+            rm -f "$f" 2>/dev/null && (( n++ )) || true
+        done < <(find "$LOG_DIR" -type f \( -name "*.log.*" -o -name "nodeagent.log" \) -print0 2>/dev/null)
+        (( n > 0 )) && log_success "Removed $n rotated/stale file(s)" || log_info "No rotated files found"
     fi
 
-    [[ -n "$since" ]]        && jctl_args+=( --since "$since" )
-    [[ -n "$until_time" ]]   && jctl_args+=( --until "$until_time" )
-    [[ -n "$grep_pattern" ]] && jctl_args+=( --grep "$grep_pattern" )
-    [[ -n "$priority" ]]     && jctl_args+=( -p "$priority" )
+    set -e
 
-    exec journalctl "${jctl_args[@]}"
+    echo ""
+    echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}  Log Clearing Complete${NC}"
+    echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo "View current logs: ${BOLD}$SCRIPT_NAME logs${NC}"
+    echo "Follow logs:       ${BOLD}$SCRIPT_NAME logs -f${NC}"
+    echo ""
 }
 
 cmd_logs_clear() {

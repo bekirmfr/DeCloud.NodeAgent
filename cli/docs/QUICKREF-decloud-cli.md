@@ -30,9 +30,11 @@
 | `decloud start` | Start service | ✅ |
 | `decloud stop` | Stop service | ✅ |
 | `decloud restart` | Restart service | ✅ |
-| `decloud logs` | View file logs | ❌ |
-| `decloud logs -f` | Follow file logs | ❌ |
-| `decloud logs --journal` | View journal logs | ❌ |
+| `decloud logs` | View logs (journal) | ❌ |
+| `decloud logs -f` | Follow logs | ❌ |
+| `decloud logs --since "1h ago"` | Logs since time | ❌ |
+| `decloud logs --grep "pattern"` | Filter by pattern | ❌ |
+| `decloud logs -p err` | Errors only | ❌ |
 | `decloud logs clear` | Clear all logs | ✅ |
 | `decloud logs clear --before-last-start` | Clear old logs only | ✅ |
 
@@ -88,7 +90,7 @@ decloud resources
 decloud diagnose
 
 # Check recent errors
-decloud logs -n 100
+decloud logs --since "1 hour ago" -p err
 
 # Restart service
 sudo decloud restart
@@ -99,7 +101,7 @@ decloud status
 
 # Still issues? Deep dive
 decloud test-api
-journalctl -u decloud-node-agent -n 200
+decloud logs -n 200
 ```
 
 ### VM Management
@@ -276,7 +278,7 @@ REPORT_FILE="/var/log/decloud/daily-report-$(date +%Y%m%d).txt"
     echo ""
     
     echo "RECENT ERRORS:"
-    journalctl -u decloud-node-agent --since yesterday -p err --no-pager
+    decloud logs --since yesterday -p err
     echo ""
     
     echo "════════════════════════════════════════"
@@ -351,7 +353,7 @@ watch -n 5 decloud status
 
 ### 3. Quick Logs
 
-View last 50 lines (from `/var/log/decloud/nodeagent.log`):
+View last 50 lines:
 ```bash
 decloud logs
 ```
@@ -361,25 +363,24 @@ Follow logs in real-time:
 decloud logs -f
 ```
 
-View systemd journal logs:
+Last hour of errors:
 ```bash
-decloud logs --journal
-decloud logs --journal -f
+decloud logs --since "1 hour ago" -p err
 ```
 
-View last 100 lines:
+Search for a pattern:
 ```bash
-decloud logs -n 100
+decloud logs --grep "reconcil"
+```
+
+Time window:
+```bash
+decloud logs --since "09:00" --until "10:00"
 ```
 
 Clear all logs:
 ```bash
 sudo decloud logs clear
-```
-
-Clear only old logs (keep recent):
-```bash
-sudo decloud logs clear --before-last-start
 ```
 
 ### 4. JSON Processing
@@ -538,7 +539,7 @@ When using `decloud logs -f`:
 3. **Logs:**
    ```bash
    decloud logs
-   journalctl -u decloud-node-agent
+   decloud logs --since "1 hour ago" -p err
    ```
 
 4. **Diagnostics:**
@@ -572,9 +573,11 @@ When using `decloud logs -f`:
 │                                                     │
 │ Service & Logs                                      │
 │   sudo decloud restart      - Restart service       │
-│   decloud logs              - View file logs        │
-│   decloud logs -f           - Follow file logs      │
-│   decloud logs --journal    - View journal logs     │
+│   decloud logs              - View logs             │
+│   decloud logs -f           - Follow logs           │
+│   decloud logs --since "1h" - Logs since time       │
+│   decloud logs --grep "x"   - Filter by pattern     │
+│   decloud logs -p err       - Errors only           │
 │   sudo decloud logs clear   - Clear all logs        │
 │                                                     │
 │ Diagnostics                                         │

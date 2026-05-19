@@ -230,10 +230,10 @@ sudo decloud restart
 ```
 
 #### `decloud logs [view]`
-View node agent logs from `/var/log/decloud/nodeagent.log` (default) or systemd journal.
+View node agent logs from systemd journal (default).
 
 ```bash
-# Show last 50 lines from file (default)
+# Show last 50 lines
 decloud logs
 decloud logs view
 
@@ -243,20 +243,33 @@ decloud logs -n 100
 # Follow logs in real-time
 decloud logs -f
 
-# View systemd journal instead of file
-decloud logs --journal
-decloud logs --journal -f
+# Filter by time
+decloud logs --since "1 hour ago"
+decloud logs --since "09:00" --until "10:00"
+decloud logs --since yesterday
 
-# Explicitly view file logs
-decloud logs --file -f
+# Filter by pattern
+decloud logs --grep "reconcil"
+decloud logs -f --grep "error"
+
+# Filter by priority
+decloud logs -p err
+decloud logs --since "1 hour ago" -p warning
+
+# Combine filters
+decloud logs --since "30 min ago" -p err --grep "libvirt"
+
+# Legacy: read from log file (pre-journal installs)
+decloud logs --file
+decloud logs --file --grep "error"
 ```
 
 **Log Sources:**
-- `--file` (default): Read from `/var/log/decloud/nodeagent.log`
-- `--journal`: Read from systemd journal (`journalctl`)
+- systemd journal (default): Timestamped, filterable via `--since`, `--until`, `--grep`, `-p`
+- `--file`: Read from `/var/log/decloud/nodeagent.log` (legacy, for pre-journal installs)
 
 #### `decloud logs clear`
-Clear node agent logs (file-based and systemd journal).
+Clear node agent logs (journal and any stale log files).
 
 **Requires:** root/sudo
 
@@ -275,9 +288,9 @@ sudo decloud logs clear --force
 ```
 
 **What gets cleared:**
-- Node agent log file: `/var/log/decloud/nodeagent.log`
-- Audit logs and rotated logs in `/var/log/decloud/`
-- Systemd journal logs for the service
+- Systemd journal entries for the service (primary)
+- Stale log file at `/var/log/decloud/nodeagent.log` (if present from pre-journal installs)
+- Rotated log files in `/var/log/decloud/`
 
 **Use cases:**
 - Free up disk space when logs grow too large
@@ -376,8 +389,10 @@ Temporary file used during authentication process.
 ### `/var/lib/decloud/vms/`
 VM storage directory (disk images, configs, cloud-init ISOs).
 
-### `/var/log/decloud/nodeagent.log`
-Primary log file for the node agent service. This is the default source for `decloud logs`.
+### `/var/log/decloud/`
+Log directory. The node agent logs to systemd journal (query via `decloud logs`).
+The audit service writes to `/var/log/decloud/audit.log` with its own rotation.
+Stale `nodeagent.log` files from pre-journal installs are cleaned by `decloud logs clear`.
 
 ## Exit Codes
 
@@ -440,14 +455,17 @@ sudo decloud vm cleanup abc-123-def
 ### Log Management
 
 ```bash
-# View file logs (last 50 lines)
+# View logs (last 50 lines)
 decloud logs
 
-# Follow file logs in real-time
+# Follow logs in real-time
 decloud logs -f
 
-# View systemd journal
-decloud logs --journal -f
+# Last hour of errors
+decloud logs --since "1 hour ago" -p err
+
+# Search for a pattern
+decloud logs --grep "vm-cleanup"
 
 # Clear all logs
 sudo decloud logs clear
