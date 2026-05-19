@@ -71,6 +71,20 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                             if (vm.Spec.VmType is VmType.Relay or VmType.Dht or VmType.BlockStore)
                                 continue;
 
+                            // Guard: skip VMs with no established heartbeat baseline.
+                            // After agent restart, LastHeartbeat may still be DateTime.MinValue
+                            // if reconciliation didn't stamp it (e.g., race with initialization).
+                            // The readiness monitor will establish a real baseline within its
+                            // first cycle — don't force-restart before that happens.
+                            if (vm.LastHeartbeat <= DateTime.MinValue.AddYears(1))
+                            {
+                                _logger.LogDebug(
+                                    "VM {VmId} has no heartbeat baseline yet — skipping health check " +
+                                    "until VmReadinessMonitor establishes one",
+                                    vm.VmId);
+                                continue;
+                            }
+
                             var timeSinceLastHeartbeat = DateTime.UtcNow - vm.LastHeartbeat;
                             if (vm.IsFullyReady && timeSinceLastHeartbeat > TimeSpan.FromMinutes(5))
                             {

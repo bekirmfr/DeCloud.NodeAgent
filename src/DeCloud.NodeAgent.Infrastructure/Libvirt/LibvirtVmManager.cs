@@ -153,6 +153,25 @@ public class LibvirtVmManager : IVmManager
             }
 
             // =====================================================
+            // STEP 2.5: Stamp discovered-alive baseline for Running VMs
+            // =====================================================
+            // After agent restart, LastHeartbeat from DB is stale (reflects the
+            // last guest-agent ping before the agent went down). VmHealthService
+            // would interpret this staleness as "VM unresponsive" and force-restart
+            // VMs that are actually healthy and confirmed Running by libvirt.
+            // Stamp LastHeartbeat = now so the health check starts from a fresh
+            // baseline. VmReadinessMonitor will overwrite this with real
+            // guest-agent heartbeats within its first cycle.
+            foreach (var vm in _vms.Values)
+            {
+                if (vm.State == VmState.Running)
+                {
+                    vm.LastHeartbeat = DateTime.UtcNow;
+                    await _repository.UpdateLastHeartbeatAsync(vm.VmId, vm.LastHeartbeat);
+                }
+            }
+
+            // =====================================================
             // STEP 3: Update next VNC port and vsock CID
             // =====================================================
             await UpdateNextVncPortAsync(ct);
@@ -370,7 +389,8 @@ public class LibvirtVmManager : IVmManager
                 CreatedAt = Directory.Exists(vmDir)
                     ? Directory.GetCreationTimeUtc(vmDir)
                     : DateTime.UtcNow,
-                StartedAt = state == VmState.Running ? DateTime.UtcNow : null
+                StartedAt = state == VmState.Running ? DateTime.UtcNow : null,
+                LastHeartbeat = DateTime.UtcNow
             };
 
             // -----------------------------------------------------------------
