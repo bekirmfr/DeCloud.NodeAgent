@@ -805,17 +805,17 @@ cmd_allocate() {
  
             if [[ -n "$cpu_percent" ]]; then
                 $first || alloc_json+=","
-                alloc_json+="\"cpuPercent\":$(echo "scale=2; $cpu_percent / 100" | bc)"
+                alloc_json+="\"cpuPercent\":$(awk "BEGIN {printf \"%.2f\", $cpu_percent / 100}")"
                 first=false
             fi
             if [[ -n "$mem_percent" ]]; then
                 $first || alloc_json+=","
-                alloc_json+="\"memoryPercent\":$(echo "scale=2; $mem_percent / 100" | bc)"
+                alloc_json+="\"memoryPercent\":$(awk "BEGIN {printf \"%.2f\", $mem_percent / 100}")"
                 first=false
             fi
             if [[ -n "$stor_percent" ]]; then
                 $first || alloc_json+=","
-                alloc_json+="\"storagePercent\":$(echo "scale=2; $stor_percent / 100" | bc)"
+                alloc_json+="\"storagePercent\":$(awk "BEGIN {printf \"%.2f\", $stor_percent / 100}")"
                 first=false
             fi
             if [[ -n "$gpu_count" ]]; then
