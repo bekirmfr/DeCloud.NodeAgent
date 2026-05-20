@@ -42,6 +42,11 @@ public class LibvirtVmManager : IVmManager
     private readonly SemaphoreSlim _lock = new(1, 1);
     // Serializes qemu-nbd operations — nbd0 is a system-wide resource.
     private static readonly SemaphoreSlim _nbdLock = new(1, 1);
+    /// <summary>
+    /// Previous CPU time samples for delta-based utilization calculation.
+    /// Key = vmId, Value = (cpuTimeNanoseconds, wallClockUtc).
+    /// </summary>
+    private readonly Dictionary<string, (long cpuTimeNs, DateTime wallTime)> _previousCpuSamples = new();
     private int _nextVncPort;
     private uint _nextVsockCid = 3; // CID 0=hypervisor, 1=reserved, 2=host, 3+=guests
     private bool _initialized = false;
@@ -327,6 +332,10 @@ public class LibvirtVmManager : IVmManager
                         "Removing ghost VM {VmId} (state: {State}) — no libvirt domain exists",
                         vmId, vm.State);
                     _vms.Remove(vmId);
+                    lock (_previousCpuSamples)
+                    {
+                        _previousCpuSamples.Remove(vmId);
+                    }
                     await _repository.DeleteVmAsync(vmId);
                 }
             }
@@ -1217,7 +1226,11 @@ public class LibvirtVmManager : IVmManager
         if (!existsInLibvirt)
         {
             _vms.Remove(vmId);
-            await _repository.DeleteVmAsync(vmId);  // ✅ ADD THIS
+            lock (_previousCpuSamples)
+            {
+                _previousCpuSamples.Remove(vmId);
+            }
+            await _repository.DeleteVmAsync(vmId);
             _logger.LogInformation("Removed non-existent VM {VmId} from tracking and database", vmId);
             return VmOperationResult.Fail(vmId, "VM not found in libvirt", "NOT_FOUND");
         }
@@ -1364,6 +1377,10 @@ public class LibvirtVmManager : IVmManager
 
         // Remove from tracking
         _vms.Remove(vmId);
+        lock (_previousCpuSamples)
+        {
+            _previousCpuSamples.Remove(vmId);
+        }
 
         // Remove from database
         await _repository.DeleteVmAsync(vmId);
@@ -1507,12 +1524,14 @@ public class LibvirtVmManager : IVmManager
     {
         lock (_vms)
         {
-            var filteredVms = new List<VmInstance>();
+            IEnumerable<VmInstance> result = _vms.Values;
+
             if (vmType != null)
-                filteredVms = _vms.Values.Where(vm => vm.Spec.VmType == vmType).ToList();
+                result = result.Where(vm => vm.Spec.VmType == vmType);
             if (vmState != null)
-                filteredVms = filteredVms.Where(vm => vm.State == vmState).ToList();
-            return _vms.Values.ToList();
+                result = result.Where(vm => vm.State == vmState);
+
+            return result.ToList();
         }
     }
 
@@ -1520,10 +1539,13 @@ public class LibvirtVmManager : IVmManager
     {
         lock (_vms)
         {
-            var systemVms = _vms.Values.Where(vm => SystemVmConstants.Types.Contains(vm.Spec.VmType)).ToList();
+            IEnumerable<VmInstance> result = _vms.Values
+                .Where(vm => SystemVmConstants.Types.Contains(vm.Spec.VmType));
+
             if (vmState != null)
-                systemVms = systemVms.Where(vm => vm.State == vmState).ToList();
-            return _vms.Values.ToList();
+                result = result.Where(vm => vm.State == vmState);
+
+            return result.ToList();
         }
     }
 
@@ -1556,9 +1578,28 @@ public class LibvirtVmManager : IVmManager
         if (cpuResult.Success)
         {
             var match = Regex.Match(cpuResult.StandardOutput, @"cpu\.time=(\d+)");
-            if (match.Success && long.TryParse(match.Groups[1].Value, out var cpuTime))
+            if (match.Success && long.TryParse(match.Groups[1].Value, out var cpuTimeNs))
             {
-                usage.CpuPercent = (cpuTime / 1_000_000_000.0) % 100;
+                var now = DateTime.UtcNow;
+                var vCpuCount = vm.Spec.VirtualCpuCores;
+
+                lock (_previousCpuSamples)
+                {
+                    if (_previousCpuSamples.TryGetValue(vmId, out var prev))
+                    {
+                        var wallElapsed = (now - prev.wallTime).TotalSeconds;
+                        if (wallElapsed > 0.5) // Guard against division by near-zero
+                        {
+                            var cpuDeltaNs = cpuTimeNs - prev.cpuTimeNs;
+                            // cpuDeltaNs / 1e9 = CPU-seconds consumed in wallElapsed seconds
+                            // Divide by vCPU count to normalize to 0-100% per vCPU
+                            var cpuPercent = (cpuDeltaNs / 1_000_000_000.0) / wallElapsed / Math.Max(1, vCpuCount) * 100.0;
+                            usage.CpuPercent = Math.Clamp(cpuPercent, 0, 100);
+                        }
+                    }
+                    // Store current sample for next delta calculation
+                    _previousCpuSamples[vmId] = (cpuTimeNs, now);
+                }
             }
         }
 
