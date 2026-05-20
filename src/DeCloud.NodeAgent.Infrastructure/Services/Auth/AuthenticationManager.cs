@@ -130,8 +130,12 @@ public class AuthenticationManager : BackgroundService
 
             if (await ValidateCredentialsAsync(credentials, ct))
             {
+                var nodeId = credentials.ContainsKey("NODE_ID")
+                    ? credentials["NODE_ID"]
+                    : _nodeMetadata.NodeId;
+
                 var isAuthorized = await VerifyNodeAuthorizationAsync(
-                    credentials["NODE_ID"],
+                    nodeId,
                     credentials["API_KEY"], ct);
 
                 if (isAuthorized)
