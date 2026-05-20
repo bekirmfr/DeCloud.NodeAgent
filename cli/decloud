@@ -794,19 +794,9 @@ cmd_allocate() {
         log_success "GPU allocation set to: ${gpu_count}"
     fi
  
-    # ── Restart agent to pick up settings ─────────────────────────────────
     if $changed; then
-        if check_service_running; then
-            systemctl restart "$SERVICE_NAME" 2>/dev/null || true
-            log_info "Agent restarted to apply new settings"
-            # Wait for agent API to come up before pushing
-            if ! wait_for_agent_api 15; then
-                log_warn "Agent API not ready after restart"
-            fi
-        fi
-
-        # ── Push to orchestrator if registered ────────────────────────────
-        if check_authenticated 2>/dev/null; then
+        # ── Push to orchestrator FIRST while agent is still authenticated ─
+        if check_service_running && check_authenticated 2>/dev/null; then
             log_info "Pushing allocation to orchestrator..."
  
             # Build JSON request body — only include non-empty fields
@@ -866,6 +856,16 @@ cmd_allocate() {
         else
             log_info "Node not registered — allocation saved locally."
             log_info "Run 'sudo $SCRIPT_NAME register' then 'sudo $SCRIPT_NAME evaluate' to go live."
+        fi
+
+        # ── Restart agent to pick up settings ─────────────────────────────────
+        if check_service_running; then
+            systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+            log_info "Agent restarted to apply new settings"
+            # Wait for agent API to come up before pushing
+            if ! wait_for_agent_api 15; then
+                log_warn "Agent API not ready after restart"
+            fi
         fi
  
         echo ""
