@@ -319,6 +319,25 @@ public class AuthenticationManager : BackgroundService
             return;
         }
 
+        // Ensure evaluation exists before attempting login.
+        // Login requires PerformanceEvaluation to compute capacity.
+        if (_nodeState.PerformanceEvaluation == null)
+        {
+            _logger.LogInformation(
+                "No performance evaluation cached — running auto-evaluate before login...");
+
+            var evalResult = await _orchestratorClient.EvaluateNodeAsync(ct);
+            if (evalResult == null)
+            {
+                _logger.LogWarning(
+                    "Auto-evaluate failed — node is heartbeating but not scheduling-ready. " +
+                    "Run 'decloud evaluate' then 'decloud login' manually.");
+                return;
+            }
+
+            _logger.LogInformation("✓ Auto-evaluate successful");
+        }
+
         try
         {
             var success = await _orchestratorClient.LoginAsync(ct);
@@ -336,13 +355,11 @@ public class AuthenticationManager : BackgroundService
         }
         catch (Exception ex)
         {
-            // Non-fatal: the node is enrolled and heartbeating. Scheduling
-            // readiness is a convenience, not a requirement for operation.
-            // The operator can run 'decloud login' manually.
             _logger.LogWarning(ex,
                 "Auto-login failed — node is heartbeating but not scheduling-ready");
         }
     }
+
 
     private bool _hasLoggedAuthWarning = false;
 }

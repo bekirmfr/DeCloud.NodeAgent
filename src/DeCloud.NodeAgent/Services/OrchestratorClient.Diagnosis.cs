@@ -9,6 +9,7 @@
 
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Core.Models.State;
 using Orchestrator.Models;
 using System.Text.Json;
 
@@ -161,7 +162,7 @@ public partial class OrchestratorClient
         {
             _logger.LogDebug("Fetching performance evaluation from orchestrator...");
 
-            var response = await _httpClient.GetAsync("/api/nodes/me/evaluation", ct);
+            var response = await _httpClient.GetAsync("/api/nodes/me/performance", ct);
 
             if (!response.IsSuccessStatusCode)
             {
@@ -268,16 +269,14 @@ public partial class OrchestratorClient
     // =====================================================================
 
     /// <inheritdoc />
-    public async Task<NodePerformanceEvaluation?> RequestPerformanceEvaluationAsync(CancellationToken ct = default)
+    /// <inheritdoc />
+    public async Task<EvaluateNodeResponse?> EvaluateNodeAsync(CancellationToken ct = default)
     {
         try
         {
-            // 1. Run the benchmark test locally
-            // Get hardware inventory
             var inventory = await _resourceDiscovery.DiscoverAllAsync(ct);
 
-            // 2. Request re-evaluation from orchestrator
-            _logger.LogInformation("Requesting performance re-evaluation from orchestrator...");
+            _logger.LogInformation("Requesting evaluation from orchestrator...");
 
             var response = await _httpClient.PostAsJsonAsync(
                 "/api/nodes/me/evaluate",
@@ -287,47 +286,136 @@ public partial class OrchestratorClient
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogWarning(
-                    "Failed to request performance evaluation: {StatusCode} - {Reason}",
+                    "Evaluation failed: {StatusCode} - {Reason}",
                     (int)response.StatusCode, response.ReasonPhrase);
                 return null;
             }
 
             var content = await response.Content.ReadAsStringAsync(ct);
-            var evaluation = JsonSerializer.Deserialize<NodePerformanceEvaluation>(content, _jsonOptions);
+            var evalResponse = JsonSerializer.Deserialize<EvaluateNodeResponse>(
+                content, _jsonOptions);
 
-            if (evaluation != null)
+            if (evalResponse == null)
             {
-                _logger.LogInformation(
-                    "✓ Performance re-evaluation complete: " +
-                    "Benchmark={Benchmark}, Points/Core={PointsPerCore:F2}, " +
-                    "HighestTier={HighestTier}, Acceptable={IsAcceptable}",
-                    evaluation.BenchmarkScore,
-                    evaluation.PointsPerCore,
-                    evaluation.HighestTier,
-                    evaluation.IsAcceptable);
-
-                // Update local state service
-                _nodeState.UpdatePerformanceEvaluation(evaluation);
+                _logger.LogError("Failed to deserialize evaluate response");
+                return null;
             }
 
-            return evaluation;
+            // ── Persist performance evaluation ───────────────────────────
+            _nodeState.UpdatePerformanceEvaluation(evalResponse.PerformanceEvaluation);
+            _logger.LogInformation(
+                "✓ Performance evaluation: benchmark={Benchmark}, " +
+                "points={Points}, tier={Tier}",
+                evalResponse.PerformanceEvaluation.BenchmarkScore,
+                evalResponse.PerformanceEvaluation.TotalComputePoints,
+                evalResponse.PerformanceEvaluation.HighestTier);
+
+            // ── Persist scheduling config ────────────────────────────────
+            _nodeState.UpdateSchedulingConfig(evalResponse.SchedulingConfig);
+            _logger.LogInformation(
+                "✓ Scheduling config v{Version} received",
+                evalResponse.SchedulingConfig.Version);
+
+            // ── Persist obligation identity states ───────────────────────
+            if (evalResponse.ObligationStates is { Count: > 0 } states)
+            {
+                foreach (var (role, payload) in states)
+                {
+                    if (string.IsNullOrWhiteSpace(payload.StateJson))
+                    {
+                        _logger.LogWarning(
+                            "Evaluate response: empty state JSON for role '{Role}' — skipping",
+                            role);
+                        continue;
+                    }
+
+                    var written = await _obligationState.SaveStateAsync(
+                        role,
+                        payload.StateJson,
+                        payload.Version,
+                        ct);
+
+                    _logger.LogInformation(
+                        written
+                            ? "✓ Obligation state saved: {Role} v{Version}"
+                            : "Obligation state {Role} v{Version} already current",
+                        role, payload.Version);
+                }
+            }
+
+            // ── Persist system VM templates ──────────────────────────────
+            if (evalResponse.SystemTemplates is { Count: > 0 } templates)
+            {
+                foreach (var (role, payload) in templates)
+                {
+                    if (string.IsNullOrWhiteSpace(payload.TemplateJson))
+                    {
+                        _logger.LogWarning(
+                            "Evaluate response: empty template JSON for role '{Role}' — skipping",
+                            role);
+                        continue;
+                    }
+
+                    var written = await _obligationState.SaveSystemTemplateAsync(
+                        role,
+                        payload.TemplateJson,
+                        payload.Revision,
+                        payload.TemplateId,
+                        ct);
+
+                    _logger.LogInformation(
+                        written
+                            ? "✓ System template saved: {Role} r{Revision}"
+                            : "System template {Role} r{Revision} already current",
+                        role, payload.Revision);
+                }
+            }
+
+            // ── Persist obligation descriptors ───────────────────────────
+            if (evalResponse.Obligations is { Count: > 0 } obligations)
+            {
+                var descriptors = obligations
+                    .Where(o => !string.IsNullOrWhiteSpace(o.Role))
+                    .Select(o => new ObligationDescriptor
+                    {
+                        Role = o.Role,
+                        Deps = o.Deps ?? [],
+                    })
+                    .ToList();
+
+                await _obligationState.SaveObligationsAsync(descriptors, ct);
+                _logger.LogInformation(
+                    "✓ Obligations persisted: [{Roles}]",
+                    string.Join(", ", descriptors.Select(d => d.Role)));
+            }
+
+            // ── DHT bootstrap peers ──────────────────────────────────────
+            if (evalResponse.DhtBootstrapPeers is { Count: > 0 } peers)
+            {
+                _logger.LogInformation(
+                    "✓ {Count} DHT bootstrap peer(s) received",
+                    peers.Count);
+            }
+
+            return evalResponse;
         }
         catch (HttpRequestException ex)
         {
-            _logger.LogError(ex, "HTTP error requesting performance evaluation");
+            _logger.LogError(ex, "HTTP error during evaluation");
             return null;
         }
         catch (TaskCanceledException) when (ct.IsCancellationRequested)
         {
-            _logger.LogDebug("Performance evaluation request cancelled");
+            _logger.LogDebug("Evaluation request cancelled");
             throw;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error requesting performance evaluation");
+            _logger.LogError(ex, "Error during evaluation");
             return null;
         }
     }
+
 
     // =====================================================================
     // Full Node Synchronization

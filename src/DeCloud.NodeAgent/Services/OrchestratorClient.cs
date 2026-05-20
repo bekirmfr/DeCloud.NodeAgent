@@ -855,121 +855,24 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                     _orchestratorPublicKey = registrationResponse.OrchestratorWireGuardPublicKey ?? throw new ArgumentNullException(nameof(registrationResponse.OrchestratorWireGuardPublicKey));
                     await SaveOrchestratorPublicKeyAsync(_orchestratorPublicKey, ct);
 
-                    var performanceEval = registrationResponse.PerformanceEvaluation ?? throw new ArgumentNullException(nameof(registrationResponse.PerformanceEvaluation));
-                    _nodeState.UpdatePerformanceEvaluation(performanceEval);
-                    _logger.LogInformation($"✓ Performance evaluation received and updated with cpu benchmark score {performanceEval.BenchmarkScore}, total compute points {performanceEval.TotalComputePoints}");
-
-                    var schedulingConfig = registrationResponse.SchedulingConfig ?? throw new ArgumentNullException(nameof(registrationResponse.SchedulingConfig));
-                    _nodeState.UpdateSchedulingConfig(schedulingConfig);
-                    _logger.LogInformation($"✓ Scheduling configuration version {schedulingConfig.Version} received and updated");
-
-                    // ── Persist obligation identity states ──────────────────────
-                    // The orchestrator sends states for any role where its version
-                    // exceeds what we reported in ObligationStateVersions.
-                    // SaveStateAsync is idempotent (version-guarded), safe to call
-                    // even if the state was already current.
-                    if (registrationResponse.ObligationStates is { Count: > 0 } states)
+                    // Registration is now identity-only. Evaluation, obligations,
+                    // and system templates are delivered by the evaluate endpoint.
+                    // Log non-compliant VMs if present (re-registration).
+                    if (registrationResponse.NonCompliantVms is { Count: > 0 } ncVms)
                     {
-                        foreach (var (role, payload) in states)
+                        _logger.LogWarning(
+                            "{Count} VM(s) flagged for migration due to locality change",
+                            ncVms.Count);
+                        foreach (var vm in ncVms)
                         {
-                            if (string.IsNullOrWhiteSpace(payload.StateJson))
-                            {
-                                _logger.LogWarning(
-                                    "Registration response: empty state JSON for role '{Role}' — skipping",
-                                    role);
-                                continue;
-                            }
-
-                            var written = await _obligationState.SaveStateAsync(
-                                role,
-                                payload.StateJson,
-                                payload.Version,
-                                ct);
-
-                            // Log role + version only — never the state JSON content.
-                            _logger.LogInformation(
-                                written
-                                    ? "✓ Obligation state [{Role}] v{Version} persisted"
-                                    : "  Obligation state [{Role}] v{Version} skipped (already current)",
-                                role, payload.Version);
+                            _logger.LogWarning("  {VmId}: {Reason}", vm.VmId, vm.Reason);
                         }
-                    }
-                    else
-                    {
-                        _logger.LogDebug(
-                            "Registration response: no obligation states delivered " +
-                            "(all states current or no obligations assigned)");
-                    }
-
-                    // ── Persist system templates ─────────────────────────────────
-                    // Parallel to ObligationStates above. Save each template to SQLite
-                    // and trigger artifact prefetch so binaries are cached before deploy.
-                    if (registrationResponse.SystemTemplates is { Count: > 0 } systemTemplates)
-                    {
-                        foreach (var (role, payload) in systemTemplates)
-                        {
-                            if (string.IsNullOrWhiteSpace(payload.TemplateJson))
-                            {
-                                _logger.LogWarning(
-                                    "Registration: empty template JSON for role '{Role}' — skipping",
-                                    role);
-                                continue;
-                            }
-
-                            var written = await _obligationState.SaveSystemTemplateAsync(
-                                role,
-                                payload.TemplateJson,
-                                payload.Revision,
-                                string.IsNullOrEmpty(payload.TemplateId) ? null : payload.TemplateId,
-                                ct);
-
-                            _logger.LogInformation(
-                                written
-                                    ? "✓ System template [{Role}] r{Revision} persisted"
-                                    : "  System template [{Role}] r{Revision} already current",
-                                role, payload.Revision);
-
-                            if (written)
-                                await TriggerArtifactPrefetchAsync(role, payload.TemplateJson, ct);
-                        }
-                    }
-                    else
-                    {
-                        _logger.LogDebug(
-                            "Registration response: no system templates delivered " +
-                            "(all templates current or none seeded yet)");
-                    }
-
-                    // ── Persist obligation descriptors ───────────────────────────
-                    // The obligation table is the matrix's intent source. Without it,
-                    // IntentComputation.Compute() always returns Intent.None and the
-                    // reconciler never issues Create.
-                    if (registrationResponse.Obligations is { Count: > 0 } obligations)
-                    {
-                        var descriptors = obligations
-                            .Where(o => !string.IsNullOrWhiteSpace(o.Role))
-                            .Select(o => new ObligationDescriptor
-                            {
-                                Role = o.Role,
-                                Deps = o.Deps ?? [],
-                            })
-                            .ToList();
-
-                        await _obligationState.SaveObligationsAsync(descriptors, ct);
-                        _logger.LogInformation(
-                        "✓ Obligations persisted: [{Roles}]",
-                        string.Join(", ", descriptors.Select(d => d.Role)));
-                    }
-                    else
-                    {
-                        _logger.LogDebug(
-                        "Registration response: no obligations delivered — " +
-                        "node has no system VM obligations or orchestrator is pre-P9");
                     }
 
                     _logger.LogInformation(
-                        "✓ Node registered successfully: {NodeId} | Wallet: {Wallet}",
-                        _nodeId, _walletAddress);
+                        "✓ Node registered: {NodeId}. " +
+                        "Run 'decloud evaluate' to benchmark and receive obligations.",
+                        _nodeId);
 
                     return RegistrationResult.Success(_nodeId, _apiKey);
                 }

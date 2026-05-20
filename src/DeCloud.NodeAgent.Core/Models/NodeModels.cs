@@ -16,27 +16,32 @@ public class NodeObligationDescriptorDto
 
 public record NodeRegistrationResponse(
     string NodeId,
-    NodePerformanceEvaluation PerformanceEvaluation,
     string ApiKey,
-    SchedulingConfig SchedulingConfig,
     string OrchestratorWireGuardPublicKey,
     TimeSpan HeartbeatInterval,
+    List<NonCompliantVmInfo>? NonCompliantVms = null
+);
+
+public record NonCompliantVmInfo(
+    string VmId,
+    string VmName,
+    string Reason
+);
+
+/// <summary>
+/// Response from POST /api/nodes/me/evaluate.
+/// Carries performance evaluation, scheduling config, obligations,
+/// identity states, system templates — everything that was previously
+/// in the registration response.
+/// </summary>
+public record EvaluateNodeResponse(
+    NodePerformanceEvaluation PerformanceEvaluation,
+    SchedulingConfig SchedulingConfig,
     List<string>? DhtBootstrapPeers,
-    /// <summary>
-    /// Identity state payloads keyed by canonical role name.
-    /// Contains only roles where orchestrator version > node-reported version.
-    /// Null or empty = all identity states current on the node.
-    /// </summary>
     Dictionary<string, ObligationStatePayload>? ObligationStates,
-    /// <summary>
-    /// System template payloads keyed by canonical role name.
-    /// Contains only roles where orchestrator revision > node-reported revision.
-    /// Null or empty = all templates current on the node (or none seeded yet).
-    /// </summary>
     Dictionary<string, SystemVmTemplatePayload>? SystemTemplates = null,
     List<NodeObligationDescriptorDto>? Obligations = null
 );
-
 
 /// <summary>
 /// Mirrors Orchestrator.Models.ObligationStatePayload.

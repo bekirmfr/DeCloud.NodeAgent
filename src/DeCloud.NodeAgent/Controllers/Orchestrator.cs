@@ -88,16 +88,17 @@ public class OrchestratorController : ControllerBase
     }
 
     /// <summary>
-    /// Request performance evaluation
+    /// Request full evaluation (benchmark + obligations + templates).
+    /// Primary lifecycle step after register, before login.
     /// </summary>
-    [HttpGet("evaluate")]
-    public async Task<ActionResult<NodePerformanceEvaluation>> RequestEvaluate(CancellationToken ct)
+    [HttpPost("evaluate")]
+    public async Task<ActionResult<EvaluateNodeResponse>> RequestEvaluate(CancellationToken ct)
     {
-        var evaluation = await _orchestratorClient.RequestPerformanceEvaluationAsync(ct);
+        var evaluation = await _orchestratorClient.EvaluateNodeAsync(ct);
 
         if (evaluation == null)
         {
-            return NotFound("Node evaluation request failed.");
+            return StatusCode(502, "Evaluation failed — could not reach orchestrator.");
         }
         return Ok(evaluation);
     }

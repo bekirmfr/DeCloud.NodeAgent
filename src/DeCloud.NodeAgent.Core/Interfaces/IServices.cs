@@ -268,15 +268,11 @@ public interface IOrchestratorClient
     Task<NodeCapacityResponse?> GetCapacityAsync(CancellationToken ct = default);
 
     /// <summary>
-    /// Request orchestrator to re-evaluate node performance.
+    /// Evaluate node: benchmark, receive obligations, persist all state.
+    /// Primary lifecycle step between register and login.
     /// Endpoint: POST /api/nodes/me/evaluate
     /// </summary>
-    /// <remarks>
-    /// Triggers a fresh performance evaluation on the orchestrator.
-    /// Use after hardware changes or benchmark updates.
-    /// Returns the new evaluation result.
-    /// </remarks>
-    Task<NodePerformanceEvaluation?> RequestPerformanceEvaluationAsync(CancellationToken ct = default);
+    Task<EvaluateNodeResponse?> EvaluateNodeAsync(CancellationToken ct = default);
 
     /// <summary>
     /// Synchronize all node state from orchestrator.

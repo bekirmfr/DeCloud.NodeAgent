@@ -1700,27 +1700,39 @@ cmd_evaluate() {
     check_authenticated
     echo ""
     echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
-    echo -e "${BOLD}  Request Performance Re-evaluation${NC}"
+    echo -e "${BOLD}  Node Evaluation${NC}"
     echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
     echo ""
     if ! check_service_running; then log_error "Service not running"; exit $EXIT_ERROR; fi
 
-    log_info "Requesting performance re-evaluation from orchestrator..."
+    log_info "Requesting evaluation from orchestrator (benchmark + obligations)..."
     echo ""
 
     local result
-    if result=$(api_get "/api/orchestrator/evaluate" 2>/dev/null); then
-        log_success "Re-evaluation completed"
+    if result=$(api_post "/api/orchestrator/evaluate" "{}" 2>/dev/null); then
+        log_success "Evaluation completed"
         echo ""
-        echo -e "${BOLD}New Evaluation Results:${NC}"
-        echo "  Raw Score:        $(echo "$result" | jq -r '.benchmarkScore     // "N/A"')"
-        echo "  Capped Score:     $(echo "$result" | jq -r '.cappedBenchmarkScore // "N/A"')"
-        printf "  Points per Core:  %s\n" "$(echo "$result" | jq -r '.pointsPerCore      // "N/A"')"
-        echo "  Highest Tier:     $(echo "$result" | jq -r '.highestTier        // "N/A"')"
+
+        local eval; eval=$(echo "$result" | jq '.performanceEvaluation // empty')
+
+        echo -e "${BOLD}Performance:${NC}"
+        echo "  Benchmark Score:  $(echo "$eval" | jq -r '.benchmarkScore     // "N/A"')"
+        echo "  Capped Score:     $(echo "$eval" | jq -r '.cappedBenchmarkScore // "N/A"')"
+        printf "  Points per Core:  %s\n" "$(echo "$eval" | jq -r '.pointsPerCore      // "N/A"')"
+        echo "  Highest Tier:     $(echo "$eval" | jq -r '.highestTier        // "N/A"')"
+
+        local oblig_count; oblig_count=$(echo "$result" | jq '.obligations // [] | length')
+        if [[ "$oblig_count" -gt 0 ]]; then
+            echo ""
+            echo -e "${BOLD}Obligations assigned:${NC}"
+            echo "$result" | jq -r '.obligations[] | "  \(.role)"'
+        fi
+
         echo ""
-        log_info "Use '$SCRIPT_NAME performance' for full details"
+        log_info "Run '$SCRIPT_NAME allocate --show' to review resource allocation."
+        log_info "Run '$SCRIPT_NAME login' to go live."
     else
-        log_error "Failed to request re-evaluation"; exit $EXIT_API_ERROR
+        log_error "Evaluation failed"; exit $EXIT_API_ERROR
     fi
     echo ""
 }
