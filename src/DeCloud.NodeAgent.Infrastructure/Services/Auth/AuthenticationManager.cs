@@ -21,15 +21,19 @@ public class AuthenticationManager : BackgroundService
     private static readonly TimeSpan DiscoveryCheckInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan AuthCheckInterval = TimeSpan.FromSeconds(10);
 
+    private readonly INodeMetadataService _nodeMetadata;
+
     public AuthenticationManager(
         IResourceDiscoveryService resourceDiscovery,
         IOrchestratorClient orchestratorClient,
         INodeStateService state,
+        INodeMetadataService nodeMetadata,
         ILogger<AuthenticationManager> logger)
     {
         _resourceDiscovery = resourceDiscovery;
         _orchestratorClient = orchestratorClient;
         _nodeState = state;
+        _nodeMetadata = nodeMetadata;
         _logger = logger;
     }
 
@@ -264,14 +268,7 @@ public class AuthenticationManager : BackgroundService
                 Timeout = TimeSpan.FromSeconds(10)
             };
 
-            // Get orchestrator base URL from OrchestratorClient configuration
-            var baseUrl = _orchestratorClient.GetType()
-                .GetField("_httpClient", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-                ?.GetValue(_orchestratorClient) as HttpClient;
-
-            var requestUrl = baseUrl?.BaseAddress != null
-                ? $"{baseUrl.BaseAddress.ToString().TrimEnd('/')}/api/nodes/{nodeId}"
-                : $"http://localhost:5000/api/nodes/{nodeId}";
+            var requestUrl = $"{_nodeMetadata.OrchestratorUrl.TrimEnd('/')}/api/nodes/{nodeId}";
 
             var request = new HttpRequestMessage(HttpMethod.Get, requestUrl);
             request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);

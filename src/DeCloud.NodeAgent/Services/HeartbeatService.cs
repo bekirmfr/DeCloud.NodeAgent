@@ -56,32 +56,28 @@ public class HeartbeatService : BackgroundService
         // Wait for node to be registered
         await _nodeState.WaitForAuthenticationAsync(ct);
 
-        _logger.LogInformation("✓ Node registered, fetching orchestrator state...");
+        _logger.LogInformation("✓ Node registered, loading orchestrator state...");
 
-        // Fetch orchestrator state data on startup (critical for VM creation)
-        // This ensures PerformanceEvaluation and SchedulingConfig are populated even after node restarts
+        // Wait for full initialization (PerformanceEvaluation + SchedulingConfig)
+        // before starting the heartbeat loop. AuthenticationManager handles auto-
+        // evaluate if no evaluation exists. Give it up to 2 minutes, then proceed
+        // with heartbeating regardless (heartbeat works without evaluation — it
+        // just can't report capacity accurately).
         try
         {
-            var perfEval = await _orchestratorClient.GetPerformanceEvaluationAsync(ct);
-            if (perfEval != null)
-            {
-                _nodeState.UpdatePerformanceEvaluation(perfEval);
-                _logger.LogInformation(
-                    "✓ Performance evaluation loaded: {Score} score, {Points} total points",
-                    perfEval.BenchmarkScore, perfEval.TotalComputePoints);
-            }
-            else
-            {
-                _logger.LogWarning(
-                    "⚠️  Failed to load performance evaluation on startup. " +
-                    "VM creation will be blocked until first successful evaluation.");
-            }
+            using var initTimeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, initTimeout.Token);
+
+            await _nodeState.WaitForInitializationAsync(linked.Token);
+            _logger.LogInformation(
+                "✓ Node fully initialized — starting heartbeat loop");
         }
-        catch (Exception ex)
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            _logger.LogError(ex, 
-                "Failed to fetch performance evaluation on startup. " +
-                "VM creation will be blocked until evaluation is available.");
+            _logger.LogWarning(
+                "⚠️  Timed out waiting for full initialization (2 min). " +
+                "Starting heartbeat loop without evaluation — VM creation " +
+                "will be blocked until evaluation completes.");
         }
 
         _logger.LogInformation("Starting heartbeat loop");

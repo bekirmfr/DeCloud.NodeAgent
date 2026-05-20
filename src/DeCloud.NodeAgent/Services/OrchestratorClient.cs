@@ -230,8 +230,9 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             Pricing = _nodeMetadata.Pricing,
             RegisteredAt = DateTime.UtcNow,
             SshCaPublicKey = sshCaPublicKey,
-            ObligationStateVersions = await BuildObligationStateVersionsAsync(ct),
-            SystemTemplateVersions = await _systemVmService.GetTemplateRevisionsAsync(ct),
+            // ObligationStateVersions and SystemTemplateVersions are not used
+            // during registration — obligations are delivered via the evaluate
+            // endpoint, and version-aware delivery uses the heartbeat flow.
             AllocatedResources = BuildAllocatedResources(),
         };
 
@@ -340,70 +341,50 @@ REGISTERED_AT={DateTime.UtcNow:O}";
     /// </summary>
     private AllocatedResources? BuildAllocatedResources()
     {
-        var hasCpuPercent = _nodeMetadata.AllocatedComputePointsPercent.HasValue;
-        // NodeMetadataService resolves "percent" mode memory/storage into bytes,
-        // but we can detect percent mode by checking the config key directly.
-        var memMode = _nodeMetadata.GetType().GetField("_memoryAllocMode",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        var storMode = _nodeMetadata.GetType().GetField("_storageAllocMode",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-
-        // Check if ANY resource uses percent mode — if so, send v2
-        var hasAnyPercentConfig = hasCpuPercent;
-
-        // Simpler approach: read config keys directly
-        var configuration = _nodeMetadata as INodeMetadataService;
-
-        // If CPU percent is set, prefer v2 format for all resources.
-        // The orchestrator will apply defaults (90%) for any null percentage.
-        if (hasCpuPercent ||
-            _nodeMetadata.AllocatedMemoryBytes.HasValue ||
-            _nodeMetadata.AllocatedComputePoints.HasValue ||
-            _nodeMetadata.AllocatedStorageBytes.HasValue ||
-            _nodeMetadata.AllocatedGpuCount.HasValue)
+        if (!_nodeMetadata.AllocatedComputePointsPercent.HasValue &&
+            !_nodeMetadata.AllocatedMemoryBytes.HasValue &&
+            !_nodeMetadata.AllocatedStorageBytes.HasValue &&
+            !_nodeMetadata.AllocatedGpuCount.HasValue)
         {
-            // Build v2 format: convert absolute values to percentages where possible
-            var inventory = _nodeMetadata.Inventory;
-
-            double? cpuPct = null;
-            if (_nodeMetadata.AllocatedComputePointsPercent.HasValue)
-            {
-                cpuPct = _nodeMetadata.AllocatedComputePointsPercent.Value / 100.0;
-            }
-
-            double? memPct = null;
-            if (_nodeMetadata.AllocatedMemoryBytes.HasValue && inventory?.Memory != null
-                && inventory.Memory.TotalBytes > 0)
-            {
-                memPct = (double)_nodeMetadata.AllocatedMemoryBytes.Value
-                       / inventory.Memory.TotalBytes;
-                memPct = Math.Max(AllocatedResources.MinPercent,
-                         Math.Min(AllocatedResources.MaxPercent, memPct.Value));
-            }
-
-            double? storPct = null;
-            if (_nodeMetadata.AllocatedStorageBytes.HasValue && inventory?.Storage != null)
-            {
-                var totalStorage = inventory.Storage.Sum(s => s.TotalBytes);
-                if (totalStorage > 0)
-                {
-                    storPct = (double)_nodeMetadata.AllocatedStorageBytes.Value / totalStorage;
-                    storPct = Math.Max(AllocatedResources.MinPercent,
-                             Math.Min(AllocatedResources.MaxPercent, storPct.Value));
-                }
-            }
-
-            return new AllocatedResources
-            {
-                SchemaVersion = AllocatedResources.CurrentSchemaVersion,
-                CpuPercent = cpuPct,
-                MemoryPercent = memPct,
-                StoragePercent = storPct,
-                GpuCount = _nodeMetadata.AllocatedGpuCount
-            };
+            return null; // No allocation configured — orchestrator applies defaults
         }
 
-        return null;
+        var inventory = _nodeMetadata.Inventory;
+
+        double? cpuPct = _nodeMetadata.AllocatedComputePointsPercent.HasValue
+            ? _nodeMetadata.AllocatedComputePointsPercent.Value / 100.0
+            : null;
+
+        // Prefer raw percent values (no lossy round-trip through bytes)
+        double? memPct = _nodeMetadata.AllocatedMemoryPercent.HasValue
+            ? _nodeMetadata.AllocatedMemoryPercent.Value / 100.0
+            : _nodeMetadata.AllocatedMemoryBytes.HasValue
+                && inventory?.Memory != null
+                && inventory.Memory.TotalBytes > 0
+                ? Math.Clamp(
+                    (double)_nodeMetadata.AllocatedMemoryBytes.Value / inventory.Memory.TotalBytes,
+                    AllocatedResources.MinPercent,
+                    AllocatedResources.MaxPercent)
+                : null;
+
+        double? storPct = _nodeMetadata.AllocatedStoragePercent.HasValue
+            ? _nodeMetadata.AllocatedStoragePercent.Value / 100.0
+            : _nodeMetadata.AllocatedStorageBytes.HasValue && inventory?.Storage != null
+                ? Math.Clamp(
+                    (double)_nodeMetadata.AllocatedStorageBytes.Value
+                        / Math.Max(1, inventory.Storage.Sum(s => s.TotalBytes)),
+                    AllocatedResources.MinPercent,
+                    AllocatedResources.MaxPercent)
+                : null;
+
+        return new AllocatedResources
+        {
+            SchemaVersion = AllocatedResources.CurrentSchemaVersion,
+            CpuPercent = cpuPct,
+            MemoryPercent = memPct,
+            StoragePercent = storPct,
+            GpuCount = _nodeMetadata.AllocatedGpuCount
+        };
     }
 
 

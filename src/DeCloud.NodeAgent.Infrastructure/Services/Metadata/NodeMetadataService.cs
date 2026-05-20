@@ -31,7 +31,11 @@ public interface INodeMetadataService
     long? AllocatedMemoryBytes { get; }
     int? AllocatedComputePoints { get; }
     int? AllocatedComputePointsPercent { get; }
+    /// <summary>Raw memory allocation percentage from settings (1-95). Null = not configured.</summary>
+    int? AllocatedMemoryPercent { get; }
     long? AllocatedStorageBytes { get; }
+    /// <summary>Raw storage allocation percentage from settings (1-95). Null = not configured.</summary>
+    int? AllocatedStoragePercent { get; }
     int? AllocatedGpuCount { get; }
 
     Task InitializeAsync(CancellationToken ct = default);
@@ -68,6 +72,8 @@ public class NodeMetadataService : INodeMetadataService
     private string? _storageAllocMode;
     private int? _storageAllocValue;
     public long? AllocatedStorageBytes { get; private set; }
+    public int? AllocatedMemoryPercent { get; private set; }
+    public int? AllocatedStoragePercent { get; private set; }
 
     public int? AllocatedGpuCount { get; private set; }
 
@@ -266,7 +272,8 @@ public class NodeMetadataService : INodeMetadataService
         if (string.Equals(_memoryAllocMode, "percent", StringComparison.OrdinalIgnoreCase)
             && _memoryAllocValue.HasValue)
         {
-            var pct = Math.Clamp(_memoryAllocValue.Value, 1, 95) / 100.0;
+            AllocatedMemoryPercent = Math.Clamp(_memoryAllocValue.Value, 1, 95);
+            var pct = AllocatedMemoryPercent.Value / 100.0;
             AllocatedMemoryBytes = (long)(inventory.Memory.TotalBytes * pct);
             _logger.LogInformation(
                 "Resource allocation (memory): resolved {Pct}% of {TotalMb} MB = {AllocMb} MB",
@@ -303,7 +310,8 @@ public class NodeMetadataService : INodeMetadataService
         if (string.Equals(_storageAllocMode, "percent", StringComparison.OrdinalIgnoreCase)
             && _storageAllocValue.HasValue)
         {
-            var pct = Math.Clamp(_storageAllocValue.Value, 1, 95) / 100.0;
+            AllocatedStoragePercent = Math.Clamp(_storageAllocValue.Value, 1, 95);
+            var pct = AllocatedStoragePercent.Value / 100.0;
             var totalStorage = inventory.Storage.Sum(s => s.TotalBytes);
             AllocatedStorageBytes = (long)(totalStorage * pct);
             _logger.LogInformation(
