@@ -50,7 +50,7 @@ NC='\033[0m'
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_success() { echo -e "${GREEN}[✓]${NC} $1"; }
 log_warn() { echo -e "${YELLOW}[!]${NC} $1"; }
-log_error() { echo -e "${RED}[✗]${NC} $1"; }
+log_error() { echo -e "${RED}[✗]${NC} $1" >&2; }
 log_step() { echo -e "${CYAN}[STEP]${NC} $1"; }
 
 # ============================================================
