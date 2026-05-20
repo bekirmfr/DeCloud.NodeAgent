@@ -1103,7 +1103,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         // so heartbeat discrepancy checks align with orchestrator's TotalResources.
         // Falls back to platform default (90% of physical) if not configured.
         var allocatedMemory = _nodeMetadata.AllocatedMemoryBytes
-            ?? (long)(memory.TotalBytes * DeCloud.Shared.AllocatedResources.DefaultPercent);
+            ?? (long)(memory.TotalBytes * Shared.Models.AllocatedResources.DefaultPercent);
         // Never exceed physical
         allocatedMemory = Math.Min(allocatedMemory, memory.TotalBytes);
 

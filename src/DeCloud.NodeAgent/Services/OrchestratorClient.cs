@@ -238,7 +238,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 _nodeMetadata.AllocatedComputePoints.HasValue ||
                 _nodeMetadata.AllocatedStorageBytes.HasValue ||
                 _nodeMetadata.AllocatedGpuCount.HasValue
-                ? new DeCloud.Shared.AllocatedResources
+                ? new AllocatedResources
                 {
                     MemoryBytes = _nodeMetadata.AllocatedMemoryBytes,
                     ComputePoints = _nodeMetadata.AllocatedComputePoints,

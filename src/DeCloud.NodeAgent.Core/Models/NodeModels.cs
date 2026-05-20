@@ -298,7 +298,7 @@ public class NodeRegistration
     /// Operator-configured resource allocation limits, resolved to absolute
     /// values. Null = use platform default (90%).
     /// </summary>
-    public DeCloud.Shared.AllocatedResources? AllocatedResources { get; set; }
+    public DeCloud.Shared.Models.AllocatedResources? AllocatedResources { get; set; }
 }
 
 public class NodePricing
