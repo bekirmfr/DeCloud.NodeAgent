@@ -1931,9 +1931,13 @@ install_decloud_cli() {
         return 0
     fi
     
-    # Copy CLI to system path
-    cp "$cli_source" "$cli_dest"
-    chmod +x "$cli_dest"
+    # Atomic replace: write to temp, then rename. This preserves the
+    # old inode so a running 'decloud update' (which holds an fd to the
+    # old file) can finish reading from the old content after install.sh
+    # returns. 'mv' on the same filesystem is a rename(2) — new inode.
+    cp "$cli_source" "${cli_dest}.tmp"
+    chmod +x "${cli_dest}.tmp"
+    mv "${cli_dest}.tmp" "$cli_dest"
     
     # Verify CLI works
     if decloud --version &> /dev/null; then
