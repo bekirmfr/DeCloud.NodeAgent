@@ -4,7 +4,7 @@ What happens from "machine has nothing on it" to "node hosting tenant
 workloads" to "node is gone." This document covers two layered
 perspectives:
 
-- **Operator lifecycle** — the seven-command contract operators see,
+- **Operator lifecycle** — the nine-command contract operators see,
   the states a node passes through, and the cryptographic invariants
   the system holds by construction.
 - **Infrastructure mechanics** — what `install.sh`, `decloud update`,
@@ -17,13 +17,14 @@ Maintainers debugging install/update/uninstall behavior can jump to
 
 > **Status notice.** Part 1 describes the operator lifecycle as
 > implemented. [Part 2](#part-2--implementation-status) covers
-> remaining work (live migration).
+> implementation status. Remaining work: live migration (Phase 2.5b).
 > Part 3 describes infrastructure mechanics.
 
 > **Companion documents:**
 > - [`LOCALITY_STANDARDS.md`](LOCALITY_STANDARDS.md) — country/region/zone semantics
 > - [`SCHEDULING.md`](SCHEDULING.md) — how the orchestrator places VMs
 > - [`RELEASE-PIPELINE.md`](RELEASE-PIPELINE.md) — how the binaries `install.sh` consumes are produced
+> - [`NODE-LIFECYCLE-RESOURCE-REDESIGN.md`](NODE-LIFECYCLE-RESOURCE-REDESIGN.md) — gap analysis and implementation plan for the evaluate/allocate separation
 
 ---
 
@@ -32,27 +33,28 @@ Maintainers debugging install/update/uninstall behavior can jump to
 **Part 1 — Operator Lifecycle**
 - [1. States](#1-states)
 - [2. Commands](#2-commands)
-- [3. Settings model](#3-settings-model)
-- [4. Cryptographic invariants](#4-cryptographic-invariants)
-- [5. Continuous drift detection](#5-continuous-drift-detection)
-- [6. VM compliance handling](#6-vm-compliance-handling)
-- [7. Trust model](#7-trust-model)
+- [3. Resource evaluation and allocation](#3-resource-evaluation-and-allocation)
+- [4. Settings model](#4-settings-model)
+- [5. Cryptographic invariants](#5-cryptographic-invariants)
+- [6. Continuous drift detection](#6-continuous-drift-detection)
+- [7. VM compliance handling](#7-vm-compliance-handling)
+- [8. Trust model](#8-trust-model)
 
 **Part 2 — Implementation Status**
-- [8. What's implemented](#8-whats-implemented)
-- [9. Remaining work](#9-remaining-work)
+- [9. What's implemented](#9-whats-implemented)
+- [10. Remaining work](#10-remaining-work)
 
 **Part 3 — Infrastructure Mechanics**
-- [10. Overview of operations](#10-overview-of-operations)
-- [11. Fresh install](#11-fresh-install)
-- [12. Update](#12-update)
-- [13. Uninstall](#13-uninstall)
-- [14. On-disk layout](#14-on-disk-layout)
-- [15. Configuration](#15-configuration)
-- [16. Trust chain at runtime](#16-trust-chain-at-runtime)
-- [17. Common operator tasks](#17-common-operator-tasks)
-- [18. Recovery scenarios](#18-recovery-scenarios)
-- [19. Migration from legacy installs](#19-migration-from-legacy-installs)
+- [11. Overview of operations](#11-overview-of-operations)
+- [12. Fresh install](#12-fresh-install)
+- [13. Update](#13-update)
+- [14. Uninstall](#14-uninstall)
+- [15. On-disk layout](#15-on-disk-layout)
+- [16. Configuration](#16-configuration)
+- [17. Trust chain at runtime](#17-trust-chain-at-runtime)
+- [18. Common operator tasks](#18-common-operator-tasks)
+- [19. Recovery scenarios](#19-recovery-scenarios)
+- [20. Migration from legacy installs](#20-migration-from-legacy-installs)
 
 ---
 
@@ -80,17 +82,46 @@ GONE ──install──► CONFIGURED ──register──► ENROLLED ──lo
  └─────────────────── uninstall (from any state) ──────────────────
 ```
 
+Within the ENROLLED state, two additional operations enrich the node
+before it goes live:
+
+```
+                       ENROLLED
+           ┌───────────────────────────────┐
+           │                               │
+register──►│  evaluate ──► allocate        │──login──► ACTIVE
+           │  (orchestrator   (operator    │
+           │   benchmarks,     sets        │
+           │   assigns         resource    │
+           │   obligations)    percentages)│
+           │                               │
+           └───────────────────────────────┘
+```
+
 | State | What it means | What's persisted |
 | --- | --- | --- |
 | `GONE` | Nothing on the machine | Nothing |
 | `CONFIGURED` | Binaries on disk, wallet declared, operational settings written, orchestrator hasn't seen them | `/opt/decloud/` binaries; `/etc/decloud/settings` (full); systemd unit installed but service idle |
-| `ENROLLED` | Orchestrator knows this node, has issued credentials, has computed obligations; node is heartbeating but **not schedulable** | Above + `/etc/decloud/credentials` (JWT); active heartbeat loop |
-| `ACTIVE` | Heartbeating **and schedulable** — orchestrator will place VMs here | Same as ENROLLED + scheduling flag set |
+| `ENROLLED` | Orchestrator knows this node, has issued credentials; node is heartbeating but **not schedulable**. Evaluation and allocation happen here. | Above + `/etc/decloud/credentials` (JWT); active heartbeat loop; optionally: cached performance evaluation, obligation list, allocation percentages |
+| `ACTIVE` | Heartbeating **and schedulable** — orchestrator has computed concrete capacity from allocation percentages and will place VMs here | Same as ENROLLED + scheduling flag set + `TotalResources` materialized |
 
-### Why four states, not five
+### Why four states, not six
 
-Earlier design rounds separated `INSTALLED` (binaries + wallet only)
-from `CONFIGURED` (binaries + wallet + operational settings). In
+Evaluate and allocate are operations within the ENROLLED state, not
+separate lifecycle states. A node that has registered but not yet
+evaluated is still ENROLLED — it heartbeats, it has credentials, the
+orchestrator knows it exists. The difference is that the scheduler
+will refuse to activate it (login will fail) until evaluation is
+complete. This is a precondition on login, not a distinct state.
+
+Adding EVALUATED and ALLOCATED as separate states would model
+checkpoints inside a preparation sequence, not meaningful operational
+postures. The node's relationship with the rest of the system does not
+change between "enrolled and evaluated" and "enrolled and allocated" —
+in both cases it is heartbeating and not schedulable.
+
+Earlier design rounds also separated `INSTALLED` (binaries + wallet
+only) from `CONFIGURED` (binaries + wallet + operational settings). In
 practice every installation provides operational settings in the same
 step — there is no useful operational posture where the node has
 binaries and a wallet but no locality. Merging the two removes a state
@@ -105,11 +136,11 @@ ceremony.
 An `ENROLLED` node is heartbeating — the orchestrator sees its
 metrics, sees its running VMs, knows it's alive. But the scheduler
 will not place new VMs on it. This gives the operator a window to
-change settings, wait for migrations, perform maintenance, or simply
-pause.
+evaluate, allocate, change settings, wait for migrations, perform
+maintenance, or simply pause.
 
-An `ACTIVE` node is enrolled and additionally schedulable. `login`
-flips the flag; `logout` clears it.
+An `ACTIVE` node is enrolled, evaluated, allocated, and additionally
+schedulable. `login` flips the flag; `logout` clears it.
 
 The wallet is not involved in this toggle. The wallet speaks at
 `register`, where it has something to say ("I attest to this
@@ -121,15 +152,19 @@ the system boundary where it belongs.
 
 Because login is a lightweight, JWT-authenticated readiness signal
 (not a wallet ceremony), the node agent can auto-login on startup if
-valid credentials exist on disk. A node that reboots at 3 AM comes
-back online and schedulable without operator intervention.
+valid credentials exist on disk and evaluation has previously
+completed. A node that reboots at 3 AM comes back online and
+schedulable without operator intervention.
 
 The agent startup sequence:
 
 1. Check for `/etc/decloud/credentials` — if absent, wait for
    `decloud register`
 2. Credentials present → begin heartbeating (ENROLLED)
-3. Auto-call `POST /api/nodes/{id}/login` using existing JWT → ACTIVE
+3. Check for cached performance evaluation — if absent, remain
+   ENROLLED (operator must run `decloud evaluate`)
+4. Evaluation present + no `/etc/decloud/logged-out` sentinel →
+   auto-call `POST /api/nodes/{id}/login` using existing JWT → ACTIVE
 
 If the operator logged out before the reboot (the `logged-out`
 sentinel file exists at `/etc/decloud/logged-out`), the agent
@@ -140,7 +175,7 @@ pause is preserved across restarts.
 
 ## 2. Commands
 
-Seven commands cover every state transition.
+Nine commands cover every state transition.
 
 ### `decloud install`
 
@@ -165,13 +200,14 @@ must `configure` and then `register` to become operational.
 ### `decloud configure`
 
 Updates operational settings: locality, display name, service rates.
+Resource allocation is handled separately by `decloud allocate`.
 
 | Aspect | Detail |
 | --- | --- |
 | **Inputs** | `--country <CC>`, `--region <region>`, `--zone <zone>`, `--name <text>`, `--description <text>` |
 | **State change** | `CONFIGURED` → `CONFIGURED'` (settings updated locally) |
 | **Side effects** | Updates `/etc/decloud/settings.json`; pushes cosmetic changes (name, description) to orchestrator if enrolled |
-| **Network** | None — purely local |
+| **Network** | None for locality/rate changes (local staging); cosmetic changes pushed via PATCH if enrolled |
 | **Validation** | Country: `^[A-Z]{2}$`; region: `^[a-z]+(-[a-z]+)*$`; zone: `^<region>-[1-9][0-9]*$` (client-side format check; existence validated server-side at register) |
 | **Refused if** | Node is ENROLLED or ACTIVE and the change includes locality or rate fields. Operator must `logout` first, then configure, then `register` to commit. |
 
@@ -191,6 +227,7 @@ sequence:
 sudo decloud logout                      # stop scheduling, open settings window
 sudo decloud configure --country BR --region sa-east
 sudo decloud register                    # wallet ceremony, VM compliance check
+sudo decloud evaluate                    # re-benchmark (optional, if hardware unchanged)
 # ... wait for migrations if flagged VMs ...
 sudo decloud login                       # resume scheduling when ready
 ```
@@ -213,14 +250,15 @@ The refusal is in the CLI, not the orchestrator. `decloud configure
     1. sudo decloud logout          # pause scheduling
     2. sudo decloud configure ...   # change settings
     3. sudo decloud register        # wallet-sign and commit
-    4. sudo decloud login           # resume when ready
+    4. sudo decloud evaluate        # re-benchmark if needed
+    5. sudo decloud login           # resume when ready
 ```
 
 ### `decloud register`
 
-Pushes current settings to the orchestrator; receives credentials and
-computes obligations. This is the only command that requires the
-wallet.
+Establishes node identity with the orchestrator. This is the only
+command that requires the wallet. Registration is lightweight — it
+does not benchmark the node or compute capacity.
 
 | Aspect | Detail |
 | --- | --- |
@@ -232,9 +270,16 @@ wallet.
 | **VM compliance** | Re-registration path: orchestrator walks running VMs; flags non-compliant ones for migration scheduler |
 
 The orchestrator's response includes:
+- Node ID (derived from `SHA256(machineId + walletAddress)`)
 - JWT (used by all subsequent authenticated calls)
-- Obligations: system VMs to host (DHT/BlockStore/Relay), attestation cadence
+- Heartbeat interval
 - List of any non-compliant VMs (re-registration only)
+
+What registration does **not** include:
+- Performance evaluation (moved to `decloud evaluate`)
+- Obligation assignment (moved to `decloud evaluate`)
+- Capacity computation (moved to `decloud login`)
+- Scheduling config (returned at evaluate time)
 
 The canonical locality message format:
 
@@ -258,31 +303,172 @@ operator-side organizational metadata and is not signed.
 
 After first registration, the node enters ENROLLED state:
 heartbeating, visible to the orchestrator, but not yet schedulable.
-The operator runs `login` when ready to accept workloads.
+The operator runs `evaluate` next to benchmark the node.
 
 After re-registration (settings change), the node returns to ENROLLED
-(paused). The operator can inspect the VM compliance results, wait
-for migrations to complete, and `login` when satisfied.
+(paused). The operator can inspect the VM compliance results, optionally
+re-evaluate, and `login` when satisfied.
+
+### `decloud evaluate`
+
+Triggers orchestrator-driven performance evaluation and obligation
+assignment. The orchestrator benchmarks the node, computes its
+performance tier, and determines which system VM roles it must host.
+
+| Aspect | Detail |
+| --- | --- |
+| **Inputs** | None |
+| **State change** | None (remains ENROLLED); enriches node record with evaluation data |
+| **Precondition** | Node must be registered (JWT exists) |
+| **Side effects** | Orchestrator runs benchmark command on node; computes `PerformanceEvaluation`; assigns obligations (DHT, Relay, BlockStore based on eligibility); generates obligation identity states and system VM templates; agent caches evaluation locally |
+| **Network** | `POST /api/nodes/{id}/evaluate` (JWT-authenticated); orchestrator sends benchmark command to node, receives raw results |
+| **Authorization** | Existing JWT — no wallet involvement |
+| **Failure mode** | If benchmark fails, agent retries; orchestrator returns error with guidance |
+
+The orchestrator is authoritative for evaluation. The node does not
+self-evaluate and send a claimed score. The orchestrator sends the
+benchmark command, receives raw output, and computes the score. This
+prevents incentive misalignment — a node cannot lie about performance
+to earn more compute points.
+
+The evaluation response includes:
+- Performance evaluation (benchmark score, points per core, performance multiplier, eligible tiers)
+- Obligations (system VM roles assigned based on node capabilities)
+- Obligation identity states (cryptographic identity for each system VM role)
+- System VM template payloads (for roles that need deployment)
+- Scheduling config (tier definitions, overcommit ratios, baseline benchmark)
+- DHT bootstrap peers
+
+The operator sees:
+
+```
+✓ Performance evaluation complete
+
+  Benchmark Score:  3200 (capped: 3200)
+  Points per Core:  3.20
+  Total Points:     25.60 (8 cores × 3.20)
+  Highest Tier:     Standard
+  Eligible Tiers:   Standard, Balanced, Burstable
+
+  Obligations assigned:
+    DHT        (1 vCPU, 512 MB RAM)
+    BlockStore (1 vCPU, 512 MB RAM, 25 GB storage)
+
+  Run 'decloud allocate --show' to review resource allocation.
+```
+
+### Why evaluation precedes allocation
+
+The operator needs to know their node's actual capacity before deciding
+how much of it to offer. Without evaluation, the operator is guessing
+("I think I have about 20 compute points"). After evaluation, the
+operator knows ("I have 25.60 compute points, I'm eligible for
+Standard tier, and system VMs will consume 2 vCPUs and 1 GB RAM").
+
+Obligations also affect allocation decisions. A node obligated to run
+DHT and BlockStore has committed resources before the operator even
+sets their allocation. Seeing obligations before allocating lets the
+operator account for system VM overhead.
+
+### Why the orchestrator is authoritative for evaluation
+
+Nodes are economically incentivized — they earn money based on compute
+points offered. A node that self-evaluates could report inflated
+benchmark scores to get more points and charge more.
+
+The orchestrator controls the benchmark (which command, which duration,
+which scoring formula) and validates the raw output. The node executes
+the benchmark but does not interpret the results. Defense in depth:
+the orchestrator can re-evaluate any node at any time via the
+heartbeat command channel.
+
+### `decloud allocate`
+
+Sets resource allocation percentages. Determines how much of the
+node's detected capacity the operator offers to the platform.
+
+| Aspect | Detail |
+| --- | --- |
+| **Inputs** | `--cpu-percent <1-95>`, `--memory-percent <1-95>`, `--storage-percent <1-95>`, `--gpu-count <N>`, `--show` |
+| **State change** | None (remains ENROLLED); updates allocation in settings and pushes to orchestrator |
+| **Precondition** | Node must be registered (JWT exists); evaluation should be completed (warning if not) |
+| **Side effects** | Stores percentages in `/etc/decloud/settings.json` under `resources`; pushes to orchestrator via `POST /api/nodes/{id}/allocate` |
+| **Network** | `POST /api/nodes/{id}/allocate` (JWT-authenticated) |
+| **Authorization** | Existing JWT — no wallet involvement |
+| **Defaults** | 90% for CPU, memory, and storage; all detected GPUs |
+
+Resource allocation uses **percentages only** for continuous resources
+(CPU, RAM, storage). GPU count is an absolute integer (discrete
+resource where percentages don't apply). Percentages survive
+re-evaluation — if the benchmark produces different compute points,
+the percentage maps correctly to the new total.
+
+If `decloud allocate` is never run, platform defaults (90% for all
+continuous resources, all GPUs) are applied at login time. The command
+is optional for operators who accept the defaults.
+
+**The `--show` flag** displays current allocation with evaluation context:
+
+```
+✓ Resource Allocation
+
+  Compute Points:  25.60 total → allocating 90% = 23.04 points
+  Memory:          32 GB total → allocating 80% = 25.6 GB
+  Storage:         500 GB total → allocating 85% = 425 GB
+  GPUs:            2 detected → allocating 2
+
+  System VM overhead (obligations):
+    DHT:           1 vCPU, 512 MB RAM
+    BlockStore:    1 vCPU, 512 MB RAM, 25 GB storage
+
+  Available for tenant VMs (after obligations):
+    ~21 compute points, ~24.6 GB RAM, ~400 GB storage, 2 GPUs
+```
+
+### Why allocation is a percentage, not absolute points
+
+On first registration, compute points don't exist yet — the node
+hasn't been benchmarked. Even after evaluation, absolute point
+allocation breaks on re-evaluation: if a node previously earned 12
+points and the operator allocated 10, but a re-evaluation produces
+only 8 points, the absolute allocation of 10 exceeds what exists.
+
+Percentages are stable across re-evaluations. "Allocate 80% of
+whatever I have" is always valid regardless of what the benchmark
+returns. The orchestrator translates percentages to concrete values
+at login time, using the current evaluation.
+
+### Why allocation is JWT-authenticated, not wallet-signed
+
+Resource allocation is an operational decision: "how much of my
+hardware do I want to offer today." It has no jurisdictional or trust
+meaning — the platform doesn't make placement guarantees based on
+allocation percentages the way it does for country/region. The JWT
+is the right credential for operational actions; the wallet is reserved
+for trust-bearing assertions (locality, identity).
 
 ### `decloud login`
 
-Signals operational readiness. The scheduler begins considering this
-node for VM placement.
+Signals operational readiness. The orchestrator computes concrete
+capacity from the node's allocation percentages and current
+performance evaluation, then begins considering this node for VM
+placement.
 
 | Aspect | Detail |
 | --- | --- |
 | **Inputs** | None (reads `/etc/decloud/credentials`) |
 | **State change** | `ENROLLED` → `ACTIVE` |
-| **Side effects** | Sets scheduling-ready flag at orchestrator; clears `/etc/decloud/logged-out` sentinel if present |
+| **Precondition** | Evaluation must be completed (`PerformanceEvaluation` exists on node record). If not, login fails with: "Node has not been evaluated. Run 'decloud evaluate' first." |
+| **Side effects** | Orchestrator computes `TotalResources` from allocation percentages × evaluation; validates no over-allocation against `UsedResources`; sets scheduling-ready flag; clears `/etc/decloud/logged-out` sentinel if present |
 | **Network** | `POST /api/nodes/{id}/login` (JWT-authenticated) |
 | **Authorization** | Existing JWT — no wallet involvement |
-| **Failure mode** | If credentials are missing or invalid, login fails with a message pointing at `register` |
+| **Failure mode** | If credentials are missing or invalid, login fails with a message pointing at `register`. If evaluation is missing, login fails pointing at `evaluate`. |
 
-Login is lightweight. No wallet ceremony, no QR code, no signature
-flow. The node is already enrolled and heartbeating — login just
-flips the scheduling flag. This is what makes unattended restart
-possible: the agent can auto-login on startup without human
-involvement.
+Login is the moment concrete capacity is materialized. Before login,
+the orchestrator knows the node has "90% of its compute points
+allocated." At login, the orchestrator computes "90% of 25.60 = 23.04
+points" and stores it as `TotalResources.ComputePoints`. This is when
+the scheduler can place VMs.
 
 The orchestrator validates that the node is enrolled and that the JWT
 is valid. If the node's heartbeat-carried settings hash doesn't match
@@ -306,6 +492,8 @@ The node remains enrolled, heartbeating, and running its existing
 VMs. Only new scheduling is paused. The operator can:
 
 - Change settings (`configure`) and re-register
+- Re-evaluate performance (`evaluate`)
+- Adjust allocation (`allocate`)
 - Drain existing workloads (`vm drain`)
 - Perform maintenance
 - Resume at any time (`login`)
@@ -382,16 +570,133 @@ sudo decloud vm drain        # migrate workloads off (when implemented)
 sudo decloud uninstall       # clean teardown, no tenant VMs to destroy
 ```
 
+### Command summary
+
+| Command | Auth | Boundary | When to use |
+| --- | --- | --- | --- |
+| `install` | None | Binary placement | First-time setup |
+| `configure` | None (local) / JWT (cosmetic push) | Settings | Locality, name, rates |
+| `register` | Wallet signature | Identity | First enrollment or settings re-commit |
+| `evaluate` | JWT | Performance | After register, or after hardware change |
+| `allocate` | JWT | Capacity | After evaluate, or to adjust offering |
+| `login` | JWT | Scheduling | Go live |
+| `logout` | JWT | Scheduling | Pause |
+| `vm drain/migrate` | JWT | Workload | Pre-uninstall or maintenance |
+| `uninstall` | JWT (best-effort) | Teardown | Leave the platform |
+
+### First-time operator flow
+
+```bash
+# 1. Install agent
+curl -fsSL https://github.com/bekirmfr/DeCloud.NodeAgent/releases/latest/download/install.sh \
+  | sudo bash -s -- --orchestrator https://decloud.stackfi.tech --wallet 0xYourWallet
+
+# 2. Configure locality and profile
+sudo decloud configure --country DE --region eu-central --name MyNode
+
+# 3. Register with orchestrator (wallet signature)
+sudo decloud register
+
+# 4. Evaluate performance (orchestrator benchmarks the node)
+sudo decloud evaluate
+
+# 5. Allocate resources (optional — defaults to 90% for all)
+sudo decloud allocate --cpu-percent 80 --memory-percent 85 --storage-percent 90
+
+# 6. Go live
+sudo decloud login
+```
+
 ---
 
-## 3. Settings model
+## 3. Resource evaluation and allocation
 
-`/etc/decloud/settings` is a JSON file (mode 600) holding the node's
+### The chicken-and-egg problem
+
+Resource allocation requires knowing what resources exist. Compute
+points — the unit of CPU capacity — are calculated by the orchestrator
+based on a hardware benchmark. Until evaluation runs, no compute
+points exist. Asking the operator to allocate compute points before
+evaluation is asking them to allocate a quantity they cannot know.
+
+Even on re-registration, absolute allocations are fragile. A node
+that previously earned 12 compute points and allocated 10 might
+re-evaluate at only 8 points — making the absolute allocation of 10
+invalid. The system would either silently cap it (hiding the
+discrepancy) or reject it (blocking re-registration).
+
+### The solution: percentages and sequencing
+
+Two design decisions eliminate the chicken-and-egg problem:
+
+1. **Percentages, not absolutes.** CPU, memory, and storage allocation
+   are expressed as percentages of detected capacity. "Allocate 80%
+   of my compute points" is always valid, regardless of what the
+   benchmark produces. The orchestrator resolves percentages to
+   concrete values at login time.
+
+2. **Evaluate before allocate.** The operator sees their node's actual
+   performance before deciding how much to offer. Obligations (system
+   VM commitments) are also visible at this point, so the operator
+   can account for platform overhead.
+
+### Resource types and allocation semantics
+
+| Resource | Allocation unit | Default | Notes |
+| --- | --- | --- | --- |
+| CPU | Percentage of hardware-max compute points | 90% | Overcommit applied per-tier by scheduler |
+| Memory | Percentage of physical RAM | 90% | No overcommit — memory is physical only |
+| Storage | Percentage of physical storage (pre-overcommit) | 90% | Tier-specific storage overcommit applied on top |
+| GPU | Absolute count | All detected | Discrete resource; 0 = operator has GPUs but does not offer them |
+
+### When capacity is materialized
+
+Capacity lives as percentages until login. At login, the orchestrator
+resolves:
+
+```
+TotalResources.ComputePoints = hardwareMaxPoints × cpuPercent
+TotalResources.MemoryBytes   = physicalRam × memoryPercent
+TotalResources.StorageBytes  = physicalStorage × storagePercent × tierOvercommit
+```
+
+This is the only moment percentages become concrete values. If the
+operator logs out, re-evaluates (different benchmark score), and logs
+back in, the percentages produce different concrete values
+automatically.
+
+### Allocation push endpoint
+
+`POST /api/nodes/{id}/allocate` — JWT-authenticated. Accepts:
+
+```json
+{
+  "cpuPercent": 0.80,
+  "memoryPercent": 0.85,
+  "storagePercent": 0.90,
+  "gpuCount": 2
+}
+```
+
+The orchestrator validates:
+- Percentages in range 0.01–0.95
+- GPU count ≤ detected GPUs (or null for all)
+- If node has running VMs: allocation not below currently used resources
+
+This endpoint is separate from registration because allocation is an
+operational decision (JWT), not a trust-bearing jurisdictional claim
+(wallet).
+
+---
+
+## 4. Settings model
+
+`/etc/decloud/settings.json` is a JSON file (mode 600) holding the node's
 operational configuration.
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "wallet": "0x86b8fE9ad3b4596a66b2C586F988A04f03be45F9",
   "orchestrator_url": "https://decloud.stackfi.tech",
   "locality": {
@@ -409,22 +714,32 @@ operational configuration.
     "cpu_hour_eur": 0.04,
     "ram_gb_hour_eur": 0.005,
     "storage_gb_month_eur": 0.10
+  },
+  "resources": {
+    "cpu": { "mode": "percent", "value": 80 },
+    "memory": { "mode": "percent", "value": 85 },
+    "storage": { "mode": "percent", "value": 90 },
+    "gpu": { "count": 2 }
   }
 }
 ```
 
 ### Field categories and mutability
 
-| Field | Category | When changeable | Authorization |
-| --- | --- | --- | --- |
-| `wallet` | identity | Never (re-install required) | Cannot change |
-| `orchestrator_url` | identity | Never | Cannot change |
-| `locality.country` | locality (signed) | Logout → configure → register | Wallet signature |
-| `locality.region` | locality (signed) | Logout → configure → register | Wallet signature |
-| `locality.zone` | locality (cosmetic) | Logout → configure → register | None (not signed) |
-| `profile.name` | cosmetic | Any time (no logout/re-register) | JWT only |
-| `profile.description` | cosmetic | Any time (no logout/re-register) | JWT only |
-| `rates.*` | service | Logout → configure → register | Wallet signature |
+| Field | Category | When changeable | Authorization | Command |
+| --- | --- | --- | --- | --- |
+| `wallet` | identity | Never (re-install required) | Cannot change | `install` |
+| `orchestrator_url` | identity | Never | Cannot change | `install` |
+| `locality.country` | locality (signed) | Logout → configure → register | Wallet signature | `configure` |
+| `locality.region` | locality (signed) | Logout → configure → register | Wallet signature | `configure` |
+| `locality.zone` | locality (cosmetic) | Logout → configure → register | None (not signed) | `configure` |
+| `profile.name` | cosmetic | Any time (no logout/re-register) | JWT only | `configure` |
+| `profile.description` | cosmetic | Any time (no logout/re-register) | JWT only | `configure` |
+| `rates.*` | service | Logout → configure → register | Wallet signature | `configure` |
+| `resources.cpu` | allocation | Any time while enrolled | JWT only | `allocate` |
+| `resources.memory` | allocation | Any time while enrolled | JWT only | `allocate` |
+| `resources.storage` | allocation | Any time while enrolled | JWT only | `allocate` |
+| `resources.gpu` | allocation | Any time while enrolled | JWT only | `allocate` |
 
 Cosmetic updates flow through `decloud configure --name "X"` and use
 the orchestrator's profile endpoint directly — no logout or re-register
@@ -432,7 +747,14 @@ needed.
 
 Locality and rate updates require the full sequence: logout (stop
 scheduling) → configure (change settings) → register (wallet-sign and
-commit, VM compliance check) → login (resume when ready).
+commit, VM compliance check) → evaluate (if needed) → login (resume).
+
+Resource allocation updates flow through `decloud allocate` and are
+pushed to the orchestrator via the allocate endpoint. No logout
+required — the orchestrator applies updated percentages on next login.
+If the node is active, the operator must logout first, allocate, then
+login to apply the new values (the orchestrator recomputes capacity
+at login).
 
 ### Settings hash
 
@@ -440,7 +762,7 @@ A SHA-256 hash of the settings file's canonical JSON representation
 (sorted keys, no whitespace) is computed by the node agent and
 included in every heartbeat payload. The orchestrator compares this
 hash against its stored state to detect drift continuously (see
-[§5 Continuous drift detection](#5-continuous-drift-detection)).
+[§6 Continuous drift detection](#6-continuous-drift-detection)).
 
 ### Why zone is not signed
 
@@ -457,7 +779,7 @@ signed payload.
 
 ---
 
-## 4. Cryptographic invariants
+## 5. Cryptographic invariants
 
 The system holds these invariants by construction:
 
@@ -471,13 +793,14 @@ the node's local settings. The orchestrator compares this against
 its stored state and detects drift within one heartbeat interval
 (~30 seconds). This is strictly stronger than a one-time check at
 login — it catches tampering continuously, not only at a ceremony.
-See [§5](#5-continuous-drift-detection).
+See [§6](#6-continuous-drift-detection).
 
 **(c) Wallet ownership required for jurisdictional changes.** A leaked
 JWT cannot change locality. Country/region updates require fresh wallet
 signature; the JWT alone is insufficient. The wallet signs at
 `register`, where jurisdictional claims have trust meaning. Routine
-operations (heartbeat, login, logout, profile updates) use the JWT.
+operations (heartbeat, login, logout, allocate, profile updates) use
+the JWT.
 
 **(d) Revoked credentials stay revoked.** JWT revocation list survives
 orchestrator restarts (MongoDB-backed). A node uninstalled today cannot
@@ -490,15 +813,22 @@ orchestrator skew tolerance. Captured registration signatures cannot
 be replayed days later. The timestamp is part of the signed payload,
 so an attacker cannot adjust it without invalidating the signature.
 
-These five together mean: if a node is `ACTIVE` and heartbeating, the
+**(f) Orchestrator-authoritative evaluation.** A node cannot
+self-declare its performance. The orchestrator drives the benchmark,
+receives raw output, and computes the score. The node's economic
+incentive (more points = more earnings) cannot influence the
+evaluation because the node does not control the scoring.
+
+These six together mean: if a node is `ACTIVE` and heartbeating, the
 orchestrator has cryptographic proof that (a) the locality was
 wallet-authorized at registration time, (b) the node's local settings
-currently match what was registered, and (c) the node's operator has
-signaled readiness for scheduling.
+currently match what was registered, (c) the node's performance has
+been independently evaluated, and (d) the node's operator has signaled
+readiness for scheduling.
 
 ---
 
-## 5. Continuous drift detection
+## 6. Continuous drift detection
 
 Drift detection uses the heartbeat — the system's natural liveness
 boundary — rather than a separate ceremony.
@@ -553,7 +883,7 @@ attestation, hardware roots of trust) that are out of scope.
 
 ---
 
-## 6. VM compliance handling
+## 7. VM compliance handling
 
 When `decloud register` runs on an already-enrolled node and the
 locality has changed, the orchestrator:
@@ -613,14 +943,14 @@ as a trigger today.
 
 ---
 
-## 7. Trust model
+## 8. Trust model
 
 Two credentials, two purposes:
 
 | Credential | Source | Lifetime | Used for |
 | --- | --- | --- | --- |
 | **Wallet** | Operator's external wallet (MetaMask, hardware wallet, etc.) | Forever (operator-controlled) | Registration; locality changes; rate changes |
-| **JWT** | Issued by orchestrator at register | Hours, refreshable | Heartbeat, login, logout, profile updates, all routine API calls |
+| **JWT** | Issued by orchestrator at register | Hours, refreshable | Heartbeat, login, logout, evaluate, allocate, profile updates, all routine API calls |
 
 The wallet is the trust root. JWTs are convenience tokens issued after
 wallet authentication.
@@ -652,14 +982,15 @@ Each mechanism does what it's good at.
 
 # Part 2 — Implementation Status
 
-## 8. What's implemented
+## 9. What's implemented
 
-The lifecycle described in Part 1 is implemented across four tiers.
+The lifecycle described in Part 1 is fully implemented.
+Implementation status by tier:
 
 ### Tier 1 — Foundation (Orchestrator + CLI)
 
-- `Node.SchedulingReady` boolean field (default `true`, preserved on
-  re-registration)
+- `Node.SchedulingReady` boolean field (default `false`; set to
+  `true` by `LoginNodeAsync` after evaluation and capacity computation)
 - `POST /api/nodes/{id}/login` and `POST /api/nodes/{id}/logout`
   endpoints on `NodesController`
 - `LoginNodeAsync` / `LogoutNodeAsync` in `NodeService`
@@ -685,11 +1016,20 @@ The lifecycle described in Part 1 is implemented across four tiers.
   changes while logged in (credentials exist AND no sentinel);
   cosmetic changes allowed anytime and pushed to orchestrator
   via `PATCH /api/nodes/me/profile` if enrolled
+- `cmd_evaluate` — primary lifecycle step; calls
+  `POST /api/orchestrator/evaluate` which triggers orchestrator-driven
+  benchmark, obligation assignment, and system template delivery.
+  Displays evaluation results and obligation list.
+- `cmd_allocate` — sets resource allocation percentages
+  (`--cpu-percent`, `--memory-percent`, `--storage-percent`,
+  `--gpu-count`); writes to `settings.json`, pushes to orchestrator
+  via `POST /api/orchestrator/allocate`. `--show` displays current
+  allocation with resolved capacity.
 - `cmd_vm_drain` / `cmd_vm_migrate` — stubs printing "not yet
   implemented" with manual alternative guidance
 - `get_api_key` / `get_orchestrator_url` utility helpers
-- Help text updated: NODE LIFECYCLE section with register, login,
-  logout, configure; install examples use wallet + orchestrator only
+- Help text: NODE LIFECYCLE section with register, evaluate, allocate,
+  login, logout, configure
 
 **Python CLI (`cli/cli-decloud-node`):**
 - Single-purpose wallet ceremony tool: `register` + `version` only
@@ -698,8 +1038,17 @@ The lifecycle described in Part 1 is implemented across four tiers.
 
 **Node agent:**
 - `AutoLoginIfNotLoggedOutAsync` in `AuthenticationManager` — checks
-  sentinel, calls `LoginAsync` if absent, non-fatal on failure
+  sentinel, auto-evaluates if `PerformanceEvaluation` is null, then
+  calls `LoginAsync` if evaluation succeeds. Non-fatal on failure.
+- `EvaluateNodeAsync` on `OrchestratorClient` — posts hardware
+  inventory to `/api/nodes/me/evaluate`, deserializes
+  `EvaluateNodeResponse`, persists evaluation, scheduling config,
+  obligation states, system templates, and obligation descriptors.
+- `AllocateAsync` on `OrchestratorClient` — posts percentages to
+  `/api/nodes/{id}/allocate`, returns resolved capacity.
 - `LoginAsync` / `LogoutAsync` on `OrchestratorClient`
+- `HeartbeatService` waits for full initialization
+  (`WaitForInitializationAsync`) before starting heartbeat loop
 
 ### Tier 3 — Security & integrity (Shared + Agent + Orchestrator)
 
@@ -753,7 +1102,53 @@ The lifecycle described in Part 1 is implemented across four tiers.
 - `TransitionContext.Compliance` and `TransitionTrigger.Compliance`
   in `VmLifecycleManager`
 
-## 9. Remaining work
+### Tier 5 — Evaluate/allocate lifecycle separation
+
+**Shared library (`DeCloud.Shared`):**
+- `AllocatedResources` model with v2 percentage fields (`CpuPercent`,
+  `MemoryPercent`, `StoragePercent`), `SchemaVersion` discriminator,
+  `ToPercentFormat()` migration helper, `Validate()`, effective
+  percentage properties
+- `NodeAllocateRequest` / `NodeAllocateResponse` wire DTOs
+- `EvaluateNodeResponse` (orchestrator-side) / `EvaluateNodeResponse`
+  (agent-side mirror) carrying performance evaluation, scheduling
+  config, obligations, identity states, system templates
+
+**Orchestrator:**
+- `RegisterNodeAsync` slimmed to identity-only: wallet auth, node
+  creation, JWT, settings hash, VM compliance. No evaluation, no
+  obligations, no capacity computation. `SchedulingReady = false`.
+- `POST /api/nodes/me/evaluate` expanded: benchmark → obligation
+  seeding → CGNAT relay assignment → obligation states + system
+  templates → returns `EvaluateNodeResponse`
+- `GenerateObligationPayloadsAsync` on `NodeService` — reusable
+  wrapper calling `GenerateAndAttachObligationStates` and
+  `GenerateSystemTemplatePayloads` with empty version dictionaries
+- `LoginNodeAsync` computes `TotalResources` from allocation
+  percentages via `NodeCapacityCalculator` at login time. Validates
+  used ≤ allocated. Precondition: evaluation must exist.
+- `POST /api/nodes/{id}/allocate` endpoint on `NodesController` —
+  JWT-authenticated, validates percentages, merges with existing
+  allocation, returns resolved capacity
+- `NodeCapacityCalculator` reads v2 percentages via
+  `ResolveComputePoints` / `ResolveMemoryBytes` /
+  `ResolveStorageBytes` helpers. Registered as DI singleton.
+
+**Node agent:**
+- `NodeRegistrationResponse` slimmed: NodeId, ApiKey,
+  WireGuardPublicKey, HeartbeatInterval, NonCompliantVms
+- `EvaluateNodeAsync` on `OrchestratorClient`: full lifecycle step
+  that discovers hardware, posts to evaluate endpoint, persists all
+  returned data (evaluation, config, states, templates, obligations)
+- `BuildAllocatedResources` sends v2 format with percentages
+- `NodeMetadataService` exposes `AllocatedMemoryPercent` and
+  `AllocatedStoragePercent` for lossless percent transmission
+- `cmd_allocate` CLI command with `--cpu-percent`, `--memory-percent`,
+  `--storage-percent`, `--gpu-count`, `--show`
+- `cmd_configure` no longer handles resource allocation
+- `cmd_evaluate` uses `api_post`, displays obligations from response
+
+## 10. Remaining work
 
 ### Live migration (Phase 2.5b)
 
@@ -761,7 +1156,7 @@ The `vm drain` and `vm migrate` stubs exist in the CLI. The
 compliance migration currently transitions VMs to Error (stops
 them) before migrating. True live migration (start on target, then
 stop on source) requires coordination the current pipeline does
-not have. This is the largest remaining piece of work.
+not have.
 
 ### Reverse compliance check
 
@@ -782,7 +1177,7 @@ committed to the new locality.
 > and recovery — not with operator command semantics (which are
 > covered in Part 1).
 
-## 10. Overview of operations
+## 11. Overview of operations
 
 Three lifecycle operations, each with one canonical entry point:
 
@@ -795,7 +1190,7 @@ Three lifecycle operations, each with one canonical entry point:
 Update is "install with saved parameters" — same script, same code path,
 just non-interactive. There is one installation procedure.
 
-## 11. Fresh install
+## 12. Fresh install
 
 The single command an operator pastes:
 
@@ -806,16 +1201,19 @@ curl -fsSL https://github.com/bekirmfr/DeCloud.NodeAgent/releases/latest/downloa
       --wallet 0xYourWalletAddress
 ```
 
-After install completes, configure operational settings and register:
+After install completes, configure, register, evaluate, and go live:
 
 ```bash
 sudo decloud configure --country TR --region eu-east --name MyNode
 sudo decloud register
+sudo decloud evaluate
+sudo decloud allocate --memory-percent 80    # optional, defaults to 90%
 sudo decloud login
 ```
 
-Wall-clock time on a fresh Ubuntu box: 3–5 minutes. On a re-run with
-most dependencies cached: ~30 seconds.
+Wall-clock time on a fresh Ubuntu box: 3–5 minutes for install. The
+full configure → register → evaluate → login sequence adds ~2 minutes
+(evaluation benchmark takes ~30 seconds).
 
 ### About the install URL
 
@@ -921,7 +1319,8 @@ Under normal circumstances both layers point to the same version.
    - Service enabled and started; idle until register
 
 10. **Done**
-    - Summary box, next-steps prompt for `decloud register`
+    - Summary box, next-steps prompt for `decloud configure` and
+      `decloud register`
 
 ### Interactive prompts
 
@@ -941,7 +1340,7 @@ validated in a loop until a valid format is provided.
 When run truly non-interactively (CI, no controlling terminal),
 missing required flags abort with copy-pasteable usage examples.
 
-## 12. Update
+## 13. Update
 
 ```bash
 sudo decloud update
@@ -991,9 +1390,9 @@ release. This means:
   `decloud configure` followed by `decloud register`.
 - Does **not** roll back automatically on failure. If the new release
   fails to start, the symlink already points at the new version. See
-  [Recovery scenarios](#18-recovery-scenarios).
+  [Recovery scenarios](#19-recovery-scenarios).
 
-## 13. Uninstall
+## 14. Uninstall
 
 ```bash
 sudo decloud uninstall
@@ -1020,7 +1419,7 @@ Same hybrid resolution as update: tries to fetch the latest
 The user is prompted to confirm before destructive actions unless
 `--force` is passed.
 
-## 14. On-disk layout
+## 15. On-disk layout
 
 After a successful install, the canonical tree:
 
@@ -1109,10 +1508,12 @@ After a successful install, the canonical tree:
 `/etc/decloud/settings.json` stores all node settings in JSON format.
 Identity fields (orchestrator URL, wallet) are written by `install.sh`.
 Operational settings (country, region, zone, name) are managed by
-`decloud configure`. The file is merged on `decloud update` —
-identity fields are refreshed while operational settings are preserved.
+`decloud configure`. Resource allocation (CPU, memory, storage, GPU)
+is managed by `decloud allocate`. The file is merged on `decloud
+update` — identity fields are refreshed while operational settings
+and resource allocations are preserved.
 
-## 15. Configuration
+## 16. Configuration
 
 ### Where settings live (current implementation)
 
@@ -1120,6 +1521,7 @@ identity fields are refreshed while operational settings are preserved.
 | --- | --- | --- |
 | Orchestrator URL, wallet | `/etc/decloud/settings.json` | Set at install; change requires reinstall |
 | Country, region, zone, name | `/etc/decloud/settings.json` | Set via `decloud configure`; locality changes require logout → configure → register → login |
+| Resource allocation (CPU%, memory%, storage%, GPU count) | `/etc/decloud/settings.json` | Set via `decloud allocate`; pushed to orchestrator; applied at next login |
 | `appsettings.Production.json` | Generated by `install.sh` | Infrastructure only (URLs, ports, paths). Safe to regenerate — contains no operator data |
 | Node ID, API key | `/etc/decloud/credentials` (after register) | Removed by `uninstall`, regenerated on next register |
 | Machine ID | `/etc/machine-id` | OS-level, do not edit |
@@ -1132,6 +1534,7 @@ Operational settings (locality, name):
 ```bash
 sudo decloud configure --country DE --region eu-central --name MyNode
 sudo decloud register       # commit to orchestrator with wallet signature
+sudo decloud evaluate       # re-benchmark if needed
 sudo decloud login           # resume scheduling
 ```
 
@@ -1141,10 +1544,19 @@ For locality changes on an enrolled node, logout first:
 sudo decloud logout
 sudo decloud configure --country BR --region sa-east
 sudo decloud register
+sudo decloud evaluate       # optional if hardware hasn't changed
 sudo decloud login
 ```
 
-## 16. Trust chain at runtime
+Resource allocation changes:
+
+```bash
+sudo decloud logout                            # if currently active
+sudo decloud allocate --cpu-percent 80 --memory-percent 70
+sudo decloud login                             # re-materializes capacity
+```
+
+## 17. Trust chain at runtime
 
 Three layered claims, each with a different cryptographic anchor.
 The same chain runs on every install and every update.
@@ -1185,7 +1597,7 @@ What this chain does **not** prove:
   download it first and inspect before running. install.sh is small
   and human-readable.
 
-## 17. Common operator tasks
+## 18. Common operator tasks
 
 | Task | Command |
 | --- | --- |
@@ -1197,13 +1609,16 @@ What this chain does **not** prove:
 | Install a specific version | `curl -fsSL https://github.com/bekirmfr/DeCloud.NodeAgent/releases/download/vX.Y.Z/install.sh \| sudo bash -s -- --orchestrator <URL> --wallet <addr>` |
 | Pause scheduling | `sudo decloud logout` |
 | Resume scheduling | `sudo decloud login` |
-| Change locality | `sudo decloud logout && sudo decloud configure --country BR --region sa-east && sudo decloud register && sudo decloud login` |
+| Re-evaluate performance | `sudo decloud evaluate` |
+| Adjust resource allocation | `sudo decloud allocate --cpu-percent 80 --memory-percent 70` |
+| View current allocation | `sudo decloud allocate --show` |
+| Change locality | `sudo decloud logout && sudo decloud configure --country BR --region sa-east && sudo decloud register && sudo decloud evaluate && sudo decloud login` |
 | Inspect installed version | `cat /opt/decloud/current-version` |
 | Manual rollback to previous version | `sudo ln -sfn /opt/decloud/publish.$(cat /opt/decloud/previous-version) /opt/decloud/publish && sudo systemctl restart decloud-node-agent` |
 | Check installed binaries | `ls -la /opt/decloud/publish/` |
 | View saved settings | `sudo cat /etc/decloud/settings.json` |
 
-## 18. Recovery scenarios
+## 19. Recovery scenarios
 
 ### Service fails to start after update
 
@@ -1213,7 +1628,7 @@ journalctl -u decloud-node-agent -n 100 --no-pager
 
 Look for missing dependencies, permission errors, or appsettings
 validation failures. If the new version is broken, manual rollback per
-[Common operator tasks](#17-common-operator-tasks) above.
+[Common operator tasks](#18-common-operator-tasks) above.
 
 ### Cosign verification fails
 
@@ -1268,11 +1683,17 @@ Either:
 
 1. Someone edited `/etc/decloud/settings` without re-registering —
    revert the edit or run the full logout → configure → register →
-   login sequence
+   evaluate → login sequence
 2. A bug produced inconsistent state — inspect both sides and
    re-register to reconcile
 
-## 19. Migration from legacy installs
+### Evaluation missing after update
+
+If a new agent version clears the cached evaluation, the node may
+fail to auto-login on restart. Run `sudo decloud evaluate` followed
+by `sudo decloud login` to restore.
+
+## 20. Migration from legacy installs
 
 Earlier (pre-2.2.0) installs used `git clone` of the source repo plus
 `dotnet publish` on the node, leaving:
@@ -1317,7 +1738,7 @@ runtime is installed independently as `aspnetcore-runtime-8.0`.
 | `decloud-relay-nat` | NAT helper for relay-mode nodes |
 | `vm-cleanup.sh` | Per-VM cleanup helper |
 | `/opt/decloud/publish` | Active version symlink — the systemd unit points here |
-| `/etc/decloud/settings.json` | Node settings (JSON); identity fields written by install, operational fields by configure |
+| `/etc/decloud/settings.json` | Node settings (JSON); identity fields written by install, operational fields by configure, resource allocation by allocate |
 | `/etc/decloud/credentials` | JWT credentials (after register) |
 | `/etc/decloud/logged-out` | Sentinel file indicating operator-initiated scheduling pause; prevents auto-login on restart |
 | `/usr/local/share/decloud/install.sh` | Offline fallback for `decloud update` |
