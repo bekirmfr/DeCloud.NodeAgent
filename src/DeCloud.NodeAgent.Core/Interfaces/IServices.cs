@@ -1,5 +1,6 @@
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.Shared.Contracts;
 using Orchestrator.Models;
 using System.Net.NetworkInformation;
 
@@ -196,6 +197,13 @@ public interface IOrchestratorClient
     string? NodeId { get; }
 
     string? WalletAddress { get; }
+    /// <summary>
+    /// Push resource allocation percentages to orchestrator.
+    /// Endpoint: POST /api/nodes/{id}/allocate
+    /// </summary>
+    Task<NodeAllocateResponse?> AllocateAsync(
+        NodeAllocateRequest request,
+        CancellationToken ct = default);
 
     Task<RegistrationResult> RegisterWithPendingAuthAsync(CancellationToken ct = default);
     Task<RegistrationResult> RegisterNodeAsync(NodeRegistration registration, CancellationToken ct = default);

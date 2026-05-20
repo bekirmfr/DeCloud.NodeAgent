@@ -347,11 +347,6 @@ cmd_configure() {
 
     local country="" region="" zone="" name="" description=""
     local has_locality_change=false
-    local has_resource_change=false
-    local alloc_mem_percent="" alloc_mem_mb=""
-    local alloc_cpu_percent="" alloc_cpu_points=""
-    local alloc_storage_percent="" alloc_storage_mb=""
-    local alloc_gpu_count=""
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -361,20 +356,6 @@ cmd_configure() {
             --zone)        zone="$2";        has_locality_change=true; shift 2 ;;
             --name)        name="$2";        shift 2 ;;
             --description) description="$2"; shift 2 ;;
-            --allocated-memory-percent)
-                alloc_mem_percent="$2"; has_resource_change=true; shift 2 ;;
-            --allocated-memory-mb)
-                alloc_mem_mb="$2"; has_resource_change=true; shift 2 ;;
-            --allocated-cpu-percent)
-                alloc_cpu_percent="$2"; has_resource_change=true; shift 2 ;;
-            --allocated-cpu-points)
-                alloc_cpu_points="$2"; has_resource_change=true; shift 2 ;;
-            --allocated-storage-percent)
-                alloc_storage_percent="$2"; has_resource_change=true; shift 2 ;;
-            --allocated-storage-mb)
-                alloc_storage_mb="$2"; has_resource_change=true; shift 2 ;;
-            --allocated-gpu-count)
-                alloc_gpu_count="$2"; has_resource_change=true; shift 2 ;;
             -h|--help)
                 echo "Usage: $SCRIPT_NAME configure [options]"
                 echo ""
@@ -383,44 +364,18 @@ cmd_configure() {
                 echo "  --region <region>    DeCloud region code"
                 echo "  --zone <zone>        Zone (format: <region>-<n>)"
                 echo ""
-                echo "Resource allocation (require logout first):"
-                echo "  --allocated-memory-percent <1-95>"
-                echo "      Percent of physical RAM to offer. Default: 90."
-                echo "  --allocated-memory-mb <MB>"
-                echo "      Absolute MB of RAM to offer (min: 256)."
-                echo "      Mutually exclusive with --allocated-memory-percent."
-                echo ""
-                echo "  --allocated-cpu-percent <1-100>"
-                echo "      Percent of compute points to offer. Default: 90."
-                echo "      Use 100 to offer all evaluated compute points."
-                echo "  --allocated-cpu-points <n>"
-                echo "      Absolute compute points to offer (min: 1)."
-                echo "      Mutually exclusive with --allocated-cpu-percent."
-                echo ""
-                echo "  --allocated-storage-percent <1-95>"
-                echo "      Percent of physical storage to offer. Default: 90."
-                echo "  --allocated-storage-mb <MB>"
-                echo "      Absolute MB of storage to offer (min: 1024)."
-                echo "      Mutually exclusive with --allocated-storage-percent."
-                echo ""
-                echo "  --allocated-gpu-count <n>"
-                echo "      Number of GPUs to offer (0 = disable GPU offering)."
-                echo ""
                 echo "Cosmetic (allowed anytime, no logout needed):"
                 echo "  --name <text>        Node display name"
                 echo "  --description <text> Node description"
                 echo ""
+                echo "Resource allocation:"
+                echo "  Use 'decloud allocate' for CPU, memory, storage, and GPU allocation."
+                echo ""
                 echo "Examples:"
-                echo "  # Offer 70% of RAM to the platform"
-                echo "  sudo $SCRIPT_NAME configure --allocated-memory-percent 70"
+                echo "  sudo $SCRIPT_NAME configure --country DE --region eu-central"
+                echo "  sudo $SCRIPT_NAME configure --name MyNode --description 'EU production node'"
                 echo ""
-                echo "  # Offer exactly 4 GB of RAM"
-                echo "  sudo $SCRIPT_NAME configure --allocated-memory-mb 4096"
-                echo ""
-                echo "  # Change country and memory allocation together"
-                echo "  sudo $SCRIPT_NAME configure --country DE --allocated-memory-percent 80"
-                echo ""
-                echo "After locality or resource changes, commit with:"
+                echo "After locality changes, commit with:"
                 echo "  sudo $SCRIPT_NAME register"
                 echo ""
                 echo "Full sequence for changes on an enrolled node:"
@@ -437,7 +392,7 @@ cmd_configure() {
         esac
     done
 
-    if [[ -z "$country$region$zone$name$description$alloc_mem_percent$alloc_mem_mb$alloc_cpu_percent$alloc_cpu_points$alloc_storage_percent$alloc_storage_mb$alloc_gpu_count" ]]; then
+    if [[ -z "$country$region$zone$name$description" ]]; then
         log_error "No settings specified"
         echo "Run '$SCRIPT_NAME configure --help' for usage"
         exit $EXIT_USAGE
@@ -450,22 +405,6 @@ cmd_configure() {
             log_error "Cannot change locality while logged in"
             echo ""
             echo "  The full sequence for locality/rate changes:"
-            echo "    1. sudo $SCRIPT_NAME logout          # pause scheduling"
-            echo "    2. sudo $SCRIPT_NAME configure ...   # change settings"
-            echo "    3. sudo $SCRIPT_NAME register        # wallet-sign and commit"
-            echo "    4. sudo $SCRIPT_NAME login            # resume when ready"
-            echo ""
-            exit $EXIT_ERROR
-        fi
-    fi
-
-    # ── Gate: resource allocation changes require logout ───────────────────
-    if $has_resource_change; then
-        if [[ -f "$CREDENTIALS_FILE" ]] && [[ ! -f "$CONFIG_DIR/logged-out" ]]; then
-            echo ""
-            log_error "Cannot change resource allocation while logged in"
-            echo ""
-            echo "  The full sequence for resource allocation changes:"
             echo "    1. sudo $SCRIPT_NAME logout          # pause scheduling"
             echo "    2. sudo $SCRIPT_NAME configure ...   # change settings"
             echo "    3. sudo $SCRIPT_NAME register        # wallet-sign and commit"
@@ -499,75 +438,6 @@ cmd_configure() {
         fi
         if [[ -n "$expected_region" ]] && [[ ! "$zone" =~ ^${expected_region}-[1-9][0-9]*$ ]]; then
             log_error "Invalid zone format: '$zone' (must be <region>-<n>, e.g. ${expected_region}-1)"
-            exit $EXIT_USAGE
-        fi
-    fi
-
-    # ── Validate resource allocation flags ─────────────────────────────────
-    if [[ -n "$alloc_mem_percent" ]] && [[ -n "$alloc_mem_mb" ]]; then
-        log_error "Cannot set both --allocated-memory-percent and --allocated-memory-mb"
-        log_info "They are mutually exclusive. Use one or the other."
-        exit $EXIT_USAGE
-    fi
-
-    if [[ -n "$alloc_mem_percent" ]]; then
-        if ! [[ "$alloc_mem_percent" =~ ^[0-9]+$ ]] || \
-           [[ "$alloc_mem_percent" -lt 1 ]] || [[ "$alloc_mem_percent" -gt 95 ]]; then
-            log_error "Invalid memory percent: '$alloc_mem_percent' (must be 1-95)"
-            exit $EXIT_USAGE
-        fi
-    fi
-
-    if [[ -n "$alloc_mem_mb" ]]; then
-        if ! [[ "$alloc_mem_mb" =~ ^[0-9]+$ ]] || [[ "$alloc_mem_mb" -lt 256 ]]; then
-            log_error "Invalid memory MB: '$alloc_mem_mb' (must be >= 256)"
-            exit $EXIT_USAGE
-        fi
-    fi
-
-    if [[ -n "$alloc_cpu_percent" ]] && [[ -n "$alloc_cpu_points" ]]; then
-        log_error "Cannot set both --allocated-cpu-percent and --allocated-cpu-points"
-        exit $EXIT_USAGE
-    fi
-
-    if [[ -n "$alloc_cpu_percent" ]]; then
-        if ! [[ "$alloc_cpu_percent" =~ ^[0-9]+$ ]] || \
-           [[ "$alloc_cpu_percent" -lt 1 ]] || [[ "$alloc_cpu_percent" -gt 100 ]]; then
-            log_error "Invalid CPU percent: '$alloc_cpu_percent' (must be 1-100)"
-            exit $EXIT_USAGE
-        fi
-    fi
-
-    if [[ -n "$alloc_cpu_points" ]]; then
-        if ! [[ "$alloc_cpu_points" =~ ^[0-9]+$ ]] || [[ "$alloc_cpu_points" -lt 1 ]]; then
-            log_error "Invalid CPU points: '$alloc_cpu_points' (must be >= 1)"
-            exit $EXIT_USAGE
-        fi
-    fi
-
-    if [[ -n "$alloc_storage_percent" ]] && [[ -n "$alloc_storage_mb" ]]; then
-        log_error "Cannot set both --allocated-storage-percent and --allocated-storage-mb"
-        exit $EXIT_USAGE
-    fi
-
-    if [[ -n "$alloc_storage_percent" ]]; then
-        if ! [[ "$alloc_storage_percent" =~ ^[0-9]+$ ]] || \
-           [[ "$alloc_storage_percent" -lt 1 ]] || [[ "$alloc_storage_percent" -gt 95 ]]; then
-            log_error "Invalid storage percent: '$alloc_storage_percent' (must be 1-95)"
-            exit $EXIT_USAGE
-        fi
-    fi
-
-    if [[ -n "$alloc_storage_mb" ]]; then
-        if ! [[ "$alloc_storage_mb" =~ ^[0-9]+$ ]] || [[ "$alloc_storage_mb" -lt 1024 ]]; then
-            log_error "Invalid storage MB: '$alloc_storage_mb' (must be >= 1024)"
-            exit $EXIT_USAGE
-        fi
-    fi
-
-    if [[ -n "$alloc_gpu_count" ]]; then
-        if ! [[ "$alloc_gpu_count" =~ ^[0-9]+$ ]]; then
-            log_error "Invalid GPU count: '$alloc_gpu_count' (must be a non-negative integer)"
             exit $EXIT_USAGE
         fi
     fi
@@ -609,74 +479,6 @@ cmd_configure() {
         _write_setting "description" "$description"
         params_changed=true
         log_success "Description set to: $description"
-    fi
-
-    # ── Resource allocation writes ──────────────────────────────────────
-    if [[ -n "$alloc_mem_percent" ]]; then
-        local tmp; tmp=$(mktemp)
-        jq '.resources.memory = {"mode":"percent","value":'"$alloc_mem_percent"'}' \
-            "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
-        chmod 600 "$SETTINGS_FILE"
-        params_changed=true
-        log_success "Memory allocation set to: ${alloc_mem_percent}%"
-    fi
-
-    if [[ -n "$alloc_mem_mb" ]]; then
-        local tmp; tmp=$(mktemp)
-        jq '.resources.memory = {"mode":"mb","value":'"$alloc_mem_mb"'}' \
-            "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
-        chmod 600 "$SETTINGS_FILE"
-        params_changed=true
-        log_success "Memory allocation set to: ${alloc_mem_mb} MB"
-    fi
-
-    if [[ -n "$alloc_cpu_percent" ]]; then
-        local tmp; tmp=$(mktemp)
-        jq '.resources.cpu = {"mode":"percent","value":'"$alloc_cpu_percent"'}' \
-            "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
-        chmod 600 "$SETTINGS_FILE"
-        params_changed=true
-        log_success "CPU allocation set to: ${alloc_cpu_percent}%"
-    fi
-
-    if [[ -n "$alloc_cpu_points" ]]; then
-        local tmp; tmp=$(mktemp)
-        jq '.resources.cpu = {"mode":"points","value":'"$alloc_cpu_points"'}' \
-            "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
-        chmod 600 "$SETTINGS_FILE"
-        params_changed=true
-        log_success "CPU allocation set to: ${alloc_cpu_points} compute points"
-    fi
-
-    if [[ -n "$alloc_storage_percent" ]]; then
-        local tmp; tmp=$(mktemp)
-        jq '.resources.storage = {"mode":"percent","value":'"$alloc_storage_percent"'}' \
-            "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
-        chmod 600 "$SETTINGS_FILE"
-        params_changed=true
-        log_success "Storage allocation set to: ${alloc_storage_percent}%"
-    fi
-
-    if [[ -n "$alloc_storage_mb" ]]; then
-        local tmp; tmp=$(mktemp)
-        jq '.resources.storage = {"mode":"mb","value":'"$alloc_storage_mb"'}' \
-            "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
-        chmod 600 "$SETTINGS_FILE"
-        params_changed=true
-        log_success "Storage allocation set to: ${alloc_storage_mb} MB"
-    fi
-
-    if [[ -n "$alloc_gpu_count" ]]; then
-        local tmp; tmp=$(mktemp)
-        jq '.resources.gpu = {"count":'"$alloc_gpu_count"'}' \
-            "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
-        chmod 600 "$SETTINGS_FILE"
-        params_changed=true
-        if [[ "$alloc_gpu_count" == "0" ]]; then
-            log_success "GPU offering disabled"
-        else
-            log_success "GPU allocation set to: ${alloc_gpu_count} GPU(s)"
-        fi
     fi
 
     # Agent reads settings.json directly via ASP.NET Core config layering
@@ -750,6 +552,311 @@ _write_setting() {
     jq --arg v "$value" ".[\"${key}\"] = \$v" "$SETTINGS_FILE" > "$tmp" \
         && mv "$tmp" "$SETTINGS_FILE"
     chmod 600 "$SETTINGS_FILE"
+}
+
+cmd_allocate() {
+    check_root
+ 
+    local cpu_percent="" mem_percent="" stor_percent="" gpu_count=""
+    local show_only=false
+ 
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --cpu-percent)     cpu_percent="$2";     shift 2 ;;
+            --memory-percent)  mem_percent="$2";     shift 2 ;;
+            --storage-percent) stor_percent="$2";    shift 2 ;;
+            --gpu-count)       gpu_count="$2";       shift 2 ;;
+            --show)            show_only=true;       shift   ;;
+            -h|--help)
+                echo "Usage: $SCRIPT_NAME allocate [options]"
+                echo ""
+                echo "Set resource allocation percentages for this node."
+                echo "Determines how much of the node's capacity to offer to the platform."
+                echo ""
+                echo "Options:"
+                echo "  --cpu-percent <1-95>       Percentage of compute points to offer (default: 90)"
+                echo "  --memory-percent <1-95>    Percentage of physical RAM to offer (default: 90)"
+                echo "  --storage-percent <1-95>   Percentage of physical storage to offer (default: 90)"
+                echo "  --gpu-count <N>            Number of GPUs to offer (0 = none, default: all)"
+                echo "  --show                     Show current allocation with evaluation context"
+                echo ""
+                echo "Examples:"
+                echo "  # Offer 80% of CPU and 70% of RAM"
+                echo "  sudo $SCRIPT_NAME allocate --cpu-percent 80 --memory-percent 70"
+                echo ""
+                echo "  # View current allocation"
+                echo "  sudo $SCRIPT_NAME allocate --show"
+                echo ""
+                echo "  # Offer no GPUs (keep for other workloads)"
+                echo "  sudo $SCRIPT_NAME allocate --gpu-count 0"
+                echo ""
+                echo "After changing allocation on an active node:"
+                echo "  1. sudo $SCRIPT_NAME logout"
+                echo "  2. sudo $SCRIPT_NAME allocate <flags>"
+                echo "  3. sudo $SCRIPT_NAME login     # re-materializes capacity"
+                exit $EXIT_SUCCESS
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                echo "Run '$SCRIPT_NAME allocate --help' for usage"
+                exit $EXIT_USAGE
+                ;;
+        esac
+    done
+ 
+    # ── Show mode ─────────────────────────────────────────────────────────
+    if $show_only; then
+        echo ""
+        echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+        echo -e "${BOLD}  Resource Allocation${NC}"
+        echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+        echo ""
+ 
+        if ! check_service_running; then
+            log_error "Service not running"
+            exit $EXIT_ERROR
+        fi
+ 
+        # Try to get capacity from orchestrator for resolved values
+        local capacity
+        if check_authenticated 2>/dev/null; then
+            capacity=$(api_get "/api/orchestrator/capacity" 2>/dev/null) || true
+        fi
+ 
+        # Read current settings
+        local settings
+        settings=$(cat "$SETTINGS_FILE" 2>/dev/null || echo "{}")
+ 
+        local cpu_mode cpu_val mem_mode mem_val stor_mode stor_val gpu_val
+        cpu_mode=$(echo "$settings" | jq -r '.resources.cpu.mode // "not set"')
+        cpu_val=$(echo "$settings" | jq -r '.resources.cpu.value // "90 (default)"')
+        mem_mode=$(echo "$settings" | jq -r '.resources.memory.mode // "not set"')
+        mem_val=$(echo "$settings" | jq -r '.resources.memory.value // "90 (default)"')
+        stor_mode=$(echo "$settings" | jq -r '.resources.storage.mode // "not set"')
+        stor_val=$(echo "$settings" | jq -r '.resources.storage.value // "90 (default)"')
+        gpu_val=$(echo "$settings" | jq -r '.resources.gpu.count // "all (default)"')
+ 
+        echo -e "${BOLD}Local Settings (/etc/decloud/settings.json):${NC}"
+        echo ""
+        if [[ "$cpu_mode" == "percent" ]]; then
+            echo "  CPU:       ${cpu_val}%"
+        elif [[ "$cpu_mode" == "points" ]]; then
+            echo "  CPU:       ${cpu_val} compute points (absolute)"
+        else
+            echo "  CPU:       90% (default)"
+        fi
+ 
+        if [[ "$mem_mode" == "percent" ]]; then
+            echo "  Memory:    ${mem_val}%"
+        elif [[ "$mem_mode" == "mb" ]]; then
+            echo "  Memory:    ${mem_val} MB (absolute)"
+        else
+            echo "  Memory:    90% (default)"
+        fi
+ 
+        if [[ "$stor_mode" == "percent" ]]; then
+            echo "  Storage:   ${stor_val}%"
+        elif [[ "$stor_mode" == "mb" ]]; then
+            echo "  Storage:   ${stor_val} MB (absolute)"
+        else
+            echo "  Storage:   90% (default)"
+        fi
+ 
+        echo "  GPUs:      ${gpu_val}"
+ 
+        # Show resolved values from orchestrator if available
+        if [[ -n "$capacity" ]] && [[ "$capacity" != "null" ]]; then
+            echo ""
+            echo -e "${BOLD}Orchestrator-Resolved Capacity:${NC}"
+            echo ""
+ 
+            local total_pts alloc_pts avail_pts phys_mem alloc_mem phys_stor total_stor gpus
+            total_pts=$(echo "$capacity" | jq -r '.totalComputePoints // "N/A"')
+            alloc_pts=$(echo "$capacity" | jq -r '.allocatedComputePoints // "N/A"')
+            avail_pts=$(echo "$capacity" | jq -r '.availableComputePoints // "N/A"')
+            echo "  Compute:   ${total_pts} total points, ${alloc_pts} used, ${avail_pts} available"
+ 
+            local phys_mem_h alloc_mem_h
+            phys_mem=$(echo "$capacity" | jq -r '.physicalMemoryBytes // 0')
+            alloc_mem=$(echo "$capacity" | jq -r '.allocatedMemoryBytes // 0')
+            phys_mem_h=$(human_bytes "$phys_mem")
+            alloc_mem_h=$(human_bytes "$alloc_mem")
+            echo "  Memory:    ${alloc_mem_h} used of $(human_bytes "$(echo "$capacity" | jq -r '.physicalMemoryBytes // 0')")"
+ 
+            local total_stor_h
+            total_stor=$(echo "$capacity" | jq -r '.physicalStorageBytes // 0')
+            total_stor_h=$(human_bytes "$total_stor")
+            echo "  Storage:   $(human_bytes "$(echo "$capacity" | jq -r '.allocatedStorageBytes // 0')") used of ${total_stor_h}"
+ 
+            local vm_count
+            vm_count=$(echo "$capacity" | jq -r '.activeVmCount // 0')
+            echo "  VMs:       ${vm_count} active"
+        fi
+ 
+        echo ""
+        return 0
+    fi
+ 
+    # ── Validate inputs ───────────────────────────────────────────────────
+    if [[ -z "$cpu_percent$mem_percent$stor_percent$gpu_count" ]]; then
+        log_error "No allocation specified"
+        echo "Run '$SCRIPT_NAME allocate --help' for usage"
+        echo "Run '$SCRIPT_NAME allocate --show' to view current allocation"
+        exit $EXIT_USAGE
+    fi
+ 
+    if [[ -n "$cpu_percent" ]]; then
+        if ! [[ "$cpu_percent" =~ ^[0-9]+$ ]] || \
+           [[ "$cpu_percent" -lt 1 ]] || [[ "$cpu_percent" -gt 95 ]]; then
+            log_error "Invalid CPU percent: '$cpu_percent' (must be 1-95)"
+            exit $EXIT_USAGE
+        fi
+    fi
+ 
+    if [[ -n "$mem_percent" ]]; then
+        if ! [[ "$mem_percent" =~ ^[0-9]+$ ]] || \
+           [[ "$mem_percent" -lt 1 ]] || [[ "$mem_percent" -gt 95 ]]; then
+            log_error "Invalid memory percent: '$mem_percent' (must be 1-95)"
+            exit $EXIT_USAGE
+        fi
+    fi
+ 
+    if [[ -n "$stor_percent" ]]; then
+        if ! [[ "$stor_percent" =~ ^[0-9]+$ ]] || \
+           [[ "$stor_percent" -lt 1 ]] || [[ "$stor_percent" -gt 95 ]]; then
+            log_error "Invalid storage percent: '$stor_percent' (must be 1-95)"
+            exit $EXIT_USAGE
+        fi
+    fi
+ 
+    if [[ -n "$gpu_count" ]]; then
+        if ! [[ "$gpu_count" =~ ^[0-9]+$ ]]; then
+            log_error "Invalid GPU count: '$gpu_count' (must be a non-negative integer)"
+            exit $EXIT_USAGE
+        fi
+    fi
+ 
+    # ── Check settings file exists ────────────────────────────────────────
+    if [[ ! -f "$SETTINGS_FILE" ]]; then
+        log_error "No settings file found — run 'decloud install' first"
+        exit $EXIT_ERROR
+    fi
+ 
+    # ── Write to settings.json ────────────────────────────────────────────
+    local changed=false
+ 
+    if [[ -n "$cpu_percent" ]]; then
+        local tmp; tmp=$(mktemp)
+        jq '.resources.cpu = {"mode":"percent","value":'"$cpu_percent"'}' \
+            "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
+        chmod 600 "$SETTINGS_FILE"
+        changed=true
+        log_success "CPU allocation set to: ${cpu_percent}%"
+    fi
+ 
+    if [[ -n "$mem_percent" ]]; then
+        local tmp; tmp=$(mktemp)
+        jq '.resources.memory = {"mode":"percent","value":'"$mem_percent"'}' \
+            "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
+        chmod 600 "$SETTINGS_FILE"
+        changed=true
+        log_success "Memory allocation set to: ${mem_percent}%"
+    fi
+ 
+    if [[ -n "$stor_percent" ]]; then
+        local tmp; tmp=$(mktemp)
+        jq '.resources.storage = {"mode":"percent","value":'"$stor_percent"'}' \
+            "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
+        chmod 600 "$SETTINGS_FILE"
+        changed=true
+        log_success "Storage allocation set to: ${stor_percent}%"
+    fi
+ 
+    if [[ -n "$gpu_count" ]]; then
+        local tmp; tmp=$(mktemp)
+        jq '.resources.gpu = {"count":'"$gpu_count"'}' \
+            "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
+        chmod 600 "$SETTINGS_FILE"
+        changed=true
+        log_success "GPU allocation set to: ${gpu_count}"
+    fi
+ 
+    # ── Restart agent to pick up settings ─────────────────────────────────
+    if $changed; then
+        if check_service_running; then
+            systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+            log_info "Agent restarted to apply new settings"
+        fi
+ 
+        # ── Push to orchestrator if registered ────────────────────────────
+        if check_authenticated 2>/dev/null; then
+            log_info "Pushing allocation to orchestrator..."
+ 
+            # Build JSON request body — only include non-empty fields
+            local alloc_json="{"
+            local first=true
+ 
+            if [[ -n "$cpu_percent" ]]; then
+                $first || alloc_json+=","
+                alloc_json+="\"cpuPercent\":$(echo "scale=2; $cpu_percent / 100" | bc)"
+                first=false
+            fi
+            if [[ -n "$mem_percent" ]]; then
+                $first || alloc_json+=","
+                alloc_json+="\"memoryPercent\":$(echo "scale=2; $mem_percent / 100" | bc)"
+                first=false
+            fi
+            if [[ -n "$stor_percent" ]]; then
+                $first || alloc_json+=","
+                alloc_json+="\"storagePercent\":$(echo "scale=2; $stor_percent / 100" | bc)"
+                first=false
+            fi
+            if [[ -n "$gpu_count" ]]; then
+                $first || alloc_json+=","
+                alloc_json+="\"gpuCount\":${gpu_count}"
+                first=false
+            fi
+            alloc_json+="}"
+ 
+            local result
+            if result=$(api_post "/api/orchestrator/allocate" "$alloc_json" 2>/dev/null); then
+                local success
+                success=$(echo "$result" | jq -r '.success // false')
+                if [[ "$success" == "true" ]]; then
+                    log_success "Orchestrator confirmed allocation"
+ 
+                    # Show resolved values if available
+                    local resolved_pts resolved_mem resolved_stor
+                    resolved_pts=$(echo "$result" | jq -r '.resolvedComputePoints // empty')
+                    resolved_mem=$(echo "$result" | jq -r '.resolvedMemoryBytes // empty')
+                    resolved_stor=$(echo "$result" | jq -r '.resolvedStorageBytes // empty')
+ 
+                    if [[ -n "$resolved_pts" ]]; then
+                        echo ""
+                        echo -e "${BOLD}Resolved capacity:${NC}"
+                        [[ -n "$resolved_pts" ]] && echo "  Compute:  ${resolved_pts} points"
+                        [[ -n "$resolved_mem" ]] && echo "  Memory:   $(human_bytes "$resolved_mem")"
+                        [[ -n "$resolved_stor" ]] && echo "  Storage:  $(human_bytes "$resolved_stor")"
+                    fi
+                else
+                    local err
+                    err=$(echo "$result" | jq -r '.error // "unknown error"')
+                    log_warn "Orchestrator rejected allocation: $err"
+                fi
+            else
+                log_warn "Could not push allocation to orchestrator (will sync on next heartbeat)"
+            fi
+        else
+            log_info "Node not registered — allocation saved locally."
+            log_info "Run 'sudo $SCRIPT_NAME register' then 'sudo $SCRIPT_NAME evaluate' to go live."
+        fi
+ 
+        echo ""
+        log_info "If the node is currently active, run:"
+        echo "  1. sudo $SCRIPT_NAME logout"
+        echo "  2. sudo $SCRIPT_NAME login    # re-materializes capacity from new allocation"
+    fi
 }
 
 # ============================================================================
@@ -2595,10 +2702,12 @@ ${BOLD}NODE LIFECYCLE:${NC}
       --zone <zone>           Zone (format: <region>-<n>)
       --name <text>           Node display name
       --description <text>    Node description
-      --allocated-memory-percent <1-95>
-                              Percent of physical RAM to offer (default: 90)
-      --allocated-memory-mb <MB>
-                              Absolute MB of RAM to offer (min: 256)
+    allocate [options]      Set resource allocation percentages
+                              --cpu-percent <1-95>    Percentage of compute points to offer (default: 90)
+                              --memory-percent <1-95> Percentage of physical RAM to offer (default: 90)
+                              --storage-percent <1-95> Percentage of storage to offer (default: 90)
+                              --gpu-count <N>         Number of GPUs to offer (0 = none, default: all)
+                              --show                  Show current allocation with evaluation context
 
 ${BOLD}STATUS & INFORMATION:${NC}
     status                  Show comprehensive node status
@@ -2788,7 +2897,8 @@ main() {
         login)        cmd_login      "$@" ;;
         logout)       cmd_logout     "$@" ;;
         settings)     cmd_settings   "$@" ;;
-        configure)    cmd_configure  "$@" ;; 
+        configure)    cmd_configure  "$@" ;;
+        allocate)     cmd_allocate   "$@" ;;
         status)       cmd_status     "$@" ;;
         info)         cmd_info       "$@" ;;
         resources)    cmd_resources  "$@" ;;

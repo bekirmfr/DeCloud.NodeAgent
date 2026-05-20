@@ -3,6 +3,7 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Services;
+using DeCloud.Shared.Contracts;
 using Microsoft.AspNetCore.Mvc;
 using Orchestrator.Models;
 
@@ -100,4 +101,29 @@ public class OrchestratorController : ControllerBase
         }
         return Ok(evaluation);
     }
+
+    /// <summary>
+    /// Push resource allocation to orchestrator.
+    /// Called by CLI: POST /api/orchestrator/allocate
+    /// </summary>
+    [HttpPost("allocate")]
+    public async Task<ActionResult<NodeAllocateResponse>> Allocate(
+        [FromBody] NodeAllocateRequest request,
+        CancellationToken ct)
+    {
+        var response = await _orchestratorClient.AllocateAsync(request, ct);
+
+        if (response == null)
+        {
+            return StatusCode(502, "Failed to reach orchestrator");
+        }
+
+        if (!response.Success)
+        {
+            return BadRequest(response);
+        }
+
+        return Ok(response);
+    }
+
 }

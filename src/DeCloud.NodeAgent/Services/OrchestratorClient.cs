@@ -1,21 +1,20 @@
 // OrchestratorClient with Wallet Signature Authentication
 // Stateless authentication - no tokens, no expiration, no re-registration!
 
-using DeCloud.NodeAgent.Core.Constants;
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Core.Models.State;
 using DeCloud.NodeAgent.Infrastructure.Services;
-using DeCloud.NodeAgent.Infrastructure.Services.State;
+using DeCloud.Shared.Contracts;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Options;
 using Orchestrator.Models;
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Net;
 using System.Reflection;
+using System.Text;
 using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Services;
@@ -233,20 +232,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             SshCaPublicKey = sshCaPublicKey,
             ObligationStateVersions = await BuildObligationStateVersionsAsync(ct),
             SystemTemplateVersions = await _systemVmService.GetTemplateRevisionsAsync(ct),
-            AllocatedResources =
-                _nodeMetadata.AllocatedMemoryBytes.HasValue ||
-                _nodeMetadata.AllocatedComputePoints.HasValue ||
-                _nodeMetadata.AllocatedStorageBytes.HasValue ||
-                _nodeMetadata.AllocatedGpuCount.HasValue
-                ? new AllocatedResources
-                {
-                    MemoryBytes = _nodeMetadata.AllocatedMemoryBytes,
-                    ComputePoints = _nodeMetadata.AllocatedComputePoints,
-                    ComputePointsPercent = _nodeMetadata.AllocatedComputePointsPercent,
-                    StorageBytes = _nodeMetadata.AllocatedStorageBytes,
-                    GpuCount = _nodeMetadata.AllocatedGpuCount,
-                }
-                : null,
+            AllocatedResources = BuildAllocatedResources(),
         };
 
         // Register with retry logic
@@ -297,6 +283,130 @@ REGISTERED_AT={DateTime.UtcNow:O}";
 
         return RegistrationResult.Failure("Max retries exceeded");
     }
+
+    /// <summary>
+    /// Push resource allocation percentages to the orchestrator.
+    /// Calls POST /api/nodes/{id}/allocate.
+    /// </summary>
+    public async Task<NodeAllocateResponse?> AllocateAsync(
+        NodeAllocateRequest request,
+        CancellationToken ct = default)
+    {
+        if (!_nodeState.IsAuthenticated || string.IsNullOrEmpty(_nodeId))
+        {
+            _logger.LogWarning("Cannot allocate — node not registered");
+            return null;
+        }
+
+        try
+        {
+            var requestPath = $"/api/nodes/{_nodeId}/allocate";
+            var json = JsonSerializer.Serialize(request, _jsonOptions);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            var response = await _httpClient.PostAsync(requestPath, content, ct);
+
+            // Use HttpResponse<T> to unwrap the ApiResponse<T> envelope,
+            // same pattern as RegisterNodeAsync and other orchestrator calls.
+            var result = await HttpResponse<NodeAllocateResponse>.FromResponseAsync(response);
+
+            if (result.IsSuccess && result.Data != null)
+            {
+                _logger.LogInformation(
+                    "✓ Allocation updated: CPU={CpuPct:P0}, Mem={MemPct:P0}, " +
+                    "Stor={StorPct:P0}, GPU={Gpu}",
+                    result.Data.EffectiveCpuPercent,
+                    result.Data.EffectiveMemoryPercent,
+                    result.Data.EffectiveStoragePercent,
+                    result.Data.GpuCount?.ToString() ?? "all");
+
+                return result.Data;
+            }
+
+            _logger.LogWarning("Allocation failed: {Error}", result.Error);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to call allocate endpoint");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Build the AllocatedResources object for registration.
+    /// Prefers v2 (percentage) format; falls back to v1 (absolute) for
+    /// backward compatibility with old settings that use absolute modes.
+    /// </summary>
+    private AllocatedResources? BuildAllocatedResources()
+    {
+        var hasCpuPercent = _nodeMetadata.AllocatedComputePointsPercent.HasValue;
+        // NodeMetadataService resolves "percent" mode memory/storage into bytes,
+        // but we can detect percent mode by checking the config key directly.
+        var memMode = _nodeMetadata.GetType().GetField("_memoryAllocMode",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        var storMode = _nodeMetadata.GetType().GetField("_storageAllocMode",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+        // Check if ANY resource uses percent mode — if so, send v2
+        var hasAnyPercentConfig = hasCpuPercent;
+
+        // Simpler approach: read config keys directly
+        var configuration = _nodeMetadata as INodeMetadataService;
+
+        // If CPU percent is set, prefer v2 format for all resources.
+        // The orchestrator will apply defaults (90%) for any null percentage.
+        if (hasCpuPercent ||
+            _nodeMetadata.AllocatedMemoryBytes.HasValue ||
+            _nodeMetadata.AllocatedComputePoints.HasValue ||
+            _nodeMetadata.AllocatedStorageBytes.HasValue ||
+            _nodeMetadata.AllocatedGpuCount.HasValue)
+        {
+            // Build v2 format: convert absolute values to percentages where possible
+            var inventory = _nodeMetadata.Inventory;
+
+            double? cpuPct = null;
+            if (_nodeMetadata.AllocatedComputePointsPercent.HasValue)
+            {
+                cpuPct = _nodeMetadata.AllocatedComputePointsPercent.Value / 100.0;
+            }
+
+            double? memPct = null;
+            if (_nodeMetadata.AllocatedMemoryBytes.HasValue && inventory?.Memory != null
+                && inventory.Memory.TotalBytes > 0)
+            {
+                memPct = (double)_nodeMetadata.AllocatedMemoryBytes.Value
+                       / inventory.Memory.TotalBytes;
+                memPct = Math.Max(AllocatedResources.MinPercent,
+                         Math.Min(AllocatedResources.MaxPercent, memPct.Value));
+            }
+
+            double? storPct = null;
+            if (_nodeMetadata.AllocatedStorageBytes.HasValue && inventory?.Storage != null)
+            {
+                var totalStorage = inventory.Storage.Sum(s => s.TotalBytes);
+                if (totalStorage > 0)
+                {
+                    storPct = (double)_nodeMetadata.AllocatedStorageBytes.Value / totalStorage;
+                    storPct = Math.Max(AllocatedResources.MinPercent,
+                             Math.Min(AllocatedResources.MaxPercent, storPct.Value));
+                }
+            }
+
+            return new AllocatedResources
+            {
+                SchemaVersion = AllocatedResources.CurrentSchemaVersion,
+                CpuPercent = cpuPct,
+                MemoryPercent = memPct,
+                StoragePercent = storPct,
+                GpuCount = _nodeMetadata.AllocatedGpuCount
+            };
+        }
+
+        return null;
+    }
+
+
 
     public async Task<bool> LoginAsync(CancellationToken ct = default)
     {
