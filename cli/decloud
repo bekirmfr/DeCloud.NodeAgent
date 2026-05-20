@@ -121,6 +121,18 @@ check_service_running() {
     return 0
 }
 
+wait_for_agent_api() {
+    local max_wait="${1:-15}" waited=0
+    while (( waited < max_wait )); do
+        if api_get "/api/node/health" &>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        ((waited++))
+    done
+    return 1
+}
+
 check_authenticated() {
     if [[ ! -f "$CREDENTIALS_FILE" ]]; then
         log_error "Node not registered. Run: sudo $SCRIPT_NAME register"
@@ -787,8 +799,12 @@ cmd_allocate() {
         if check_service_running; then
             systemctl restart "$SERVICE_NAME" 2>/dev/null || true
             log_info "Agent restarted to apply new settings"
+            # Wait for agent API to come up before pushing
+            if ! wait_for_agent_api 15; then
+                log_warn "Agent API not ready after restart"
+            fi
         fi
- 
+
         # ── Push to orchestrator if registered ────────────────────────────
         if check_authenticated 2>/dev/null; then
             log_info "Pushing allocation to orchestrator..."
@@ -972,13 +988,26 @@ cmd_login() {
         exit $EXIT_NO_AUTH
     fi
 
-    local node_id; node_id=$(get_node_id)
     local api_key; api_key=$(get_api_key)
     local orchestrator_url; orchestrator_url=$(get_orchestrator_url)
 
-    if [[ -z "$node_id" || -z "$api_key" || -z "$orchestrator_url" ]]; then
+    if [[ -z "$api_key" || -z "$orchestrator_url" ]]; then
         log_error "Credentials file is incomplete — re-register"
         log_info "  sudo $SCRIPT_NAME register"
+        exit $EXIT_ERROR
+    fi
+
+    # Node ID comes from the agent API — wait for it to be ready
+    if ! wait_for_agent_api 20; then
+        log_error "Agent API not responding — ensure service is running"
+        log_info "  sudo systemctl start $SERVICE_NAME"
+        exit $EXIT_ERROR
+    fi
+
+    local node_id; node_id=$(get_node_id)
+    if [[ -z "$node_id" ]]; then
+        log_error "Could not determine node ID from agent"
+        log_info "  Check agent logs: sudo $SCRIPT_NAME logs --journal -n 50"
         exit $EXIT_ERROR
     fi
 
