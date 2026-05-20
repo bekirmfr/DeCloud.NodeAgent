@@ -1018,12 +1018,6 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 activeVmCount = heartbeat.ActiveVms.Count,
                 loadAverage = (double)0
             },
-            availableResources = new  // ResourceSnapshot structure
-            {
-                computePoints = heartbeat.Resources.AvailableComputePoints,
-                memoryBytes = heartbeat.Resources.AvailableMemoryBytes,
-                storageBytes = heartbeat.Resources.AvailableStorageBytes
-            },
             schedulingConfigVersion = heartbeat.SchedulingConfigVersion,
             activeVms = heartbeat.ActiveVms.Select(v => new
             {
