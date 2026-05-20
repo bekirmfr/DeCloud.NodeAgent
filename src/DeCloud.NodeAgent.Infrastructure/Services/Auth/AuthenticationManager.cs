@@ -128,6 +128,14 @@ public class AuthenticationManager : BackgroundService
         {
             var credentials = await LoadCredentialsAsync(ct);
 
+            // Backfill derived identity fields — the credentials file
+            // stores only API_KEY. NODE_ID and WALLET_ADDRESS are derived
+            // from settings.json + machine-id by NodeMetadataService.
+            if (!credentials.ContainsKey("NODE_ID"))
+                credentials["NODE_ID"] = _nodeMetadata.NodeId;
+            if (!credentials.ContainsKey("WALLET_ADDRESS"))
+                credentials["WALLET_ADDRESS"] = _nodeMetadata.WalletAddress;
+
             if (await ValidateCredentialsAsync(credentials, ct))
             {
                 var nodeId = _nodeMetadata.NodeId;
