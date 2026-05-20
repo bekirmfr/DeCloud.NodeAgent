@@ -141,9 +141,9 @@ check_authenticated() {
 }
 
 get_node_id() {
-    # Derive from agent API (agent knows its own ID)
+    # Fetch from orchestrator proxy (agent relays /api/nodes/me from orchestrator)
     if check_service_running 2>/dev/null; then
-        api_get "/api/node/summary" 2>/dev/null \
+        api_get "/api/orchestrator/summary" 2>/dev/null \
             | jq -r '.nodeId // empty' 2>/dev/null || echo ""
     else
         echo ""
