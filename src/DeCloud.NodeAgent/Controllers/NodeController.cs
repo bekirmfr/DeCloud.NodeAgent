@@ -3,6 +3,7 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Services;
+using DeCloud.Shared.Models;
 using Microsoft.AspNetCore.Mvc;
 
 namespace DeCloud.NodeAgent.Controllers;
@@ -13,17 +14,20 @@ public class NodeController : ControllerBase
 {
     private readonly IResourceDiscoveryService _resourceDiscovery;
     private readonly IOrchestratorClient _orchestratorClient;
+    private readonly INodeMetadataService _nodeMetadata;
     private readonly INodeStateService _nodeStateService;
     private readonly ILogger<NodeController> _logger;
 
     public NodeController(
         IResourceDiscoveryService resourceDiscovery,
         IOrchestratorClient orchestratorClient,
+        INodeMetadataService nodeMetadata,
         INodeStateService nodeStateService,
         ILogger<NodeController> logger)
     {
         _resourceDiscovery = resourceDiscovery;
         _orchestratorClient = orchestratorClient;
+        _nodeMetadata = nodeMetadata;
         _nodeStateService = nodeStateService;
         _logger = logger;
     }
@@ -144,5 +148,24 @@ public class NodeController : ControllerBase
             return NotFound("No heartbeat data available.");
         }
         return Ok(lastHeartbeat);
+    }
+
+
+    [HttpGet("allocation")]
+    public IActionResult GetAllocation()
+    {
+        var m = _nodeMetadata;
+        return Ok(new
+        {
+            cpuPercent = (m.AllocatedComputePointsPercent ?? 90) / 100.0,
+            memoryPercent = m.AllocatedMemoryPercent is int mp ? mp / 100.0 : AllocatedResources.DefaultPercent,
+            storagePercent = m.AllocatedStoragePercent is int sp ? sp / 100.0 : AllocatedResources.DefaultPercent,
+            gpuCount = m.AllocatedGpuCount,
+            resolvedComputePoints = m.AllocatedComputePoints ?? 0,
+            resolvedMemoryBytes = m.AllocatedMemoryBytes ?? 0,
+            resolvedStorageBytes = m.AllocatedStorageBytes ?? 0,
+            resolvedAt = m.AllocationResolvedAt,
+            source = m.AllocationResolvedAt.HasValue ? "orchestrator" : "settings"
+        });
     }
 }

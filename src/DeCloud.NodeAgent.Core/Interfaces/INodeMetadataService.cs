@@ -36,6 +36,12 @@ namespace DeCloud.NodeAgent.Core.Interfaces
         /// <summary>Raw storage allocation percentage from settings (1-95). Null = not configured.</summary>
         int? AllocatedStoragePercent { get; }
         int? AllocatedGpuCount { get; }
+        /// <summary>
+        /// When the orchestrator last confirmed allocation, as persisted in
+        /// allocation-resolved.json. Null if the cache has never been written
+        /// (values are settings-derived, not orchestrator-confirmed).
+        /// </summary>
+        DateTime? AllocationResolvedAt { get; }
 
         Task InitializeAsync(CancellationToken ct = default);
         void UpdatePublicIp(string publicIp);

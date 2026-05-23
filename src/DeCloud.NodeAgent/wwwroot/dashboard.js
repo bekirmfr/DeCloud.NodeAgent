@@ -11,6 +11,7 @@ const S = {
     ingressBaseDomain: null,  // e.g. "vms.stackfi.tech" — set from summary
     vmIngress: {},            // vmId → "https://..." from orchestrator DB
     obligations: [],          // SystemVmObligations from orchestrator
+    allocation: null,         // orchestrator-confirmed allocation from /api/node/allocation
 };
 
 // ============================================================
@@ -44,7 +45,7 @@ document.addEventListener('keydown', e => {
 });
 
 async function loadFast() {
-    const [sum, snap, vms, net, ports, svcs, vmIngress, oblResp, downloads] = await Promise.all([
+    const [sum, snap, vms, net, ports, svcs, vmIngress, oblResp, downloads, alloc] = await Promise.all([
         get('/api/dashboard/summary'),
         get('/api/node/snapshot'),
         get('/api/vms'),
@@ -54,6 +55,7 @@ async function loadFast() {
         get('/api/dashboard/vm-ingress'),
         get('/api/dashboard/obligations'),
         get('/api/downloads'),
+        get('/api/node/allocation'),
     ]);
     S.summary = sum;
     S.snapshot = snap;
@@ -64,6 +66,7 @@ async function loadFast() {
     S.services = svcs;
     S.vmIngress = vmIngress ?? {};
     S.obligations = oblResp?.obligations ?? [];
+    S.allocation = alloc;
     renderAll();
     $('last-refresh').textContent = 'Updated ' + new Date().toLocaleTimeString();
     if (S.logsVisible) loadLogs();
@@ -279,6 +282,34 @@ function pushHistory(key, value) {
     if (HW_HISTORY[key].length > HW_MAX_PTS) HW_HISTORY[key].shift();
 }
 
+/**
+ * Render one allocation card in the Resource Allocation section.
+ * Shows the operator-configured slice (allocBytes) against the physical total
+ * (physBytes), with vm-spec-based usage (vmUsedBytes) as the bar fill.
+ * Falls back to platform default (90%) when allocBytes is absent, which
+ * happens when the /api/node/allocation endpoint is not yet deployed and
+ * the snapshot field is also missing.
+ */
+function renderAllocCard(allocBytes, physBytes, vmUsedBytes, pctId, detailId, barId) {
+    if (allocBytes > 0 && physBytes > 0) {
+        const allocPct = allocBytes / physBytes * 100;
+        const usedOfAlloc = vmUsedBytes / allocBytes * 100;
+        set(pctId, `${allocPct.toFixed(0)}% of physical`);
+        set(detailId, `${fmtBytes(vmUsedBytes)} used / ${fmtBytes(allocBytes)} allocated / ${fmtBytes(physBytes)} physical`);
+        setHwBar(barId, usedOfAlloc);
+    } else if (physBytes > 0) {
+        const defaultAlloc = Math.floor(physBytes * 0.9);
+        const usedOfDefault = defaultAlloc > 0 ? vmUsedBytes / defaultAlloc * 100 : 0;
+        set(pctId, 'Default (90%)');
+        set(detailId, `${fmtBytes(vmUsedBytes)} used / ${fmtBytes(defaultAlloc)} allocated / ${fmtBytes(physBytes)} physical`);
+        setHwBar(barId, usedOfDefault);
+    } else {
+        set(pctId, '—');
+        set(detailId, '—');
+        setHwBar(barId, 0);
+    }
+}
+
 function renderHardware() {
     const snap = S.snapshot; if (!snap) return;
 
@@ -330,11 +361,15 @@ function renderHardware() {
     const vmUsedStor = allVms.reduce((s, v) =>
         s + ((v.spec?.diskBytes ?? v.diskBytes) || 0), 0);
 
-    const allocMem = snap.allocatedMemoryBytes ?? 0;
-    const totalPts = snap.totalComputePoints ?? 0;
-    const totalStor = snap.totalStorageBytes ?? 0;
+    // Prefer orchestrator-confirmed values from S.allocation (/api/node/allocation);
+    // fall back to snapshot fields for nodes running older agent versions.
+    const totalPts = S.allocation?.resolvedComputePoints ?? snap.totalComputePoints ?? 0;
+    const allocMem = S.allocation?.resolvedMemoryBytes ?? snap.allocatedMemoryBytes ?? 0;
+    const allocStor = S.allocation?.resolvedStorageBytes ?? snap.allocatedStorageBytes ?? 0;
+    // physMem already declared above; derive physStor from snap directly
+    const physStor = snap.totalStorageBytes ?? 0;
 
-    // Compute points: vm-used / total with bar
+    // Compute points: vm-used / allocated total with bar
     if (totalPts > 0) {
         const cpuAllocPct = vmUsedPts / totalPts * 100;
         set('hw-alloc-cpu', `${vmUsedPts} / ${totalPts} pts`);
@@ -342,35 +377,9 @@ function renderHardware() {
         setHwBar('hw-alloc-cpu-bar', cpuAllocPct);
     }
 
-    // Memory: vm-used of allocated, allocated vs physical
-    if (allocMem > 0 && physMem > 0) {
-        const allocPct = (allocMem / physMem * 100);
-        const usedOfAlloc = vmUsedMem / allocMem * 100;
-        set('hw-alloc-mem-pct', `${allocPct.toFixed(0)}% of physical`);
-        set('hw-alloc-mem-detail',
-            `${fmtBytes(vmUsedMem)} used / ${fmtBytes(allocMem)} allocated / ${fmtBytes(physMem)} physical`);
-        setHwBar('hw-alloc-mem-bar', usedOfAlloc);
-    } else {
-        const defaultAlloc = Math.floor(physMem * 0.9);
-        const usedOfDefault = defaultAlloc > 0 ? vmUsedMem / defaultAlloc * 100 : 0;
-        set('hw-alloc-mem-pct', 'Default (90%)');
-        set('hw-alloc-mem-detail',
-            `${fmtBytes(vmUsedMem)} used / ${fmtBytes(defaultAlloc)} allocated / ${fmtBytes(physMem)} physical`);
-        setHwBar('hw-alloc-mem-bar', usedOfDefault);
-    }
-
-    // Storage: vm-used / total with bar
-    if (totalStor > 0) {
-        const storAllocPct = vmUsedStor / totalStor * 100;
-        set('hw-alloc-stor', fmtBytes(totalStor));
-        set('hw-alloc-stor-detail',
-            `${fmtBytes(vmUsedStor)} used / ${fmtBytes(totalStor - vmUsedStor)} free`);
-        setHwBar('hw-alloc-stor-bar', storAllocPct);
-    } else {
-        set('hw-alloc-stor', '—');
-        set('hw-alloc-stor-detail', 'Default (90%)');
-        setHwBar('hw-alloc-stor-bar', 0);
-    }
+    // Memory and Storage: operator-configured slice vs physical total
+    renderAllocCard(allocMem, physMem, vmUsedMem, 'hw-alloc-mem-pct', 'hw-alloc-mem-detail', 'hw-alloc-mem-bar');
+    renderAllocCard(allocStor, physStor, vmUsedStor, 'hw-alloc-stor', 'hw-alloc-stor-detail', 'hw-alloc-stor-bar');
 
     // GPUs
     const gpus = snap.totalGpus ?? 0;
@@ -1434,6 +1443,7 @@ function stateBadge(state, vmId) {
 const EXPORT_ENDPOINTS = [
     { key: 'summary', label: 'Node Summary', url: '/api/dashboard/summary' },
     { key: 'snapshot', label: 'Resource Snapshot', url: '/api/node/snapshot' },
+    { key: 'allocation', label: 'Resource Allocation', url: '/api/node/allocation' },
     { key: 'vms', label: 'Virtual Machines', url: '/api/vms' },
     { key: 'obligations', label: 'Obligations', url: '/api/dashboard/obligations' },
     { key: 'network', label: 'Network Topology', url: '/api/dashboard/network' },

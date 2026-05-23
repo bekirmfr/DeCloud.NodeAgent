@@ -630,80 +630,32 @@ cmd_allocate() {
             exit $EXIT_ERROR
         fi
  
-        # Try to get capacity from orchestrator for resolved values
-        local capacity
-        if check_authenticated 2>/dev/null; then
-            capacity=$(api_get "/api/orchestrator/capacity" 2>/dev/null) || true
-        fi
- 
-        # Read current settings
-        local settings
-        settings=$(cat "$SETTINGS_FILE" 2>/dev/null || echo "{}")
- 
-        local cpu_mode cpu_val mem_mode mem_val stor_mode stor_val gpu_val
-        cpu_mode=$(echo "$settings" | jq -r '.resources.cpu.mode // "not set"')
-        cpu_val=$(echo "$settings" | jq -r '.resources.cpu.value // "90 (default)"')
-        mem_mode=$(echo "$settings" | jq -r '.resources.memory.mode // "not set"')
-        mem_val=$(echo "$settings" | jq -r '.resources.memory.value // "90 (default)"')
-        stor_mode=$(echo "$settings" | jq -r '.resources.storage.mode // "not set"')
-        stor_val=$(echo "$settings" | jq -r '.resources.storage.value // "90 (default)"')
-        gpu_val=$(echo "$settings" | jq -r '.resources.gpu.count // "all (default)"')
- 
-        echo -e "${BOLD}Local Settings (/etc/decloud/settings.json):${NC}"
-        echo ""
-        if [[ "$cpu_mode" == "percent" ]]; then
-            echo "  CPU:       ${cpu_val}%"
-        elif [[ "$cpu_mode" == "points" ]]; then
-            echo "  CPU:       ${cpu_val} compute points (absolute)"
-        else
-            echo "  CPU:       90% (default)"
-        fi
- 
-        if [[ "$mem_mode" == "percent" ]]; then
-            echo "  Memory:    ${mem_val}%"
-        elif [[ "$mem_mode" == "mb" ]]; then
-            echo "  Memory:    ${mem_val} MB (absolute)"
-        else
-            echo "  Memory:    90% (default)"
-        fi
- 
-        if [[ "$stor_mode" == "percent" ]]; then
-            echo "  Storage:   ${stor_val}%"
-        elif [[ "$stor_mode" == "mb" ]]; then
-            echo "  Storage:   ${stor_val} MB (absolute)"
-        else
-            echo "  Storage:   90% (default)"
-        fi
- 
-        echo "  GPUs:      ${gpu_val}"
- 
-        # Show resolved values from orchestrator if available
-        if [[ -n "$capacity" ]] && [[ "$capacity" != "null" ]]; then
+        local alloc
+        alloc=$(api_get "/api/node/allocation" 2>/dev/null) || true
+
+        if [[ -n "$alloc" ]]; then
+            local cpu_pct mem_pct stor_pct source resolved_at
+            cpu_pct=$(echo "$alloc"     | jq -r '(.cpuPercent     * 100 | round | tostring) + "%"')
+            mem_pct=$(echo "$alloc"     | jq -r '(.memoryPercent  * 100 | round | tostring) + "%"')
+            stor_pct=$(echo "$alloc"    | jq -r '(.storagePercent * 100 | round | tostring) + "%"')
+            source=$(echo "$alloc"      | jq -r '.source     // "settings"')
+            resolved_at=$(echo "$alloc" | jq -r '.resolvedAt // "never"')
+
+            echo -e "${BOLD}Local Settings (/etc/decloud/settings.json):${NC}"
+            echo "  CPU:       $cpu_pct"
+            echo "  Memory:    $mem_pct"
+            echo "  Storage:   $stor_pct"
+            echo "  GPUs:      $(echo "$alloc" | jq -r '.gpuCount // "all (default)"')"
             echo ""
-            echo -e "${BOLD}Orchestrator-Resolved Capacity:${NC}"
-            echo ""
- 
-            local total_pts alloc_pts avail_pts phys_mem alloc_mem phys_stor total_stor gpus
-            total_pts=$(echo "$capacity" | jq -r '.totalComputePoints // "N/A"')
-            alloc_pts=$(echo "$capacity" | jq -r '.allocatedComputePoints // "N/A"')
-            avail_pts=$(echo "$capacity" | jq -r '.availableComputePoints // "N/A"')
-            echo "  Compute:   ${total_pts} total points, ${alloc_pts} used, ${avail_pts} available"
- 
-            local phys_mem_h alloc_mem_h
-            phys_mem=$(echo "$capacity" | jq -r '.physicalMemoryBytes // 0')
-            alloc_mem=$(echo "$capacity" | jq -r '.allocatedMemoryBytes // 0')
-            phys_mem_h=$(human_bytes "$phys_mem")
-            alloc_mem_h=$(human_bytes "$alloc_mem")
-            echo "  Memory:    ${alloc_mem_h} used of $(human_bytes "$(echo "$capacity" | jq -r '.physicalMemoryBytes // 0')")"
- 
-            local total_stor_h
-            total_stor=$(echo "$capacity" | jq -r '.physicalStorageBytes // 0')
-            total_stor_h=$(human_bytes "$total_stor")
-            echo "  Storage:   $(human_bytes "$(echo "$capacity" | jq -r '.allocatedStorageBytes // 0')") used of ${total_stor_h}"
- 
-            local vm_count
-            vm_count=$(echo "$capacity" | jq -r '.activeVmCount // 0')
-            echo "  VMs:       ${vm_count} active"
+
+            if [[ "$source" == "orchestrator" ]]; then
+                echo -e "${BOLD}Orchestrator-Resolved Capacity (confirmed ${resolved_at}):${NC}"
+            else
+                echo -e "${BOLD}Locally-Derived Capacity (not yet confirmed by orchestrator):${NC}"
+            fi
+            echo "  Compute:   $(echo "$alloc" | jq -r '.resolvedComputePoints') pts"
+            echo "  Memory:    $(human_bytes "$(echo "$alloc" | jq -r '.resolvedMemoryBytes')")"
+            echo "  Storage:   $(human_bytes "$(echo "$alloc" | jq -r '.resolvedStorageBytes')")"
         fi
  
         echo ""

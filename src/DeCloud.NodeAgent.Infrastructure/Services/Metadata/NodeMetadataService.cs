@@ -39,6 +39,12 @@ public class NodeMetadataService : INodeMetadataService
     public int? AllocatedStoragePercent { get; private set; }
 
     public int? AllocatedGpuCount { get; private set; }
+    // Add after AllocatedGpuCount:
+    /// <summary>
+    /// When the orchestrator last confirmed allocation, as persisted in
+    /// allocation-resolved.json. Null if the cache has never been written.
+    /// </summary>
+    public DateTime? AllocationResolvedAt { get; private set; }
 
     private const string ResolvedAllocationFile = "/etc/decloud/allocation-resolved.json";
 
@@ -250,6 +256,7 @@ public class NodeMetadataService : INodeMetadataService
             if (cached.ComputePoints > 0) AllocatedComputePoints = cached.ComputePoints;
             if (cached.MemoryBytes > 0) AllocatedMemoryBytes = cached.MemoryBytes;
             if (cached.StorageBytes > 0) AllocatedStorageBytes = cached.StorageBytes;
+            AllocationResolvedAt = cached.ResolvedAt;
 
             _logger.LogInformation(
                 "Loaded persisted orchestrator allocation: {Pts} pts, " +
@@ -276,6 +283,7 @@ public class NodeMetadataService : INodeMetadataService
         if (response.ResolvedComputePoints is > 0) AllocatedComputePoints = response.ResolvedComputePoints.Value;
         if (response.ResolvedMemoryBytes is > 0) AllocatedMemoryBytes = response.ResolvedMemoryBytes.Value;
         if (response.ResolvedStorageBytes is > 0) AllocatedStorageBytes = response.ResolvedStorageBytes.Value;
+        AllocationResolvedAt = DateTime.UtcNow;
 
         try
         {
@@ -295,8 +303,7 @@ public class NodeMetadataService : INodeMetadataService
             var tmp = ResolvedAllocationFile + ".tmp";
             await File.WriteAllTextAsync(tmp, json, ct);
             File.Move(tmp, ResolvedAllocationFile, overwrite: true);
-            File.SetUnixFileMode(ResolvedAllocationFile,
-                UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            File.SetUnixFileMode(ResolvedAllocationFile, UnixFileMode.UserRead | UnixFileMode.UserWrite);
 
             _logger.LogInformation(
                 "✓ Orchestrator allocation persisted: {Pts} pts, " +
