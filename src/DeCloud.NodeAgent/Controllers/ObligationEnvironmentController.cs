@@ -1,4 +1,5 @@
-﻿using DeCloud.NodeAgent.Core.Interfaces.State;
+﻿using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Services.CloudInit;
 using DeCloud.Shared.Models;
