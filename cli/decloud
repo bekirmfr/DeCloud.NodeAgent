@@ -883,7 +883,6 @@ cmd_allocate() {
         log_info "Agent restarted to apply new settings"
     fi
 }
-}
 
 # ============================================================================
 # AUTHENTICATION COMMANDS
