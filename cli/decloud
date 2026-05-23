@@ -710,13 +710,17 @@ cmd_allocate() {
         return 0
     fi
  
-    # ── Validate inputs ───────────────────────────────────────────────────
-    if [[ -z "$cpu_percent$mem_percent$stor_percent$gpu_count" ]]; then
-        log_error "No allocation specified"
-        echo "Run '$SCRIPT_NAME allocate --help' for usage"
-        echo "Run '$SCRIPT_NAME allocate --show' to view current allocation"
-        exit $EXIT_USAGE
-    fi
+    # ── Resolve effective values ──────────────────────────────────────────
+    # Base: settings file. Override: CLI flags.
+    # No flags = push settings as-is (useful after reset/re-register).
+    local settings_cpu settings_mem settings_stor
+    settings_cpu=$(jq -r '.resources.cpu.value // empty' "$SETTINGS_FILE" 2>/dev/null)
+    settings_mem=$(jq -r '.resources.memory.value // empty' "$SETTINGS_FILE" 2>/dev/null)
+    settings_stor=$(jq -r '.resources.storage.value // empty' "$SETTINGS_FILE" 2>/dev/null)
+
+    local eff_cpu="${cpu_percent:-$settings_cpu}"
+    local eff_mem="${mem_percent:-$settings_mem}"
+    local eff_stor="${stor_percent:-$settings_stor}"
  
     if [[ -n "$cpu_percent" ]]; then
         if ! [[ "$cpu_percent" =~ ^[0-9]+$ ]] || \
@@ -755,9 +759,11 @@ cmd_allocate() {
         exit $EXIT_ERROR
     fi
  
-    # ── Write to settings.json ────────────────────────────────────────────
+    # ── Write CLI overrides to settings.json ──────────────────────────────
+    # Only write fields that were explicitly provided as CLI flags.
+    # Settings file values are already there; no need to re-write them.
     local changed=false
- 
+
     if [[ -n "$cpu_percent" ]]; then
         local tmp; tmp=$(mktemp)
         jq '.resources.cpu = {"mode":"percent","value":'"$cpu_percent"'}' \
@@ -766,7 +772,7 @@ cmd_allocate() {
         changed=true
         log_success "CPU allocation set to: ${cpu_percent}%"
     fi
- 
+
     if [[ -n "$mem_percent" ]]; then
         local tmp; tmp=$(mktemp)
         jq '.resources.memory = {"mode":"percent","value":'"$mem_percent"'}' \
@@ -775,7 +781,7 @@ cmd_allocate() {
         changed=true
         log_success "Memory allocation set to: ${mem_percent}%"
     fi
- 
+
     if [[ -n "$stor_percent" ]]; then
         local tmp; tmp=$(mktemp)
         jq '.resources.storage = {"mode":"percent","value":'"$stor_percent"'}' \
@@ -784,7 +790,7 @@ cmd_allocate() {
         changed=true
         log_success "Storage allocation set to: ${stor_percent}%"
     fi
- 
+
     if [[ -n "$gpu_count" ]]; then
         local tmp; tmp=$(mktemp)
         jq '.resources.gpu = {"count":'"$gpu_count"'}' \
@@ -793,86 +799,90 @@ cmd_allocate() {
         changed=true
         log_success "GPU allocation set to: ${gpu_count}"
     fi
- 
-    if $changed; then
-        # ── Push to orchestrator FIRST while agent is still authenticated ─
-        if check_service_running && check_authenticated 2>/dev/null; then
-            log_info "Pushing allocation to orchestrator..."
- 
-            # Build JSON request body — only include non-empty fields
-            local alloc_json="{"
-            local first=true
- 
-            if [[ -n "$cpu_percent" ]]; then
-                $first || alloc_json+=","
-                alloc_json+="\"cpuPercent\":$(awk "BEGIN {printf \"%.2f\", $cpu_percent / 100}")"
-                first=false
-            fi
-            if [[ -n "$mem_percent" ]]; then
-                $first || alloc_json+=","
-                alloc_json+="\"memoryPercent\":$(awk "BEGIN {printf \"%.2f\", $mem_percent / 100}")"
-                first=false
-            fi
-            if [[ -n "$stor_percent" ]]; then
-                $first || alloc_json+=","
-                alloc_json+="\"storagePercent\":$(awk "BEGIN {printf \"%.2f\", $stor_percent / 100}")"
-                first=false
-            fi
-            if [[ -n "$gpu_count" ]]; then
-                $first || alloc_json+=","
-                alloc_json+="\"gpuCount\":${gpu_count}"
-                first=false
-            fi
-            alloc_json+="}"
- 
-            local result
-            if result=$(api_post "/api/orchestrator/allocate" "$alloc_json" 2>/dev/null); then
-                local success
-                success=$(echo "$result" | jq -r '.success // false')
-                if [[ "$success" == "true" ]]; then
-                    log_success "Orchestrator confirmed allocation"
- 
-                    # Show resolved values if available
-                    local resolved_pts resolved_mem resolved_stor
-                    resolved_pts=$(echo "$result" | jq -r '.resolvedComputePoints // empty')
-                    resolved_mem=$(echo "$result" | jq -r '.resolvedMemoryBytes // empty')
-                    resolved_stor=$(echo "$result" | jq -r '.resolvedStorageBytes // empty')
- 
-                    if [[ -n "$resolved_pts" ]]; then
-                        echo ""
-                        echo -e "${BOLD}Resolved capacity:${NC}"
-                        [[ -n "$resolved_pts" ]] && echo "  Compute:  ${resolved_pts} points"
-                        [[ -n "$resolved_mem" ]] && echo "  Memory:   $(human_bytes "$resolved_mem")"
-                        [[ -n "$resolved_stor" ]] && echo "  Storage:  $(human_bytes "$resolved_stor")"
-                    fi
-                else
-                    local err
-                    err=$(echo "$result" | jq -r '.error // "unknown error"')
-                    log_warn "Orchestrator rejected allocation: $err"
+
+    # No CLI flags = show what we're sending from settings.
+    if ! $changed; then
+        echo ""
+        echo -e "${BOLD}Pushing allocation from settings:${NC}"
+        echo "  CPU:       ${eff_cpu:-90 (default)}%"
+        echo "  Memory:    ${eff_mem:-90 (default)}%"
+        echo "  Storage:   ${eff_stor:-90 (default)}%"
+    fi
+
+    # ── Push to orchestrator FIRST, before agent restart ──────────────
+    if check_service_running && check_authenticated 2>/dev/null; then
+        log_info "Pushing allocation to orchestrator..."
+
+        local alloc_json="{"
+        local first=true
+
+        if [[ -n "$eff_cpu" ]]; then
+            $first || alloc_json+=","
+            alloc_json+="\"cpuPercent\":$(echo "scale=2; $eff_cpu / 100" | bc)"
+            first=false
+        fi
+        if [[ -n "$eff_mem" ]]; then
+            $first || alloc_json+=","
+            alloc_json+="\"memoryPercent\":$(echo "scale=2; $eff_mem / 100" | bc)"
+            first=false
+        fi
+        if [[ -n "$eff_stor" ]]; then
+            $first || alloc_json+=","
+            alloc_json+="\"storagePercent\":$(echo "scale=2; $eff_stor / 100" | bc)"
+            first=false
+        fi
+        if [[ -n "$gpu_count" ]]; then
+            $first || alloc_json+=","
+            alloc_json+="\"gpuCount\":${gpu_count}"
+            first=false
+        fi
+        alloc_json+="}"
+
+        local result
+        if result=$(api_post "/api/orchestrator/allocate" "$alloc_json" 2>/dev/null); then
+            local success
+            success=$(echo "$result" | jq -r '.success // false')
+            if [[ "$success" == "true" ]]; then
+                log_success "Orchestrator confirmed allocation"
+
+                local resolved_pts resolved_mem resolved_stor
+                resolved_pts=$(echo "$result" | jq -r '.resolvedComputePoints // empty')
+                resolved_mem=$(echo "$result" | jq -r '.resolvedMemoryBytes // empty')
+                resolved_stor=$(echo "$result" | jq -r '.resolvedStorageBytes // empty')
+
+                if [[ -n "$resolved_pts" ]]; then
+                    echo ""
+                    echo -e "${BOLD}Resolved capacity:${NC}"
+                    [[ -n "$resolved_pts" ]] && echo "  Compute:  ${resolved_pts} points"
+                    [[ -n "$resolved_mem" ]] && echo "  Memory:   $(human_bytes "$resolved_mem")"
+                    [[ -n "$resolved_stor" ]] && echo "  Storage:  $(human_bytes "$resolved_stor")"
                 fi
             else
-                log_warn "Could not push allocation to orchestrator (will sync on next heartbeat)"
+                local err
+                err=$(echo "$result" | jq -r '.error // "unknown error"')
+                log_warn "Orchestrator rejected allocation: $err"
             fi
         else
-            log_info "Node not registered — allocation saved locally."
-            log_info "Run 'sudo $SCRIPT_NAME register' then 'sudo $SCRIPT_NAME evaluate' to go live."
+            log_warn "Could not push allocation to orchestrator (will sync on next heartbeat)"
         fi
 
-        # ── Restart agent to pick up settings ─────────────────────────────────
-        if check_service_running; then
-            systemctl restart "$SERVICE_NAME" 2>/dev/null || true
-            log_info "Agent restarted to apply new settings"
-            # Wait for agent API to come up before pushing
-            if ! wait_for_agent_api 15; then
-                log_warn "Agent API not ready after restart"
-            fi
+        if $changed; then
+            echo ""
+            log_info "If the node is currently active, run:"
+            echo "  1. sudo $SCRIPT_NAME logout"
+            echo "  2. sudo $SCRIPT_NAME login    # re-materializes capacity from new allocation"
         fi
- 
-        echo ""
-        log_info "If the node is currently active, run:"
-        echo "  1. sudo $SCRIPT_NAME logout"
-        echo "  2. sudo $SCRIPT_NAME login    # re-materializes capacity from new allocation"
+    else
+        log_info "Node not registered — allocation saved locally."
+        log_info "Run 'sudo $SCRIPT_NAME register' then 'sudo $SCRIPT_NAME evaluate' to go live."
     fi
+
+    # ── Restart agent AFTER push so settings.json changes take effect ─
+    if $changed && check_service_running; then
+        systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+        log_info "Agent restarted to apply new settings"
+    fi
+}
 }
 
 # ============================================================================
