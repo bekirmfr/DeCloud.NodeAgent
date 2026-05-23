@@ -141,7 +141,7 @@ public sealed class SystemVmService : ISystemVmService
         {
             // Step 1: guest-exec journalctl inside the VM
             var argsJson = string.Join(",",
-                new[] { "--no-pager", "-n", lines.ToString(), "--since=-30min" }
+                new[] { "--no-pager", "-n", lines.ToString(), "-p", "0..5", "--since=-30min" }
                     .Select(a => $"\"{a}\""));
             var execCmd = $"{{\"execute\":\"guest-exec\",\"arguments\":{{\"path\":\"/usr/bin/journalctl\",\"arg\":[{argsJson}],\"capture-output\":true}}}}";
 
