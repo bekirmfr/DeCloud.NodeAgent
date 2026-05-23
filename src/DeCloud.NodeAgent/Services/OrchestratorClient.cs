@@ -321,6 +321,8 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                     result.Data.EffectiveStoragePercent,
                     result.Data.GpuCount?.ToString() ?? "all");
 
+                await _nodeMetadata.UpdateFromOrchestratorResolutionAsync(result.Data, ct);
+
                 return result.Data;
             }
 

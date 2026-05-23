@@ -1,47 +1,10 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.Shared;
+using DeCloud.Shared.Contracts;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
-
-public interface INodeMetadataService
-{
-    string OrchestratorUrl { get; }
-    string NodeId { get; }
-    string MachineId { get; }
-    string Name { get; }
-    string? PublicIp { get; }
-    string WalletAddress { get; }
-    string Region { get; }
-    string Zone { get; }
-    /// <summary>
-    /// ISO 3166-1 alpha-2 country code from <c>Node:Country</c> config.
-    /// <c>"ZZ"</c> when not configured (unknown / not yet declared).
-    /// </summary>
-    string Country { get; }
-
-    NodePricing? Pricing { get; }
-    HardwareInventory? Inventory { get; }
-
-    /// <summary>
-    /// Operator-allocated memory in bytes, resolved from settings.
-    /// Null until UpdateInventory is called (percent mode needs TotalBytes).
-    /// Null also means "use platform default (90%)".
-    /// </summary>
-    long? AllocatedMemoryBytes { get; }
-    int? AllocatedComputePoints { get; }
-    int? AllocatedComputePointsPercent { get; }
-    /// <summary>Raw memory allocation percentage from settings (1-95). Null = not configured.</summary>
-    int? AllocatedMemoryPercent { get; }
-    long? AllocatedStorageBytes { get; }
-    /// <summary>Raw storage allocation percentage from settings (1-95). Null = not configured.</summary>
-    int? AllocatedStoragePercent { get; }
-    int? AllocatedGpuCount { get; }
-
-    Task InitializeAsync(CancellationToken ct = default);
-    void UpdatePublicIp(string publicIp);
-    void UpdateInventory(HardwareInventory inventory);
-}
+using System.Text.Json;
 
 public class NodeMetadataService : INodeMetadataService
 {
@@ -76,6 +39,17 @@ public class NodeMetadataService : INodeMetadataService
     public int? AllocatedStoragePercent { get; private set; }
 
     public int? AllocatedGpuCount { get; private set; }
+
+    private const string ResolvedAllocationFile = "/etc/decloud/allocation-resolved.json";
+
+    private record ResolvedAllocationCache(
+        DateTime ResolvedAt,
+        int ComputePoints,
+        long MemoryBytes,
+        long StorageBytes,
+        double CpuPercent,
+        double MemoryPercent,
+        double StoragePercent);
 
     public NodeMetadataService(IConfiguration configuration, ILogger<NodeMetadataService> logger)
     {
@@ -206,6 +180,14 @@ public class NodeMetadataService : INodeMetadataService
             _logger.LogInformation("Resource allocation (GPU): not configured, all detected GPUs offered");
         }
 
+        // ── Load persisted orchestrator-resolved allocation ──────────────────
+        // These are the last confirmed concrete values from the orchestrator.
+        // They take precedence over locally-derived settings values so the agent
+        // starts with an accurate view even before the next allocate/heartbeat.
+        // The Resolve* methods (called from UpdateInventory) guard with HasValue,
+        // so they will skip re-derivation when these values are already set.
+        await LoadResolvedAllocationAsync(ct);
+
         // Load operator pricing from config (optional)
         var pricingSection = _configuration.GetSection("Node:Pricing");
         if (pricingSection.Exists())
@@ -249,6 +231,87 @@ public class NodeMetadataService : INodeMetadataService
         {
             _logger.LogWarning(ex, "Failed to discover public IP");
             return null;
+        }
+    }
+
+    private async Task LoadResolvedAllocationAsync(CancellationToken ct)
+    {
+        if (!File.Exists(ResolvedAllocationFile))
+            return;
+
+        try
+        {
+            var json = await File.ReadAllTextAsync(ResolvedAllocationFile, ct);
+            var cached = JsonSerializer.Deserialize<ResolvedAllocationCache>(json,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+            if (cached == null) return;
+
+            if (cached.ComputePoints > 0) AllocatedComputePoints = cached.ComputePoints;
+            if (cached.MemoryBytes > 0) AllocatedMemoryBytes = cached.MemoryBytes;
+            if (cached.StorageBytes > 0) AllocatedStorageBytes = cached.StorageBytes;
+
+            _logger.LogInformation(
+                "Loaded persisted orchestrator allocation: {Pts} pts, " +
+                "{MemGb:F1} GB RAM, {StorGb:F1} GB storage (resolved {At:u})",
+                cached.ComputePoints,
+                cached.MemoryBytes / (1024.0 * 1024 * 1024),
+                cached.StorageBytes / (1024.0 * 1024 * 1024),
+                cached.ResolvedAt);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Could not load persisted allocation from {File} — using settings-derived values",
+                ResolvedAllocationFile);
+        }
+    }
+
+    public async Task UpdateFromOrchestratorResolutionAsync(
+    NodeAllocateResponse response,
+    CancellationToken ct = default)
+    {
+        // Update in-memory state with whatever the orchestrator confirmed.
+        // Only overwrite fields that the orchestrator actually resolved (non-null, non-zero).
+        if (response.ResolvedComputePoints is > 0) AllocatedComputePoints = response.ResolvedComputePoints.Value;
+        if (response.ResolvedMemoryBytes is > 0) AllocatedMemoryBytes = response.ResolvedMemoryBytes.Value;
+        if (response.ResolvedStorageBytes is > 0) AllocatedStorageBytes = response.ResolvedStorageBytes.Value;
+
+        try
+        {
+            var cache = new ResolvedAllocationCache(
+                ResolvedAt: DateTime.UtcNow,
+                ComputePoints: response.ResolvedComputePoints ?? 0,
+                MemoryBytes: response.ResolvedMemoryBytes ?? 0,
+                StorageBytes: response.ResolvedStorageBytes ?? 0,
+                CpuPercent: response.EffectiveCpuPercent,
+                MemoryPercent: response.EffectiveMemoryPercent,
+                StoragePercent: response.EffectiveStoragePercent);
+
+            var json = JsonSerializer.Serialize(cache, new JsonSerializerOptions { WriteIndented = true });
+
+            // Atomic write: write to .tmp then rename so a crash mid-write
+            // never leaves a corrupt file.
+            var tmp = ResolvedAllocationFile + ".tmp";
+            await File.WriteAllTextAsync(tmp, json, ct);
+            File.Move(tmp, ResolvedAllocationFile, overwrite: true);
+            File.SetUnixFileMode(ResolvedAllocationFile,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite);
+
+            _logger.LogInformation(
+                "✓ Orchestrator allocation persisted: {Pts} pts, " +
+                "{MemGb:F1} GB RAM, {StorGb:F1} GB storage",
+                cache.ComputePoints,
+                cache.MemoryBytes / (1024.0 * 1024 * 1024),
+                cache.StorageBytes / (1024.0 * 1024 * 1024));
+        }
+        catch (Exception ex)
+        {
+            // Non-fatal: in-memory state is already updated; persistence failure
+            // only affects the next restart, where settings-derived values apply.
+            _logger.LogWarning(ex,
+                "Could not persist orchestrator allocation to {File}",
+                ResolvedAllocationFile);
         }
     }
 
