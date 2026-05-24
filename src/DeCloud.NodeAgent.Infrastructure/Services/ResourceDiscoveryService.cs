@@ -119,21 +119,28 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                     supportsGpuContainers ? "enabled" : "disabled");
             }
 
-            // GPU proxy mode: available when GPU exists but VFIO passthrough is not.
-            // The GPU proxy daemon on the host bridges CUDA calls from VMs over virtio-vsock.
-            var hasAnyPassthrough = gpus.Any(g => g.IsAvailableForPassthrough);
-            // GPU proxy works on bare metal (vsock) AND WSL2 (TCP fallback)
-            var supportsGpuProxy = supportsGpu && !hasAnyPassthrough && !_isWindows;
-            if (supportsGpuProxy)
+            // GPU proxy mode: per-GPU evaluation, not node-wide.
+            // A GPU that is not reserved for VFIO passthrough can serve proxied workloads
+            // regardless of whether other GPUs on the same node have passthrough.
+            // Windows hosts cannot run vsock — excluded entirely.
+            if (!_isWindows)
             {
                 foreach (var gpu in gpus)
                 {
-                    gpu.IsAvailableForProxiedSharing = true;
+                    if (!gpu.IsAvailableForPassthrough)
+                        gpu.IsAvailableForProxiedSharing = true;
                 }
-                _logger.LogInformation(
-                    "GPU proxy mode available: {GpuCount} GPU(s) accessible via virtio-vsock proxy (no IOMMU)",
-                    gpus.Count);
             }
+
+            // Derive the node-level flag from the per-GPU results.
+            // Referenced by the HardwareInventory constructor below and by GpuProxyService.EnsureStartedAsync.
+            var supportsGpuProxy = gpus.Any(g => g.IsAvailableForProxiedSharing);
+
+            var proxiedCount = gpus.Count(g => g.IsAvailableForProxiedSharing);
+            if (proxiedCount > 0)
+                _logger.LogInformation(
+                    "GPU proxy mode available: {Count}/{Total} GPU(s) accessible via virtio-vsock proxy",
+                    proxiedCount, gpus.Count);
 
             var isWsl2 = await IsWslEnvironmentAsync(ct);
 

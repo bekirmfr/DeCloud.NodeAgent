@@ -202,6 +202,10 @@ public class VmSummary
     public int ComputePointCost { get; set; }
     public long MemoryBytes { get; set; }
     public long? DiskBytes { get; set; }
+    /// <summary>GPU access mode integer value (GpuMode enum): 0=None, 1=Passthrough, 2=Proxied.</summary>
+    public int GpuMode { get; set; }
+    /// <summary>VRAM quota for Proxied mode in bytes. Null = no quota.</summary>
+    public long? GpuVramBytes { get; set; }
     public double VirtualCpuUsagePercent { get; set; }
     public bool IsIpAssigned { get; set; }
     public string? IpAddress { get; set; }

@@ -5,7 +5,6 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Models;
-using DeCloud.NodeAgent.Core.Models.State;
 using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.Shared.Contracts;
 using DeCloud.Shared.Models;
@@ -1038,6 +1037,8 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 computePointCost = v.ComputePointCost,
                 memoryBytes = v.MemoryBytes,
                 diskBytes = v.DiskBytes,
+                gpuMode = v.GpuMode,
+                gpuVramBytes = v.GpuVramBytes,
                 imageId = v.Name,  // Use name as imageId for now
                 startedAt = v.StartedAt.ToString("O"),
                 services = v.Services?.Select(s => new

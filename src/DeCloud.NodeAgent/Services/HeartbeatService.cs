@@ -197,6 +197,8 @@ public class HeartbeatService : BackgroundService
                         ComputePointCost = vm.Spec.ComputePointCost,
                         MemoryBytes = vm.Spec.MemoryBytes,
                         DiskBytes = vm.Spec.DiskBytes,
+                        GpuMode = (int)vm.Spec.GpuMode,
+                        GpuVramBytes = vm.Spec.GpuVramBytes,
                         VirtualCpuUsagePercent = usage?.CpuPercent ?? 0,
                         StartedAt = vm.StartedAt ?? vm.CreatedAt,
                         IsIpAssigned = isIpAssigned,
