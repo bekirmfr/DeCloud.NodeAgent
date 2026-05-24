@@ -314,11 +314,14 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             {
                 _logger.LogInformation(
                     "✓ Allocation updated: CPU={CpuPct:P0}, Mem={MemPct:P0}, " +
-                    "Stor={StorPct:P0}, GPU={Gpu}",
+                    "Stor={StorPct:P0}, GPU={Gpu}, GpuVram={GpuVram}",
                     result.Data.EffectiveCpuPercent,
                     result.Data.EffectiveMemoryPercent,
                     result.Data.EffectiveStoragePercent,
-                    result.Data.GpuCount?.ToString() ?? "all");
+                    result.Data.GpuCount?.ToString() ?? "all",
+                    result.Data.EffectiveGpuVramPercent.HasValue
+                        ? $"{result.Data.EffectiveGpuVramPercent.Value:P0}"
+                        : "100%");
 
                 await _nodeMetadata.UpdateFromOrchestratorResolutionAsync(result.Data, ct);
 
@@ -384,7 +387,10 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             CpuPercent = cpuPct,
             MemoryPercent = memPct,
             StoragePercent = storPct,
-            GpuCount = _nodeMetadata.AllocatedGpuCount
+            GpuCount = _nodeMetadata.AllocatedGpuCount,
+            GpuVramPercent = _nodeMetadata.AllocatedGpuVramPercent.HasValue
+                ? _nodeMetadata.AllocatedGpuVramPercent.Value / 100.0
+                : null
         };
     }
 

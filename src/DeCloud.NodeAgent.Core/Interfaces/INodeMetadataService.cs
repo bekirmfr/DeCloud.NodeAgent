@@ -36,6 +36,8 @@ namespace DeCloud.NodeAgent.Core.Interfaces
         /// <summary>Raw storage allocation percentage from settings (1-95). Null = not configured.</summary>
         int? AllocatedStoragePercent { get; }
         int? AllocatedGpuCount { get; }
+        long? AllocatedGpuVramBytes { get; }
+        int? AllocatedGpuVramPercent { get; }
         /// <summary>
         /// When the orchestrator last confirmed allocation, as persisted in
         /// allocation-resolved.json. Null if the cache has never been written

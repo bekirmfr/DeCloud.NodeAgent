@@ -39,7 +39,12 @@ public class NodeMetadataService : INodeMetadataService
     public int? AllocatedStoragePercent { get; private set; }
 
     public int? AllocatedGpuCount { get; private set; }
-    // Add after AllocatedGpuCount:
+
+    private string? _gpuVramAllocMode;
+    private int? _gpuVramAllocValue;
+    public long? AllocatedGpuVramBytes { get; private set; }
+    public int? AllocatedGpuVramPercent { get; private set; }
+
     /// <summary>
     /// When the orchestrator last confirmed allocation, as persisted in
     /// allocation-resolved.json. Null if the cache has never been written.
@@ -53,9 +58,11 @@ public class NodeMetadataService : INodeMetadataService
         int ComputePoints,
         long MemoryBytes,
         long StorageBytes,
+        long GpuVramBytes,
         double CpuPercent,
         double MemoryPercent,
-        double StoragePercent);
+        double StoragePercent,
+        double GpuVramPercent);
 
     public NodeMetadataService(IConfiguration configuration, ILogger<NodeMetadataService> logger)
     {
@@ -186,6 +193,21 @@ public class NodeMetadataService : INodeMetadataService
             _logger.LogInformation("Resource allocation (GPU): not configured, all detected GPUs offered");
         }
 
+        // ── GPU VRAM allocation (Proxied mode) ───────────────────────────
+        _gpuVramAllocMode = _configuration["resources:gpu:vram:mode"];
+        var gpuVramValStr = _configuration["resources:gpu:vram:value"];
+        if (int.TryParse(gpuVramValStr, out var gpuVramVal))
+            _gpuVramAllocValue = gpuVramVal;
+
+        if (string.Equals(_gpuVramAllocMode, "percent", StringComparison.OrdinalIgnoreCase)
+            && _gpuVramAllocValue.HasValue)
+            _logger.LogInformation(
+                "Resource allocation (GPU VRAM): {Pct}% (deferred until hardware discovery)",
+                _gpuVramAllocValue.Value);
+        else
+            _logger.LogInformation(
+                "Resource allocation (GPU VRAM): not configured, 100% of proxy-eligible VRAM offered");
+
         // ── Load persisted orchestrator-resolved allocation ──────────────────
         // These are the last confirmed concrete values from the orchestrator.
         // They take precedence over locally-derived settings values so the agent
@@ -256,6 +278,7 @@ public class NodeMetadataService : INodeMetadataService
             if (cached.ComputePoints > 0) AllocatedComputePoints = cached.ComputePoints;
             if (cached.MemoryBytes > 0) AllocatedMemoryBytes = cached.MemoryBytes;
             if (cached.StorageBytes > 0) AllocatedStorageBytes = cached.StorageBytes;
+            if (cached.GpuVramBytes > 0) AllocatedGpuVramBytes = cached.GpuVramBytes;
             AllocationResolvedAt = cached.ResolvedAt;
 
             _logger.LogInformation(
@@ -283,6 +306,7 @@ public class NodeMetadataService : INodeMetadataService
         if (response.ResolvedComputePoints is > 0) AllocatedComputePoints = response.ResolvedComputePoints.Value;
         if (response.ResolvedMemoryBytes is > 0) AllocatedMemoryBytes = response.ResolvedMemoryBytes.Value;
         if (response.ResolvedStorageBytes is > 0) AllocatedStorageBytes = response.ResolvedStorageBytes.Value;
+        if (response.ResolvedGpuVramBytes is > 0) AllocatedGpuVramBytes = response.ResolvedGpuVramBytes.Value;
         AllocationResolvedAt = DateTime.UtcNow;
 
         try
@@ -292,9 +316,11 @@ public class NodeMetadataService : INodeMetadataService
                 ComputePoints: response.ResolvedComputePoints ?? 0,
                 MemoryBytes: response.ResolvedMemoryBytes ?? 0,
                 StorageBytes: response.ResolvedStorageBytes ?? 0,
+                GpuVramBytes: response.ResolvedGpuVramBytes ?? 0,
                 CpuPercent: response.EffectiveCpuPercent,
                 MemoryPercent: response.EffectiveMemoryPercent,
-                StoragePercent: response.EffectiveStoragePercent);
+                StoragePercent: response.EffectiveStoragePercent,
+                GpuVramPercent: response.EffectiveGpuVramPercent ?? 0);
 
             var json = JsonSerializer.Serialize(cache, new JsonSerializerOptions { WriteIndented = true });
 
@@ -328,6 +354,30 @@ public class NodeMetadataService : INodeMetadataService
         ResolveAllocatedMemory(inventory);
         ResolveAllocatedCpu(inventory);
         ResolveAllocatedStorage(inventory);
+        ResolveAllocatedGpuVram(inventory);
+    }
+
+    private void ResolveAllocatedGpuVram(HardwareInventory inventory)
+    {
+        if (AllocatedGpuVramBytes.HasValue)
+            return; // Already resolved (from persisted cache)
+
+        if (string.Equals(_gpuVramAllocMode, "percent", StringComparison.OrdinalIgnoreCase)
+            && _gpuVramAllocValue.HasValue)
+        {
+            AllocatedGpuVramPercent = Math.Clamp(_gpuVramAllocValue.Value, 1, 95);
+            var pct = AllocatedGpuVramPercent.Value / 100.0;
+            var totalProxiedVram = inventory.Gpus
+                .Where(g => g.IsAvailableForProxiedSharing)
+                .Sum(g => g.MemoryBytes);
+            AllocatedGpuVramBytes = (long)(totalProxiedVram * pct);
+            _logger.LogInformation(
+                "Resource allocation (GPU VRAM): resolved {Pct}% of {TotalGb:F1} GB = {AllocGb:F1} GB",
+                _gpuVramAllocValue.Value,
+                totalProxiedVram / (1024.0 * 1024 * 1024),
+                AllocatedGpuVramBytes.Value / (1024.0 * 1024 * 1024));
+        }
+        // else: null → orchestrator uses full proxy-eligible VRAM as the pool
     }
 
     /// <summary>
