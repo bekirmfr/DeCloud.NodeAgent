@@ -721,8 +721,8 @@ cmd_allocate() {
         # Warn early to avoid a round-trip rejection from the orchestrator.
         # Degrades gracefully when the agent is not running.
         local has_passthrough
-        has_passthrough=$(api_get "/api/node/snapshot" 2>/dev/null \
-            | jq -r '[.gpus[]? | select(.isAvailableForPassthrough == true)] | length' \
+        has_passthrough=$(api_get "/api/node/gpus" 2>/dev/null \
+            | jq -r '[.[] | select(.isAvailableForPassthrough == true)] | length' \
             2>/dev/null || echo "")
         if [[ "$has_passthrough" == "0" ]]; then
             log_error "--gpu-count is only valid for Passthrough GPU mode."
@@ -742,8 +742,8 @@ cmd_allocate() {
         # Warn early to avoid a round-trip rejection from the orchestrator.
         # Degrades gracefully when the agent is not running.
         local has_proxied
-        has_proxied=$(api_get "/api/node/snapshot" 2>/dev/null \
-            | jq -r '[.gpus[]? | select(.isAvailableForProxiedSharing == true)] | length' \
+        has_proxied=$(api_get "/api/node/gpus" 2>/dev/null \
+            | jq -r '[.[] | select(.isAvailableForProxiedSharing == true)] | length' \
             2>/dev/null || echo "")
         if [[ "$has_proxied" == "0" ]]; then
             log_error "--gpu-vram-percent is only valid for Proxied GPU mode."
