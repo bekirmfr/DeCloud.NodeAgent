@@ -102,8 +102,9 @@ static uint64_t now_us(void)
 #define MAX_TOKENS 256
 
 typedef struct {
-    uint8_t  token[GPU_PROXY_TOKEN_LEN];
+    char     token[GPU_PROXY_TOKEN_LEN + 1];
     char     vm_id[64];
+    uint64_t quota_bytes;   /* VRAM quota, 0 = unlimited */
     int      active;
 } TokenEntry;
 
@@ -129,7 +130,12 @@ static void load_tokens(void)
     int count = 0;
     while (fgets(line, sizeof(line), f) && count < MAX_TOKENS) {
         char hex_token[65], vm_id[64];
-        if (sscanf(line, "%64s %63s", hex_token, vm_id) != 2) continue;
+        unsigned long long quota = 0; /* optional third field, 0 = unlimited */
+
+        /* Format: <hex_token> <vm_id> [<quota_bytes>]
+         * Third field is optional — absent means unlimited (legacy entries). */
+        int parsed = sscanf(line, "%64s %63s %llu", hex_token, vm_id, &quota);
+        if (parsed < 2) continue;
 
         /* Parse hex string → bytes */
         size_t tlen = strlen(hex_token);
@@ -142,6 +148,7 @@ static void load_tokens(void)
             e->token[i] = (uint8_t)byte;
         }
         strncpy(e->vm_id, vm_id, sizeof(e->vm_id) - 1);
+        e->quota_bytes = (uint64_t)quota;
         e->active = 1;
         count++;
     }
@@ -151,7 +158,8 @@ static void load_tokens(void)
     pthread_mutex_unlock(&g_token_lock);
 }
 
-static int validate_token(const uint8_t *token, char *vm_id_out, size_t vm_id_size)
+static int validate_token(const uint8_t *token, char *vm_id_out, size_t vm_id_size,
+                          uint64_t *quota_out)
 {
     /* All-zero token = vsock (no auth needed, CID is authoritative) */
     int all_zero = 1;
@@ -165,6 +173,7 @@ static int validate_token(const uint8_t *token, char *vm_id_out, size_t vm_id_si
         if (!g_tokens[i].active) continue;
         if (memcmp(g_tokens[i].token, token, GPU_PROXY_TOKEN_LEN) == 0) {
             if (vm_id_out) strncpy(vm_id_out, g_tokens[i].vm_id, vm_id_size - 1);
+            if (quota_out) *quota_out = g_tokens[i].quota_bytes;
             pthread_mutex_unlock(&g_token_lock);
             return 1; /* Valid */
         }
@@ -466,7 +475,8 @@ static int handle_hello(ConnectionCtx *ctx, const void *payload, uint32_t len)
     /* Validate auth token for TCP connections BEFORE sending success */
     if (ctx->is_tcp) {
         char vm_id[64] = {0};
-        int tok_result = validate_token(req.auth_token, vm_id, sizeof(vm_id));
+        uint64_t vm_quota = 0;
+        int tok_result = validate_token(req.auth_token, vm_id, sizeof(vm_id), &vm_quota);
         if (tok_result < 0) {
             LOG_ERR("TCP connection rejected: invalid auth token (PID %u)", req.pid);
             send_response(ctx->fd, GPU_CMD_HELLO, -1, NULL, 0);
@@ -475,6 +485,18 @@ static int handle_hello(ConnectionCtx *ctx, const void *payload, uint32_t len)
         strncpy(ctx->vm_id, vm_id, sizeof(ctx->vm_id) - 1);
         LOG_INFO("TCP auth OK: VM %s (PID %u, shim v%u)",
                  vm_id, req.pid, req.shim_version);
+        /* Apply operator-set VRAM quota immediately — enforced by handle_malloc.
+         * Set by the host before VM boot via the token registry; the tenant
+         * cannot modify it from inside the VM. */
+        ctx->memory_quota = vm_quota;
+        if (ctx->memory_quota > 0) {
+            LOG_INFO("VM %s: VRAM quota applied at connect: %llu bytes (%llu MB)",
+                     ctx->vm_id,
+                     (unsigned long long)ctx->memory_quota,
+                     (unsigned long long)(ctx->memory_quota / (1024 * 1024)));
+        } else {
+            LOG_INFO("VM %s: no VRAM quota (unlimited)", ctx->vm_id);
+        }
     }
 
     int count = 0;

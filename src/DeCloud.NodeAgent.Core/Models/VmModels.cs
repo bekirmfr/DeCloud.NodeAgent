@@ -44,6 +44,16 @@ public class VmSpec
     public GpuMode GpuMode { get; set; } = GpuMode.None;
 
     /// <summary>
+    /// VRAM quota for Proxied GPU access, in bytes.
+    /// Set by the orchestrator at scheduling time from the VM template's GPU
+    /// memory requirement. Enforced by the GPU proxy daemon via the token
+    /// registry — applied to the connection at GPU_CMD_HELLO time so the tenant
+    /// cannot override it. Null = no quota (unlimited). Not used for Passthrough
+    /// (the entire GPU is dedicated).
+    /// </summary>
+    public long? GpuVramBytes { get; set; }
+
+    /// <summary>
     /// Vsock context ID (CID) assigned to this VM for host↔guest communication.
     /// Used by the GPU proxy daemon to identify which VM is making requests.
     /// CID 0 = hypervisor, 1 = reserved, 2 = host, 3+ = guests.

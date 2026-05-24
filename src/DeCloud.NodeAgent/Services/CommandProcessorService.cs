@@ -352,6 +352,7 @@ public class CommandProcessorService : BackgroundService
         string? gpuPciAddress = GetStringProperty(root, "gpuPciAddress", "GpuPciAddress");
         int gpuModeInt = GetIntProperty(root, "gpuMode", "GpuMode") ?? 0;
         var gpuMode = (GpuMode)gpuModeInt;
+        var gpuVramBytes = GetLongProperty(root, "gpuVramBytes", "GpuVramBytes"); ;
         int deploymentModeInt = GetIntProperty(root, "deploymentMode", "DeploymentMode") ?? 0;
         var deploymentMode = (DeploymentMode)deploymentModeInt;
         string? containerImage = GetStringProperty(root, "containerImage", "ContainerImage");
@@ -436,6 +437,7 @@ public class CommandProcessorService : BackgroundService
             CloudInitUserData = userData,
             GpuPciAddress = gpuPciAddress,
             GpuMode = gpuMode,
+            GpuVramBytes = gpuVramBytes,
             DeploymentMode = deploymentMode,
             ContainerImage = containerImage,
             EnvironmentVariables = environmentVariables,

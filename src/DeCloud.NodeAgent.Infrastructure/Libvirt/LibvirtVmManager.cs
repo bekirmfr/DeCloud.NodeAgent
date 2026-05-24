@@ -610,7 +610,13 @@ public class LibvirtVmManager : IVmManager
                 // The daemon reloads on SIGHUP (sent after this write)
                 try
                 {
-                    var tokenLine = $"{spec.GpuProxyToken} {spec.Id}\n";
+                    // Include quota when set so the daemon applies it at HELLO time.
+                    // Format: <token> <vm_id> [<quota_bytes>]
+                    // Third field is optional; absent = unlimited (old format still valid).
+                    var tokenLine = spec.GpuVramBytes is > 0
+                        ? $"{spec.GpuProxyToken} {spec.Id} {spec.GpuVramBytes.Value}\n"
+                        : $"{spec.GpuProxyToken} {spec.Id}\n";
+                    await File.AppendAllTextAsync("/var/lib/decloud/gpu-proxy-tokens", tokenLine, ct);
                     await File.AppendAllTextAsync("/var/lib/decloud/gpu-proxy-tokens", tokenLine, ct);
 
                     // Signal daemon to reload tokens

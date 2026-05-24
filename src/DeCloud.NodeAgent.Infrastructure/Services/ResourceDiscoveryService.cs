@@ -1127,10 +1127,8 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         var totalGpuVramBytes = gpus.Sum(g => g.MemoryBytes);
         var usedGpuVramBytes = gpus.Sum(g => g.MemoryUsedBytes);
         var allocatedGpus = _nodeMetadata.AllocatedGpuCount ?? gpus.Count;
-        var (usedGpus, passthroughVramBytes) = GetGpuUsageFromRepository(gpus);
-        // AllocatedGpuVramBytes = passthrough VRAM (committed, full GPU) now;
-        // proxied VRAM quotas (GpuVramBytes on VmSpec) added in Phase 2.
-        var allocatedGpuVramBytes = passthroughVramBytes;
+        var (usedGpus, passthroughVramBytes, proxiedVramBytes) = GetGpuUsageFromRepository(gpus);
+        var allocatedGpuVramBytes = passthroughVramBytes + proxiedVramBytes;
 
         return new ResourceSnapshot
         {
@@ -1247,21 +1245,48 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         => LoadActivePassthroughAssignments();
 
     /// <summary>
-    /// Compute GPU usage figures for the ResourceSnapshot.
-    /// Calls LoadActivePassthroughAssignments once and derives both
-    /// UsedGpus and PassthroughVramBytes from the same result.
+    /// Single VmRepository query covering both Passthrough and Proxied GPU VMs.
+    /// Returns UsedGpus (physical GPUs in passthrough), PassthroughVramBytes
+    /// (full GPU VRAM per assigned address), and ProxiedVramBytes (sum of
+    /// GpuVramBytes quotas across active proxied VMs).
+    /// Called from GetCurrentSnapshotAsync — synchronous to avoid deadlock
+    /// with the discovery semaphore, consistent with GetUsedComputePoints.
     /// </summary>
-    private (int UsedGpus, long PassthroughVramBytes) GetGpuUsageFromRepository(
-        List<GpuInfo> gpus)
+    private (int UsedGpus, long PassthroughVramBytes, long ProxiedVramBytes)
+        GetGpuUsageFromRepository(List<GpuInfo> gpus)
     {
-        var assignments = LoadActivePassthroughAssignments();
+        try
+        {
+            var vms = _vmRepository.LoadAllVmsAsync().GetAwaiter().GetResult();
+            var active = vms
+                .Where(v => v.State is not
+                    (VmState.Deleted or VmState.Stopped or VmState.Failed))
+                .ToList();
 
-        var passthroughVramBytes = gpus
-            .Where(g => assignments.ContainsKey(g.PciAddress))
-            .Sum(g => g.MemoryBytes);
+            // Passthrough: full GPU VRAM for each physically assigned GPU.
+            var assignedPci = active
+                .Where(v => v.Spec.GpuMode == GpuMode.Passthrough
+                         && !string.IsNullOrEmpty(v.Spec.GpuPciAddress))
+                .Select(v => v.Spec.GpuPciAddress!)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        // Proxied VRAM quotas deferred to Phase 2 (requires VmSpec.GpuVramBytes).
-        return (assignments.Count, passthroughVramBytes);
+            var passthroughVram = gpus
+                .Where(g => assignedPci.Contains(g.PciAddress))
+                .Sum(g => g.MemoryBytes);
+
+            // Proxied: sum of operator-set VRAM quotas carried on VmSpec.
+            var proxiedVram = active
+                .Where(v => v.Spec.GpuMode == GpuMode.Proxied
+                         && v.Spec.GpuVramBytes > 0)
+                .Sum(v => v.Spec.GpuVramBytes!.Value);
+
+            return (assignedPci.Count, passthroughVram, proxiedVram);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to query VmRepository for GPU usage");
+            return (0, 0, 0);
+        }
     }
 
     // =========================================================================
