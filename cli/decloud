@@ -717,12 +717,38 @@ cmd_allocate() {
             log_error "Invalid GPU count: '$gpu_count' (must be a non-negative integer)"
             exit $EXIT_USAGE
         fi
+        # GpuCount is only valid for Passthrough mode.
+        # Warn early to avoid a round-trip rejection from the orchestrator.
+        # Degrades gracefully when the agent is not running.
+        local has_passthrough
+        has_passthrough=$(api_get "/api/node/snapshot" 2>/dev/null \
+            | jq -r '[.gpus[]? | select(.isAvailableForPassthrough == true)] | length' \
+            2>/dev/null || echo "")
+        if [[ "$has_passthrough" == "0" ]]; then
+            log_error "--gpu-count is only valid for Passthrough GPU mode."
+            log_error "This node has no passthrough-capable GPUs (IOMMU + vfio-pci required)."
+            log_error "Use --gpu-vram-percent to limit Proxied GPU VRAM availability instead."
+            exit $EXIT_USAGE
+        fi
     fi
 
     if [[ -n "$gpu_vram_percent" ]]; then
         if ! [[ "$gpu_vram_percent" =~ ^[0-9]+$ ]] || \
            [[ "$gpu_vram_percent" -lt 1 ]] || [[ "$gpu_vram_percent" -gt 95 ]]; then
             log_error "Invalid GPU VRAM percent: '$gpu_vram_percent' (must be 1-95)"
+            exit $EXIT_USAGE
+        fi
+        # GpuVramPercent is only valid for Proxied mode.
+        # Warn early to avoid a round-trip rejection from the orchestrator.
+        # Degrades gracefully when the agent is not running.
+        local has_proxied
+        has_proxied=$(api_get "/api/node/snapshot" 2>/dev/null \
+            | jq -r '[.gpus[]? | select(.isAvailableForProxiedSharing == true)] | length' \
+            2>/dev/null || echo "")
+        if [[ "$has_proxied" == "0" ]]; then
+            log_error "--gpu-vram-percent is only valid for Proxied GPU mode."
+            log_error "This node has no proxy-eligible GPUs (all GPUs are Passthrough-only)."
+            log_error "Use --gpu-count to limit Passthrough GPU availability instead."
             exit $EXIT_USAGE
         fi
     fi
