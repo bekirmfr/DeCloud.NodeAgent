@@ -569,17 +569,18 @@ _write_setting() {
 cmd_allocate() {
     check_root
  
-    local cpu_percent="" mem_percent="" stor_percent="" gpu_count=""
+    local cpu_percent="" mem_percent="" stor_percent="" gpu_count="" gpu_vram_percent=""
     local show_only=false
  
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --cpu-percent)     cpu_percent="$2";     shift 2 ;;
-            --memory-percent)  mem_percent="$2";     shift 2 ;;
-            --storage-percent) stor_percent="$2";    shift 2 ;;
-            --gpu-count)       gpu_count="$2";       shift 2 ;;
-            --show)            show_only=true;       shift   ;;
+            --cpu-percent)      cpu_percent="$2";      shift 2 ;;
+            --memory-percent)   mem_percent="$2";      shift 2 ;;
+            --storage-percent)  stor_percent="$2";     shift 2 ;;
+            --gpu-count)        gpu_count="$2";        shift 2 ;;
+            --gpu-vram-percent) gpu_vram_percent="$2"; shift 2 ;;
+            --show)             show_only=true;        shift   ;;
             -h|--help)
                 echo "Usage: $SCRIPT_NAME allocate [options]"
                 echo ""
@@ -587,11 +588,12 @@ cmd_allocate() {
                 echo "Determines how much of the node's capacity to offer to the platform."
                 echo ""
                 echo "Options:"
-                echo "  --cpu-percent <1-95>       Percentage of compute points to offer (default: 90)"
-                echo "  --memory-percent <1-95>    Percentage of physical RAM to offer (default: 90)"
-                echo "  --storage-percent <1-95>   Percentage of physical storage to offer (default: 90)"
-                echo "  --gpu-count <N>            Number of GPUs to offer (0 = none, default: all)"
-                echo "  --show                     Show current allocation with evaluation context"
+                echo "  --cpu-percent <1-95>        Percentage of compute points to offer (default: 90)"
+                echo "  --memory-percent <1-95>     Percentage of physical RAM to offer (default: 90)"
+                echo "  --storage-percent <1-95>    Percentage of physical storage to offer (default: 90)"
+                echo "  --gpu-count <N>             Number of GPUs to offer (0 = none, default: all)"
+                echo "  --gpu-vram-percent <1-95>   Percentage of proxy-eligible GPU VRAM to offer (default: 100)"
+                echo "  --show                      Show current allocation with evaluation context"
                 echo ""
                 echo "Examples:"
                 echo "  # Offer 80% of CPU and 70% of RAM"
@@ -656,6 +658,16 @@ cmd_allocate() {
             echo "  Compute:   $(echo "$alloc" | jq -r '.resolvedComputePoints') pts"
             echo "  Memory:    $(human_bytes "$(echo "$alloc" | jq -r '.resolvedMemoryBytes')")"
             echo "  Storage:   $(human_bytes "$(echo "$alloc" | jq -r '.resolvedStorageBytes')")"
+            local vram_bytes gpu_vram_pct
+            vram_bytes=$(  echo "$alloc" | jq -r '.resolvedGpuVramBytes   // empty')
+            gpu_vram_pct=$(echo "$alloc" | jq -r '.effectiveGpuVramPercent // empty')
+            if [[ -n "$vram_bytes" && "$vram_bytes" != "0" ]]; then
+                local pct_label=""
+                if [[ -n "$gpu_vram_pct" ]]; then
+                    pct_label=" ($(awk "BEGIN {printf \"%d\", $gpu_vram_pct * 100}")%)"
+                fi
+                echo "  GPU VRAM:  $(human_bytes "$vram_bytes")${pct_label}"
+            fi
         fi
  
         echo ""
@@ -665,14 +677,16 @@ cmd_allocate() {
     # ── Resolve effective values ──────────────────────────────────────────
     # Base: settings file. Override: CLI flags.
     # No flags = push settings as-is (useful after reset/re-register).
-    local settings_cpu settings_mem settings_stor
-    settings_cpu=$(jq -r '.resources.cpu.value // empty' "$SETTINGS_FILE" 2>/dev/null)
-    settings_mem=$(jq -r '.resources.memory.value // empty' "$SETTINGS_FILE" 2>/dev/null)
-    settings_stor=$(jq -r '.resources.storage.value // empty' "$SETTINGS_FILE" 2>/dev/null)
+    local settings_cpu settings_mem settings_stor settings_gpu_vram
+    settings_cpu=$(     jq -r '.resources.cpu.value          // empty' "$SETTINGS_FILE" 2>/dev/null)
+    settings_mem=$(     jq -r '.resources.memory.value       // empty' "$SETTINGS_FILE" 2>/dev/null)
+    settings_stor=$(    jq -r '.resources.storage.value      // empty' "$SETTINGS_FILE" 2>/dev/null)
+    settings_gpu_vram=$(jq -r '.resources.gpu.vram.value     // empty' "$SETTINGS_FILE" 2>/dev/null)
 
     local eff_cpu="${cpu_percent:-$settings_cpu}"
     local eff_mem="${mem_percent:-$settings_mem}"
     local eff_stor="${stor_percent:-$settings_stor}"
+    local eff_gpu_vram="${gpu_vram_percent:-$settings_gpu_vram}"
  
     if [[ -n "$cpu_percent" ]]; then
         if ! [[ "$cpu_percent" =~ ^[0-9]+$ ]] || \
@@ -701,6 +715,14 @@ cmd_allocate() {
     if [[ -n "$gpu_count" ]]; then
         if ! [[ "$gpu_count" =~ ^[0-9]+$ ]]; then
             log_error "Invalid GPU count: '$gpu_count' (must be a non-negative integer)"
+            exit $EXIT_USAGE
+        fi
+    fi
+
+    if [[ -n "$gpu_vram_percent" ]]; then
+        if ! [[ "$gpu_vram_percent" =~ ^[0-9]+$ ]] || \
+           [[ "$gpu_vram_percent" -lt 1 ]] || [[ "$gpu_vram_percent" -gt 95 ]]; then
+            log_error "Invalid GPU VRAM percent: '$gpu_vram_percent' (must be 1-95)"
             exit $EXIT_USAGE
         fi
     fi
@@ -745,11 +767,20 @@ cmd_allocate() {
 
     if [[ -n "$gpu_count" ]]; then
         local tmp; tmp=$(mktemp)
-        jq '.resources.gpu = {"count":'"$gpu_count"'}' \
+        jq '.resources.gpu.count = '"$gpu_count" \
             "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
         chmod 600 "$SETTINGS_FILE"
         changed=true
-        log_success "GPU allocation set to: ${gpu_count}"
+        log_success "GPU allocation set to: ${gpu_count} GPU(s)"
+    fi
+
+    if [[ -n "$gpu_vram_percent" ]]; then
+        local tmp; tmp=$(mktemp)
+        jq '.resources.gpu.vram = {"mode":"percent","value":'"$gpu_vram_percent"'}' \
+            "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
+        chmod 600 "$SETTINGS_FILE"
+        changed=true
+        log_success "GPU VRAM allocation set to: ${gpu_vram_percent}%"
     fi
 
     # No CLI flags = show what we're sending from settings.
@@ -788,6 +819,11 @@ cmd_allocate() {
             alloc_json+="\"gpuCount\":${gpu_count}"
             first=false
         fi
+        if [[ -n "$eff_gpu_vram" ]]; then
+            $first || alloc_json+=","
+            alloc_json+="\"gpuVramPercent\":$(awk "BEGIN {printf \"%.2f\", $eff_gpu_vram / 100}")"
+            first=false
+        fi
         alloc_json+="}"
 
         local result
@@ -797,10 +833,11 @@ cmd_allocate() {
             if [[ "$success" == "true" ]]; then
                 log_success "Orchestrator confirmed allocation"
 
-                local resolved_pts resolved_mem resolved_stor
-                resolved_pts=$(echo "$result" | jq -r '.resolvedComputePoints // empty')
-                resolved_mem=$(echo "$result" | jq -r '.resolvedMemoryBytes // empty')
-                resolved_stor=$(echo "$result" | jq -r '.resolvedStorageBytes // empty')
+                local resolved_pts resolved_mem resolved_stor resolved_gpu_vram
+                resolved_pts=$(     echo "$result" | jq -r '.resolvedComputePoints // empty')
+                resolved_mem=$(     echo "$result" | jq -r '.resolvedMemoryBytes   // empty')
+                resolved_stor=$(    echo "$result" | jq -r '.resolvedStorageBytes  // empty')
+                resolved_gpu_vram=$(echo "$result" | jq -r '.resolvedGpuVramBytes  // empty')
 
                 if [[ -n "$resolved_pts" ]]; then
                     echo ""
@@ -1459,6 +1496,15 @@ cmd_resources() {
         fi
     else
         echo "  GPUs:     all detected GPUs offered"
+    fi
+
+    local gpu_vram_mode gpu_vram_value
+    gpu_vram_mode=$( jq -r '.resources.gpu.vram.mode  // ""' "$SETTINGS_FILE" 2>/dev/null)
+    gpu_vram_value=$(jq -r '.resources.gpu.vram.value // ""' "$SETTINGS_FILE" 2>/dev/null)
+    if [[ -n "$gpu_vram_value" ]]; then
+        echo "  GPU VRAM: ${gpu_vram_value}% (${gpu_vram_mode}) of proxy-eligible VRAM"
+    else
+        echo "  GPU VRAM: 100% (all proxy-eligible VRAM offered)"
     fi
     echo ""
 
