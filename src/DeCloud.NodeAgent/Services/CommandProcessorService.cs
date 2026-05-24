@@ -39,9 +39,10 @@ public class CommandProcessorService : BackgroundService
     /// <summary>
     /// Tracks GPU PCI addresses currently assigned to VMs via passthrough.
     /// Key = PCI address (e.g. "0000:01:00.0"), Value = VM ID.
-    /// Prevents double-assignment when concurrent VM creation requests arrive.
+    /// Instance field (not static) so it is correctly scoped to this service's
+    /// lifetime. Hydrated from VmRepository on startup to survive agent restarts.
     /// </summary>
-    private static readonly ConcurrentDictionary<string, string> _assignedGpus = new();
+    private readonly ConcurrentDictionary<string, string> _assignedGpus = new();
 
     // Default base image URLs (fallback)
     private static readonly Dictionary<string, string> ImageUrls = new(StringComparer.OrdinalIgnoreCase)
@@ -108,6 +109,10 @@ public class CommandProcessorService : BackgroundService
         var currentPollInterval = _options.PollInterval;
         var maxPollInterval = TimeSpan.FromSeconds(30);
         var consecutiveEmptyPolls = 0;
+
+        // Restore passthrough GPU assignments before processing any commands.
+        // Must run before the poll loop so the guard is in place on the first command.
+        HydrateAssignedGpus();
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -1171,6 +1176,40 @@ public class CommandProcessorService : BackgroundService
         {
             _logger.LogError(ex, "Error handling RemovePort command");
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Restores passthrough GPU assignments from persisted VM state on startup.
+    /// Prevents double-assignment after an agent restart where VMs with
+    /// passthrough GPUs survived but _assignedGpus was cleared.
+    /// </summary>
+    private void HydrateAssignedGpus()
+    {
+        try
+        {
+            // Delegate to IResourceDiscoveryService — single VmRepository query
+            // shared with snapshot GPU accounting. No direct _repository access here.
+            var assignments = _resourceDiscovery.GetActivePassthroughAssignments();
+
+            foreach (var (pciAddr, vmId) in assignments)
+            {
+                _assignedGpus.TryAdd(pciAddr, vmId);
+                _logger.LogInformation(
+                    "GPU pool restore: {PciAddr} → VM {VmId}",
+                    pciAddr, vmId);
+            }
+
+            if (_assignedGpus.Count > 0)
+                _logger.LogInformation(
+                    "GPU assignment pool hydrated: {Count} passthrough assignment(s) restored",
+                    _assignedGpus.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to hydrate GPU assignment pool — " +
+                "double-assignment guard may be incomplete until next VM restart");
         }
     }
 }

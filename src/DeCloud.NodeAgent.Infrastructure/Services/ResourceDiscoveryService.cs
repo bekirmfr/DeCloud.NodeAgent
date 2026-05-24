@@ -2,6 +2,7 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
+using DeCloud.Shared.Models;
 using Microsoft.Extensions.Logging;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
@@ -1103,9 +1104,12 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         // so heartbeat discrepancy checks align with orchestrator's TotalResources.
         // Falls back to platform default (90% of physical) if not configured.
         var allocatedMemory = _nodeMetadata.AllocatedMemoryBytes
-            ?? (long)(memory.TotalBytes * Shared.Models.AllocatedResources.DefaultPercent);
+            ?? (long)(memory.TotalBytes * AllocatedResources.DefaultPercent);
         // Never exceed physical
         allocatedMemory = Math.Min(allocatedMemory, memory.TotalBytes);
+
+        var totalStorageBytes = storage.Sum(s => s.TotalBytes);
+        var allocatedStorageBytes = _nodeMetadata.AllocatedStorageBytes;
 
         // Apply operator CPU ceiling so the local snapshot matches what the
         // orchestrator schedules against. Absolute points: hard cap.
@@ -1119,6 +1123,15 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                       * Math.Clamp(_nodeMetadata.AllocatedComputePointsPercent.Value, 1, 100) / 100.0)
                 : (int)totalComputePoints;
 
+        // GPU accounting
+        var totalGpuVramBytes = gpus.Sum(g => g.MemoryBytes);
+        var usedGpuVramBytes = gpus.Sum(g => g.MemoryUsedBytes);
+        var allocatedGpus = _nodeMetadata.AllocatedGpuCount ?? gpus.Count;
+        var (usedGpus, passthroughVramBytes) = GetGpuUsageFromRepository(gpus);
+        // AllocatedGpuVramBytes = passthrough VRAM (committed, full GPU) now;
+        // proxied VRAM quotas (GpuVramBytes on VmSpec) added in Phase 2.
+        var allocatedGpuVramBytes = passthroughVramBytes;
+
         return new ResourceSnapshot
         {
             TotalPhysicalCores = cpu.PhysicalCores,
@@ -1130,10 +1143,15 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             TotalMemoryBytes = memory.TotalBytes,
             AllocatedMemoryBytes = allocatedMemory,
             UsedMemoryBytes = memory.UsedBytes,
-            TotalStorageBytes = storage.Sum(s => s.TotalBytes),
+            TotalStorageBytes = totalStorageBytes,
+            AllocatedStorageBytes = allocatedStorageBytes ?? 0L,
             UsedStorageBytes = storage.Sum(s => s.UsedBytes),
             TotalGpus = gpus.Count,
-            UsedGpus = 0
+            AllocatedGpus = allocatedGpus,
+            UsedGpus = usedGpus,
+            TotalGpuVramBytes = totalGpuVramBytes,
+            AllocatedGpuVramBytes = allocatedGpuVramBytes,
+            UsedGpuVramBytes = usedGpuVramBytes,
         };
     }
 
@@ -1193,6 +1211,57 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             _logger.LogWarning(ex, "Failed to query VmRepository for used compute points");
             return 0;
         }
+    }
+
+    /// <summary>
+    /// Single VmRepository query that produces the PCI-address → VM-ID map
+    /// for all currently active Passthrough GPU assignments.
+    /// Both GetGpuUsageFromRepository (snapshot) and GetActivePassthroughAssignments
+    /// (interface) delegate here so the query is never duplicated.
+    /// </summary>
+    private IReadOnlyDictionary<string, string> LoadActivePassthroughAssignments()
+    {
+        try
+        {
+            var vms = _vmRepository.LoadAllVmsAsync().GetAwaiter().GetResult();
+            return vms
+                .Where(v =>
+                    v.Spec.GpuMode == GpuMode.Passthrough
+                    && !string.IsNullOrEmpty(v.Spec.GpuPciAddress)
+                    && v.State is not (VmState.Deleted or VmState.Stopped or VmState.Failed))
+                .ToDictionary(
+                    v => v.Spec.GpuPciAddress!,
+                    v => v.VmId,
+                    StringComparer.OrdinalIgnoreCase);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to load active passthrough GPU assignments from VmRepository");
+            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    // Interface implementation — consumed by CommandProcessorService on startup.
+    public IReadOnlyDictionary<string, string> GetActivePassthroughAssignments()
+        => LoadActivePassthroughAssignments();
+
+    /// <summary>
+    /// Compute GPU usage figures for the ResourceSnapshot.
+    /// Calls LoadActivePassthroughAssignments once and derives both
+    /// UsedGpus and PassthroughVramBytes from the same result.
+    /// </summary>
+    private (int UsedGpus, long PassthroughVramBytes) GetGpuUsageFromRepository(
+        List<GpuInfo> gpus)
+    {
+        var assignments = LoadActivePassthroughAssignments();
+
+        var passthroughVramBytes = gpus
+            .Where(g => assignments.ContainsKey(g.PciAddress))
+            .Sum(g => g.MemoryBytes);
+
+        // Proxied VRAM quotas deferred to Phase 2 (requires VmSpec.GpuVramBytes).
+        return (assignments.Count, passthroughVramBytes);
     }
 
     // =========================================================================

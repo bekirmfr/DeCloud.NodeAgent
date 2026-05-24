@@ -42,6 +42,14 @@ public interface IResourceDiscoveryService
     Task<List<GpuInfo>> GetGpuInfoAsync(CancellationToken ct = default, bool forceRecheck = false);
     Task<NetworkInfo> GetNetworkInfoAsync(CancellationToken ct = default);
     Task<ResourceSnapshot> GetCurrentSnapshotAsync(CancellationToken ct = default);
+    /// <summary>
+    /// Returns the PCI-address → VM-ID map of GPUs currently assigned to
+    /// active Passthrough VMs, derived from VmRepository.
+    /// Shared between ResourceDiscoveryService (snapshot GPU accounting)
+    /// and CommandProcessorService (assignment pool hydration on startup)
+    /// to avoid duplicate VmRepository queries for the same data.
+    /// </summary>
+    IReadOnlyDictionary<string, string> GetActivePassthroughAssignments();
 }
 
 /// <summary>

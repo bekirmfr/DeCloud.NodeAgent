@@ -382,11 +382,25 @@ function renderHardware() {
     renderAllocCard(allocStor, physStor, vmUsedStor, 'hw-alloc-stor', 'hw-alloc-stor-detail', 'hw-alloc-stor-bar');
 
     // GPUs
+    // GpuMode enum: None=0, Passthrough=1, Proxied=2.
+    // Count by mode, not by gpuPciAddress presence — Proxied VMs have no PCI address.
     const gpus = snap.totalGpus ?? 0;
-    const usedGpus = allVms.filter(v =>
-        (v.spec?.gpuPciAddress ?? v.gpuPciAddress)).length;
-    set('hw-alloc-gpu', gpus > 0 ? `${gpus} detected` : 'None');
-    set('hw-alloc-gpu-detail', gpus > 0 ? `${gpus - usedGpus} available` : '—');
+    const passthroughVms = allVms.filter(v => (v.spec?.gpuMode ?? v.gpuMode) === 1).length;
+    const proxiedVms = allVms.filter(v => (v.spec?.gpuMode ?? v.gpuMode) === 2).length;
+    if (gpus > 0) {
+        const freePassthrough = gpus - passthroughVms;
+        const parts = [];
+        if (passthroughVms > 0) parts.push(`${passthroughVms} passthrough`);
+        if (proxiedVms > 0) parts.push(`${proxiedVms} proxied`);
+        set('hw-alloc-gpu', `${gpus} GPU${gpus !== 1 ? 's' : ''}`);
+        set('hw-alloc-gpu-detail',
+            parts.length > 0
+                ? `${parts.join(', ')} · ${freePassthrough} free for passthrough`
+                : `${gpus} available`);
+    } else {
+        set('hw-alloc-gpu', 'None');
+        set('hw-alloc-gpu-detail', '—');
+    }
 }
 
 // ============================================================

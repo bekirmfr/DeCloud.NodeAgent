@@ -168,9 +168,26 @@ public class ResourceSnapshot
 
     // GPU (if any)
     public int TotalGpus { get; set; }
+    /// <summary>
+    /// Operator-configured GPU ceiling. Null = all detected GPUs offered.
+    /// 0 = GPUs present but operator has opted out of offering them.
+    /// </summary>
     public int AllocatedGpus { get; set; }
+    /// <summary>Physical GPUs currently held by active Passthrough VMs.</summary>
     public int UsedGpus { get; set; }
-    public int AvailableGpus => TotalGpus - UsedGpus;
+    public int AvailableGpus => Math.Max(0, TotalGpus - UsedGpus);
+
+    /// <summary>Sum of MemoryBytes for all detected GPUs.</summary>
+    public long TotalGpuVramBytes { get; set; }
+    /// <summary>
+    /// Committed VRAM across all active GPU VMs.
+    /// Passthrough: full GPU MemoryBytes per assigned GPU.
+    /// Proxied: sum of GpuVramBytes quotas per active VM (Phase 2 — 0 until VmSpec.GpuVramBytes exists).
+    /// </summary>
+    public long AllocatedGpuVramBytes { get; set; }
+    /// <summary>Live aggregate VRAM usage reported by nvidia-smi (sum of MemoryUsedBytes).</summary>
+    public long UsedGpuVramBytes { get; set; }
+    public long AvailableGpuVramBytes => Math.Max(0, TotalGpuVramBytes - AllocatedGpuVramBytes);
 }
 
 public class VmSummary
