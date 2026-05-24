@@ -22,6 +22,7 @@ public class CommandProcessorService : BackgroundService
     private readonly IOrchestratorClient _orchestratorClient;
     private readonly ConcurrentQueue<PendingCommand> _pushedCommands;
     private readonly IVmManager _vmManager;
+    private readonly GpuProxyService _gpuProxy;
     private readonly DockerContainerManager _dockerManager;
     private readonly IVmDeploymentPipeline _pipeline;
     private readonly IResourceDiscoveryService _resourceDiscovery;
@@ -60,6 +61,7 @@ public class CommandProcessorService : BackgroundService
         IOrchestratorClient orchestratorClient,
         ConcurrentQueue<PendingCommand> pushedCommands,
         IVmManager vmManager,
+        GpuProxyService gpuProxy,
         DockerContainerManager dockerManager,
         IVmDeploymentPipeline pipeline,
         IResourceDiscoveryService resourceDiscovery,
@@ -77,6 +79,7 @@ public class CommandProcessorService : BackgroundService
         _orchestratorClient = orchestratorClient;
         _pushedCommands = pushedCommands;
         _vmManager = vmManager;
+        _gpuProxy = gpuProxy;
         _dockerManager = dockerManager;
         _pipeline = pipeline;
         _resourceDiscovery = resourceDiscovery;
@@ -681,6 +684,7 @@ public class CommandProcessorService : BackgroundService
 
         // Release GPU assignment on stop (VFIO will unbind)
         var vmInstance = await manager.GetVmAsync(vmId, ct);
+        
         if (vmInstance?.Spec.GpuMode == GpuMode.Passthrough &&
             !string.IsNullOrEmpty(vmInstance.Spec.GpuPciAddress))
         {
@@ -691,6 +695,13 @@ public class CommandProcessorService : BackgroundService
                     vmId, vmInstance.Spec.GpuPciAddress);
             }
         }
+
+        // Terminate GPU proxy session for Proxied VMs.
+        // removeToken=true — VM is stopped; token removed so the daemon no longer
+        // accepts connections from it. A restarted VM would need recreation to
+        // obtain a new token and cloud-init injection.
+        if (vmInstance != null)
+            await _gpuProxy.CleanupGpuProxySessionAsync(vmInstance.Spec, removeToken: true, ct);
 
         _logger.LogInformation("Stopping VM {VmId} (force={Force})", vmId, force);
         var result = await manager.StopVmAsync(vmId, force, ct);

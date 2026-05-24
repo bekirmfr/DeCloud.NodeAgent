@@ -616,8 +616,7 @@ public class LibvirtVmManager : IVmManager
                     var tokenLine = spec.GpuVramBytes is > 0
                         ? $"{spec.GpuProxyToken} {spec.Id} {spec.GpuVramBytes.Value}\n"
                         : $"{spec.GpuProxyToken} {spec.Id}\n";
-                    await File.AppendAllTextAsync("/var/lib/decloud/gpu-proxy-tokens", tokenLine, ct);
-                    await File.AppendAllTextAsync("/var/lib/decloud/gpu-proxy-tokens", tokenLine, ct);
+                    await File.AppendAllTextAsync(_gpuProxy.TokenFile, tokenLine, ct);
 
                     // Signal daemon to reload tokens
                     var signalResult = await _executor.ExecuteAsync(
@@ -1391,27 +1390,8 @@ public class LibvirtVmManager : IVmManager
         // Remove from database
         await _repository.DeleteVmAsync(vmId);
 
-        // Remove GPU proxy token from daemon registry
-        if (!string.IsNullOrEmpty(instance.Spec.GpuProxyToken))
-        {
-            try
-            {
-                var tokenFile = "/var/lib/decloud/gpu-proxy-tokens";
-                if (File.Exists(tokenFile))
-                {
-                    var lines = await File.ReadAllLinesAsync(tokenFile, ct);
-                    var filtered = lines.Where(l => !l.Contains(instance.Spec.Id)).ToArray();
-                    await File.WriteAllLinesAsync(tokenFile, filtered, ct);
-
-                    // Signal daemon to reload
-                    await _executor.ExecuteAsync("pkill", "-HUP -f gpu-proxy-daemon", ct);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to cleanup GPU proxy token for VM {VmId}", instance.Spec.Id);
-            }
-        }
+        // Terminate GPU proxy session (token removal, SIGHUP, TCP force-close).
+        await _gpuProxy.CleanupGpuProxySessionAsync(instance.Spec, removeToken: true, ct);
 
         // Delete blocks owned by this VM from local BlockStore (best-effort, non-fatal)
         await NotifyBlockstoreOwnerDeleteAsync(vmId, ct);
@@ -1493,6 +1473,12 @@ public class LibvirtVmManager : IVmManager
         {
             instance.State = VmState.Paused;
             await _repository.UpdateVmStateAsync(vmId, VmState.Paused);
+
+            // Force-close stale TCP connections only — token is kept because
+            // ResumeVmAsync does virsh resume and the shim reconnects with the
+            // same baked-in token. Removing it here would break resume.
+            await _gpuProxy.CleanupGpuProxySessionAsync(instance.Spec, removeToken: false, ct);
+
             return VmOperationResult.Ok(vmId, VmState.Paused);
         }
 

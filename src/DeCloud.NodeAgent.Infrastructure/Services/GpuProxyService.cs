@@ -45,10 +45,11 @@ public class GpuProxyService
     /// </summary>
     public string GpuProxySrcDir { get; set; } = "/opt/decloud/DeCloud.NodeAgent/src/gpu-proxy";
 
-    /// <summary>
-    /// Port the daemon listens on (vsock port, must match proto/gpu_proxy_proto.h).
-    /// </summary>
-    public int DaemonPort { get; set; } = 9999;
+    public string TokenFile = "/var/lib/decloud/gpu-proxy-tokens";
+
+    /// <summary>Default vsock/TCP port the daemon listens on. Matches proto/gpu_proxy_proto.h GPU_PROXY_PORT.</summary>
+    public const int DefaultPort = 9999;
+    public int DaemonPort { get; set; } = DefaultPort;
 
     /// <summary>
     /// Maximum consecutive crashes before giving up on auto-restart.
@@ -451,5 +452,75 @@ public class GpuProxyService
         }
 
         return started;
+    }
+
+    /// <summary>
+    /// Terminates the GPU proxy session for a Proxied VM.
+    ///
+    /// Three steps — all best-effort, non-fatal:
+    /// 1. Remove the VM's token from the registry so the daemon stops
+    ///    accepting new connections from it after SIGHUP.
+    /// 2. SIGHUP the daemon to reload the token file immediately.
+    /// 3. Force-close any stale TCP connections to the daemon port via ss -K.
+    ///    vsock connections close automatically on QEMU process exit.
+    ///    TCP connections (WSL2) have no keepalive and can persist indefinitely
+    ///    without this, holding memory_allocated in the daemon ConnectionCtx.
+    ///
+    /// removeToken: true for Stop and Delete (session is over, token no longer
+    /// needed). False for Pause (VM will resume and shim will reconnect with
+    /// the same baked-in token — removing it would break ResumeVmAsync).
+    /// </summary>
+    public async Task CleanupGpuProxySessionAsync(
+        VmSpec spec, bool removeToken, CancellationToken ct)
+    {
+        if (spec.GpuMode != GpuMode.Proxied) return;
+
+        // ── Step 1: token registry ──────────────────────────────────────────
+        if (removeToken && !string.IsNullOrEmpty(spec.GpuProxyToken))
+        {
+            try
+            {
+                
+                if (File.Exists(TokenFile))
+                {
+                    var lines = await File.ReadAllLinesAsync(TokenFile, ct);
+                    var filtered = lines.Where(l => !l.Contains(spec.Id)).ToArray();
+                    await File.WriteAllLinesAsync(TokenFile, filtered, ct);
+
+                    _logger.LogInformation(
+                        "VM {VmId}: GPU proxy token removed from registry", spec.Id);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "VM {VmId}: Failed to remove GPU proxy token from registry", spec.Id);
+            }
+
+            // ── Step 2: reload daemon ───────────────────────────────────────
+            try
+            {
+                await _executor.ExecuteAsync("pkill", "-HUP -f gpu-proxy-daemon", ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "VM {VmId}: Failed to SIGHUP GPU proxy daemon", spec.Id);
+            }
+        }
+
+        // ── Step 3: force-close stale TCP connections (WSL2 path) ──────────
+        // vsock connections close automatically when QEMU exits.
+        // TCP connections have no keepalive — ss -K forces immediate teardown.
+        try
+        {
+            await _executor.ExecuteAsync(
+                "bash", $"-c \"ss -K sport = :{DefaultPort} 2>/dev/null || true\"", ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "VM {VmId}: Failed to force-close GPU proxy TCP connections", spec.Id);
+        }
     }
 }
