@@ -14,7 +14,6 @@ namespace DeCloud.NodeAgent.Controllers;
 ///   /api/vms/{vmId}/proxy/tcp/{port}                 - Raw TCP tunnel (WebSocket-based)
 /// 
 /// Examples:
-///   /api/vms/{vmId}/proxy/http/9999/challenge        - Attestation agent
 ///   /api/vms/{vmId}/proxy/http/80/index.html         - Web server
 ///   /api/vms/{vmId}/proxy/ws/22                      - SSH over WebSocket
 ///   /api/vms/{vmId}/proxy/tcp/3306                   - MySQL over WebSocket
@@ -33,7 +32,6 @@ public class GenericProxyController : ControllerBase
         22,    // SSH
         80,    // HTTP
         443,   // HTTPS
-        9999,  // Attestation agent
     };
 
     /// <summary>
