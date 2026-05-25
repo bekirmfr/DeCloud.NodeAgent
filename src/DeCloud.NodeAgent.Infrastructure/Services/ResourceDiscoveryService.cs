@@ -1118,18 +1118,6 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         var totalStorageBytes = storage.Sum(s => s.TotalBytes);
         var allocatedStorageBytes = _nodeMetadata.AllocatedStorageBytes;
 
-        // Apply operator CPU ceiling so the local snapshot matches what the
-        // orchestrator schedules against. Absolute points: hard cap.
-        // Percent: apply to hardware-computed points as an approximation
-        // (orchestrator applies the same percent to its benchmark-evaluated
-        // total, so values may differ slightly due to overcommit ratios).
-        var effectiveComputePoints = _nodeMetadata.AllocatedComputePoints.HasValue
-            ? Math.Min(_nodeMetadata.AllocatedComputePoints.Value, (int)totalComputePoints)
-            : _nodeMetadata.AllocatedComputePointsPercent.HasValue
-                ? (int)Math.Floor((int)totalComputePoints
-                      * Math.Clamp(_nodeMetadata.AllocatedComputePointsPercent.Value, 1, 100) / 100.0)
-                : (int)totalComputePoints;
-
         // GPU accounting
         var totalGpuVramBytes = gpus.Sum(g => g.MemoryBytes);
         var usedGpuVramBytes = gpus.Sum(g => g.MemoryUsedBytes);
@@ -1143,20 +1131,29 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             TotalVirtualCpuCores = cpu.LogicalCores,
             UsedVirtualCpuCores = cpu.LogicalCores - cpu.AvailableVCpus,
             VirtualCpuUsagePercent = cpu.UsagePercent,
-            TotalComputePoints = effectiveComputePoints,
+
+            TotalComputePoints = (int)totalComputePoints,
+            AllocatedComputePoints = _nodeMetadata.AllocatedComputePoints.Value,
             UsedComputePoints = GetUsedComputePoints(),
+
             TotalMemoryBytes = memory.TotalBytes,
             AllocatedMemoryBytes = allocatedMemory,
             UsedMemoryBytes = memory.UsedBytes,
+
             TotalStorageBytes = totalStorageBytes,
             AllocatedStorageBytes = allocatedStorageBytes ?? 0L,
             UsedStorageBytes = storage.Sum(s => s.UsedBytes),
+
             TotalGpus = gpus.Count,
             AllocatedGpus = allocatedGpus,
             UsedGpus = usedGpus,
+
             TotalGpuVramBytes = totalGpuVramBytes,
             AllocatedGpuVramBytes = allocatedGpuVramBytes,
             UsedGpuVramBytes = usedGpuVramBytes,
+
+            SupportsGpuProxy = gpus.Any(g => g.IsAvailableForProxiedSharing),
+            SupportsGpuPassthrough = gpus.Any(g => g.IsAvailableForPassthrough),
         };
     }
 

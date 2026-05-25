@@ -148,8 +148,9 @@ public class ResourceSnapshot
 
     // Compute Points
     public int TotalComputePoints { get; set; }
+    public int AllocatedComputePoints { get; set; }
     public int UsedComputePoints { get; set; }
-    public int AvailableComputePoints => TotalComputePoints - UsedComputePoints;
+    public int AvailableComputePoints => AllocatedComputePoints - UsedComputePoints;
     public double ComputePointUsagePercent => TotalComputePoints == 0 ? 0 : (double)UsedComputePoints / TotalComputePoints * 100.0;
 
     // Memory
@@ -158,13 +159,13 @@ public class ResourceSnapshot
     /// <summary>Operator-allocated memory ceiling (for scheduling alignment).</summary>
     public long AllocatedMemoryBytes { get; set; }
     public long UsedMemoryBytes { get; set; }
-    public long AvailableMemoryBytes => Math.Max(0, TotalMemoryBytes - UsedMemoryBytes);
+    public long AvailableMemoryBytes => Math.Max(0, AllocatedMemoryBytes - UsedMemoryBytes);
 
     // Storage
     public long TotalStorageBytes { get; set; }
     public long AllocatedStorageBytes { get; set; }
     public long UsedStorageBytes { get; set; }
-    public long AvailableStorageBytes => Math.Max(0, TotalStorageBytes - UsedStorageBytes);
+    public long AvailableStorageBytes => Math.Max(0, AllocatedStorageBytes - UsedStorageBytes);
 
     // GPU (if any)
     public int TotalGpus { get; set; }
@@ -175,7 +176,7 @@ public class ResourceSnapshot
     public int AllocatedGpus { get; set; }
     /// <summary>Physical GPUs currently held by active Passthrough VMs.</summary>
     public int UsedGpus { get; set; }
-    public int AvailableGpus => Math.Max(0, TotalGpus - UsedGpus);
+    public int AvailableGpus => Math.Max(0, AllocatedGpus - UsedGpus);
 
     /// <summary>Sum of MemoryBytes for all detected GPUs.</summary>
     public long TotalGpuVramBytes { get; set; }
@@ -187,7 +188,11 @@ public class ResourceSnapshot
     public long AllocatedGpuVramBytes { get; set; }
     /// <summary>Live aggregate VRAM usage reported by nvidia-smi (sum of MemoryUsedBytes).</summary>
     public long UsedGpuVramBytes { get; set; }
-    public long AvailableGpuVramBytes => Math.Max(0, TotalGpuVramBytes - AllocatedGpuVramBytes);
+    public long AvailableGpuVramBytes => Math.Max(0, AllocatedGpuVramBytes - UsedGpuVramBytes);
+    /// <summary>True if any GPU supports Proxied (shared) access via the proxy daemon.</summary>
+    public bool SupportsGpuProxy { get; set; }
+    /// <summary>True if any GPU supports VFIO Passthrough (IOMMU + vfio-pci).</summary>
+    public bool SupportsGpuPassthrough { get; set; }
 }
 
 public class VmSummary
