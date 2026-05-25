@@ -264,11 +264,12 @@ public class EphemeralSshKeyService : IEphemeralSshKeyService
 
         // Create script to add key
         var script = $@"
-mkdir -p /home/{username}/.ssh && \
-chmod 700 /home/{username}/.ssh && \
-echo '{publicKey}' >> /home/{username}/.ssh/authorized_keys && \
-chmod 600 /home/{username}/.ssh/authorized_keys && \
-chown -R {username}:{username} /home/{username}/.ssh
+HOME_DIR=$(getent passwd {username} | cut -d: -f6) && \
+mkdir -p ""$HOME_DIR/.ssh"" && \
+chmod 700 ""$HOME_DIR/.ssh"" && \
+echo '{publicKey}' >> ""$HOME_DIR/.ssh/authorized_keys"" && \
+chmod 600 ""$HOME_DIR/.ssh/authorized_keys"" && \
+chown -R {username}:{username} ""$HOME_DIR/.ssh""
 ";
         var base64Script = Convert.ToBase64String(Encoding.UTF8.GetBytes(script));
 
