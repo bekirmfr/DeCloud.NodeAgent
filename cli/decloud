@@ -243,6 +243,7 @@ api_call() {
 
 api_get()    { api_call "GET"    "$1"; }
 api_post()   { api_call "POST"   "$1" "$2"; }
+api_patch()  { api_call "PATCH"  "$1" "$2"; }
 api_delete() { api_call "DELETE" "$1"; }
 
 # ============================================================================
@@ -896,6 +897,246 @@ cmd_allocate() {
     if $changed && check_service_running; then
         systemctl restart "$SERVICE_NAME" 2>/dev/null || true
         log_info "Agent restarted to apply new settings"
+    fi
+}
+
+cmd_pricing() {
+    check_root
+
+    local cpu="" memory="" storage="" gpu="" do_reset=false show_only=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --cpu)      cpu="$2";     shift 2 ;;
+            --memory)   memory="$2";  shift 2 ;;
+            --storage)  storage="$2"; shift 2 ;;
+            --gpu)      gpu="$2";     shift 2 ;;
+            --reset)    do_reset=true; shift  ;;
+            --show)     show_only=true; shift ;;
+            -h|--help)
+                echo "Usage: $SCRIPT_NAME pricing [options]"
+                echo ""
+                echo "Set per-resource pricing rates (USDC/hr)."
+                echo "Unset fields default to platform rates."
+                echo ""
+                echo "Options:"
+                echo "  --cpu <rate>      CPU rate per core per hour        (e.g. 0.012)"
+                echo "  --memory <rate>   Memory rate per GB per hour       (e.g. 0.006)"
+                echo "  --storage <rate>  Storage rate per GB per hour      (e.g. 0.0001)"
+                echo "  --gpu <rate>      GPU VRAM rate per GB per hour     (e.g. 0.008)"
+                echo "  --reset           Remove custom pricing, use platform defaults"
+                echo "  --show            Show current effective pricing from orchestrator"
+                echo ""
+                echo "Examples:"
+                echo "  sudo $SCRIPT_NAME pricing --cpu 0.012 --memory 0.006"
+                echo "  sudo $SCRIPT_NAME pricing --gpu 0.008"
+                echo "  sudo $SCRIPT_NAME pricing --show"
+                echo "  sudo $SCRIPT_NAME pricing --reset"
+                echo ""
+                echo "Rates are clamped to platform floor minimums by the orchestrator."
+                echo "Use --show to see effective rates after floor enforcement."
+                exit $EXIT_SUCCESS
+                ;;
+            *)
+                log_error "Unknown option: $1"
+                echo "Run '$SCRIPT_NAME pricing --help' for usage"
+                exit $EXIT_USAGE
+                ;;
+        esac
+    done
+
+    if [[ ! -f "$SETTINGS_FILE" ]]; then
+        log_error "No settings file found — run 'decloud install' first"
+        exit $EXIT_ERROR
+    fi
+
+    # ── Show mode ─────────────────────────────────────────────────────────
+    if $show_only; then
+        echo ""
+        echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+        echo -e "${BOLD}  Pricing${NC}"
+        echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+        echo ""
+
+        # Local settings
+        local local_cpu local_mem local_stor local_gpu
+        local_cpu=$(jq  -r '.pricing.cpu_per_hour           // empty' "$SETTINGS_FILE" 2>/dev/null)
+        local_mem=$(jq  -r '.pricing.memory_per_gb_per_hour // empty' "$SETTINGS_FILE" 2>/dev/null)
+        local_stor=$(jq -r '.pricing.storage_per_gb_per_hour // empty' "$SETTINGS_FILE" 2>/dev/null)
+        local_gpu=$(jq  -r '.pricing.gpu_vram_per_gb_per_hour // empty' "$SETTINGS_FILE" 2>/dev/null)
+
+        echo -e "${BOLD}  Configured (settings.json):${NC}"
+        echo "    CPU:     ${local_cpu:-platform default}"
+        echo "    Memory:  ${local_mem:-platform default}"
+        echo "    Storage: ${local_stor:-platform default}"
+        echo "    GPU:     ${local_gpu:-platform default}"
+        echo ""
+
+        # Effective rates from orchestrator (floor-clamped)
+        if [[ -f "$CREDENTIALS_FILE" ]]; then
+            local api_key; api_key=$(get_api_key)
+            local orchestrator_url; orchestrator_url=$(get_orchestrator_url)
+
+            if [[ -n "$orchestrator_url" && -n "$api_key" ]]; then
+                local tmp code_file result http_code
+                tmp=$(mktemp); code_file=$(mktemp)
+                curl -s -o "$tmp" -w "%{http_code}" \
+                    -H "Authorization: Bearer $api_key" \
+                    --connect-timeout 10 \
+                    "${orchestrator_url}/api/nodes/me/pricing" \
+                    2>/dev/null > "$code_file" || true
+                http_code=$(cat "$code_file" 2>/dev/null | tr -d '[:space:]' | head -c 3 || echo "0")
+                result=$(cat "$tmp" 2>/dev/null || echo "")
+                rm -f "$tmp" "$code_file"
+
+                if [[ "$http_code" =~ ^2 ]]; then
+                    local eff_cpu eff_mem eff_stor eff_gpu
+                    eff_cpu=$(echo  "$result" | jq -r '.cpuPerHour           // empty')
+                    eff_mem=$(echo  "$result" | jq -r '.memoryPerGbPerHour   // empty')
+                    eff_stor=$(echo "$result" | jq -r '.storagePerGbPerHour  // empty')
+                    eff_gpu=$(echo  "$result" | jq -r '.gpuVramPerGbPerHour  // empty')
+                    echo -e "${BOLD}  Effective (orchestrator, after floor enforcement):${NC}"
+                    echo "    CPU:     ${eff_cpu:-(none)}"
+                    echo "    Memory:  ${eff_mem:-(none)}"
+                    echo "    Storage: ${eff_stor:-(none)}"
+                    echo "    GPU:     ${eff_gpu:-(none)}"
+                else
+                    log_warn "Could not fetch effective pricing from orchestrator (HTTP $http_code)"
+                fi
+            fi
+        fi
+        echo ""
+        return 0
+    fi
+
+    # ── Reset mode ────────────────────────────────────────────────────────
+    if $do_reset; then
+        local tmp; tmp=$(mktemp)
+        jq 'del(.pricing)' "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
+        chmod 600 "$SETTINGS_FILE"
+        log_success "Custom pricing removed — platform defaults will apply"
+
+        _pricing_push_to_orchestrator "{}" "reset"
+        return 0
+    fi
+
+    # ── Validate inputs ───────────────────────────────────────────────────
+    local field
+    for field in cpu memory storage gpu; do
+        local val="${!field}"
+        if [[ -n "$val" ]]; then
+            if ! [[ "$val" =~ ^[0-9]+(\.[0-9]+)?$ ]] || \
+               awk "BEGIN { exit !($val > 0) }"; then
+                : # valid
+            else
+                log_error "--$field must be a positive number (e.g. 0.012)"
+                exit $EXIT_USAGE
+            fi
+            if ! [[ "$val" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+                log_error "--$field '$val' is not a valid number"
+                exit $EXIT_USAGE
+            fi
+        fi
+    done
+
+    if [[ -z "$cpu$memory$storage$gpu" ]]; then
+        log_error "No pricing fields specified"
+        echo "Run '$SCRIPT_NAME pricing --help' for usage"
+        exit $EXIT_USAGE
+    fi
+
+    # ── Write to settings.json ────────────────────────────────────────────
+    local tmp; tmp=$(mktemp)
+    local jq_expr='.'
+    [[ -n "$cpu" ]]     && jq_expr+=" | .pricing.cpu_per_hour = ($cpu | tonumber)"
+    [[ -n "$memory" ]]  && jq_expr+=" | .pricing.memory_per_gb_per_hour = ($memory | tonumber)"
+    [[ -n "$storage" ]] && jq_expr+=" | .pricing.storage_per_gb_per_hour = ($storage | tonumber)"
+    [[ -n "$gpu" ]]     && jq_expr+=" | .pricing.gpu_vram_per_gb_per_hour = ($gpu | tonumber)"
+
+    # shellcheck disable=SC2016
+    jq --argjson cpu     "${cpu:-null}" \
+       --argjson memory  "${memory:-null}" \
+       --argjson storage "${storage:-null}" \
+       --argjson gpu     "${gpu:-null}" \
+       "$jq_expr" \
+       "$SETTINGS_FILE" > "$tmp" && mv "$tmp" "$SETTINGS_FILE"
+    chmod 600 "$SETTINGS_FILE"
+
+    [[ -n "$cpu" ]]     && log_success "CPU rate set to: \$${cpu}/core/hr"
+    [[ -n "$memory" ]]  && log_success "Memory rate set to: \$${memory}/GB/hr"
+    [[ -n "$storage" ]] && log_success "Storage rate set to: \$${storage}/GB/hr"
+    [[ -n "$gpu" ]]     && log_success "GPU VRAM rate set to: \$${gpu}/GB/hr"
+
+    # ── Push to orchestrator ──────────────────────────────────────────────
+    local payload="{}"
+    [[ -n "$cpu" ]]     && payload=$(echo "$payload" | jq --argjson v "$cpu"     '.cpuPerHour = $v')
+    [[ -n "$memory" ]]  && payload=$(echo "$payload" | jq --argjson v "$memory"  '.memoryPerGbPerHour = $v')
+    [[ -n "$storage" ]] && payload=$(echo "$payload" | jq --argjson v "$storage" '.storagePerGbPerHour = $v')
+    [[ -n "$gpu" ]]     && payload=$(echo "$payload" | jq --argjson v "$gpu"     '.gpuVramPerGbPerHour = $v')
+
+    _pricing_push_to_orchestrator "$payload" "update"
+}
+
+# Internal: PATCH pricing to the orchestrator, log outcome.
+_pricing_push_to_orchestrator() {
+    local payload="$1"
+    local mode="$2"   # "update" | "reset"
+
+    if [[ ! -f "$CREDENTIALS_FILE" ]]; then
+        echo ""
+        log_info "Pricing saved locally. Run 'sudo $SCRIPT_NAME register' to commit to orchestrator."
+        return 0
+    fi
+
+    local api_key; api_key=$(get_api_key)
+    local orchestrator_url; orchestrator_url=$(get_orchestrator_url)
+
+    if [[ -z "$orchestrator_url" || -z "$api_key" ]]; then
+        log_warn "Could not determine orchestrator URL or API key"
+        log_info "Pricing saved locally — will take effect on next register"
+        return 0
+    fi
+
+    local tmp code_file http_code result
+    tmp=$(mktemp); code_file=$(mktemp)
+    curl -s -o "$tmp" -w "%{http_code}" \
+        -X PATCH \
+        -H "Authorization: Bearer $api_key" \
+        -H "Content-Type: application/json" \
+        -d "$payload" \
+        --connect-timeout 10 \
+        "${orchestrator_url}/api/nodes/me/pricing" \
+        2>/dev/null > "$code_file" || true
+    http_code=$(cat "$code_file" 2>/dev/null | tr -d '[:space:]' | head -c 3 || echo "0")
+    result=$(cat "$tmp" 2>/dev/null || echo "")
+    rm -f "$tmp" "$code_file"
+
+    echo ""
+    if [[ "$http_code" =~ ^2 ]]; then
+        if [[ "$mode" == "reset" ]]; then
+            log_success "Orchestrator reverted to platform defaults"
+        else
+            log_success "Pricing updated on orchestrator"
+            # Show effective rates (may differ from input due to floor enforcement)
+            local eff_cpu eff_mem eff_stor eff_gpu has_custom
+            eff_cpu=$(echo  "$result" | jq -r '.cpuPerHour           // empty')
+            eff_mem=$(echo  "$result" | jq -r '.memoryPerGbPerHour   // empty')
+            eff_stor=$(echo "$result" | jq -r '.storagePerGbPerHour  // empty')
+            eff_gpu=$(echo  "$result" | jq -r '.gpuVramPerGbPerHour  // empty')
+            has_custom=$(echo "$result" | jq -r '.hasCustomPricing // false')
+
+            if [[ "$has_custom" == "true" ]]; then
+                echo ""
+                echo -e "${BOLD}  Effective rates (after floor enforcement):${NC}"
+                [[ -n "$eff_cpu" ]]  && echo "    CPU:     \$${eff_cpu}/core/hr"
+                [[ -n "$eff_mem" ]]  && echo "    Memory:  \$${eff_mem}/GB/hr"
+                [[ -n "$eff_stor" ]] && echo "    Storage: \$${eff_stor}/GB/hr"
+                [[ -n "$eff_gpu" ]]  && echo "    GPU:     \$${eff_gpu}/GB/hr"
+            fi
+        fi
+    else
+        log_warn "Could not push pricing to orchestrator (HTTP $http_code)"
+        log_info "Pricing saved locally — will take effect on next register"
     fi
 }
 
@@ -2788,6 +3029,13 @@ ${BOLD}NODE LIFECYCLE:${NC}
                               --storage-percent <1-95> Percentage of storage to offer (default: 90)
                               --gpu-count <N>         Number of GPUs to offer (0 = none, default: all)
                               --show                  Show current allocation with evaluation context
+    pricing [options]       Set per-resource pricing rates (USDC/hr)
+      --cpu <rate>            CPU rate per core per hour (e.g. 0.012)
+      --memory <rate>         Memory rate per GB per hour (e.g. 0.006)
+      --storage <rate>        Storage rate per GB per hour (e.g. 0.0001)
+      --gpu <rate>            GPU VRAM rate per GB per hour (e.g. 0.008)
+      --reset                 Remove custom pricing, revert to platform defaults
+      --show                  Show configured and effective (floor-clamped) rates
 
 ${BOLD}STATUS & INFORMATION:${NC}
     status                  Show comprehensive node status
@@ -2979,6 +3227,7 @@ main() {
         settings)     cmd_settings   "$@" ;;
         configure)    cmd_configure  "$@" ;;
         allocate)     cmd_allocate   "$@" ;;
+        pricing)      cmd_pricing    "$@" ;;
         status)       cmd_status     "$@" ;;
         info)         cmd_info       "$@" ;;
         resources)    cmd_resources  "$@" ;;

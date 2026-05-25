@@ -217,12 +217,36 @@ public class NodeMetadataService : INodeMetadataService
         // so they will skip re-derivation when these values are already set.
         await LoadResolvedAllocationAsync(ct);
 
-        // Load operator pricing from config (optional)
-        var pricingSection = _configuration.GetSection("Node:Pricing");
-        if (pricingSection.Exists())
+        // Load operator pricing from settings.json flat keys.
+        // Written by: decloud pricing --cpu 0.012 --memory 0.006 ...
+        // Stored as a nested "pricing" object in settings.json; ASP.NET Core
+        // config layering exposes them as pricing:cpu_per_hour etc.
+        var cpuStr = _configuration["pricing:cpu_per_hour"];
+        var memStr = _configuration["pricing:memory_per_gb_per_hour"];
+        var storageStr = _configuration["pricing:storage_per_gb_per_hour"];
+        var gpuStr = _configuration["pricing:gpu_vram_per_gb_per_hour"];
+
+        if (cpuStr != null || memStr != null || storageStr != null || gpuStr != null)
         {
             Pricing = new NodePricing();
-            pricingSection.Bind(Pricing);
+            if (decimal.TryParse(cpuStr, System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out var cpu) && cpu > 0)
+                Pricing.CpuPerHour = cpu;
+            if (decimal.TryParse(memStr, System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out var mem) && mem > 0)
+                Pricing.MemoryPerGbPerHour = mem;
+            if (decimal.TryParse(storageStr, System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out var storage) && storage > 0)
+                Pricing.StoragePerGbPerHour = storage;
+            if (decimal.TryParse(gpuStr, System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.InvariantCulture, out var gpu) && gpu > 0)
+                Pricing.GpuVramPerGbPerHour = gpu;
+
+            _logger.LogInformation(
+                "Operator pricing loaded: CPU={Cpu}/hr, Memory={Mem}/GB/hr, " +
+                "Storage={Storage}/GB/hr, GpuVram={Gpu}/GB/hr",
+                Pricing.CpuPerHour, Pricing.MemoryPerGbPerHour,
+                Pricing.StoragePerGbPerHour, Pricing.GpuVramPerGbPerHour);
         }
 
         // Discover public IP
