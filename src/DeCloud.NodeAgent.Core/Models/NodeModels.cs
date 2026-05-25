@@ -331,12 +331,3 @@ public class NodeRegistration
     /// </summary>
     public DeCloud.Shared.Models.AllocatedResources? AllocatedResources { get; set; }
 }
-
-public class NodePricing
-{
-    public decimal CpuPerHour { get; set; }
-    public decimal MemoryPerGbPerHour { get; set; }
-    public decimal StoragePerGbPerHour { get; set; }
-    public decimal GpuPerHour { get; set; }
-    public string Currency { get; set; } = "USDC";
-}
