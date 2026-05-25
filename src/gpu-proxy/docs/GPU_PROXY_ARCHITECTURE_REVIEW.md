@@ -2,7 +2,7 @@
 
 **Date Range:** 2026-02-27 through 2026-03-17
 **Authors:** BMA + Claude AI assistant
-**Status:** Production-ready — Generic proxy with template-driven configuration; Ollama GPU + PyTorch + SD Forge all confirmed
+**Status:** Production-ready with known limitations — Ollama 3B GPU confirmed; 7B+ blocked by Bug 23a; Ollama pinned to 0.7.0 (Bug 23)
 
 ---
 
@@ -113,7 +113,11 @@ All application-specific behavior is controlled by `/etc/decloud/gpu-proxy.env`,
 
 **CUDA Graph Pass-Through:** CUDA graphs cannot be faithfully proxied — capture records host-side API calls but execution is remote. Both the runtime and driver shims return "not supported" for graph capture (`cudaStreamBeginCapture`, `cuStreamBeginCapture`), forcing applications to fall back to direct kernel execution. This is both simpler and more correct than the earlier no-op or capture/replay approaches. Note: libcudart resolves `cudaStreamBeginCapture` through the driver API (`cuGetProcAddress`), so both shims must return consistent results.
 
+> ⚠️ **Ollama Version Compatibility (May 2026):** Ollama 0.24.0 introduced `ggml_backend_cuda_graph_reserve()` in context init, which calls `cudaStreamBeginCapture` wrapped in `CUDA_CHECK()` with no fallback — any non-zero return causes `ggml_abort()`. The `cudaErrorNotSupported` pass-through approach (Session 15) breaks with this version. **Ollama must be pinned to 0.7.0** in templates until the shim is updated to return `cudaSuccess` on the first `cudaStreamBeginCapture` call per-process (satisfying the reserve) while still rejecting inference-time captures. See Debugging Journal Session 16.
+
 **Real GPU Attributes:** `cu_func_get_attribute` queries daemon via RPC, caches per-function, falls back to safe defaults. Eliminates hardcoded sm_89 vendor dependency.
+
+> ⚠️ **7B+ Model Compatibility (May 2026 — Bug 23a):** Models with n_embd≥4096, n_ff≥14336, or 32+ layers produce Ġ token (U+0120) corruption in GPU inference starting at ~token 200-250, cascading to complete output failure. The 3B model (n_embd=3072, 28 layers) is clean. GEMM proxy is ruled out (MMQ path confirmed). Root cause is a geometry-dependent error in kernel launch parameter handling or KV cache stride calculations for larger tensor dimensions. See Debugging Journal Session 17.
 
 ---
 
@@ -145,13 +149,14 @@ install.sh handles: Docker compat build (glibc 2.31), native daemon build, stale
 | Capability | Status | Notes |
 |------------|--------|-------|
 | GPU detection + model loading | ✅ | Automatic via cloud-init |
-| Kernel launch via RPC | ✅ | 13-21 tok/s generation |
+| Kernel launch via RPC | ✅ | 13-21 tok/s generation (3B models confirmed) |
+| Ollama 7B+ model inference | ❌ Blocked | Bug 23a — Ġ token corruption in extended generation; tensor geometry exceeds proxy's correct range |
 | Prompt evaluation | ✅ | 188-436 tok/s |
 | 1.56GB streaming module upload | ✅ | Zero-copy from mmap |
 | cuBLAS GEMM proxy | ✅ | GQA attention via RPC |
 | cublasLtMatmul proxy | ✅ | PyTorch linear/attention GEMMs |
 | Real kernel attributes + occupancy | ✅ | Cached, with fallback |
-| CUDA graph pass-through | ✅ | Returns not-supported, forces direct kernel execution |
+| CUDA graph pass-through | ✅ Working (pinned) | Returns not-supported, forces direct kernel execution. **Ollama pinned to 0.7.0** — 0.24.0+ incompatible (see Session 16) |
 | TCP_NODELAY + TCP_QUICKACK | ✅ | Sub-ms RPC latency |
 | Template-driven env vars | ✅ | Generic proxy |
 | Zero-touch VM deployment | ✅ | Cloud-init automated |

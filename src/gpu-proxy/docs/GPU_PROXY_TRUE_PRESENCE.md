@@ -149,6 +149,8 @@ With real attributes proxied from the host GPU, the following works transparentl
 
 Any CUDA application using `__cudaRegisterFatBinary` / `__cudaRegisterFunction` / `cudaLaunchKernel` / `cudaFuncGetAttributes` works through the proxy. This covers ggml (llama.cpp, Ollama), PyTorch custom ops, TensorFlow Lite, Triton-compiled kernels, and any nvcc-compiled program.
 
+> ⚠️ **7B+ Model Limitation (Bug 23a, May 2026):** True GPU Presence correctly proxies kernel attributes for all model sizes. However, extended GPU inference with 7B+ models (n_embd≥4096, 32+ layers) produces Ġ token corruption starting at ~token 200-250. The GEMM proxy is not involved (MMQ path confirmed via diagnostic log). Root cause is a geometry-dependent error in kernel launch or KV cache stride handling for large tensor dimensions. 3B models are unaffected. See Debugging Journal Session 17.
+
 ### Still Requires Stubs
 
 | Library | Why |

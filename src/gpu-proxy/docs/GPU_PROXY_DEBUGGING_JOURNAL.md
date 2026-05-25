@@ -1,8 +1,8 @@
 # DeCloud GPU Proxy — Debugging Journal
 
-**Date Range:** 2026-02-27 through 2026-03-17
+**Date Range:** 2026-02-27 through 2026-05-25
 **Authors:** BMA + Claude AI assistant
-**Status:** Active — PyTorch inference + training + LoRA + SD Forge + Ollama GPU all production-ready
+**Status:** Active — PyTorch inference + training + LoRA + SD Forge + Ollama 3B GPU production-ready; Ollama pinned to 0.7.0; 7B+ models blocked by Bug 23a
 
 ---
 
@@ -24,6 +24,8 @@
 | 13 | Mar 14 | cuGetExportTable stub, cuDNN investigation, Bug 19 parked |
 | 14 | Mar 15 | **cublasLt bias fix (Bug 21)**, **SD Forge image generation confirmed**, libcudnn stub, Bug 22 investigating |
 | 15 | Mar 17 | **Bug 22 FIXED** — CUDA graph pass-through mode, word doubling/garbling parked for future |
+| 16 | May 24 | **Bug 23** — Ollama 0.24.0 incompatible with `cudaErrorNotSupported`; pinned to 0.7.0 |
+| 17 | May 25 | **Bug 23a** — 7B+ models corrupt at extended generation; confirmed proxy bug, not model |
 
 ---
 
@@ -610,6 +612,181 @@ Intermittent word doubling observed during capture/replay testing. Parked — th
 
 | Item | Priority | Notes |
 |------|----------|-------|
+| Bug 22a — Word doubling/garbling | 🅿️ Parked | Only observed during capture/replay testing; pass-through fix eliminates root cause. Revisit if it resurfaces. |
+| Bug 19 — cuDNN context struct layout | Low | Parked — nvproxy reference needed |
+| vLLM template validation | High | VMEM_PROXY=1 already set |
+| React frontend migration | Low | Backlog |
+| `cuLaunchKernelEx` grid dims | Low | Parses 1×1×1 defaults |
+
+---
+
+## Session 16: Ollama Version Compatibility Break (May 24, 2026)
+
+### Bug 23: `ggml_backend_cuda_graph_reserve` Aborts on `cudaErrorNotSupported`
+
+**Symptom:** Fresh AI Chatbot VM deployment fails on every chat request. Ollama runner crashes with `CUDA error: unknown error` at `cudaStreamBeginCapture` inside `ggml_backend_cuda_graph_reserve`, then `SIGABRT`. The shim config (systemd drop-in, LD_PRELOAD, library injection) was all correct.
+
+**Installed version:** Ollama 0.24.0 (latest as of May 2026, installed by `curl -fsSL https://ollama.com/install.sh | sh`).
+
+**Root cause:** Ollama 0.24.0 added `ggml_backend_cuda_graph_reserve()`, called unconditionally during `llama_init_from_model` (context creation). This function calls `cudaStreamBeginCapture` and wraps it in ggml's `CUDA_CHECK()` macro, which calls `ggml_abort()` on **any** non-zero return — including `cudaErrorNotSupported`. Previously, `cudaStreamBeginCapture` was only called during the inference path, where ggml had a graceful fallback to direct execution. The reserve call has no such fallback.
+
+The Session 15 fix (returning `cudaErrorNotSupported`) was correct for the Ollama versions in use at the time. The assumption it relied on — that ggml always handles `NOT_SUPPORTED` from `cudaStreamBeginCapture` gracefully — was broken by the new reserve call site.
+
+**Crash stack (simplified):**
+```
+llama_init_from_model
+  → ggml_backend_cuda_graph_reserve          ← new in 0.24.0, no fallback
+    → cudaStreamBeginCapture
+      → shim returns cudaErrorNotSupported
+        → CUDA_CHECK() → ggml_abort() → SIGABRT
+```
+
+**Versions investigated:**
+
+| Version | cuda_v12 layout | Result | Reason |
+|---------|----------------|--------|--------|
+| 0.24.0 (latest) | `libcudart.so.12` (symlink), `libcublas.so.12` (symlink), `libcublasLt.so.12` (symlink), `libggml-cuda.so` | ❌ SIGABRT | `ggml_backend_cuda_graph_reserve` aborts on `cudaErrorNotSupported` |
+| 0.5.13 | `libcudart.so.12` → dangling symlink, `libcublasLt.so.12.8.3.14` (real 737MB), `libggml-cuda.so` | ❌ CPU fallback | Different layout — dangling `libcudart` symlink, no `libcublas.so.12`; shim injection script assumptions don't match |
+| 0.7.0 | `libcudart.so.12` (symlink), `libcublas.so.12` (symlink), `libcublasLt.so.12` (symlink), `libggml-cuda.so` | ✅ GPU working | Correct layout for shim injection; `cudaErrorNotSupported` from `cudaStreamBeginCapture` handled gracefully |
+
+**Fix (immediate):** Downgrade to Ollama 0.7.0.
+
+```bash
+curl -fsSL https://ollama.com/install.sh | OLLAMA_VERSION=0.7.0 sh
+# Re-inject shims after downgrade (install overwrites cuda_v12/)
+CUDA_DIR=/usr/local/lib/ollama/cuda_v12
+for lib in libcudart.so.12 libcublas.so.12 libcublasLt.so.12; do
+  target="$CUDA_DIR/$lib"
+  if [ -f "$target" ] || [ -L "$target" ]; then
+    [ ! -f "$target.orig" ] && cp -P "$target" "$target.orig"
+    rm -f "$target"
+    case "$lib" in
+      libcublas.so.12)   cp /usr/local/lib/libcublas_stub.so "$target" ;;
+      libcublasLt.so.12) cp /usr/local/lib/libcublasLt_stub.so "$target" ;;
+      *)                 cp /usr/local/lib/libdecloud_cuda_shim.so "$target" ;;
+    esac
+  fi
+done
+systemctl restart ollama
+```
+
+**Fix (template):** Pin `OLLAMA_VERSION=0.7.0` in cloud-init Mode 2 install line (`TemplateSeederService.cs` and the seeded template document):
+
+```bash
+# Before:
+curl -fsSL https://ollama.com/install.sh | sh
+# After:
+curl -fsSL https://ollama.com/install.sh | OLLAMA_VERSION=0.7.0 sh
+```
+
+**Confirmed working on 0.7.0:**
+- `CUDA0 model buffer size = 1918.35 MiB` ✅
+- `CUDA0 KV buffer size = 448.00 MiB` ✅
+- `nvidia-smi` shows 2767 MiB VRAM used ✅
+- Chat response ~17s (GPU generation at ~13-21 tok/s) ✅
+
+**Root fix needed (platform):** The shim's `cudaStreamBeginCapture` needs to return `cudaSuccess` when called from `ggml_backend_cuda_graph_reserve` (context init) while still forcing `cudaErrorNotSupported` during inference-time capture. These two call sites are indistinguishable from the shim side by function name alone. One approach: return `cudaSuccess` on the first call per-process (satisfying reserve) and `cudaErrorNotSupported` on all subsequent calls (forcing direct execution). This is a targeted `cuda_shim.c` change. Until this is implemented, Ollama must remain pinned at 0.7.0.
+
+### Key Lessons Learned (Session 16)
+
+25. **Version-pin application dependencies that interact with the shim.** The shim makes behavioral assumptions about how applications handle specific error codes. When the application changes that behavior (new call site without fallback), the shim breaks. Template installs must pin to a verified-compatible version.
+
+26. **`cudaErrorNotSupported` is not universally safe.** It triggers correct fallback behavior in ggml's inference path, but the same code in a context-init path (no fallback) causes abort. Error handling contracts must be verified per call site, not per error code.
+
+27. **Always re-inject shims after Ollama upgrades/downgrades.** The install script replaces `/usr/local/lib/ollama/` entirely, including `cuda_v12/`. The shim injection performed by cloud-init is not persistent across Ollama reinstalls. This is a known operational hazard.
+
+28. **Ollama's `cuda_v12` layout changes between versions.** 0.5.13 uses versioned filenames with symlinks and ships real cuBLAS Lt (737MB). 0.7.0+ uses plain symlink names. The cloud-init injection script targets the symlink names (`libcudart.so.12`, `libcublas.so.12`, `libcublasLt.so.12`) — this only works for the 0.7.0+ layout.
+---
+
+## Session 17: 7B+ Model GPU Corruption (May 25, 2026)
+
+### Bug 23a: Ġ Token Corruption in Extended Generation for Large Models
+
+**Symptom:** `dolphin-llama3:8b` produces increasingly corrupted output during GPU inference. Clean for the first ~150-200 tokens, then standalone `G` characters appear between words, worsening until complete cascade collapse (output becomes streams of `GivesGGGivesC...`). The 3B model (`llama3.2:3b`) generates clean output at any length under the same conditions.
+
+**Model under test:**
+- `dolphin-2.9-llama3-8b`, Q4_0, 4.33 GiB, 8.03B params
+- 32 layers, n_embd=4096, n_ff=14336, n_head=32, n_head_kv=8, n_gqa=4
+- KV cache: 1024 MiB (512 K + 512 V), `--parallel 2`, `--no-mmap`
+
+**Working model (3B) for comparison:**
+- `llama3.2:3b`, Q4_K_M, 1.87 GiB, 3.21B params
+- 28 layers, n_embd=3072, n_ff=8192, n_head=24, n_head_kv=8, n_gqa=3
+- KV cache: 448 MiB, `--parallel 1`, mmap=true
+
+**What the "G" characters actually are:** Unicode `Ġ` (U+0120) — Llama's BPE space-prefix token. Normally fused with the following word (e.g. `Ġocean` = " ocean"). When the GPU produces slightly wrong logits, the space-prefix token scores above threshold as a standalone token, inserting a visible `G` between words. The cascading collapse is self-reinforcing: corrupted tokens become corrupted KV cache entries, which corrupt subsequent attention computations.
+
+**Diagnostic steps and findings:**
+
+| Test | Result | Conclusion |
+|------|--------|------------|
+| 3 sentences (8B, GPU) | Clean | Short context within safe range |
+| 10 sentences (8B, GPU) | 1 G at end | Corruption onset ~token 250 |
+| 30 sentences (8B, GPU) | Clean to ~sentence 20, then cascade | Progressive accumulation |
+| `OLLAMA_NUM_PARALLEL=1` (8B, GPU) | Slightly later onset, still cascades | Parallel not the root cause |
+| 30 sentences (3B, GPU) | Fully clean all 30 | 3B geometry works correctly |
+| `DECLOUD_GPU_DEBUG` GEMM log | Empty — no GemmStrided/GemmBatched calls | MMQ path used, not GEMM proxy |
+| CPU isolation attempt | Could not achieve — NVML/libcuda shims always report GPU; Ollama ignores `OLLAMA_LLM_LIBRARY=cpu` | Cannot rule out model corruption via this path |
+
+**Why CPU isolation failed:** The NVML shim (`libnvidia-ml.so.1`) and driver shim (`libcuda.so.1`) are installed system-wide. Ollama's GPU detection uses both and always reports the proxied GPU regardless of `OLLAMA_LLM_LIBRARY=cpu` or `OLLAMA_NUM_GPU_LAYERS=0`. Removing the NVML shim did not help because `libcuda.so.1` alone is sufficient for Ollama to discover and use the GPU. True CPU isolation on this VM requires removing all shims from system paths, which is too invasive for a production VM.
+
+**Root cause (hypothesis):** The proxy's kernel launch parameter handling or memory write-back logic has a geometry-dependent error that accumulates over sequential token generations. The 8B model's larger tensor dimensions (n_embd=4096 vs 3072, n_ff=14336 vs 8192, 32 vs 28 layers, 1024 MiB KV vs 448 MiB) exceed a boundary where the proxy computes addresses or strides correctly. The GEMM proxy is ruled out (MMQ path confirmed). The most likely candidates are:
+
+1. **KV cache write stride error** — the 8B's `n_embd_k_gqa=1024` per layer across 32 layers with `n_seq_max=2` may cause offset calculations that overflow a fixed-size buffer or produce wrong addresses after enough sequential writes
+2. **Kernel launch parameter truncation** — `cudaLaunchKernel` payload for the 8B's larger grid/block dimensions may overflow the RPC protocol's parameter packing
+
+**Status:** 🔴 Open — 7B+ models unusable on GPU proxy until fixed.
+
+**Debugging path:**
+```bash
+# Enable full RPC logging
+touch /tmp/gpu-proxy-diag
+DECLOUD_GPU_DEBUG=1 ollama run dolphin-llama3:8b "write 30 sentences about the ocean" 2>&1
+
+# After run, compare launch parameters vs 3B
+cat /tmp/gpu-proxy-diag.log | grep -E "LaunchKernel|gridDim|blockDim" | head -60
+# Run same for 3B and diff the grid/block size patterns
+```
+
+The divergence point will be in kernel launches that occur after token ~200, compared against the 3B's equivalent launches at that sequence position.
+
+**Workarounds:**
+- Use `llama3.2:3b` for GPU inference — clean at all output lengths
+- 8B on GPU is usable for short responses (<150 tokens) only
+- 8B on CPU (true CPU, via shim removal) would be correct but ~2 tok/s — impractical
+
+### Key Lessons Learned (Session 17)
+
+29. **Model compatibility must be verified at each major parameter boundary.** A proxy that works for 3B models may fail for 7B+ due to larger tensor dimensions, deeper layer counts, or bigger KV cache geometry. Each boundary (n_embd, n_ff, n_layers, KV size) is an independent failure surface.
+
+30. **NVML + libcuda shims make CPU isolation impossible on a live GPU proxy VM.** Removing one shim is insufficient. This is an operational constraint that makes root-cause isolation harder. For future debugging, maintain a separate "bare metal" test VM without shims installed.
+
+31. **Ġ token corruption is a reliable proxy bug indicator.** The BPE space-prefix token (U+0120) appearing as a standalone character means the GPU computed wrong logits — not a model file issue, not a tokenizer issue. It specifically indicates that activation values entering the final linear layer are subtly wrong, pointing to a memory write or compute ordering error in the proxy path.
+
+32. **Corruption onset token count is a diagnostic signal.** Corruption starting at token ~200-250 and cascading is consistent with a per-token accumulated error (e.g. wrong KV cache address that gets read back every attention step). Instant corruption from token 1 would indicate a model weight loading error.
+
+---
+
+## Production Status (2026-05-25)
+
+| Workload | Status | Notes |
+|----------|--------|-------|
+| Ollama llama3.2:3b GPU | ✅ Production | Clean output at all lengths; 13-21 tok/s generation |
+| Ollama 7B+ models GPU | ❌ Blocked | Bug 23a — Ġ token corruption in extended generation |
+| Ollama 7B+ models CPU | ⚠️ Impractical | ~2 tok/s; CPU isolation not possible on live proxy VM |
+| PyTorch inference (eager) | ✅ Confirmed | All transformer ops incl. bias |
+| PyTorch full fine-tuning | ✅ Confirmed | 1,252 tok/s, 409ms/step |
+| PyTorch LoRA (PEFT) | ✅ Confirmed | 1,038 tok/s, 493ms/step, 1,360MB VRAM |
+| JupyterLab kernel | ✅ Confirmed | Via systemd EnvironmentFile |
+| Stable Diffusion Forge | ✅ Confirmed | Image generation 1.61 it/s |
+| cuDNN-accelerated conv | ❌ Blocked | Bug 19 — parked |
+
+## Pending Items
+
+| Item | Priority | Notes |
+|------|----------|-------|
+| Bug 23a — 7B+ model Ġ token corruption | High | Proxy kernel launch or KV stride error at large tensor geometry. Enable `DECLOUD_GPU_DEBUG`, capture RPC log, diff vs 3B launch params. |
+| Bug 23 — Shim fix for `ggml_backend_cuda_graph_reserve` | High | Root fix: `cudaStreamBeginCapture` must return `cudaSuccess` on first call per-process. Until fixed, Ollama pinned to 0.7.0. |
 | Bug 22a — Word doubling/garbling | 🅿️ Parked | Only observed during capture/replay testing; pass-through fix eliminates root cause. Revisit if it resurfaces. |
 | Bug 19 — cuDNN context struct layout | Low | Parked — nvproxy reference needed |
 | vLLM template validation | High | VMEM_PROXY=1 already set |

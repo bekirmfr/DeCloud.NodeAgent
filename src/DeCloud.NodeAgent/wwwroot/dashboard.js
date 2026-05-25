@@ -381,25 +381,56 @@ function renderHardware() {
     renderAllocCard(allocMem, physMem, vmUsedMem, 'hw-alloc-mem-pct', 'hw-alloc-mem-detail', 'hw-alloc-mem-bar');
     renderAllocCard(allocStor, physStor, vmUsedStor, 'hw-alloc-stor', 'hw-alloc-stor-detail', 'hw-alloc-stor-bar');
 
-    // GPUs
-    // GpuMode enum: None=0, Passthrough=1, Proxied=2.
+    // GPUs — GpuMode: None=0, Passthrough=1, Proxied=2.
     // Count by mode, not by gpuPciAddress presence — Proxied VMs have no PCI address.
     const gpus = snap.totalGpus ?? 0;
     const passthroughVms = allVms.filter(v => (v.spec?.gpuMode ?? v.gpuMode) === 1).length;
     const proxiedVms = allVms.filter(v => (v.spec?.gpuMode ?? v.gpuMode) === 2).length;
+    const isProxyNode = snap.supportsGpuProxy === true;
+
+    const gpuModeBadge = $('hw-alloc-gpu-mode-badge');
+
     if (gpus > 0) {
-        const freePassthrough = gpus - passthroughVms;
+        // Mode badge — green for Proxied, blue for Passthrough
+        if (gpuModeBadge) {
+            gpuModeBadge.textContent = isProxyNode ? 'Proxied' : 'Passthrough';
+            gpuModeBadge.style.cssText = isProxyNode
+                ? 'font-size:10px;font-weight:500;padding:1px 6px;border-radius:20px;margin-left:4px;background:#E1F5EE;color:#0F6E56'
+                : 'font-size:10px;font-weight:500;padding:1px 6px;border-radius:20px;margin-left:4px;background:#E6F1FB;color:#185FA5';
+        }
+
+        if (isProxyNode) {
+            // Proxied: VRAM allocation bar — same renderAllocCard pattern as memory/storage.
+            // allocBytes  = operator ceiling (resolvedGpuVramBytes from allocate response).
+            // physBytes   = total physical GPU VRAM from snapshot.
+            // vmUsedBytes = committed VRAM (passthrough full-GPU + proxied quotas) from snapshot.
+            const resolvedGpuVram = S.allocation?.resolvedGpuVramBytes ?? snap.totalGpuVramBytes ?? 0;
+            const physGpuVram = snap.totalGpuVramBytes ?? 0;
+            const usedGpuVram = snap.allocatedGpuVramBytes ?? 0;
+            renderAllocCard(resolvedGpuVram, physGpuVram, usedGpuVram,
+                'hw-alloc-gpu-vram-pct', 'hw-alloc-gpu-vram-detail', 'hw-alloc-gpu-vram-bar');
+        } else {
+            // Passthrough: VRAM sharing is not applicable — bar represents GPU slot usage.
+            const usedPct = gpus > 0 ? passthroughVms / gpus * 100 : 0;
+            set('hw-alloc-gpu-vram-pct', `${gpus} GPU${gpus !== 1 ? 's' : ''}`);
+            set('hw-alloc-gpu-vram-detail', `${passthroughVms} assigned · ${gpus - passthroughVms} free`);
+            setHwBar('hw-alloc-gpu-vram-bar', usedPct);
+        }
+
+        // Secondary line — VM-level GPU breakdown (shown for both modes)
         const parts = [];
         if (passthroughVms > 0) parts.push(`${passthroughVms} passthrough`);
         if (proxiedVms > 0) parts.push(`${proxiedVms} proxied`);
-        set('hw-alloc-gpu', `${gpus} GPU${gpus !== 1 ? 's' : ''}`);
-        set('hw-alloc-gpu-detail',
+        set('hw-alloc-gpu-count',
             parts.length > 0
-                ? `${parts.join(', ')} · ${freePassthrough} free for passthrough`
-                : `${gpus} available`);
+                ? `${parts.join(', ')} · ${gpus - passthroughVms} free for passthrough`
+                : `${gpus} GPU${gpus !== 1 ? 's' : ''} available`);
     } else {
-        set('hw-alloc-gpu', 'None');
-        set('hw-alloc-gpu-detail', '—');
+        if (gpuModeBadge) { gpuModeBadge.textContent = ''; gpuModeBadge.style.cssText = ''; }
+        set('hw-alloc-gpu-vram-pct', 'None');
+        set('hw-alloc-gpu-vram-detail', '—');
+        set('hw-alloc-gpu-count', '—');
+        setHwBar('hw-alloc-gpu-vram-bar', 0);
     }
 }
 
