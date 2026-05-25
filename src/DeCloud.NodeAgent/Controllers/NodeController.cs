@@ -161,9 +161,13 @@ public class NodeController : ControllerBase
             memoryPercent = m.AllocatedMemoryPercent is int mp ? mp / 100.0 : AllocatedResources.DefaultPercent,
             storagePercent = m.AllocatedStoragePercent is int sp ? sp / 100.0 : AllocatedResources.DefaultPercent,
             gpuCount = m.AllocatedGpuCount,
+            effectiveGpuVramPercent = m.AllocatedGpuVramPercent.HasValue
+                ? m.AllocatedGpuVramPercent.Value / 100.0
+                : (double?)null,
             resolvedComputePoints = m.AllocatedComputePoints ?? 0,
             resolvedMemoryBytes = m.AllocatedMemoryBytes ?? 0,
             resolvedStorageBytes = m.AllocatedStorageBytes ?? 0,
+            resolvedGpuVramBytes = m.AllocatedGpuVramBytes ?? 0,
             resolvedAt = m.AllocationResolvedAt,
             source = m.AllocationResolvedAt.HasValue ? "orchestrator" : "settings"
         });

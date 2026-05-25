@@ -659,8 +659,8 @@ cmd_allocate() {
             echo "  Memory:    $(human_bytes "$(echo "$alloc" | jq -r '.resolvedMemoryBytes')")"
             echo "  Storage:   $(human_bytes "$(echo "$alloc" | jq -r '.resolvedStorageBytes')")"
             local vram_bytes gpu_vram_pct
-            vram_bytes=$(  echo "$alloc" | jq -r '.resolvedGpuVramBytes   // empty')
-            gpu_vram_pct=$(echo "$alloc" | jq -r '.effectiveGpuVramPercent // empty')
+            vram_bytes=$(   echo "$alloc" | jq -r '.resolvedGpuVramBytes    // empty')
+            gpu_vram_pct=$( echo "$alloc" | jq -r '.effectiveGpuVramPercent // empty')
             if [[ -n "$vram_bytes" && "$vram_bytes" != "0" ]]; then
                 local pct_label=""
                 if [[ -n "$gpu_vram_pct" ]]; then
@@ -1539,22 +1539,28 @@ cmd_resources() {
     local snap
     if snap=$(api_get "/api/node/snapshot" 2>/dev/null); then
         local total_mem alloc_mem used_mem used_pts total_pts total_stor alloc_stor used_stor total_gpus alloc_gpus
-        total_mem=$(   echo "$snap" | jq -r '.totalMemoryBytes   // .totalMemoryBytes   // 0')
-        alloc_mem=$(  echo "$snap" | jq -r '.allocatedMemoryBytes  // 0')
-        used_mem=$(   echo "$snap" | jq -r '.usedMemoryBytes       // 0')
-        used_pts=$(   echo "$snap" | jq -r '.usedComputePoints     // 0')
-        total_pts=$(  echo "$snap" | jq -r '.totalComputePoints    // 0')
-        total_stor=$(  echo "$snap" | jq -r '.totalStorageBytes     // 0')
-        alloc_stor=$( echo "$snap" | jq -r '.allocatedStorageBytes // .totalStorageBytes // 0')
-        used_stor=$(  echo "$snap" | jq -r '.usedStorageBytes      // 0')
-        total_gpus=$( echo "$snap" | jq -r '.totalGpus             // 0')
-        alloc_gpus=$( echo "$snap" | jq -r '.allocatedGpus         // .totalGpus // 0')
+        total_mem=$(        echo "$snap" | jq -r '.totalMemoryBytes      // .totalMemoryBytes   // 0')
+        alloc_mem=$(        echo "$snap" | jq -r '.allocatedMemoryBytes  // 0')
+        used_mem=$(         echo "$snap" | jq -r '.usedMemoryBytes       // 0')
+        used_pts=$(         echo "$snap" | jq -r '.usedComputePoints     // 0')
+        total_pts=$(        echo "$snap" | jq -r '.totalComputePoints    // 0')
+        total_stor=$(       echo "$snap" | jq -r '.totalStorageBytes     // 0')
+        alloc_stor=$(       echo "$snap" | jq -r '.allocatedStorageBytes // .totalStorageBytes // 0')
+        used_stor=$(        echo "$snap" | jq -r '.usedStorageBytes      // 0')
+        total_gpus=$(       echo "$snap" | jq -r '.totalGpus             // 0')
+        alloc_gpus=$(       echo "$snap" | jq -r '.allocatedGpus         // 0')
+        total_gpu_vram=$(   echo "$snap" | jq -r '.totalGpuVramBytes     // 0')
+        alloc_gpu_vram=$(   echo "$snap" | jq -r '.allocatedGpuVramBytes // 0')
+        avail_gpu_vram=$(   echo "$snap" | jq -r '.availableGpuVramBytes // 0')
 
         echo "  Compute:  ${used_pts} / ${total_pts} pts used"
         echo "  Memory:   $(human_bytes "$used_mem") used / $(human_bytes "$alloc_mem") allocated / $(human_bytes "$total_mem") physical"
         echo "  Storage:  $(human_bytes "$used_stor") used / $(human_bytes "$alloc_stor") allocated / $(human_bytes "$total_stor") physical"
         if (( total_gpus > 0 )); then
             echo "  GPUs:     ${alloc_gpus} / ${total_gpus} offered"
+            if (( total_gpu_vram > 0 )); then
+                echo "  GPU VRAM: $(human_bytes "$avail_gpu_vram") free / $(human_bytes "$alloc_gpu_vram") committed / $(human_bytes "$total_gpu_vram") physical"
+            fi
         fi
     else
         log_warn "Could not fetch snapshot"
