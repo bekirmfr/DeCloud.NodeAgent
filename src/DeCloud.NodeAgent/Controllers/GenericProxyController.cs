@@ -146,8 +146,7 @@ public class GenericProxyController : ControllerBase
         catch (HttpRequestException ex)
         {
             // Connection refused means nothing is listening on that port in the VM.
-            // This is expected for optional services (attestation agent, app not yet started).
-            // The caller (e.g. AttestationService) already handles 502 gracefully — no need
+            // This is expected for optional services that aren't running. Callers handle 502 gracefully.
             // to fill logs with stack traces for a routine "service not installed" case.
             var isConnectionRefused = ex.InnerException is System.Net.Sockets.SocketException se
                 && se.SocketErrorCode == System.Net.Sockets.SocketError.ConnectionRefused;

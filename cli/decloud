@@ -649,6 +649,13 @@ cmd_allocate() {
             echo "  Memory:    $mem_pct"
             echo "  Storage:   $stor_pct"
             echo "  GPUs:      $(echo "$alloc" | jq -r '.gpuCount // "all (default)"')"
+            local gpu_vram_val
+            gpu_vram_val=$(jq -r '.resources.gpu.vram.value // ""' "$SETTINGS_FILE" 2>/dev/null)
+            if [[ -n "$gpu_vram_val" ]]; then
+                echo "  GPU VRAM:  ${gpu_vram_val}% (of proxy-eligible VRAM)"
+            else
+                echo "  GPU VRAM:  100% (default — all proxy-eligible VRAM)"
+            fi
             echo ""
 
             if [[ "$source" == "orchestrator" ]]; then
@@ -813,10 +820,13 @@ cmd_allocate() {
     # No CLI flags = show what we're sending from settings.
     if ! $changed; then
         echo ""
-        echo -e "${BOLD}Pushing allocation from settings:${NC}"
-        echo "  CPU:       ${eff_cpu:-90 (default)}%"
-        echo "  Memory:    ${eff_mem:-90 (default)}%"
-        echo "  Storage:   ${eff_stor:-90 (default)}%"
+        echo "Pushing allocation from settings:"
+        echo "  CPU:       ${eff_cpu}%"
+        echo "  Memory:    ${eff_mem}%"
+        echo "  Storage:   ${eff_stor}%"
+        if [[ -n "$eff_gpu_vram" ]]; then
+            echo "  GPU VRAM:  ${eff_gpu_vram}% (of proxy-eligible VRAM)"
+        fi
     fi
 
     # ── Push to orchestrator FIRST, before agent restart ──────────────
