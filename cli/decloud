@@ -637,31 +637,16 @@ cmd_allocate() {
         alloc=$(api_get "/api/node/allocation" 2>/dev/null) || true
 
         if [[ -n "$alloc" ]]; then
-            local cpu_pct mem_pct stor_pct source resolved_at
-            cpu_pct=$(echo "$alloc"     | jq -r '(.cpuPercent     * 100 | round | tostring) + "%"')
-            mem_pct=$(echo "$alloc"     | jq -r '(.memoryPercent  * 100 | round | tostring) + "%"')
-            stor_pct=$(echo "$alloc"    | jq -r '(.storagePercent * 100 | round | tostring) + "%"')
+            local source resolved_at
             source=$(echo "$alloc"      | jq -r '.source     // "settings"')
             resolved_at=$(echo "$alloc" | jq -r '.resolvedAt // "never"')
-
-            echo -e "${BOLD}Local Settings (/etc/decloud/settings.json):${NC}"
-            echo "  CPU:       $cpu_pct"
-            echo "  Memory:    $mem_pct"
-            echo "  Storage:   $stor_pct"
-            echo "  GPUs:      $(echo "$alloc" | jq -r '.gpuCount // "all (default)"')"
-            local gpu_vram_val
-            gpu_vram_val=$(jq -r '.resources.gpu.vram.value // ""' "$SETTINGS_FILE" 2>/dev/null)
-            if [[ -n "$gpu_vram_val" ]]; then
-                echo "  GPU VRAM:  ${gpu_vram_val}% (of proxy-eligible VRAM)"
-            else
-                echo "  GPU VRAM:  100% (default — all proxy-eligible VRAM)"
-            fi
-            echo ""
 
             if [[ "$source" == "orchestrator" ]]; then
                 echo -e "${BOLD}Orchestrator-Resolved Capacity (confirmed ${resolved_at}):${NC}"
             else
-                echo -e "${BOLD}Locally-Derived Capacity (not yet confirmed by orchestrator):${NC}"
+                log_warn "Not yet confirmed by orchestrator — run 'decloud evaluate' then 'decloud allocate'."
+                echo ""
+                return 0
             fi
             echo "  Compute:   $(echo "$alloc" | jq -r '.resolvedComputePoints') pts"
             echo "  Memory:    $(human_bytes "$(echo "$alloc" | jq -r '.resolvedMemoryBytes')")"

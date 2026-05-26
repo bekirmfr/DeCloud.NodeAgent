@@ -310,6 +310,14 @@ public class NodeMetadataService : INodeMetadataService
             if (cached.MemoryBytes > 0) AllocatedMemoryBytes = cached.MemoryBytes;
             if (cached.StorageBytes > 0) AllocatedStorageBytes = cached.StorageBytes;
             if (cached.GpuVramBytes > 0) AllocatedGpuVramBytes = cached.GpuVramBytes;
+            // Restore percent fields so ResolveAllocated* early-exit guards don't
+            // leave AllocatedComputePointsPercent/AllocatedMemoryPercent/etc. null,
+            // causing GetAllocation() to return the 90% default instead of the
+            // operator-configured value.
+            if (cached.CpuPercent > 0) AllocatedComputePointsPercent = (int)Math.Round(cached.CpuPercent * 100);
+            if (cached.MemoryPercent > 0) AllocatedMemoryPercent = (int)Math.Round(cached.MemoryPercent * 100);
+            if (cached.StoragePercent > 0) AllocatedStoragePercent = (int)Math.Round(cached.StoragePercent * 100);
+            if (cached.GpuVramPercent > 0) AllocatedGpuVramPercent = (int)Math.Round(cached.GpuVramPercent * 100);
             AllocationResolvedAt = cached.ResolvedAt;
 
             _logger.LogInformation(
