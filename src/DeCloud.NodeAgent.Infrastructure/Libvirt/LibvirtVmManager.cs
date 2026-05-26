@@ -2827,13 +2827,6 @@ public class LibvirtVmManager : IVmManager
                 "Please ensure the node has successfully registered with the orchestrator.");
         }
         
-        if (_nodeState.PerformanceEvaluation == null)
-        {
-            throw new InvalidOperationException(
-                "Cannot create VM: Node has not completed performance evaluation. " +
-                "Please ensure the node has successfully registered with the orchestrator.");
-        }
-        
         var config = _nodeState.SchedulingConfig;
         var nodeTotalPoints = _nodeState.PerformanceEvaluation.TotalComputePoints;
 
