@@ -5,6 +5,7 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Core.Models.State;
 using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.Shared.Contracts;
 using DeCloud.Shared.Enums;
@@ -845,6 +846,13 @@ REGISTERED_AT={DateTime.UtcNow:O}";
 
                     // Registration is now identity-only. Evaluation, obligations,
                     // and system templates are delivered by the evaluate endpoint.
+                    // Clear any stale local obligations so the reconciler does not
+                    // act on a previous evaluation before the new one completes.
+                    await _obligationState.SaveObligationsAsync(
+                        Array.Empty<ObligationDescriptor>(), ct);
+                    _logger.LogInformation(
+                        "Stale local obligations cleared — awaiting 'decloud evaluate'");
+
                     // Log non-compliant VMs if present (re-registration).
                     if (registrationResponse.NonCompliantVms is { Count: > 0 } ncVms)
                     {

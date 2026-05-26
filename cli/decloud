@@ -2485,9 +2485,17 @@ cmd_reset() {
     systemctl stop "$SERVICE_NAME" 2>/dev/null && log_success "Stopped" || log_warn "Was not running"
     sleep 2
 
-    log_info "[2/5] Removing credentials..."
+    log_info "[2/5] Removing credentials and obligation state..."
     rm -f "$CREDENTIALS_FILE" "$PENDING_AUTH_FILE"
-    log_success "Credentials removed"
+    # obligation-state.db is bound to the old node identity (obligations,
+    # Ed25519/WireGuard keys, system templates). Wipe it so the reconciler
+    # cannot act on a prior evaluation after re-registration. The WAL
+    # sidecar files must also be removed (SQLite journal_mode=WAL).
+    local _data_dir; _data_dir="$(dirname "$VM_STORAGE_PATH")"
+    rm -f "${_data_dir}/obligation-state.db" \
+          "${_data_dir}/obligation-state.db-wal" \
+          "${_data_dir}/obligation-state.db-shm"
+    log_success "Credentials and obligation state removed"
 
     log_info "[3/5] Clearing logs..."
     if [[ -d "$LOG_DIR" ]]; then
