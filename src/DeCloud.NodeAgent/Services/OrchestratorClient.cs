@@ -9,12 +9,14 @@ using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.Shared.Contracts;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Options;
+using Nethereum.Contracts.Standards.ERC20.TokenList;
 using Orchestrator.Models;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace DeCloud.NodeAgent.Services;
 
@@ -1092,6 +1094,9 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 _logger.LogWarning("Heartbeat response missing 'data' property");
                 throw new ArgumentException("Heartbeat response missing 'data' property");
             }
+
+            if (data.TryGetProperty("schedulingReady", out var srProp))
+                _nodeState.SetSchedulingReady(srProp.GetBoolean());
 
             // Process Pending Commands
             if (data.TryGetProperty("pendingCommands", out var commands) &&

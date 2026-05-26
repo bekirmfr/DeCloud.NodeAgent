@@ -30,10 +30,6 @@ public class AuthenticationManager : BackgroundService
 
     private readonly INodeMetadataService _nodeMetadata;
 
-    // Cached scheduling-ready state so AutoLoginIfNotLoggedOutAsync can skip
-    // an unnecessary login call when the node is already scheduling-ready.
-    private bool _isSchedulingReady = false;
-
     private bool _hasLoggedAuthWarning = false;
 
     public AuthenticationManager(
@@ -82,7 +78,7 @@ public class AuthenticationManager : BackgroundService
                     case AuthenticationState.PendingRegistration:
                         // Reset scheduling-ready cache — new registration
                         // means a new API key and unknown server-side state.
-                        _isSchedulingReady = false;
+                        _nodeState.SetSchedulingReady(false);
                         await HandlePendingRegistrationAsync(ct);
                         break;
 
@@ -100,7 +96,7 @@ public class AuthenticationManager : BackgroundService
                         continue; // skip the standard AuthCheckInterval below
 
                     case AuthenticationState.CredentialsInvalid:
-                        _isSchedulingReady = false;
+                        _nodeState.SetSchedulingReady(false);
                         await HandleInvalidCredentialsAsync(ct);
                         break;
                 }
@@ -167,17 +163,13 @@ public class AuthenticationManager : BackgroundService
             {
                 var nodeId = _nodeMetadata.NodeId;
 
-                var (isAuthorized, isSchedulingReady) = await VerifyNodeAuthorizationAsync(
-                    nodeId,
+                var isAuthorized = await VerifyNodeAuthorizationAsync(
+                    _nodeMetadata.NodeId,
                     credentials["API_KEY"],
                     ct);
 
                 if (isAuthorized)
-                {
-                    // Keep local cache in sync with server-side state.
-                    _isSchedulingReady = isSchedulingReady;
                     return AuthenticationState.Registered;
-                }
             }
 
             return AuthenticationState.CredentialsInvalid;
@@ -300,7 +292,7 @@ public class AuthenticationManager : BackgroundService
     /// Returns (isAuthorized, isSchedulingReady) — both derived from the
     /// same HTTP response so no extra round-trip is needed.
     /// </summary>
-    private async Task<(bool isAuthorized, bool isSchedulingReady)> VerifyNodeAuthorizationAsync(
+    private async Task<bool> VerifyNodeAuthorizationAsync(
         string nodeId,
         string apiKey,
         CancellationToken ct)
@@ -327,7 +319,7 @@ public class AuthenticationManager : BackgroundService
                     (int)response.StatusCode,
                     response.ReasonPhrase);
 
-                return (false, false);
+                return false;
             }
 
             // Parse SchedulingReady from the response body — same call,
@@ -357,16 +349,13 @@ public class AuthenticationManager : BackgroundService
                 _logger.LogWarning(ex, "Could not parse schedulingReady from node response");
             }
 
-            _logger.LogInformation(
-                "✓ Node authorization verified with orchestrator (schedulingReady={SchedulingReady})",
-                isSchedulingReady);
-
-            return (true, isSchedulingReady);
+            _logger.LogInformation("✓ Node authorization verified with orchestrator");
+            return true;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to verify node authorization with orchestrator");
-            return (false, false);
+            return false;
         }
     }
 
@@ -391,7 +380,7 @@ public class AuthenticationManager : BackgroundService
         }
 
         // Skip login if the orchestrator already has this node as scheduling-ready.
-        if (_isSchedulingReady)
+        if (_nodeState.IsSchedulingReady)
         {
             _logger.LogInformation(
                 "Node is already scheduling-ready — skipping auto-login");
@@ -423,7 +412,7 @@ public class AuthenticationManager : BackgroundService
 
             if (success)
             {
-                _isSchedulingReady = true;
+                _nodeState.SetSchedulingReady(true);
                 _logger.LogInformation("✓ Auto-login successful — node is scheduling-ready");
             }
             else

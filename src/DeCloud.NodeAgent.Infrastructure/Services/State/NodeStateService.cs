@@ -21,7 +21,8 @@ public class NodeStateService : INodeStateService
 
     private NodeStatus _status = NodeStatus.Initializing;
     private AuthenticationState _authState = AuthenticationState.NotAuthenticated;
-    private bool _isDiscoveryComplete;  // Explicit tracking
+    private bool _isDiscoveryComplete = false;  // Explicit tracking
+    private bool _isSchedulingReady = false;
     private bool _isOrchestratorReachable;  // Explicit tracking
     private bool _isInternetReachable;  // (not exposed yet)
     private DateTime? _lastHeartbeat;
@@ -123,6 +124,12 @@ public class NodeStateService : INodeStateService
     public bool IsDiscoveryComplete
     {
         get { lock (_lock) return _isDiscoveryComplete; }
+    }
+
+    public bool IsSchedulingReady => _isSchedulingReady;
+    public void SetSchedulingReady(bool schedulingReady)
+    {
+        lock (_lock) { _isSchedulingReady = schedulingReady; }
     }
 
     // ================================================================

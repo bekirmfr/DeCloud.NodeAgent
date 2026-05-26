@@ -61,6 +61,8 @@ public interface INodeStateService
     /// Whether resource discovery is complete
     /// </summary>
     bool IsDiscoveryComplete { get; }
+    bool IsSchedulingReady { get; }
+    void SetSchedulingReady(bool schedulingReady);
 
     /// <summary>
     /// Whether the node is currently online and can accept workloads
