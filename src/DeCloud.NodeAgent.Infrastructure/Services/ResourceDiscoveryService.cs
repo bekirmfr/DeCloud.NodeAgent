@@ -1133,7 +1133,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
             VirtualCpuUsagePercent = cpu.UsagePercent,
 
             TotalComputePoints = (int)totalComputePoints,
-            AllocatedComputePoints = _nodeMetadata.AllocatedComputePoints.Value,
+            AllocatedComputePoints = _nodeMetadata.AllocatedComputePoints ?? 0,
             UsedComputePoints = GetUsedComputePoints(),
 
             TotalMemoryBytes = memory.TotalBytes,
