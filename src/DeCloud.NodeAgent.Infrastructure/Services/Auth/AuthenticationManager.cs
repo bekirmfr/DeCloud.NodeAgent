@@ -387,23 +387,19 @@ public class AuthenticationManager : BackgroundService
             return;
         }
 
-        // Ensure evaluation exists before attempting login.
-        // Login requires PerformanceEvaluation to compute capacity.
+        // Evaluation must exist before login — login requires PerformanceEvaluation
+        // to compute capacity. On a normal restart InitializeAsync already fetched
+        // it from the orchestrator. If it is still null here the node has not yet
+        // been evaluated (fresh registration) or the orchestrator was unreachable
+        // during init. In both cases the operator must run 'decloud evaluate'
+        // explicitly — auto-evaluating here would bypass the intended lifecycle
+        // (register → evaluate → login) and cause obligations to deploy before
+        // the operator has reviewed allocation.
         if (_nodeState.PerformanceEvaluation == null)
         {
             _logger.LogInformation(
-                "No performance evaluation cached — running auto-evaluate before login...");
-
-            var evalResult = await _orchestratorClient.EvaluateNodeAsync(ct);
-            if (evalResult == null)
-            {
-                _logger.LogWarning(
-                    "Auto-evaluate failed — node is heartbeating but not scheduling-ready. " +
-                    "Run 'decloud evaluate' then 'decloud login' manually.");
-                return;
-            }
-
-            _logger.LogInformation("✓ Auto-evaluate successful");
+                "No performance evaluation — run 'decloud evaluate' then 'decloud login' to go live.");
+            return;
         }
 
         try
