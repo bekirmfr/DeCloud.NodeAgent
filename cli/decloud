@@ -2487,14 +2487,12 @@ cmd_reset() {
 
     log_info "[2/5] Removing credentials and obligation state..."
     rm -f "$CREDENTIALS_FILE" "$PENDING_AUTH_FILE"
-    # obligation-state.db is bound to the old node identity (obligations,
-    # Ed25519/WireGuard keys, system templates). Wipe it so the reconciler
-    # cannot act on a prior evaluation after re-registration. The WAL
-    # sidecar files must also be removed (SQLite journal_mode=WAL).
-    local _data_dir; _data_dir="$(dirname "$VM_STORAGE_PATH")"
-    rm -f "${_data_dir}/obligation-state.db" \
-          "${_data_dir}/obligation-state.db-wal" \
-          "${_data_dir}/obligation-state.db-shm"
+    # obligation-state.db is bound to the old node identity. Wipe it so the
+    # reconciler cannot act on a prior evaluation after re-registration.
+    # WAL sidecar files must also be removed (SQLite journal_mode=WAL).
+    rm -f "${VM_STORAGE_PATH}/obligation-state.db" \
+          "${VM_STORAGE_PATH}/obligation-state.db-wal" \
+          "${VM_STORAGE_PATH}/obligation-state.db-shm"
     log_success "Credentials and obligation state removed"
 
     log_info "[3/5] Clearing logs..."
