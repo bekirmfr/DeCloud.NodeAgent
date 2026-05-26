@@ -1232,24 +1232,23 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             }
 
             var content = await response.Content.ReadAsStringAsync(ct);
-            var json = JsonDocument.Parse(content);
-
-            if (!json.RootElement.TryGetProperty("data", out var data))
-            {
-                return new List<PendingCommand>();
-            }
+            var envelope = JsonSerializer.Deserialize<ApiResponse<List<NodeCommand>>>(
+                content, Core.Json.JsonOptions.Wire);
 
             var commands = new List<PendingCommand>();
 
-            if (data.ValueKind == JsonValueKind.Array)
+            if (envelope?.Data is { Count: > 0 } nodeCommands)
             {
-                foreach (var cmd in data.EnumerateArray())
+                foreach (var cmd in nodeCommands)
                 {
-                    var command = ParseCommand(cmd);
-                    if (command != null)
+                    commands.Add(new PendingCommand
                     {
-                        commands.Add(command);
-                    }
+                        CommandId = cmd.CommandId,
+                        Type = cmd.Type,
+                        Payload = cmd.Payload,
+                        RequiresAck = cmd.RequiresAck,
+                        IssuedAt = DateTime.UtcNow
+                    });
                 }
             }
 
@@ -1266,62 +1265,6 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         {
             _logger.LogError(ex, "Error fetching pending commands");
             return new List<PendingCommand>();
-        }
-    }
-
-    /// <summary>
-    /// Parse command from JSON element (shared by heartbeat and fetch)
-    /// </summary>
-    private PendingCommand? ParseCommand(JsonElement cmd)
-    {
-        try
-        {
-            var commandId = cmd.GetProperty("commandId").GetString() ?? "";
-            var typeProp = cmd.GetProperty("type");
-
-            NodeCommandType commandType;
-            if (typeProp.ValueKind == JsonValueKind.Number)
-            {
-                var intValue = typeProp.GetInt32();
-                if (!Enum.IsDefined(typeof(NodeCommandType), intValue))
-                {
-                    _logger.LogWarning("Unknown command type integer: {Value}", intValue);
-                    return null;
-                }
-                commandType = (NodeCommandType)intValue;
-            }
-            else if (typeProp.ValueKind == JsonValueKind.String)
-            {
-                if (!Enum.TryParse<NodeCommandType>(typeProp.GetString(), true, out commandType))
-                {
-                    _logger.LogWarning("Unknown command type: {Type}", typeProp.GetString());
-                    return null;
-                }
-            }
-            else
-            {
-                _logger.LogWarning("Unexpected command type format: {Kind}", typeProp.ValueKind);
-                return null;
-            }
-
-            var payload = cmd.GetProperty("payload").GetString() ?? "";
-            var requiresAck = cmd.TryGetProperty("requiresAck", out var ackProp)
-                ? ackProp.GetBoolean()
-                : true;
-
-            return new PendingCommand
-            {
-                CommandId = commandId,
-                Type = commandType,
-                Payload = payload,
-                RequiresAck = requiresAck,
-                IssuedAt = DateTime.UtcNow
-            };
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to parse command");
-            return null;
         }
     }
 
