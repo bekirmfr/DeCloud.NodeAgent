@@ -254,6 +254,12 @@ public class NodeMetadataService : INodeMetadataService
 
         // Background task to update inventory
         _ = Task.Run(async () => {
+            if (_resourceDiscovery == null)
+            {
+                _logger.LogWarning("Node metadata init error: {ResourcediscoveryService} is null.", nameof(_resourceDiscovery));
+                return;
+            }
+            
             var inv = await _resourceDiscovery.GetInventoryCachedAsync(CancellationToken.None);
             if (inv != null) UpdateInventory(inv);
         }, ct);
