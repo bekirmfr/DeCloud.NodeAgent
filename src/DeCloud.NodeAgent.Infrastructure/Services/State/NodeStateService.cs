@@ -126,7 +126,10 @@ public class NodeStateService : INodeStateService
         get { lock (_lock) return _isDiscoveryComplete; }
     }
 
-    public bool IsSchedulingReady => _isSchedulingReady;
+    public bool IsSchedulingReady
+    {
+        get { lock (_lock) return _isSchedulingReady; }
+    }
     public void SetSchedulingReady(bool schedulingReady)
     {
         lock (_lock) { _isSchedulingReady = schedulingReady; }
