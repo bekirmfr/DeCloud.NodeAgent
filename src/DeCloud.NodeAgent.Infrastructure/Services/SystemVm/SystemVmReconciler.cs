@@ -6,6 +6,7 @@ using DeCloud.NodeAgent.Core.Models.Reality;
 using DeCloud.NodeAgent.Core.Models.State;
 using DeCloud.NodeAgent.Core.Models.SystemVm;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
+using DeCloud.Shared.Enums;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;

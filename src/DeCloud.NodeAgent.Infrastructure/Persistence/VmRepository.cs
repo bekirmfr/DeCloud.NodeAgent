@@ -1,4 +1,5 @@
 ﻿using DeCloud.NodeAgent.Core.Models;
+using DeCloud.Shared.Enums;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using System.Security.Cryptography;

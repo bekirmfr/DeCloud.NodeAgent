@@ -1,32 +1,9 @@
 using DeCloud.NodeAgent.Core.Interfaces.State;
+using DeCloud.Shared.Contracts;
+using DeCloud.Shared.Dtos;
 using DeCloud.Shared.Models;
-using Orchestrator.Models;
 
 namespace DeCloud.NodeAgent.Core.Models;
-
-/// <summary>
-/// Wire DTO for a single obligation received in the registration response.
-/// Mirrors <c>Orchestrator.Models.ObligationDescriptorPayload</c>.
-/// </summary>
-public class NodeObligationDescriptorDto
-{
-    public string Role { get; init; } = string.Empty;
-    public List<string> Deps { get; init; } = [];
-}
-
-public record NodeRegistrationResponse(
-    string NodeId,
-    string ApiKey,
-    string OrchestratorWireGuardPublicKey,
-    TimeSpan HeartbeatInterval,
-    List<NonCompliantVmInfo>? NonCompliantVms = null
-);
-
-public record NonCompliantVmInfo(
-    string VmId,
-    string VmName,
-    string Reason
-);
 
 /// <summary>
 /// Response from POST /api/nodes/me/evaluate.
@@ -36,23 +13,12 @@ public record NonCompliantVmInfo(
 /// </summary>
 public record EvaluateNodeResponse(
     NodePerformanceEvaluation PerformanceEvaluation,
-    SchedulingConfig SchedulingConfig,
+    AgentSchedulingConfig SchedulingConfig,
     List<string>? DhtBootstrapPeers,
     Dictionary<string, ObligationStatePayload>? ObligationStates,
     Dictionary<string, SystemVmTemplatePayload>? SystemTemplates = null,
-    List<NodeObligationDescriptorDto>? Obligations = null
+    List<ObligationDescriptorDto>? Obligations = null
 );
-
-/// <summary>
-/// Mirrors Orchestrator.Models.ObligationStatePayload.
-/// Defined here to avoid a project reference from Core → Orchestrator.
-/// </summary>
-public class ObligationStatePayload
-{
-    public string StateJson { get; init; } = string.Empty;
-    public int Version { get; init; }
-}
-
 
 /// <summary>
 /// Periodic heartbeat sent to orchestrator.

@@ -7,16 +7,14 @@ using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.Shared.Contracts;
+using DeCloud.Shared.Enums;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Options;
-using Nethereum.Contracts.Standards.ERC20.TokenList;
-using Orchestrator.Models;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
-using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace DeCloud.NodeAgent.Services;
 
@@ -947,7 +945,9 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 Heartbeat = heartbeat
             };
 
-            var response = await _httpClient.PostAsJsonAsync(requestPath, payload, ct);
+            // Use Wire options (camelCase) so the orchestrator deserialises correctly.
+            var response = await _httpClient.PostAsJsonAsync(
+                requestPath, payload, Core.Json.JsonOptions.Wire, ct);
 
             _lastHeartbeat.Response = response;
 
@@ -999,234 +999,187 @@ REGISTERED_AT={DateTime.UtcNow:O}";
     }
 
     /// <summary>
-    /// Build heartbeat payload from Heartbeat object
+    /// Build the typed NodeHeartbeat wire object from the node-internal Heartbeat model.
+    /// Uses the shared NodeHeartbeat record — the orchestrator deserialises the same type.
     /// </summary>
-    /// <summary>
-    /// Build heartbeat payload matching orchestrator's NodeHeartbeat model
-    /// </summary>
-    private async Task<object> BuildHeartbeatPayload(Heartbeat heartbeat, CancellationToken ct)
+    private async Task<NodeHeartbeat> BuildHeartbeatPayload(Heartbeat heartbeat, CancellationToken ct)
     {
-        // Build payload matching orchestrator's NodeHeartbeat model exactly
-        var payload = new 
+        var metrics = new NodeMetrics
         {
-            nodeId = heartbeat.NodeId,
-            metrics = new  // NodeMetrics structure
-            {
-                timestamp = heartbeat.Timestamp.ToString("O"),
-                cpuUsagePercent = heartbeat.Resources.VirtualCpuUsagePercent,
-                // Usage percent measures against physical RAM (host-level metric),
-                // not the allocated ceiling (scheduling concept).
-                memoryUsagePercent = heartbeat.Resources.TotalMemoryBytes > 0
-                    ? (double)heartbeat.Resources.UsedMemoryBytes / heartbeat.Resources.TotalMemoryBytes * 100
-                    : 0,
-                storageUsagePercent = heartbeat.Resources.TotalStorageBytes > 0
-                    ? (double)heartbeat.Resources.UsedStorageBytes / heartbeat.Resources.TotalStorageBytes * 100
-                    : 0,
-                networkInMbps = (double)0,
-                networkOutMbps = (double)0,
-                activeVmCount = heartbeat.ActiveVms.Count,
-                loadAverage = (double)0
-            },
-            schedulingConfigVersion = heartbeat.SchedulingConfigVersion,
-            activeVms = heartbeat.ActiveVms.Select(v => new
-            {
-                vmId = v.VmId,
-                name = v.Name,
-                state = v.State.ToString(),
-                vmType = v.VmType.ToString(),
-                ownerId = v.OwnerId ?? "unknown",
-                isIpAssigned = v.IsIpAssigned,
-                ipAddress = v.IpAddress,
-                macAddress = v.MacAddress,
-                sshPort = 2222,
-                vncPort = v.VncPort,
-                virtualCpuCores = v.VirtualCpuCores,
-                qualityTier = v.QualityTier,
-                computePointCost = v.ComputePointCost,
-                memoryBytes = v.MemoryBytes,
-                diskBytes = v.DiskBytes,
-                gpuMode = v.GpuMode,
-                gpuVramBytes = v.GpuVramBytes,
-                imageId = v.Name,  // Use name as imageId for now
-                startedAt = v.StartedAt.ToString("O"),
-                services = v.Services?.Select(s => new
-                {
-                    name = s.Name,
-                    port = s.Port,
-                    protocol = s.Protocol,
-                    status = s.Status,
-                    statusMessage = s.StatusMessage,
-                    readyAt = s.ReadyAt?.ToString("O")
-                })
-            }),
-            cgnatInfo = heartbeat.CgnatInfo != null ? new
-            {
-                assignedRelayNodeId = heartbeat.CgnatInfo.AssignedRelayNodeId,
-                tunnelIp = heartbeat.CgnatInfo.TunnelIp,
-                wireGuardConfig = heartbeat.CgnatInfo.WireGuardConfig,
-                publicEndpoint = heartbeat.CgnatInfo.PublicEndpoint,
-                tunnelStatus = (int)heartbeat.CgnatInfo.TunnelStatus,  // Send as int
-                lastHandshake = heartbeat.CgnatInfo.LastHandshake?.ToString("O")
-            } : null,
-            obligationStateVersions = await BuildObligationStateVersionsAsync(ct),
-            obligationHealth = heartbeat.ObligationHealth,
-            systemTemplateVersions = await _systemVmService.GetTemplateRevisionsAsync(ct),
-            systemBinaryVersions = await _systemVmService.GetAllBinaryVersionsAsync(ct),
-            agentVersion = _nodeState.AgentVersion,
-            settingsHash = heartbeat.SettingsHash,
+            Timestamp = heartbeat.Timestamp,
+            CpuUsagePercent = heartbeat.Resources.VirtualCpuUsagePercent,
+            MemoryUsagePercent = heartbeat.Resources.TotalMemoryBytes > 0
+                ? (double)heartbeat.Resources.UsedMemoryBytes / heartbeat.Resources.TotalMemoryBytes * 100
+                : 0,
+            StorageUsagePercent = heartbeat.Resources.TotalStorageBytes > 0
+                ? (double)heartbeat.Resources.UsedStorageBytes / heartbeat.Resources.TotalStorageBytes * 100
+                : 0,
+            NetworkInMbps = 0,
+            NetworkOutMbps = 0,
+            ActiveVmCount = heartbeat.ActiveVms.Count,
+            LoadAverage = 0
         };
 
-        return payload;
+        var activeVms = heartbeat.ActiveVms.Select(v => new HeartbeatVmInfo
+        {
+            VmId = v.VmId,
+            Name = v.Name,
+            State = v.State.ToString(),
+            VmType = v.VmType.ToString(),
+            OwnerId = v.OwnerId ?? "unknown",
+            IsIpAssigned = v.IsIpAssigned,
+            IpAddress = v.IpAddress,
+            MacAddress = v.MacAddress,
+            SshPort = 2222,
+            VncPort = v.VncPort,
+            VirtualCpuCores = v.VirtualCpuCores,
+            QualityTier = v.QualityTier,
+            ComputePointCost = v.ComputePointCost,
+            MemoryBytes = v.MemoryBytes,
+            DiskBytes = v.DiskBytes,
+            GpuMode = v.GpuMode,
+            GpuVramBytes = v.GpuVramBytes,
+            ImageId = v.Name,
+            StartedAt = v.StartedAt,
+            Services = v.Services?.Select(s => new HeartbeatServiceInfo
+            {
+                Name = s.Name,
+                Port = s.Port,
+                Protocol = s.Protocol,
+                Status = s.Status,
+                StatusMessage = s.StatusMessage,
+                ReadyAt = s.ReadyAt
+            }).ToList()
+        }).ToList();
+
+        return new NodeHeartbeat(
+            NodeId: heartbeat.NodeId,
+            Metrics: metrics,
+            SchedulingConfigVersion: heartbeat.SchedulingConfigVersion,
+            ActiveVms: activeVms,
+            CgnatInfo: heartbeat.CgnatInfo,
+            SystemVmBinaryVersions: await _systemVmService.GetAllBinaryVersionsAsync(ct),
+            ObligationStateVersions: await BuildObligationStateVersionsAsync(ct),
+            ObligationHealth: heartbeat.ObligationHealth,
+            SystemTemplateVersions: await _systemVmService.GetTemplateRevisionsAsync(ct),
+            AgentVersion: _nodeState.AgentVersion,
+            SettingsHash: heartbeat.SettingsHash
+        );
     }
 
     /// <summary>
-    /// Process heartbeat response including pending commands and CGNAT info
+    /// Process the heartbeat response. Deserialises the typed NodeHeartbeatResponse
+    /// directly — no JsonDocument navigation, no silent property-name drift.
     /// </summary>
     private async Task ProcessHeartbeatResponseAsync(string content, CancellationToken ct)
     {
         _logger.LogDebug("Processing heartbeat response");
         try
         {
-            var json = JsonDocument.Parse(content);
+            // The orchestrator wraps every response in ApiResponse<T> { success, data }.
+            // Deserialise with Wire options (camelCase, case-insensitive) to match.
+            var envelope = JsonSerializer.Deserialize<ApiResponse<NodeHeartbeatResponse>>(
+                content, Core.Json.JsonOptions.Wire);
 
-            if (!json.RootElement.TryGetProperty("data", out var data))
+            var data = envelope?.Data;
+            if (data is null)
             {
                 _logger.LogWarning("Heartbeat response missing 'data' property");
                 throw new ArgumentException("Heartbeat response missing 'data' property");
             }
 
-            if (data.TryGetProperty("schedulingReady", out var srProp))
-                _nodeState.SetSchedulingReady(srProp.GetBoolean());
+            // ── Scheduling readiness ───────────────────────────────────────────
+            _nodeState.SetSchedulingReady(data.SchedulingReady);
 
-            // Process Pending Commands
-            if (data.TryGetProperty("pendingCommands", out var commands) &&
-                commands.ValueKind == JsonValueKind.Array)
+            // ── Pending commands ───────────────────────────────────────────────
+            if (data.PendingCommands is { Count: > 0 })
             {
-                foreach (var cmd in commands.EnumerateArray())
+                foreach (var cmd in data.PendingCommands)
                 {
-                    var command = ParseCommand(cmd);
-                    if (command != null)
+                    _pendingCommands.Enqueue(new PendingCommand
                     {
-                        _pendingCommands.Enqueue(command);
-                        _logger.LogDebug("Queued command {CommandId} from heartbeat", command.CommandId);
-                    }
+                        CommandId = cmd.CommandId,
+                        Type = cmd.Type,
+                        Payload = cmd.Payload,
+                        RequiresAck = cmd.RequiresAck,
+                        IssuedAt = DateTime.UtcNow
+                    });
+                    _logger.LogDebug("Queued command {CommandId} from heartbeat", cmd.CommandId);
                 }
             }
 
-            // Process Scheduling Config Update
-            if (data.TryGetProperty("schedulingConfig", out var schedulingConfigProp))
+            // ── Scheduling config update ───────────────────────────────────────
+            if (data.SchedulingConfig is not null)
             {
-                var schedulingConfig = JsonSerializer.Deserialize<SchedulingConfig>(
-                    schedulingConfigProp.GetRawText(),
-                    Core.Json.JsonOptions.Wire);
-                if (schedulingConfig != null)
-                {
-                    _logger.LogInformation("Received updated scheduling configuration version {Version}",
-                        schedulingConfig.Version);
-                    _nodeState.UpdateSchedulingConfig(schedulingConfig);
-                }
+                _logger.LogInformation(
+                    "Received updated scheduling configuration version {Version}",
+                    data.SchedulingConfig.Version);
+                _nodeState.UpdateSchedulingConfig(data.SchedulingConfig);
             }
 
-            // Extract and Store CGNAT Info
-            if (data.TryGetProperty("cgnatInfo", out var cgnatInfoElement) &&
-                cgnatInfoElement.ValueKind != JsonValueKind.Null)
+            // ── CGNAT info ─────────────────────────────────────────────────────
+            if (data.CgnatInfo is not null)
             {
-                var relayId = cgnatInfoElement.GetProperty("assignedRelayNodeId").GetString();
-                var tunnelIp = cgnatInfoElement.GetProperty("tunnelIp").GetString() ?? "";
-                var wgConfig = cgnatInfoElement.TryGetProperty("wireGuardConfig", out var wgConfigProp)
-                    ? wgConfigProp.GetString()
-                    : null;
-                var publicEndpoint = cgnatInfoElement.TryGetProperty("publicEndpoint", out var endpointProp)
-                    ? endpointProp.GetString() ?? ""
-                    : "";
-
                 _logger.LogInformation(
                     "Received relay data: Relay {RelayId}, Tunnel IP {TunnelIp}",
-                    relayId, tunnelIp);
+                    data.CgnatInfo.AssignedRelayNodeId, data.CgnatInfo.TunnelIp);
 
-                if (_lastHeartbeat != null && _lastHeartbeat.Heartbeat != null)
+                if (_lastHeartbeat?.Heartbeat is not null)
                 {
-                    _lastHeartbeat.Heartbeat.CgnatInfo = new CgnatNodeInfo
-                    {
-                        AssignedRelayNodeId = relayId,
-                        TunnelIp = tunnelIp,
-                        WireGuardConfig = wgConfig,
-                        PublicEndpoint = publicEndpoint,
-                        TunnelStatus = TunnelStatus.Disconnected,
-                        LastHandshake = null
-                    };
-
+                    _lastHeartbeat.Heartbeat.CgnatInfo = data.CgnatInfo;
                     _logger.LogInformation("✓ Stored CGNAT info in heartbeat");
                 }
             }
-            else if (_lastHeartbeat != null && _lastHeartbeat.Heartbeat != null && _lastHeartbeat.Heartbeat.CgnatInfo != null)
+            else if (_lastHeartbeat?.Heartbeat?.CgnatInfo is not null)
             {
                 _logger.LogInformation("Clearing previous CGNAT info - node no longer behind NAT");
                 _lastHeartbeat.Heartbeat.CgnatInfo = null;
             }
-            // Process InvalidVmIds — destroy VMs the orchestrator says
-            // this node should not be running
-            if (data.TryGetProperty("invalidVmIds", out var invalidVmIdsEl) &&
-                invalidVmIdsEl.ValueKind == JsonValueKind.Array)
+
+            // ── Invalid VM destruction ─────────────────────────────────────────
+            if (data.InvalidVmIds is { Count: > 0 })
             {
-                foreach (var idEl in invalidVmIdsEl.EnumerateArray())
+                foreach (var vmId in data.InvalidVmIds)
                 {
-                    var vmId = idEl.GetString();
-                    if (!string.IsNullOrEmpty(vmId))
+                    _logger.LogWarning(
+                        "Orchestrator flagged VM {VmId} as invalid — queuing for destruction", vmId);
+                    _pendingCommands.Enqueue(new PendingCommand
                     {
-                        _logger.LogWarning(
-                            "Orchestrator flagged VM {VmId} as invalid — queuing for destruction",
-                            vmId);
-                        _pendingCommands.Enqueue(new PendingCommand
-                        {
-                            CommandId = Guid.NewGuid().ToString(),
-                            Type = CommandType.DeleteVm,
-                            Payload = $"{{\"vmId\":\"{vmId}\"}}",
-                            RequiresAck = false,
-                            IssuedAt = DateTime.UtcNow
-                        });
-                    }
+                        CommandId = Guid.NewGuid().ToString(),
+                        Type = NodeCommandType.DeleteVm,
+                        Payload = $"{{\"vmId\":\"{vmId}\"}}",
+                        RequiresAck = false,
+                        IssuedAt = DateTime.UtcNow
+                    });
                 }
             }
 
-            // Process settings drift warning
-            if (data.TryGetProperty("settingsDrift", out var driftElement) &&
-                driftElement.ValueKind == JsonValueKind.Object)
+            // ── Settings drift warning ─────────────────────────────────────────
+            if (data.SettingsDrift is not null)
             {
-                var driftMessage = driftElement.TryGetProperty("message", out var msg)
-                    ? msg.GetString() : "Settings drift detected";
-
                 _logger.LogWarning(
                     "⚠ Settings drift detected by orchestrator: {Message}. " +
                     "Run 'decloud register' to re-commit settings, or revert local edits.",
-                    driftMessage);
+                    data.SettingsDrift.Message);
             }
 
             // ── Obligation state pull ──────────────────────────────────────────
-            // If the orchestrator signals that one or more obligation states are
-            // newer than what we have locally, fetch and persist each one.
-            if (data.TryGetProperty("obligationStatesPending", out var pendingProp)
-                && pendingProp.ValueKind == JsonValueKind.Array)
+            if (data.ObligationStatesPending is { Count: > 0 })
             {
-                foreach (var roleProp in pendingProp.EnumerateArray())
+                foreach (var role in data.ObligationStatesPending)
                 {
-                    var role = roleProp.GetString();
                     if (!string.IsNullOrWhiteSpace(role))
                         await FetchAndSaveStateAsync(role, ct);
                 }
             }
 
-            // Pull system templates signalled as stale by the orchestrator.
-            if (data.TryGetProperty("systemTemplatesPending", out var pendingTemplates) &&
-                pendingTemplates.ValueKind == JsonValueKind.Array)
+            // ── System template pull ───────────────────────────────────────────
+            if (data.SystemTemplatesPending is { Count: > 0 })
             {
-                foreach (var roleEl in pendingTemplates.EnumerateArray())
+                foreach (var role in data.SystemTemplatesPending)
                 {
-                    var role = roleEl.GetString();
                     if (!string.IsNullOrEmpty(role))
-                    {
                         _ = Task.Run(() => FetchAndSaveSystemTemplateAsync(role, ct), ct);
-                    }
                 }
             }
         }
@@ -1326,14 +1279,20 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             var commandId = cmd.GetProperty("commandId").GetString() ?? "";
             var typeProp = cmd.GetProperty("type");
 
-            CommandType commandType;
+            NodeCommandType commandType;
             if (typeProp.ValueKind == JsonValueKind.Number)
             {
-                commandType = (CommandType)typeProp.GetInt32();
+                var intValue = typeProp.GetInt32();
+                if (!Enum.IsDefined(typeof(NodeCommandType), intValue))
+                {
+                    _logger.LogWarning("Unknown command type integer: {Value}", intValue);
+                    return null;
+                }
+                commandType = (NodeCommandType)intValue;
             }
             else if (typeProp.ValueKind == JsonValueKind.String)
             {
-                if (!Enum.TryParse<CommandType>(typeProp.GetString(), true, out commandType))
+                if (!Enum.TryParse<NodeCommandType>(typeProp.GetString(), true, out commandType))
                 {
                     _logger.LogWarning("Unknown command type: {Type}", typeProp.GetString());
                     return null;

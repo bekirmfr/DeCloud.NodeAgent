@@ -5,6 +5,7 @@ using DeCloud.NodeAgent.Infrastructure.Docker;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
+using DeCloud.Shared.Enums;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
@@ -253,28 +254,28 @@ public class CommandProcessorService : BackgroundService
     {
         switch (command.Type)
         {
-            case CommandType.CreateVm:
+            case NodeCommandType.CreateVm:
                 return (await HandleCreateVmAsync(command.Payload, ct), null);
 
-            case CommandType.StartVm:
+            case NodeCommandType.StartVm:
                 return (await HandleStartVmAsync(command.Payload, ct), null);
 
-            case CommandType.StopVm:
+            case NodeCommandType.StopVm:
                 return (await HandleStopVmAsync(command.Payload, ct), null);
 
-            case CommandType.DeleteVm:
+            case NodeCommandType.DeleteVm:
                 return (await HandleDeleteVmAsync(command.Payload, ct), null);
 
-            case CommandType.Benchmark:
+            case NodeCommandType.Benchmark:
                 return (await HandleBenchmarkAsync(ct), null);
 
-            case CommandType.AllocatePort:
+            case NodeCommandType.AllocatePort:
                 return await HandleAllocatePortAsync(command.Payload, ct);
 
-            case CommandType.RemovePort:
+            case NodeCommandType.RemovePort:
                 return (await HandleRemovePortAsync(command.Payload, ct), null);
 
-            case CommandType.ReseedVm:
+            case NodeCommandType.ReseedVm:
                 return (await HandleReseedVmAsync(command.Payload, ct), null);
 
             default:

@@ -1,8 +1,7 @@
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.Shared.Contracts;
-using Orchestrator.Models;
-using System.Net.NetworkInformation;
+using DeCloud.Shared.Enums;
 
 namespace DeCloud.NodeAgent.Core.Interfaces;
 
@@ -19,7 +18,7 @@ public class RegistrationResult
     public bool IsSuccess { get; init; }
     public string? NodeId { get; init; }
     public string? ApiKey { get; init; }
-    public SchedulingConfig? SchedulingConfig { get; init; }
+    public AgentSchedulingConfig? SchedulingConfig { get; init; }
     public string? Error { get; init; }
 
     public static RegistrationResult Success(string nodeId, string apiKey) =>
@@ -247,7 +246,7 @@ public interface IOrchestratorClient
     /// - Tier configurations
     /// Use this for on-demand config refresh outside heartbeat cycle.
     /// </remarks>
-    Task<SchedulingConfig?> GetSchedulingConfigAsync(CancellationToken ct = default);
+    Task<AgentSchedulingConfig?> GetSchedulingConfigAsync(CancellationToken ct = default);
 
     /// <summary>
     /// Get node performance evaluation and tier eligibility.
@@ -537,27 +536,18 @@ public interface INatRuleManager
     Task<List<string>> GetExistingRulesAsync(CancellationToken ct = default);
 }
 
+/// <summary>
+/// Node-agent internal representation of a command to be processed.
+/// Type uses the shared NodeCommandType so integer values align with
+/// what the orchestrator serialises over the wire.
+/// </summary>
 public class PendingCommand
 {
     public string CommandId { get; set; } = string.Empty;
-    public CommandType Type { get; set; }
-    public string Payload { get; set; } = string.Empty;  // JSON payload
+    public NodeCommandType Type { get; set; }
+    public string Payload { get; set; } = string.Empty;
     public bool RequiresAck { get; set; } = true;
     public DateTime IssuedAt { get; set; }
-}
-
-public enum CommandType
-{
-    CreateVm,
-    StartVm,
-    StopVm,
-    DeleteVm,
-    UpdateNetwork,
-    Benchmark,
-    Shutdown,
-    AllocatePort,
-    RemovePort,
-    ReseedVm
 }
 
 /// <summary>

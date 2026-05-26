@@ -1,4 +1,5 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.Shared.Enums;
 using Microsoft.AspNetCore.Mvc;
 using System.Collections.Concurrent;
 
@@ -42,11 +43,19 @@ public class CommandsController : ControllerBase
             "📥 Received pushed command {CommandId}: {Type}",
             command.CommandId, command.Type);
 
-        // Convert to internal format
+        // Cast directly — integer values are aligned via the shared NodeCommandType enum
+        if (!Enum.IsDefined(typeof(NodeCommandType), command.Type))
+        {
+            _logger.LogWarning(
+                "Rejected pushed command {CommandId}: unknown type value {Type}",
+                command.CommandId, command.Type);
+            return BadRequest(new { error = $"Unknown command type: {command.Type}" });
+        }
+
         var pendingCommand = new PendingCommand
         {
             CommandId = command.CommandId,
-            Type = ConvertCommandType(command.Type),
+            Type = command.Type,
             Payload = command.Payload,
             RequiresAck = command.RequiresAck,
             IssuedAt = DateTime.UtcNow
@@ -82,36 +91,16 @@ public class CommandsController : ControllerBase
             Timestamp = DateTime.UtcNow
         });
     }
-
-    /// <summary>
-    /// Convert orchestrator command type to node agent command type
-    /// </summary>
-    private CommandType ConvertCommandType(int typeValue)
-    {
-        return typeValue switch
-        {
-            0 => CommandType.CreateVm,       // NodeCommandType.CreateVm
-            1 => CommandType.StartVm,        // NodeCommandType.StartVm (FIXED: was backwards)
-            2 => CommandType.StopVm,         // NodeCommandType.StopVm (FIXED: was backwards)
-            3 => CommandType.DeleteVm,       // NodeCommandType.DeleteVm
-            4 => CommandType.UpdateNetwork,  // NodeCommandType.UpdateNetwork
-            5 => CommandType.Benchmark,      // NodeCommandType.Benchmark
-            6 => CommandType.Shutdown,       // NodeCommandType.Shutdown
-            7 => CommandType.AllocatePort,   // NodeCommandType.AllocatePort
-            8 => CommandType.RemovePort,     // NodeCommandType.RemovePort
-            9 => CommandType.ReseedVm,       // NodeCommandType.ReseedVm
-            _ => throw new ArgumentException($"Unknown command type: {typeValue}")
-        };
-    }
 }
 
 /// <summary>
-/// Command as received from orchestrator push
+/// Command as received from orchestrator push.
+/// Type uses NodeCommandType directly — integer values match the shared enum.
 /// </summary>
 public class PushedCommand
 {
     public string CommandId { get; set; } = string.Empty;
-    public int Type { get; set; }  // NodeCommandType as int
+    public NodeCommandType Type { get; set; }
     public string Payload { get; set; } = string.Empty;
     public bool RequiresAck { get; set; } = true;
 }

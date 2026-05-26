@@ -1,3 +1,4 @@
+using DeCloud.Shared.Enums;
 using System.Text.Json.Serialization;
 
 namespace DeCloud.NodeAgent.Core.Models;
@@ -247,33 +248,6 @@ public enum GpuMode
     /// Works without IOMMU. Multiple VMs can share one GPU.
     /// </summary>
     Proxied = 2
-}
-
-public enum QualityTier
-{
-    /// <summary>
-    /// Dedicated resources, guaranteed performance
-    /// Requires highest-performance nodes (4000+ benchmark)
-    /// </summary>
-    Guaranteed = 0,
-
-    /// <summary>
-    /// High performance for demanding applications
-    /// Requires high-end nodes (2500+ benchmark)
-    /// </summary>
-    Standard = 1,
-
-    /// <summary>
-    /// Balanced performance for production workloads
-    /// Requires mid-range nodes (1500+ benchmark)
-    /// </summary>
-    Balanced = 2,
-
-    /// <summary>
-    /// Best-effort, lowest cost
-    /// Minimum acceptable performance (1000+ benchmark)
-    /// </summary>
-    Burstable = 3
 }
 
 /// <summary>

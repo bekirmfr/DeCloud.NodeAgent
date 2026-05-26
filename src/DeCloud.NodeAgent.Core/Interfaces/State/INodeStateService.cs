@@ -8,7 +8,7 @@
 // =====================================================================
 
 using DeCloud.NodeAgent.Core.Models;
-using Orchestrator.Models;
+using DeCloud.Shared.Contracts;
 
 namespace DeCloud.NodeAgent.Core.Interfaces.State;
 
@@ -83,7 +83,7 @@ public interface INodeStateService
     /// Current scheduling configuration from orchestrator
     /// Contains tier configurations and overcommit ratios
     /// </summary>
-    SchedulingConfig? SchedulingConfig { get; }
+    AgentSchedulingConfig? SchedulingConfig { get; }
 
     /// <summary>
     /// Whether node has received both SchedulingConfig and PerformanceEvaluation
@@ -152,7 +152,7 @@ public interface INodeStateService
     /// <summary>
     /// Update scheduling configuration from orchestrator
     /// </summary>
-    void UpdateSchedulingConfig(SchedulingConfig config);
+    void UpdateSchedulingConfig(AgentSchedulingConfig config);
 
     // ================================================================
     // ASYNC WAITERS

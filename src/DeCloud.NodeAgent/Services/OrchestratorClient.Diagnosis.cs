@@ -10,7 +10,7 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Core.Models.State;
-using Orchestrator.Models;
+using DeCloud.Shared.Contracts;
 using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Services;
@@ -95,7 +95,7 @@ public partial class OrchestratorClient
     // =====================================================================
 
     /// <inheritdoc />
-    public async Task<SchedulingConfig?> GetSchedulingConfigAsync(CancellationToken ct = default)
+    public async Task<AgentSchedulingConfig?> GetSchedulingConfigAsync(CancellationToken ct = default)
     {
         try
         {
@@ -112,7 +112,7 @@ public partial class OrchestratorClient
             }
 
             var content = await response.Content.ReadAsStringAsync(ct);
-            var config = JsonSerializer.Deserialize<SchedulingConfig>(content, _jsonOptions);
+            var config = JsonSerializer.Deserialize<AgentSchedulingConfig>(content, _jsonOptions);
 
             if (config != null)
             {
@@ -120,16 +120,7 @@ public partial class OrchestratorClient
                     "✓ Scheduling config received: v{Version}, Baseline={Baseline}, Overcommit={Overcommit:F1}",
                     config.Version, config.BaselineBenchmark, config.BaselineOvercommitRatio);
 
-                // Update local state service
-                _nodeState.UpdateSchedulingConfig(new SchedulingConfig
-                {
-                    Version = config.Version,
-                    BaselineBenchmark = config.BaselineBenchmark,
-                    BaselineOvercommitRatio = config.BaselineOvercommitRatio,
-                    MaxPerformanceMultiplier = config.MaxPerformanceMultiplier,
-                    Tiers = config.Tiers,
-                    UpdatedAt = config.UpdatedAt
-                });
+                _nodeState.UpdateSchedulingConfig(config);
             }
 
             return config;
@@ -577,7 +568,7 @@ public partial class OrchestratorClient
     // Retry Helpers
     // =====================================================================
 
-    private async Task<SchedulingConfig?> GetSchedulingConfigWithRetryAsync(CancellationToken ct)
+    private async Task<AgentSchedulingConfig?> GetSchedulingConfigWithRetryAsync(CancellationToken ct)
     {
         for (int attempt = 0; attempt < MaxRetries; attempt++)
         {

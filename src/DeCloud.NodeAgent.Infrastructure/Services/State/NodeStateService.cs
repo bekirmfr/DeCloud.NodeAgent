@@ -1,7 +1,7 @@
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.Shared.Contracts;
 using Microsoft.Extensions.Logging;
-using Orchestrator.Models;
 using System.Reflection;
 
 namespace DeCloud.NodeAgent.Infrastructure.Services;
@@ -34,7 +34,7 @@ public class NodeStateService : INodeStateService
     // ================================================================
 
     private NodePerformanceEvaluation? _performanceEvaluation;
-    private SchedulingConfig? _schedulingConfig;
+    private AgentSchedulingConfig? _schedulingConfig;
 
     // ================================================================
     // ASYNC WAITERS
@@ -158,7 +158,7 @@ public class NodeStateService : INodeStateService
         get { lock (_lock) return _performanceEvaluation; }
     }
 
-    public SchedulingConfig? SchedulingConfig
+    public AgentSchedulingConfig? SchedulingConfig
     {
         get { lock (_lock) return _schedulingConfig; }
     }
@@ -380,7 +380,7 @@ public class NodeStateService : INodeStateService
     /// <summary>
     /// Update scheduling configuration from orchestrator
     /// </summary>
-    public void UpdateSchedulingConfig(SchedulingConfig config)
+    public void UpdateSchedulingConfig(AgentSchedulingConfig config)
     {
         lock (_lock)
         {

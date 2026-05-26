@@ -1,11 +1,8 @@
-﻿using DeCloud.NodeAgent.Contracts.Response.Network;
-using DeCloud.NodeAgent.Core.Interfaces;
+﻿using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
-using DeCloud.NodeAgent.Services;
 using DeCloud.Shared.Contracts;
 using Microsoft.AspNetCore.Mvc;
-using Orchestrator.Models;
 
 namespace DeCloud.NodeAgent.Controllers;
 
@@ -31,7 +28,7 @@ public class OrchestratorController : ControllerBase
     /// Get node performance information
     /// </summary>
     [HttpGet("config")]
-    public async Task<ActionResult<SchedulingConfig>> GetSchedulingonfig(CancellationToken ct)
+    public async Task<ActionResult<AgentSchedulingConfig>> GetSchedulingonfig(CancellationToken ct)
     {
         var config = await _orchestratorClient.GetSchedulingConfigAsync(ct);
 

@@ -1,4 +1,6 @@
-﻿namespace DeCloud.NodeAgent.Core.Models
+﻿using DeCloud.Shared.Enums;
+
+namespace DeCloud.NodeAgent.Core.Models
 {
     /// <summary>
     /// Result of node performance evaluation
