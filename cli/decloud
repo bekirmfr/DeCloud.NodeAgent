@@ -648,9 +648,14 @@ cmd_allocate() {
                 echo ""
                 return 0
             fi
-            echo "  Compute:   $(echo "$alloc" | jq -r '.resolvedComputePoints') pts"
-            echo "  Memory:    $(human_bytes "$(echo "$alloc" | jq -r '.resolvedMemoryBytes')")"
-            echo "  Storage:   $(human_bytes "$(echo "$alloc" | jq -r '.resolvedStorageBytes')")"
+            local cpu_pct mem_pct stor_pct
+            cpu_pct=$(echo "$alloc" | jq -r 'if .cpuPercent then (.cpuPercent * 100 | round | tostring) + "%" else "" end')
+            mem_pct=$(echo "$alloc" | jq -r 'if .memoryPercent then (.memoryPercent * 100 | round | tostring) + "%" else "" end')
+            stor_pct=$(echo "$alloc" | jq -r 'if .storagePercent then (.storagePercent * 100 | round | tostring) + "%" else "" end')
+
+            echo "  Compute:   $(echo "$alloc" | jq -r '.resolvedComputePoints') pts${cpu_pct:+ ($cpu_pct)}"
+            echo "  Memory:    $(human_bytes "$(echo "$alloc" | jq -r '.resolvedMemoryBytes')")${mem_pct:+ ($mem_pct)}"
+            echo "  Storage:   $(human_bytes "$(echo "$alloc" | jq -r '.resolvedStorageBytes')")${stor_pct:+ ($stor_pct)}"
             local vram_bytes gpu_vram_pct
             vram_bytes=$(   echo "$alloc" | jq -r '.resolvedGpuVramBytes    // empty')
             gpu_vram_pct=$( echo "$alloc" | jq -r '.effectiveGpuVramPercent // empty')
