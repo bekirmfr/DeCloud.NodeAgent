@@ -2,6 +2,7 @@
 using System.Text;
 using System.Text.Json;
 using DeCloud.NodeAgent.Infrastructure.Services;
+using DeCloud.Shared.Contracts;
 using Microsoft.AspNetCore.Mvc;
 using Renci.SshNet;
 
@@ -406,26 +407,4 @@ public class SshProxyController : ControllerBase
         public int Cols { get; set; }
         public int Rows { get; set; }
     }
-}
-
-public class TerminalConnectRequest
-{
-    public string VmIp { get; init; } = "";
-    public string? Username { get; init; }
-    public int Port { get; init; } = 22;
-    public int TtlSeconds { get; init; } = 300;
-    public string? Password { get; init; }
-}
-
-public class TerminalConnectResponse
-{
-    public bool Success { get; init; }
-    public string? Error { get; init; }
-    public string WebSocketPath { get; init; } = "";
-    public string PrivateKey { get; init; } = "";
-    public string PrivateKeyBase64 { get; init; } = "";
-    public string Fingerprint { get; init; } = "";
-    public DateTime? ExpiresAt { get; init; }
-    public string? MethodUsed { get; init; }
-    public string? Password { get; init; }
 }

@@ -1291,18 +1291,16 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             // =====================================================
             var requestPath = $"/api/nodes/{_nodeId}/commands/{commandId}/acknowledge";
 
+            var ack = new CommandAcknowledgment(
+                CommandId: commandId,
+                Success: success,
+                ErrorMessage: errorMessage,
+                CompletedAt: DateTime.UtcNow,
+                Data: data
+            );
+
             var request = new HttpRequestMessage(HttpMethod.Post, requestPath);
-
-            var payload = new
-            {
-                commandId,
-                success,
-                errorMessage = errorMessage ?? string.Empty,
-                completedAt = DateTime.UtcNow.ToString("O"),
-                data
-            };
-
-            request.Content = JsonContent.Create(payload);
+            request.Content = JsonContent.Create(ack, options: Core.Json.JsonOptions.Wire);
 
             var response = await _httpClient.SendAsync(request, ct);
 
@@ -1344,24 +1342,24 @@ REGISTERED_AT={DateTime.UtcNow:O}";
 
         try
         {
-            var payload = new
+            var request = new BlockStoreManifestRequest
             {
-                vmId,
-                nodeId = _nodeId,
-                rootCid,
-                version,
-                changedBlockCids,
-                blockCount,
-                blockSizeKb,
-                manifestType = 0,
-                totalBytes,
-                isSeeding,
-                replicationFactor,  // ← pass through from LazysyncDaemon
-                chunkMap
+                VmId = vmId,
+                NodeId = _nodeId ?? string.Empty,
+                RootCid = rootCid,
+                Version = version,
+                ChangedBlockCids = changedBlockCids,
+                BlockCount = blockCount,
+                BlockSizeKb = blockSizeKb,
+                ManifestType = ManifestType.VmOverlay,
+                TotalBytes = totalBytes,
+                IsSeeding = isSeeding,
+                ReplicationFactor = replicationFactor,
+                ChunkMap = chunkMap
             };
 
             var response = await _httpClient.PostAsJsonAsync(
-                "/api/blockstore/manifest", payload, ct);
+                "/api/blockstore/manifest", request, Core.Json.JsonOptions.Wire, ct);
 
             if (!response.IsSuccessStatusCode)
             {
