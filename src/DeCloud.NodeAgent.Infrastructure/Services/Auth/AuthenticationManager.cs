@@ -3,6 +3,7 @@ using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Infrastructure.Services.Auth;
 
@@ -16,12 +17,24 @@ public class AuthenticationManager : BackgroundService
     // File paths
     private const string CredentialsFilePath = "/etc/decloud/credentials";
     private const string PendingAuthFile = "/etc/decloud/pending-auth";
+    private const string LoggedOutSentinelPath = "/etc/decloud/logged-out";
 
     // Polling intervals
     private static readonly TimeSpan DiscoveryCheckInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan AuthCheckInterval = TimeSpan.FromSeconds(10);
 
+    // When the node is registered and scheduling-ready, we only need to watch
+    // for a new pending-auth (i.e. the operator ran 'decloud register' again).
+    // Checking every 30s is sufficient and avoids hammering the orchestrator.
+    private static readonly TimeSpan RegisteredCheckInterval = TimeSpan.FromSeconds(30);
+
     private readonly INodeMetadataService _nodeMetadata;
+
+    // Cached scheduling-ready state so AutoLoginIfNotLoggedOutAsync can skip
+    // an unnecessary login call when the node is already scheduling-ready.
+    private bool _isSchedulingReady = false;
+
+    private bool _hasLoggedAuthWarning = false;
 
     public AuthenticationManager(
         IResourceDiscoveryService resourceDiscovery,
@@ -46,13 +59,19 @@ public class AuthenticationManager : BackgroundService
             // Phase 1: Wait for resource discovery to complete
             await WaitForResourceDiscoveryAsync(ct);
 
-            // Phase 2: Authentication lifecycle
+            // Phase 2: Authentication lifecycle — loop forever so that
+            // 'decloud register' (which writes pending-auth) is picked up
+            // at any point during the agent's lifetime without a restart.
             while (!ct.IsCancellationRequested)
             {
                 var state = await DetermineAuthStateAsync(ct);
 
                 // Update shared state
                 _nodeState.SetAuthState(state);
+
+                // Reset the auth warning flag when we leave NotAuthenticated
+                if (state != AuthenticationState.NotAuthenticated)
+                    _hasLoggedAuthWarning = false;
 
                 switch (state)
                 {
@@ -61,6 +80,9 @@ public class AuthenticationManager : BackgroundService
                         break;
 
                     case AuthenticationState.PendingRegistration:
+                        // Reset scheduling-ready cache — new registration
+                        // means a new API key and unknown server-side state.
+                        _isSchedulingReady = false;
                         await HandlePendingRegistrationAsync(ct);
                         break;
 
@@ -68,12 +90,17 @@ public class AuthenticationManager : BackgroundService
                         _logger.LogInformation("✓ Node authenticated and registered");
 
                         // Auto-login: set SchedulingReady at orchestrator unless
-                        // operator explicitly logged out (sentinel file present).
+                        // the operator explicitly logged out (sentinel file present)
+                        // or the orchestrator already shows the node as ready.
                         await AutoLoginIfNotLoggedOutAsync(ct);
 
-                        return; // Exit - normal operation can proceed
+                        // Use a longer interval while registered — we only need
+                        // to detect a new pending-auth from 'decloud register'.
+                        await Task.Delay(RegisteredCheckInterval, ct);
+                        continue; // skip the standard AuthCheckInterval below
 
                     case AuthenticationState.CredentialsInvalid:
+                        _isSchedulingReady = false;
                         await HandleInvalidCredentialsAsync(ct);
                         break;
                 }
@@ -117,7 +144,7 @@ public class AuthenticationManager : BackgroundService
 
         _logger.LogInformation("Auth file exists: {AuthFileExists}", authFileExists);
 
-        // Check if pending authentication exists
+        // Pending-auth always takes priority — checked first (cheapest operation).
         if (authFileExists)
         {
             return AuthenticationState.PendingRegistration;
@@ -140,12 +167,15 @@ public class AuthenticationManager : BackgroundService
             {
                 var nodeId = _nodeMetadata.NodeId;
 
-                var isAuthorized = await VerifyNodeAuthorizationAsync(
+                var (isAuthorized, isSchedulingReady) = await VerifyNodeAuthorizationAsync(
                     nodeId,
-                    credentials["API_KEY"], ct);
+                    credentials["API_KEY"],
+                    ct);
 
                 if (isAuthorized)
                 {
+                    // Keep local cache in sync with server-side state.
+                    _isSchedulingReady = isSchedulingReady;
                     return AuthenticationState.Registered;
                 }
             }
@@ -166,7 +196,7 @@ public class AuthenticationManager : BackgroundService
             _logger.LogWarning("═══════════════════════════════════════");
             _logger.LogWarning("");
             _logger.LogWarning("To authenticate this node, run:");
-            _logger.LogWarning("  sudo cli-decloud-node login");
+            _logger.LogWarning("  sudo decloud register");
             _logger.LogWarning("");
             _logger.LogWarning("The node agent is running and ready.");
             _logger.LogWarning("Waiting for authentication...");
@@ -199,7 +229,7 @@ public class AuthenticationManager : BackgroundService
             {
                 _logger.LogError("Registration failed: {Error}", result.Error);
 
-                // Don't delete pending-auth - allow retry
+                // Don't delete pending-auth — allow retry
                 await Task.Delay(TimeSpan.FromSeconds(30), ct);
             }
         }
@@ -219,7 +249,7 @@ public class AuthenticationManager : BackgroundService
         _logger.LogError("The credentials file is corrupted or invalid.");
         _logger.LogError("Please re-authenticate:");
         _logger.LogError("  sudo rm /etc/decloud/credentials");
-        _logger.LogError("  sudo cli-decloud-node login");
+        _logger.LogError("  sudo decloud register");
         _logger.LogError("");
 
         // Wait longer for invalid credentials
@@ -266,10 +296,14 @@ public class AuthenticationManager : BackgroundService
     }
 
     /// <summary>
-    /// Verify node authorization by calling the orchestrator's GET /api/nodes/{nodeId} endpoint.
-    /// Returns true if the node receives a 200 OK response, indicating valid credentials.
+    /// Verify node authorization by calling GET /api/nodes/{nodeId}.
+    /// Returns (isAuthorized, isSchedulingReady) — both derived from the
+    /// same HTTP response so no extra round-trip is needed.
     /// </summary>
-    private async Task<bool> VerifyNodeAuthorizationAsync(string nodeId, string apiKey, CancellationToken ct)
+    private async Task<(bool isAuthorized, bool isSchedulingReady)> VerifyNodeAuthorizationAsync(
+        string nodeId,
+        string apiKey,
+        CancellationToken ct)
     {
         try
         {
@@ -281,35 +315,65 @@ public class AuthenticationManager : BackgroundService
             var requestUrl = $"{_nodeMetadata.OrchestratorUrl.TrimEnd('/')}/api/nodes/{nodeId}";
 
             var request = new HttpRequestMessage(HttpMethod.Get, requestUrl);
-            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
+            request.Headers.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
 
             var response = await httpClient.SendAsync(request, ct);
 
-            if (response.StatusCode == System.Net.HttpStatusCode.OK)
+            if (response.StatusCode != System.Net.HttpStatusCode.OK)
             {
-                _logger.LogInformation("✓ Node authorization verified with orchestrator");
-                return true;
+                _logger.LogWarning(
+                    "Node authorization failed: {StatusCode} - {Reason}",
+                    (int)response.StatusCode,
+                    response.ReasonPhrase);
+
+                return (false, false);
             }
 
-            _logger.LogWarning(
-                "Node authorization failed: {StatusCode} - {Reason}",
-                (int)response.StatusCode,
-                response.ReasonPhrase);
+            // Parse SchedulingReady from the response body — same call,
+            // no extra round-trip.
+            var body = await response.Content.ReadAsStringAsync(ct);
+            var isSchedulingReady = false;
 
-            return false;
+            try
+            {
+                using var doc = JsonDocument.Parse(body);
+                // Response shape: { "data": { "schedulingReady": true, ... } }
+                // or flat: { "schedulingReady": true, ... }
+                if (doc.RootElement.TryGetProperty("data", out var data))
+                {
+                    isSchedulingReady = data.TryGetProperty("schedulingReady", out var prop)
+                        && prop.GetBoolean();
+                }
+                else if (doc.RootElement.TryGetProperty("schedulingReady", out var prop))
+                {
+                    isSchedulingReady = prop.GetBoolean();
+                }
+            }
+            catch (JsonException ex)
+            {
+                // Non-fatal — we know the node is authorized; scheduling state
+                // will be resolved at the next auto-login attempt.
+                _logger.LogWarning(ex, "Could not parse schedulingReady from node response");
+            }
+
+            _logger.LogInformation(
+                "✓ Node authorization verified with orchestrator (schedulingReady={SchedulingReady})",
+                isSchedulingReady);
+
+            return (true, isSchedulingReady);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to verify node authorization with orchestrator");
-            return false;
+            return (false, false);
         }
     }
 
-    private const string LoggedOutSentinelPath = "/etc/decloud/logged-out";
-
     /// <summary>
     /// Call the login endpoint to set SchedulingReady = true,
-    /// unless the operator has explicitly logged out (sentinel file exists).
+    /// unless the operator has explicitly logged out (sentinel file exists)
+    /// or the orchestrator already shows the node as scheduling-ready.
     ///
     /// This enables unattended restart: a node that reboots comes back
     /// online and schedulable without operator intervention. A node that
@@ -323,6 +387,14 @@ public class AuthenticationManager : BackgroundService
                 "Logged-out sentinel exists at {Path} — heartbeating but not scheduling-ready. " +
                 "Run 'decloud login' to resume scheduling.",
                 LoggedOutSentinelPath);
+            return;
+        }
+
+        // Skip login if the orchestrator already has this node as scheduling-ready.
+        if (_isSchedulingReady)
+        {
+            _logger.LogInformation(
+                "Node is already scheduling-ready — skipping auto-login");
             return;
         }
 
@@ -351,6 +423,7 @@ public class AuthenticationManager : BackgroundService
 
             if (success)
             {
+                _isSchedulingReady = true;
                 _logger.LogInformation("✓ Auto-login successful — node is scheduling-ready");
             }
             else
@@ -366,7 +439,4 @@ public class AuthenticationManager : BackgroundService
                 "Auto-login failed — node is heartbeating but not scheduling-ready");
         }
     }
-
-
-    private bool _hasLoggedAuthWarning = false;
 }
