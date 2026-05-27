@@ -1,14 +1,15 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Infrastructure.Persistence;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Org.BouncyCastle.Pqc.Crypto.Lms;
 
 namespace DeCloud.NodeAgent.Infrastructure.Services
 {
     public class VmHealthService : BackgroundService
     {
         private readonly IVmManager _vmManager;
+        private readonly VmRepository _vmRepository;
         private readonly INatRuleManager _natRuleManager;
         private readonly IOrchestratorClient _orchestratorClient;
         private readonly ILogger<VmHealthService> _logger;
@@ -22,12 +23,14 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
 
         public VmHealthService(
             IVmManager vmManager,
+            VmRepository vmRepository,
             INatRuleManager natRuleManager,
             IOrchestratorClient orchestratorClient,
             ILogger<VmHealthService> logger
             )
         {
             _vmManager = vmManager;
+            _vmRepository = vmRepository;
             _natRuleManager = natRuleManager;
             _orchestratorClient = orchestratorClient;
             _logger = logger;
@@ -99,8 +102,15 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                                         "VM {VmId} failed to restart — marking as Failed to stop retry loop. " +
                                         "Orchestrator reconciliation will redeploy.",
                                         vm.VmId);
-                                    // Mark Failed in-memory so the loop skips it next cycle
                                     vm.State = VmState.Failed;
+                                }
+                                else
+                                {
+                                    // Reset the heartbeat baseline so the health check doesn't immediately
+                                    // re-fire on the next cycle. VmReadinessMonitor will overwrite this with
+                                    // a real guest-agent ping once the VM boots and the agent responds.
+                                    vm.LastHeartbeat = DateTime.UtcNow;
+                                    await _vmRepository.UpdateLastHeartbeatAsync(vm.VmId, vm.LastHeartbeat);
                                 }
                             }
                         }
