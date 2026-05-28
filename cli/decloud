@@ -1880,8 +1880,8 @@ cmd_performance() {
         printf "  Total Points:     %s\n" "$(printf "%.0f" "$total_points"    2>/dev/null || echo "$total_points")"
         echo ""
         echo -e "${BOLD}Tier Eligibility:${NC}"
-        echo "  Highest Tier:     ${BOLD}$highest_tier${NC}"
-        echo "  Is Acceptable:    $is_acceptable"
+        echo -e "  Highest Tier:     ${BOLD}$highest_tier${NC}"
+        echo -e "  Is Acceptable:    $is_acceptable"
         echo ""
         echo -e "${BOLD}Eligible Tiers:${NC}"
         if echo "$perf" | jq -e '.eligibleTiers' >/dev/null 2>&1; then
@@ -2042,7 +2042,7 @@ cmd_evaluate() {
         echo "  Benchmark Score:  $(echo "$eval" | jq -r '.benchmarkScore     // "N/A"')"
         echo "  Capped Score:     $(echo "$eval" | jq -r '.cappedBenchmarkScore // "N/A"')"
         printf "  Points per Core:  %s\n" "$(echo "$eval" | jq -r '.pointsPerCore      // "N/A"')"
-        echo "  Highest Tier:     $(echo "$eval" | jq -r '.highestTier        // "N/A"')"
+        echo -e "  Highest Tier:     $(echo "$eval" | jq -r '.highestTier        // "N/A"')"
 
         local oblig_count; oblig_count=$(echo "$result" | jq '.obligations // [] | length')
         if [[ "$oblig_count" -gt 0 ]]; then

@@ -787,20 +787,32 @@ public class LibvirtVmManager : IVmManager
             try
             {
                 cloudInitIso = await CreateCloudInitIsoAsync(spec, vmDir, password, ct);
-                if (!string.IsNullOrEmpty(cloudInitIso))
-                {
-                    _logger.LogInformation("VM {VmId}: Cloud-init ISO created at {Path}", spec.Id, cloudInitIso);
-                }
-                else
-                {
-                    _logger.LogWarning("VM {VmId}: Cloud-init ISO creation failed, VM may not configure properly", spec.Id);
-                }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "VM {VmId}: Cloud-init ISO creation failed, continuing without it", spec.Id);
-                cloudInitIso = string.Empty;
+                // A VM without cloud-init never configures correctly: no network repair,
+                // no SSH/CA, no readiness probing. Fail the deploy and surface the real
+                // error instead of booting a silently-broken guest — the failure mode that
+                // masked the migration regression. Mirrors STEP 2's overlay-disk handling.
+                _logger.LogError(ex, "VM {VmId}: Failed to create cloud-init ISO", spec.Id);
+                instance.State = VmState.Failed;
+                await _repository.UpdateVmStateAsync(spec.Id, VmState.Failed);
+                return VmOperationResult.Fail(spec.Id,
+                    $"Failed to create cloud-init ISO: {ex.Message}", "CLOUDINIT_ERROR");
             }
+
+            if (string.IsNullOrEmpty(cloudInitIso))
+            {
+                // CreateCloudInitIsoAsync returns empty only when both genisoimage and
+                // cloud-localds failed — a genuine ISO-build failure, not an optional step.
+                _logger.LogError("VM {VmId}: cloud-init ISO creation produced no output", spec.Id);
+                instance.State = VmState.Failed;
+                await _repository.UpdateVmStateAsync(spec.Id, VmState.Failed);
+                return VmOperationResult.Fail(spec.Id,
+                    "Cloud-init ISO creation produced no output", "CLOUDINIT_ERROR");
+            }
+
+            _logger.LogInformation("VM {VmId}: Cloud-init ISO created at {Path}", spec.Id, cloudInitIso);
 
             // =====================================================
             // STEP 4: Generate libvirt XML
@@ -2066,14 +2078,21 @@ public class LibvirtVmManager : IVmManager
                     }
                 }
             }
+            else if (spec.OverlayChunkMap is { Count: > 0 })
+            {
+                // Migration: the orchestrator sends no user-data by design. The overlay
+                // already carries the fully-initialised guest (rendered cloud-init,
+                // installed packages, user changes). STEP 7 below overwrites this with the
+                // minimal migration cloud-config that only repairs machine-specific state
+                // (MAC-bound netplan + guest agent). Start from a valid empty cloud-config
+                // so STEP 6.5/6.6 stay well-formed; STEP 7 owns the migration value.
+                cloudInitYaml = "#cloud-config\n";
+                _logger.LogInformation(
+                    "VM {VmId}: migration — deferring cloud-init to minimal migration config", spec.Id);
+            }
             else
             {
-                // P4.3: legacy CloudInitTemplateService path removed. The orchestrator's
-                // CloudInitRenderer is the single authoritative substitution layer for
-                // both system and tenant VMs (per VmDeploymentPipeline.cs). If a CreateVm
-                // command arrives without userData, the originating orchestrator caller
-                // must be fixed to populate it — concealing the gap with a node-side
-                // fallback is no longer acceptable.
+                // unchanged — genuine misconfiguration for a non-migration CreateVm
                 throw new InvalidOperationException(
                     $"VM {spec.Id} ({spec.VmType}): spec.CloudInitUserData is null/empty. " +
                     "The orchestrator must pre-render and send userData for every CreateVm " +
