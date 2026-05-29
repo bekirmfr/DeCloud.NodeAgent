@@ -522,7 +522,7 @@ function renderVMs() {
         return `<tr>
           <td class="vm-name-cell">${esc(vm.name ?? spec.name ?? '—')}</td>
           <td class="vm-id-cell">${truncId(vm.vmId ?? '—')}</td>
-          <td>${stateBadge(vm.state, vm.vmId ?? vm.spec?.id)}</td>
+          <td>${stateBadge(vm.status, vm.vmId ?? vm.spec?.id)}</td>
           <td class="health-cell">${renderHealthCell(vm)}</td>
           <td>${spec.virtualCpuCores ?? '—'}</td>
           <td>${spec.memoryBytes ? fmtBytes(spec.memoryBytes) : '—'}</td>
@@ -669,7 +669,7 @@ function paintSysVm(key, vm) {
     // VmState: 0=Pending,1=Creating,2=Starting,3=Running,4=Paused,
     //          5=Stopping,6=Stopped,7=Failed,8=NotFound,9=Deleted,10=Migrating
     const TRANSITIONAL_VM_STATES = new Set([0, 1, 2, 10]); // Pending/Creating/Starting/Migrating
-    const vmIsTransitioning = vm != null && TRANSITIONAL_VM_STATES.has(vm.state);
+    const vmIsTransitioning = vm != null && TRANSITIONAL_VM_STATES.has(vm.status);
     const isUnmet = oblStatus === 2 && !running && !vmIsTransitioning;
 
     // Card border class
@@ -1781,7 +1781,7 @@ function buildTextReport(p) {
         h2('Virtual Machines');
         for (const vm of vms) {
             const spec = vm.spec ?? {};
-            lines.push(`  [${vmStateName(vm.state)}] ${vm.name ?? spec.name ?? vm.vmId}`);
+            lines.push(`  [${vmStateName(vm.status)}] ${vm.name ?? spec.name ?? vm.vmId}`);
             lines.push(`    ID:    ${vm.vmId}`);
             lines.push(`    Type:  vmRole=${spec.vmRole}  role=${spec.labels?.role ?? '—'}`);
             lines.push(`    IP:    ${spec.ipAddress || '—'}   VNC: ${vm.vncPort ?? '—'}`);
