@@ -395,7 +395,7 @@ public class NodeDashboardController : ControllerBase
                     v.VmId,
                     v.Name,
                     v.State,
-                    v.VmType,
+                    v.Role,
                     v.OwnerId,
                     v.IpAddress,
                     v.VncPort,

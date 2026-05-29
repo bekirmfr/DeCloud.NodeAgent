@@ -395,7 +395,8 @@ public record VmDashboardRecord
     public string VmId { get; init; } = "";
     public string Name { get; init; } = "";
     public string State { get; init; } = "";
-    public string VmType { get; init; } = "";
+    public string Category { get; init; } = "";
+    public string Role { get; init; } = "";
     public string? OwnerId { get; init; }
     public string? IpAddress { get; init; }
     public int? VncPort { get; init; }
