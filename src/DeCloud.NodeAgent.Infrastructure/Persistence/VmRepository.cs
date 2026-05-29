@@ -832,7 +832,7 @@ public class VmRepository : IDisposable
         {
             var records = new List<VmDashboardRecord>();
             const string sql = @"
-            SELECT VmId, Name, State, VmType, OwnerId,
+            SELECT VmId, Name, State, Category, Role, OwnerId,
                    IpAddress, VncPort, ReplicationFactor,
                    VirtualCpuCores, MemoryBytes, DiskBytes,
                    CreatedAt, LastUpdated, TargetNodeId,
@@ -896,11 +896,15 @@ public class VmRepository : IDisposable
             {
                 VmId = reader.GetString(reader.GetOrdinal("VmId")),
                 Name = reader.GetString(reader.GetOrdinal("Name")),
+                Category = (VmCategory)reader.GetInt32(reader.GetOrdinal("Category")),
+                Role = (VmRole)reader.GetInt32(reader.GetOrdinal("Role")),
                 Services = DeserializeServices(GetNullableString(reader, "ServicesJson")),
                 Spec = new VmSpec
                 {
                     Id = reader.GetString(reader.GetOrdinal("VmId")),
                     Name = reader.GetString(reader.GetOrdinal("Name")),
+                    Category = (VmCategory)reader.GetInt32(reader.GetOrdinal("Category")),
+                    Role = (VmRole)reader.GetInt32(reader.GetOrdinal("Role")),
                     OwnerId = GetNullableString(reader, "OwnerId"),
                     QualityTier = (QualityTier)reader.GetInt32(reader.GetOrdinal("QualityTier")),
                     ComputePointCost = reader.GetInt32(reader.GetOrdinal("ComputePointCost")),
