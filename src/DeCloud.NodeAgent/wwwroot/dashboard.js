@@ -353,7 +353,9 @@ function renderHardware() {
     // Compute VM-spec-based usage from S.vms (same data source as heartbeat).
     // This matches what the orchestrator sees in UsedResources.
     const allVms = (S.vms ?? []).filter(v =>
-        v.state !== 'Deleted' && v.state !== 5);
+        v.state !== 9 &&   // Deleted
+        v.state !== 7 &&   // Stopped (resources not in use)
+        v.state !== 8);    // Deleting
     const vmUsedPts = allVms.reduce((s, v) =>
         s + ((v.spec?.computePointCost ?? v.computePointCost) || 0), 0);
     const vmUsedMem = allVms.reduce((s, v) =>
@@ -466,13 +468,11 @@ function renderVMs() {
     if (!S.vms) return;
     const all = S.vms;
 
-    // VmRole enum: General=0, Compute=1, Memory=2, Storage=3, Gpu=4,
-    //              Relay=5, Dht=6, Inference=7, BlockStore=8
-    // vmRole lives in vm.spec.vmRole (integer). Labels are the reliable
-    // fallback for any serialisation that flattens the spec.
-    const isRelay = v => v.spec?.vmRole === 5 || v.labels?.role === 'relay';
-    const isDht = v => v.spec?.vmRole === 6 || v.labels?.role === 'dht';
-    const isBs = v => v.spec?.vmRole === 8 || v.labels?.role === 'blockstore';
+    // VmRole serialises as a string via [JsonStringEnumConverter].
+    // Label fallback retained as a safety net for edge cases.
+    const isRelay = v => v.spec?.vmRole === 'Relay' || v.labels?.role === 'relay';
+    const isDht = v => v.spec?.vmRole === 'Dht' || v.labels?.role === 'dht';
+    const isBs = v => v.spec?.vmRole === 'BlockStore' || v.labels?.role === 'blockstore';
 
     // Resolve each obligation once so findSysVm can use the vmId.
     const relayObl = S.obligations.find(o => o.role === ROLE_FOR_KEY.relay);
@@ -1349,10 +1349,9 @@ function isRunning(vm) {
 
 // ── Service health helpers ────────────────────────────────────────────────
 
-/** Normalise ServiceReadiness to a CSS class key */
+/** Normalise ServiceStatus to a CSS class key */
 function svcReadiness(svc) {
-    // Status can arrive as a string (serialised enum) or number
-    const s = typeof svc.status === 'string' ? svc.status.toLowerCase() : '';
+    const s = (svc.status ?? '').toLowerCase();
     if (s === 'ready') return 'ready';
     if (s === 'checking') return 'checking';
     if (s === 'timedout') return 'timedout';
@@ -1447,13 +1446,10 @@ function resolveVmUrl(vm) {
 }
 
 function vmStateName(state) {
-    // Must match VmState enum exactly:
-    // 0=Pending, 1=Creating, 2=Starting, 3=Running, 4=Paused,
-    // 5=Stopping, 6=Stopped, 7=Failed, 8=NotFound, 9=Deleted, 10=Migrating
     const map = {
-        0: 'Pending', 1: 'Creating', 2: 'Starting', 3: 'Running',
-        4: 'Paused', 5: 'Stopping', 6: 'Stopped', 7: 'Failed',
-        8: 'NotFound', 9: 'Deleted', 10: 'Migrating'
+        0: 'Pending', 1: 'Scheduling', 2: 'Provisioning', 3: 'Running',
+        4: 'Paused', 5: 'Suspended', 6: 'Stopping', 7: 'Stopped',
+        8: 'Deleting', 9: 'Deleted', 10: 'Migrating', 11: 'Error'
     };
     return map[state] ?? String(state);
 }
