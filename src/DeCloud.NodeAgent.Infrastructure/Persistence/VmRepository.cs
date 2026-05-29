@@ -220,25 +220,6 @@ public class VmRepository : IDisposable
     }
 
     /// <summary>
-    /// Check if a column exists in a table
-    /// </summary>
-    private bool ColumnExists(string tableName, string columnName)
-    {
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = $"PRAGMA table_info({tableName})";
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-        {
-            var name = reader.GetString(1); // Column name is at index 1
-            if (name.Equals(columnName, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /// <summary>
     /// Save or update a VM record
     /// </summary>
     public async Task SaveVmAsync(VmInstance vm)
@@ -679,15 +660,15 @@ public class VmRepository : IDisposable
             {
                 VmId = reader.GetString(reader.GetOrdinal("VmId")),
                 Name = reader.GetString(reader.GetOrdinal("Name")),
-                Category = (VmCategory)reader.GetInt32(reader.GetOrdinal("Category")),
-                Role = (VmRole)reader.GetInt32(reader.GetOrdinal("Role")),
+                Category = Enum.Parse<VmCategory>(reader.GetString(reader.GetOrdinal("Category"))),
+                Role = Enum.Parse<VmRole>(reader.GetString(reader.GetOrdinal("Role"))),
                 Services = DeserializeServices(GetNullableString(reader, "ServicesJson")),
                 Spec = new VmSpec
                 {
                     Id = reader.GetString(reader.GetOrdinal("VmId")),
                     Name = reader.GetString(reader.GetOrdinal("Name")),
-                    Category = (VmCategory)reader.GetInt32(reader.GetOrdinal("Category")),
-                    Role = (VmRole)reader.GetInt32(reader.GetOrdinal("Role")),
+                    Category = Enum.Parse<VmCategory>(reader.GetString(reader.GetOrdinal("Category"))),
+                    Role = Enum.Parse<VmRole>(reader.GetString(reader.GetOrdinal("Role"))),
                     OwnerId = GetNullableString(reader, "OwnerId"),
                     QualityTier = (QualityTier)reader.GetInt32(reader.GetOrdinal("QualityTier")),
                     ComputePointCost = reader.GetInt32(reader.GetOrdinal("ComputePointCost")),
