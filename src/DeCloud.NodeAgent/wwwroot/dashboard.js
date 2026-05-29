@@ -472,9 +472,9 @@ function renderVMs() {
     // v.spec.labels — labels dict lives on Spec, not at the top level of VmInstance.
     // v.category — "System" / "Tenant"; used for tenant filter so future system roles
     //              don't leak into the tenant table without a dashboard change.
-    const isRelay = v => v.role === 'Relay' || v.spec?.labels?.['system-vm-role'] === 'relay';
-    const isDht = v => v.role === 'Dht' || v.spec?.labels?.['system-vm-role'] === 'dht';
-    const isBs = v => v.role === 'BlockStore' || v.spec?.labels?.['system-vm-role'] === 'blockstore';
+    const isRelay = v => v.spec?.role === 'Relay' || v.spec?.labels?.['system-vm-role'] === 'relay';
+    const isDht = v => v.spec?.role === 'Dht' || v.spec?.labels?.['system-vm-role'] === 'dht';
+    const isBs = v => v.spec?.role === 'BlockStore' || v.spec?.labels?.['system-vm-role'] === 'blockstore';
 
     // Resolve each obligation once so findSysVm can use the vmId.
     const relayObl = S.obligations.find(o => o.role === ROLE_FOR_KEY.relay);
@@ -484,7 +484,7 @@ function renderVMs() {
     const relay = findSysVm(all, isRelay, relayObl);
     const dht = findSysVm(all, isDht, dhtObl);
     const bs = findSysVm(all, isBs, bsObl);
-    const tenants = all.filter(v => v.category !== 'System');
+    const tenants = all.filter(v => v.spec?.category !== 'System');
 
     $('vm-count-badge').textContent = all.length;
     // Update tenant collapsible meta
