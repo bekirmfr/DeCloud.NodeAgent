@@ -3,6 +3,7 @@ using System.Text.Json;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
+using DeCloud.Shared.Enums;
 
 namespace DeCloud.NodeAgent.Services;
 
@@ -61,7 +62,7 @@ public class VmReadinessMonitor : BackgroundService
 
         // Boot-time readiness + liveness re-verification for opted-in services.
         var runningVms = allVms
-            .Where(vm => vm.State == VmState.Running
+            .Where(vm => vm.Status == VmStatus.Running
                       && vm.Services.Count > 0
                       && (!vm.IsFullyReady || vm.Services.Any(s => s.LivenessCheck)))
             .ToList();
@@ -81,7 +82,7 @@ public class VmReadinessMonitor : BackgroundService
         // Guest-agent liveness ping for fully-ready VMs (LastHeartbeat update).
         // VmHealthService uses LastHeartbeat to detect stale tenant VMs.
         var fullyReadyVms = allVms
-            .Where(vm => vm.State == VmState.Running && vm.IsFullyReady)
+            .Where(vm => vm.Status == VmStatus.Running && vm.IsFullyReady)
             .ToList();
 
         foreach (var vm in fullyReadyVms)

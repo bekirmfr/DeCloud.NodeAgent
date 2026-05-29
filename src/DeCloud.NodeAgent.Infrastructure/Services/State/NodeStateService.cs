@@ -1,6 +1,7 @@
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.Shared.Contracts;
+using DeCloud.Shared.Models;
 using Microsoft.Extensions.Logging;
 using System.Reflection;
 

@@ -1,6 +1,7 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
+using DeCloud.Shared.Enums;
 using Microsoft.Extensions.Logging;
 
 namespace DeCloud.NodeAgent.Infrastructure.Docker;
@@ -89,7 +90,7 @@ public class DockerContainerManager : IVmManager
             {
                 VmId = vmId,
                 Name = containerName,
-                State = VmState.Running,
+                Status = VmStatus.Running,
                 Spec = spec,
                 CreatedAt = DateTime.UtcNow,
                 StartedAt = DateTime.UtcNow,
@@ -105,7 +106,7 @@ public class DockerContainerManager : IVmManager
                 "GPU container {VmId} ({Name}) created and running. Image: {Image}, IP: {Ip}",
                 vmId, containerName, spec.ContainerImage, ip ?? "pending");
 
-            return VmOperationResult.Ok(vmId, VmState.Running);
+            return VmOperationResult.Ok(vmId, VmStatus.Running);
         }
         catch (Exception ex)
         {
@@ -124,12 +125,12 @@ public class DockerContainerManager : IVmManager
         if (!result.Success)
             return VmOperationResult.Fail(vmId, $"docker start failed: {result.StandardError}");
 
-        instance.State = VmState.Running;
+        instance.Status = VmStatus.Running;
         instance.StartedAt = DateTime.UtcNow;
         await _repository.SaveVmAsync(instance);
 
         _logger.LogInformation("Container {VmId} started", vmId);
-        return VmOperationResult.Ok(vmId, VmState.Running);
+        return VmOperationResult.Ok(vmId, VmStatus.Running);
     }
 
     public async Task<VmOperationResult> StopVmAsync(string vmId, bool force = false, CancellationToken ct = default)
@@ -143,12 +144,12 @@ public class DockerContainerManager : IVmManager
         if (!result.Success)
             return VmOperationResult.Fail(vmId, $"docker stop failed: {result.StandardError}");
 
-        instance.State = VmState.Stopped;
+        instance.Status = VmStatus.Stopped;
         instance.StoppedAt = DateTime.UtcNow;
         await _repository.SaveVmAsync(instance);
 
         _logger.LogInformation("Container {VmId} stopped (force={Force})", vmId, force);
-        return VmOperationResult.Ok(vmId, VmState.Stopped);
+        return VmOperationResult.Ok(vmId, VmStatus.Stopped);
     }
 
     public async Task<VmOperationResult> RestartVmAsync(string vmId, bool force = false, CancellationToken ct = default)
@@ -161,12 +162,12 @@ public class DockerContainerManager : IVmManager
         if (!result.Success)
             return VmOperationResult.Fail(vmId, $"docker restart failed: {result.StandardError}");
 
-        instance.State = VmState.Running;
+        instance.Status = VmStatus.Running;
         instance.StartedAt = DateTime.UtcNow;
         await _repository.SaveVmAsync(instance);
 
         _logger.LogInformation("Container {VmId} restarted", vmId);
-        return VmOperationResult.Ok(vmId, VmState.Running);
+        return VmOperationResult.Ok(vmId, VmStatus.Running);
     }
 
     public async Task<VmOperationResult> DeleteVmAsync(string vmId, CancellationToken ct = default)
@@ -183,12 +184,12 @@ public class DockerContainerManager : IVmManager
             // Continue cleanup even if docker rm fails
         }
 
-        instance.State = VmState.Deleted;
+        instance.Status = VmStatus.Deleted;
         _containers.Remove(vmId);
         await _repository.SaveVmAsync(instance);
 
         _logger.LogInformation("Container {VmId} deleted", vmId);
-        return VmOperationResult.Ok(vmId, VmState.Deleted);
+        return VmOperationResult.Ok(vmId, VmStatus.Deleted);
     }
 
     public async Task<VmOperationResult> PauseVmAsync(string vmId, CancellationToken ct = default)
@@ -201,9 +202,9 @@ public class DockerContainerManager : IVmManager
         if (!result.Success)
             return VmOperationResult.Fail(vmId, $"docker pause failed: {result.StandardError}");
 
-        instance.State = VmState.Paused;
+        instance.Status = VmStatus.Paused;
         await _repository.SaveVmAsync(instance);
-        return VmOperationResult.Ok(vmId, VmState.Paused);
+        return VmOperationResult.Ok(vmId, VmStatus.Paused);
     }
 
     public async Task<VmOperationResult> ResumeVmAsync(string vmId, CancellationToken ct = default)
@@ -216,9 +217,9 @@ public class DockerContainerManager : IVmManager
         if (!result.Success)
             return VmOperationResult.Fail(vmId, $"docker unpause failed: {result.StandardError}");
 
-        instance.State = VmState.Running;
+        instance.Status = VmStatus.Running;
         await _repository.SaveVmAsync(instance);
-        return VmOperationResult.Ok(vmId, VmState.Running);
+        return VmOperationResult.Ok(vmId, VmStatus.Running);
     }
 
     public Task<VmInstance?> GetVmAsync(string vmId, CancellationToken ct = default)
@@ -233,7 +234,7 @@ public class DockerContainerManager : IVmManager
     }
     public IReadOnlyCollection<VmInstance> GetRunningVms()
     {
-        return _containers.Values.Where(c => c.State == VmState.Running).ToList();
+        return _containers.Values.Where(c => c.Status == VmStatus.Running).ToList();
     }
 
     public async Task<VmResourceUsage> GetVmUsageAsync(string vmId, CancellationToken ct = default)
@@ -276,7 +277,7 @@ public class DockerContainerManager : IVmManager
 
         foreach (var (vmId, instance) in _containers.ToList())
         {
-            if (instance.State == VmState.Deleted) continue;
+            if (instance.Status == VmStatus.Deleted) continue;
 
             try
             {
@@ -287,7 +288,7 @@ public class DockerContainerManager : IVmManager
                 {
                     _logger.LogWarning("Container {VmId} ({Name}) not found in Docker - marking as deleted",
                         vmId, instance.Name);
-                    instance.State = VmState.Deleted;
+                    instance.Status = VmStatus.Deleted;
                     await _repository.SaveVmAsync(instance);
                     continue;
                 }
@@ -295,18 +296,18 @@ public class DockerContainerManager : IVmManager
                 var dockerState = result.StandardOutput.Trim().ToLowerInvariant();
                 var newState = dockerState switch
                 {
-                    "running" => VmState.Running,
-                    "paused" => VmState.Paused,
-                    "exited" or "dead" => VmState.Stopped,
-                    "created" or "restarting" => VmState.Starting,
-                    _ => instance.State
+                    "running" => VmStatus.Running,
+                    "paused" => VmStatus.Paused,
+                    "exited" or "dead" => VmStatus.Stopped,
+                    "created" or "restarting" => VmStatus.Provisioning,
+                    _ => instance.Status
                 };
 
-                if (newState != instance.State)
+                if (newState != instance.Status)
                 {
                     _logger.LogInformation("Container {VmId} state reconciled: {Old} → {New}",
-                        vmId, instance.State, newState);
-                    instance.State = newState;
+                        vmId, instance.Status, newState);
+                    instance.Status = newState;
                     await _repository.SaveVmAsync(instance);
                 }
             }
@@ -485,17 +486,17 @@ public class DockerContainerManager : IVmManager
         return arg;
     }
 
-    public IReadOnlyCollection<VmInstance> GetAllVms(VmType? vmType = null, VmState? vmState = null)
+    public IReadOnlyCollection<VmInstance> GetAllVms(VmRole? vmType = null, Shared.Enums.VmStatus? vmState = null)
     {
         throw new NotImplementedException();
     }
 
-    public IReadOnlyCollection<VmInstance> GetSystemVms(VmState? vmState = null)
+    public IReadOnlyCollection<VmInstance> GetSystemVms(Shared.Enums.VmStatus? vmState = null)
     {
         throw new NotImplementedException();
     }
 
-    public VmInstance? GetRunningSystemVm(VmType? vmType = null)
+    public VmInstance? GetRunningSystemVm(VmRole? vmType = null)
     {
         throw new NotImplementedException();
     }

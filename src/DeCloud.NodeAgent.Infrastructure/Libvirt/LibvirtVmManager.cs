@@ -1,4 +1,3 @@
-using DeCloud.NodeAgent.Core.Constants;
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Interfaces.UserNetwork;
@@ -143,7 +142,7 @@ public class LibvirtVmManager : IVmManager
             {
                 _vms[vm.VmId] = vm;
                 _logger.LogDebug("Loaded VM {VmId} from database (State: {State})",
-                    vm.VmId, vm.State);
+                    vm.VmId, vm.Status);
             }
 
             if (savedVms.Any())
@@ -171,7 +170,7 @@ public class LibvirtVmManager : IVmManager
             // guest-agent heartbeats within its first cycle.
             foreach (var vm in _vms.Values)
             {
-                if (vm.State == VmState.Running)
+                if (vm.Status == VmStatus.Running)
                 {
                     vm.LastHeartbeat = DateTime.UtcNow;
                     await _repository.UpdateLastHeartbeatAsync(vm.VmId, vm.LastHeartbeat);
@@ -224,14 +223,14 @@ public class LibvirtVmManager : IVmManager
                 if (_vms.ContainsKey(vmId))
                 {
                     var vm = _vms[vmId];
-                    if (vm.State != actualState)
+                    if (vm.Status != actualState)
                     {
                         // Never overwrite a health-service Failed with Running from libvirt.
                         // Failed means "QEMU alive but internal services dead" — a condition
                         // libvirt cannot detect. Reconciliation only clears Failed when libvirt
                         // reports a genuine state change (Stopped/Starting) indicating the VM
                         // has actually been destroyed or restarted.
-                        if (vm.State == VmState.Failed && actualState == VmState.Running)
+                        if (vm.Status == VmStatus.Error && actualState == VmStatus.Running)
                         {
                             _logger.LogDebug(
                                 "VM {VmId} is Failed (health check) but libvirt reports Running — preserving Failed",
@@ -240,14 +239,14 @@ public class LibvirtVmManager : IVmManager
                         else
                         {
                             _logger.LogInformation("VM {VmId} state changed: {OldState} -> {NewState}",
-                                vmId, vm.State, actualState);
-                            vm.State = actualState;
+                                vmId, vm.Status, actualState);
+                            vm.Status = actualState;
                             isDirty = true;
                         }
                     }
 
                     // Resolve IP for running VMs that are missing one
-                    if (actualState == VmState.Running && string.IsNullOrEmpty(vm.Spec.IpAddress))
+                    if (actualState == VmStatus.Running && string.IsNullOrEmpty(vm.Spec.IpAddress))
                     {
                         var ip = await GetVmIpAddressAsync(vmId, ct);
                         if (!string.IsNullOrEmpty(ip))
@@ -275,7 +274,7 @@ public class LibvirtVmManager : IVmManager
                     VmInstance? vmInstance;
                     if (dbVm != null)
                     {
-                        dbVm.State = actualState;
+                        dbVm.Status = actualState;
                         vmInstance = dbVm;
                         _logger.LogInformation(
                             "Re-adopted VM {VmId} from SQLite (state: {State}, tier: {Tier}, pts: {Pts})",
@@ -289,7 +288,7 @@ public class LibvirtVmManager : IVmManager
                             _logger.LogWarning(
                                 "Recovered orphaned VM {VmId} from libvirt XML — " +
                                 "no SQLite record exists (state: {State})",
-                                vmId, vmInstance.State);
+                                vmId, vmInstance.Status);
                         }
                     }
                     if (vmInstance != null)
@@ -310,18 +309,18 @@ public class LibvirtVmManager : IVmManager
             {
                 var vm = _vms[vmId];
 
-                if (vm.State == VmState.Creating)
+                if (vm.Status == VmStatus.Provisioning)
                 {
                     // Domain creation in flight — legitimately not in libvirt yet
                     continue;
                 }
 
-                if (vm.State != VmState.Stopped && vm.State != VmState.Failed)
+                if (vm.Status != VmStatus.Stopped && vm.Status != VmStatus.Error)
                 {
                     // Domain existed but disappeared — mark Failed
                     _logger.LogWarning("VM {VmId} missing from libvirt — marking as Failed", vmId);
-                    vm.State = VmState.Failed;
-                    await _repository.UpdateVmStateAsync(vmId, VmState.Failed);
+                    vm.Status = VmStatus.Error;
+                    await _repository.UpdateVmStateAsync(vmId, VmStatus.Error);
                 }
                 else
                 {
@@ -331,7 +330,7 @@ public class LibvirtVmManager : IVmManager
                     // and SQLite so it stops polluting decloud vm list and VmHealthService.
                     _logger.LogInformation(
                         "Removing ghost VM {VmId} (state: {State}) — no libvirt domain exists",
-                        vmId, vm.State);
+                        vmId, vm.Status);
                     _vms.Remove(vmId);
                     lock (_previousCpuSamples)
                     {
@@ -413,7 +412,7 @@ public class LibvirtVmManager : IVmManager
                     DiskBytes = await GetDiskSizeAsync(diskPath, ct),
                     // DeCloud fields from metadata.json (or defaults)
                     OwnerId = savedSpec?.OwnerId ?? "unknown",
-                    VmType = savedSpec?.VmType ?? VmType.General,
+                    Role = savedSpec?.Role ?? VmRole.General,
                     QualityTier = savedSpec?.QualityTier ?? QualityTier.Burstable,
                     ComputePointCost = savedSpec?.ComputePointCost ?? 0,
                     BaseImageUrl = savedSpec?.BaseImageUrl,
@@ -423,14 +422,14 @@ public class LibvirtVmManager : IVmManager
                     GpuMode = savedSpec?.GpuMode ?? GpuMode.None,
                     TargetNodeId = savedSpec?.TargetNodeId,
                 },
-                State = state,
+                Status = state,
                 DiskPath = diskPath,
                 ConfigPath = Path.Combine(vmDir, "domain.xml"),
                 VncPort = vncPort,
                 CreatedAt = Directory.Exists(vmDir)
                     ? Directory.GetCreationTimeUtc(vmDir)
                     : DateTime.UtcNow,
-                StartedAt = state == VmState.Running ? DateTime.UtcNow : null,
+                StartedAt = state == VmStatus.Running ? global::System.DateTime.UtcNow : null,
                 LastHeartbeat = DateTime.UtcNow
             };
 
@@ -460,7 +459,7 @@ public class LibvirtVmManager : IVmManager
             // Re-populate the System service StatusMessage so heartbeats report
             // the peer ID without waiting for a callback that won't re-fire.
             // -----------------------------------------------------------------
-            if ((savedSpec?.VmType ?? VmType.General) == VmType.Dht)
+            if ((savedSpec?.Role ?? VmRole.General) == VmRole.Dht)
             {
                 var peerIdPath = Path.Combine(vmDir, "dht-peer-id");
                 if (File.Exists(peerIdPath))
@@ -563,19 +562,19 @@ public class LibvirtVmManager : IVmManager
         _logger.LogDebug("Next vsock CID set to {Cid}", _nextVsockCid);
     }
 
-    public async Task<VmState> GetVmStateFromLibvirtAsync(string vmId, CancellationToken ct)
+    public async Task<Shared.Enums.VmStatus> GetVmStateFromLibvirtAsync(string vmId, CancellationToken ct)
     {
         var result = await _executor.ExecuteAsync("virsh", $"domstate {vmId}", ct);
-        if (!result.Success) return VmState.Stopped;
+        if (!result.Success) return VmStatus.Stopped;
 
         return result.StandardOutput.Trim().ToLower() switch
         {
-            "running" => VmState.Running,
-            "paused" => VmState.Paused,
-            "shut off" => VmState.Stopped,
-            "crashed" => VmState.Failed,
-            "in shutdown" => VmState.Stopping,
-            _ => VmState.Stopped
+            "running" => VmStatus.Running,
+            "paused" => VmStatus.Paused,
+            "shut off" => VmStatus.Stopped,
+            "crashed" => VmStatus.Error,
+            "in shutdown" => VmStatus.Stopping,
+            _ => VmStatus.Stopped
         };
     }
 
@@ -663,7 +662,7 @@ public class LibvirtVmManager : IVmManager
                 VmId = spec.Id,
                 Name = spec.Name,
                 Spec = spec,
-                State = VmState.Creating,
+                Status = VmStatus.Provisioning,
                 CreatedAt = DateTime.UtcNow,
                 LastHeartbeat = DateTime.UtcNow,
                 VncPort = _nextVncPort++
@@ -710,8 +709,8 @@ public class LibvirtVmManager : IVmManager
             catch (Exception ex)
             {
                 _logger.LogError(ex, "VM {VmId}: Failed to prepare base image", spec.Id);
-                instance.State = VmState.Failed;
-                await _repository.UpdateVmStateAsync(spec.Id, VmState.Failed);
+                instance.Status = VmStatus.Error;
+                await _repository.UpdateVmStateAsync(spec.Id, VmStatus.Error);
                 return VmOperationResult.Fail(spec.Id, $"Failed to prepare base image: {ex.Message}", "IMAGE_ERROR");
             }
 
@@ -773,8 +772,8 @@ public class LibvirtVmManager : IVmManager
             catch (Exception ex)
             {
                 _logger.LogError(ex, "VM {VmId}: Failed to create/reconstruct overlay disk", spec.Id);
-                instance.State = VmState.Failed;
-                await _repository.UpdateVmStateAsync(spec.Id, VmState.Failed);
+                instance.Status = VmStatus.Error;
+                await _repository.UpdateVmStateAsync(spec.Id, VmStatus.Error);
                 return VmOperationResult.Fail(spec.Id, $"Failed to prepare disk: {ex.Message}", "DISK_ERROR");
             }
 
@@ -795,8 +794,8 @@ public class LibvirtVmManager : IVmManager
                 // error instead of booting a silently-broken guest — the failure mode that
                 // masked the migration regression. Mirrors STEP 2's overlay-disk handling.
                 _logger.LogError(ex, "VM {VmId}: Failed to create cloud-init ISO", spec.Id);
-                instance.State = VmState.Failed;
-                await _repository.UpdateVmStateAsync(spec.Id, VmState.Failed);
+                instance.Status = VmStatus.Error;
+                await _repository.UpdateVmStateAsync(spec.Id, VmStatus.Error);
                 return VmOperationResult.Fail(spec.Id,
                     $"Failed to create cloud-init ISO: {ex.Message}", "CLOUDINIT_ERROR");
             }
@@ -806,8 +805,8 @@ public class LibvirtVmManager : IVmManager
                 // CreateCloudInitIsoAsync returns empty only when both genisoimage and
                 // cloud-localds failed — a genuine ISO-build failure, not an optional step.
                 _logger.LogError("VM {VmId}: cloud-init ISO creation produced no output", spec.Id);
-                instance.State = VmState.Failed;
-                await _repository.UpdateVmStateAsync(spec.Id, VmState.Failed);
+                instance.Status = VmStatus.Error;
+                await _repository.UpdateVmStateAsync(spec.Id, VmStatus.Error);
                 return VmOperationResult.Fail(spec.Id,
                     "Cloud-init ISO creation produced no output", "CLOUDINIT_ERROR");
             }
@@ -843,8 +842,8 @@ public class LibvirtVmManager : IVmManager
                 _logger.LogError("VM {VmId}: Failed to define VM in libvirt: {Error}",
                     spec.Id, defineResult.StandardError);
 
-                instance.State = VmState.Failed;
-                await _repository.UpdateVmStateAsync(spec.Id, VmState.Failed);
+                instance.Status = VmStatus.Error;
+                await _repository.UpdateVmStateAsync(spec.Id, VmStatus.Error);
 
                 // Cleanup
                 try { Directory.Delete(vmDir, recursive: true); } catch { }
@@ -898,17 +897,17 @@ public class LibvirtVmManager : IVmManager
             // =====================================================
             // STEP 7: Start the VM
             // =====================================================
-            instance.State = VmState.Starting;
-            await _repository.UpdateVmStateAsync(spec.Id, VmState.Starting);
+            instance.Status = VmStatus.Provisioning;
+            await _repository.UpdateVmStateAsync(spec.Id, VmStatus.Provisioning);
 
             _logger.LogInformation("VM {VmId}: Starting VM", spec.Id);
 
             var startResult = await _executor.ExecuteAsync("virsh", $"start {spec.Id}", ct);
             if (startResult.Success)
             {
-                instance.State = VmState.Running;
+                instance.Status = VmStatus.Running;
                 instance.StartedAt = DateTime.UtcNow;
-                await _repository.UpdateVmStateAsync(spec.Id, VmState.Running);
+                await _repository.UpdateVmStateAsync(spec.Id, VmStatus.Running);
 
                 _logger.LogInformation("VM {VmId} started successfully", spec.Id);
 
@@ -967,12 +966,12 @@ public class LibvirtVmManager : IVmManager
                     }
                 }, ct);
 
-                return VmOperationResult.Ok(spec.Id, VmState.Running);
+                return VmOperationResult.Ok(spec.Id, VmStatus.Running);
             }
             else
             {
-                instance.State = VmState.Failed;
-                await _repository.UpdateVmStateAsync(spec.Id, VmState.Failed);
+                instance.Status = VmStatus.Error;
+                await _repository.UpdateVmStateAsync(spec.Id, VmStatus.Error);
 
                 _logger.LogError("Failed to start VM {VmId}: {Error}", spec.Id, startResult.StandardError);
                 return VmOperationResult.Fail(spec.Id, startResult.StandardError, "START_FAILED");
@@ -985,8 +984,8 @@ public class LibvirtVmManager : IVmManager
 
             if (_vms.TryGetValue(spec.Id, out var instance))
             {
-                instance.State = VmState.Failed;
-                await _repository.UpdateVmStateAsync(spec.Id, VmState.Failed);
+                instance.Status = VmStatus.Error;
+                await _repository.UpdateVmStateAsync(spec.Id, VmStatus.Error);
             }
 
             return VmOperationResult.Fail(spec.Id, ex.Message, "UNEXPECTED_ERROR");
@@ -1107,8 +1106,8 @@ public class LibvirtVmManager : IVmManager
                 using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(90) };
 
                 var blockstoreVm = _vms.Values
-                    .FirstOrDefault(v => v.Spec.VmType == VmType.BlockStore &&
-                        v.State == VmState.Running);
+                    .FirstOrDefault(v => v.Spec.Role == VmRole.BlockStore &&
+                        v.Status == VmStatus.Running);
 
                 var blockstoreAddr = blockstoreVm?.Spec.IpAddress is { Length: > 0 } ip
                     ? $"http://{ip}:5090"
@@ -1221,13 +1220,13 @@ public class LibvirtVmManager : IVmManager
 
         if (result.Success || result.StandardError.Contains("already active"))
         {
-            instance.State = VmState.Running;
+            instance.Status = VmStatus.Running;
             instance.StartedAt = DateTime.UtcNow;
 
             // NEW: Persist state change
-            await _repository.UpdateVmStateAsync(vmId, VmState.Running);
+            await _repository.UpdateVmStateAsync(vmId, VmStatus.Running);
 
-            return VmOperationResult.Ok(vmId, VmState.Running);
+            return VmOperationResult.Ok(vmId, VmStatus.Running);
         }
 
         _logger.LogError("Failed to start VM {VmId}: {Error}", vmId, result.StandardError);
@@ -1255,14 +1254,14 @@ public class LibvirtVmManager : IVmManager
 
         if (_vms.TryGetValue(vmId, out var instance))
         {
-            instance.State = VmState.Stopping;
-            await _repository.UpdateVmStateAsync(vmId, VmState.Stopping);
+            instance.Status = VmStatus.Stopping;
+            await _repository.UpdateVmStateAsync(vmId, VmStatus.Stopping);
         }
 
         // virsh reset/reboot only works on running domains.
         // For stopped domains (defined but not started), use virsh start instead.
         var domainIsRunning = _vms.TryGetValue(vmId, out var tracked)
-            && tracked.State == VmState.Running;
+            && tracked.Status == VmStatus.Running;
 
         CommandResult result;
         if (!domainIsRunning)
@@ -1281,12 +1280,12 @@ public class LibvirtVmManager : IVmManager
         {
             if (_vms.TryGetValue(vmId, out var restarted))
             {
-                restarted.State = VmState.Starting;
+                restarted.Status = VmStatus.Provisioning;
                 restarted.StartedAt = DateTime.UtcNow;
                 // Persist state change
-                await _repository.UpdateVmStateAsync(vmId, VmState.Starting);
+                await _repository.UpdateVmStateAsync(vmId, VmStatus.Provisioning);
             }
-            return VmOperationResult.Ok(vmId, VmState.Running);
+            return VmOperationResult.Ok(vmId, VmStatus.Running);
         }
         _logger.LogError("Failed to restart VM {VmId}: {Error}", vmId, result.StandardError);
         return VmOperationResult.Fail(vmId, result.StandardError, "RESTART_FAILED");
@@ -1299,7 +1298,7 @@ public class LibvirtVmManager : IVmManager
         // virsh reset/reboot only works on running domains.
         // For stopped domains (defined but not started), use virsh start instead.
         var domainIsRunning = _vms.TryGetValue(vmId, out var tracked)
-            && tracked.State == VmState.Running;
+            && tracked.Status == VmStatus.Running;
 
         CommandResult result;
         if (!domainIsRunning)
@@ -1318,12 +1317,12 @@ public class LibvirtVmManager : IVmManager
         {
             if (_vms.TryGetValue(vmId, out var restarted))
             {
-                restarted.State = VmState.Starting;
+                restarted.Status = VmStatus.Provisioning;
                 restarted.StartedAt = DateTime.UtcNow;
                 // Persist state change
-                await _repository.UpdateVmStateAsync(vmId, VmState.Starting);
+                await _repository.UpdateVmStateAsync(vmId, VmStatus.Provisioning);
             }
-            return VmOperationResult.Ok(vmId, VmState.Running);
+            return VmOperationResult.Ok(vmId, VmStatus.Running);
         }
         _logger.LogError("Failed to restart VM {VmId}: {Error}", vmId, result.StandardError);
         return VmOperationResult.Fail(vmId, result.StandardError, "RESTART_FAILED");
@@ -1367,13 +1366,13 @@ public class LibvirtVmManager : IVmManager
                 await _repository.DeleteVmAsync(vmId);
                 CleanupVmDirectory(vmId, orphaned: true);
                 
-                return VmOperationResult.Ok(vmId, VmState.Stopped);
+                return VmOperationResult.Ok(vmId, VmStatus.Stopped);
             }
         }
 
         // Stop if running
         var state = await GetVmStateFromLibvirtAsync(vmId, ct);
-        if (state == VmState.Running || state == VmState.Paused)
+        if (state == VmStatus.Running || state == VmStatus.Paused)
         {
             await _executor.ExecuteAsync("virsh", $"destroy {vmId}", ct);
             await Task.Delay(500, ct);
@@ -1439,7 +1438,7 @@ public class LibvirtVmManager : IVmManager
             }
         }
 
-        return VmOperationResult.Ok(vmId, VmState.Stopped);
+        return VmOperationResult.Ok(vmId, VmStatus.Stopped);
     }
 
     /// <summary>
@@ -1484,15 +1483,15 @@ public class LibvirtVmManager : IVmManager
 
         if (result.Success)
         {
-            instance.State = VmState.Paused;
-            await _repository.UpdateVmStateAsync(vmId, VmState.Paused);
+            instance.Status = VmStatus.Paused;
+            await _repository.UpdateVmStateAsync(vmId, VmStatus.Paused);
 
             // Force-close stale TCP connections only — token is kept because
             // ResumeVmAsync does virsh resume and the shim reconnects with the
             // same baked-in token. Removing it here would break resume.
             await _gpuProxy.CleanupGpuProxySessionAsync(instance.Spec, removeToken: false, ct);
 
-            return VmOperationResult.Ok(vmId, VmState.Paused);
+            return VmOperationResult.Ok(vmId, VmStatus.Paused);
         }
 
         return VmOperationResult.Fail(vmId, result.StandardError, "PAUSE_FAILED");
@@ -1511,9 +1510,9 @@ public class LibvirtVmManager : IVmManager
 
         if (result.Success)
         {
-            instance.State = VmState.Running;
-            await _repository.UpdateVmStateAsync(vmId, VmState.Running);
-            return VmOperationResult.Ok(vmId, VmState.Running);
+            instance.Status = VmStatus.Running;
+            await _repository.UpdateVmStateAsync(vmId, VmStatus.Running);
+            return VmOperationResult.Ok(vmId, VmStatus.Running);
         }
 
         return VmOperationResult.Fail(vmId, result.StandardError, "RESUME_FAILED");
@@ -1525,39 +1524,39 @@ public class LibvirtVmManager : IVmManager
         return Task.FromResult(vm);
     }
 
-    public IReadOnlyCollection<VmInstance> GetAllVms(VmType? vmType = null, VmState? vmState = null)
+    public IReadOnlyCollection<VmInstance> GetAllVms(VmRole? vmType = null, Shared.Enums.VmStatus? vmState = null)
     {
         lock (_vms)
         {
             IEnumerable<VmInstance> result = _vms.Values;
 
             if (vmType != null)
-                result = result.Where(vm => vm.Spec.VmType == vmType);
+                result = result.Where(vm => vm.Spec.Role == vmType);
             if (vmState != null)
-                result = result.Where(vm => vm.State == vmState);
+                result = result.Where(vm => vm.Status == vmState);
 
             return result.ToList();
         }
     }
 
-    public IReadOnlyCollection<VmInstance> GetSystemVms(VmState? vmState = null)
+    public IReadOnlyCollection<VmInstance> GetSystemVms(Shared.Enums.VmStatus? vmState = null)
     {
         lock (_vms)
         {
             IEnumerable<VmInstance> result = _vms.Values
-                .Where(vm => SystemVmConstants.Types.Contains(vm.Spec.VmType));
+                .Where(vm => vm.Spec.Category == VmCategory.System);
 
             if (vmState != null)
-                result = result.Where(vm => vm.State == vmState);
+                result = result.Where(vm => vm.Status == vmState);
 
             return result.ToList();
         }
     }
 
-    public VmInstance? GetRunningSystemVm(VmType? vmType = null)
+    public VmInstance? GetRunningSystemVm(VmRole? vmType = null)
     {
-        var systemVms = GetSystemVms(VmState.Running);
-        return systemVms.Where(vm => vm.Spec.VmType == vmType).FirstOrDefault();
+        var systemVms = GetSystemVms(VmStatus.Running);
+        return systemVms.Where(vm => vm.Spec.Role == vmType).FirstOrDefault();
     }
 
     public IReadOnlyCollection<VmInstance> GetRunningVms()
@@ -1565,7 +1564,7 @@ public class LibvirtVmManager : IVmManager
         lock (_vms)
         {
             return _vms.Values
-                .Where(v => v.State == VmState.Running)
+                .Where(v => v.Status == VmStatus.Running)
                 .ToList();
         }
     }
@@ -1574,7 +1573,7 @@ public class LibvirtVmManager : IVmManager
     {
         var usage = new VmResourceUsage { MeasuredAt = DateTime.UtcNow };
 
-        if (!_vms.TryGetValue(vmId, out var vm) || vm.State != VmState.Running)
+        if (!_vms.TryGetValue(vmId, out var vm) || vm.Status != VmStatus.Running)
         {
             return usage;
         }
@@ -1831,7 +1830,7 @@ public class LibvirtVmManager : IVmManager
     {
         _logger.LogInformation(
             "VM {VmId}: Creating cloud-init ISO using template for VM type {VmType}",
-            spec.Id, spec.VmType);
+            spec.Id, spec.Role);
 
         try
         {
@@ -1851,7 +1850,7 @@ public class LibvirtVmManager : IVmManager
             var hasSshKey = !string.IsNullOrEmpty(spec.SshPublicKey);
             string sshKeysBlock = "";
 
-            if (hasSshKey && spec.VmType != VmType.Relay)
+            if (hasSshKey && spec.Role != VmRole.Relay)
             {
                 var sb = new StringBuilder();
                 sb.AppendLine("ssh_authorized_keys:");
@@ -1881,7 +1880,7 @@ public class LibvirtVmManager : IVmManager
             var hasPassword = !string.IsNullOrEmpty(password);
             string passwordBlock = "";
 
-            if (hasPassword && spec.VmType != VmType.Relay)
+            if (hasPassword && spec.Role != VmRole.Relay)
             {
                 var sb = new StringBuilder();
                 // Use chpasswd.users format (cloud-init 22.3+, Ubuntu 22.04 and 24.04).
@@ -1920,7 +1919,7 @@ public class LibvirtVmManager : IVmManager
             // =====================================================
             string passwordSshCommandsBlock = "";
 
-            if (hasPassword && spec.VmType != VmType.Relay)
+            if (hasPassword && spec.Role != VmRole.Relay)
             {
                 // Generate a single compound command with && to chain multiple operations
                 var commands = new[]
@@ -2094,7 +2093,7 @@ public class LibvirtVmManager : IVmManager
             {
                 // unchanged — genuine misconfiguration for a non-migration CreateVm
                 throw new InvalidOperationException(
-                    $"VM {spec.Id} ({spec.VmType}): spec.CloudInitUserData is null/empty. " +
+                    $"VM {spec.Id} ({spec.Role}): spec.CloudInitUserData is null/empty. " +
                     "The orchestrator must pre-render and send userData for every CreateVm " +
                     "command. Investigate the originating CreateVm caller in the orchestrator.");
             }
@@ -2228,7 +2227,7 @@ public class LibvirtVmManager : IVmManager
                 "✓ VM {VmId}: Created cloud-init ISO at {Path} (type: {VmType}, password: {HasPassword}, ssh: {HasSshKey}, CA: {HasCA})",
                 spec.Id,
                 isoPath,
-                spec.VmType,
+                spec.Role,
                 hasPassword,
                 hasSshKey,
                 File.Exists(caPublicKeyPath));
@@ -3104,7 +3103,7 @@ public class LibvirtVmManager : IVmManager
         CancellationToken ct = default)
     {
         var vmId = vm.VmId;
-        if (vm.Spec.VmType == VmType.Relay)
+        if (vm.Spec.Role == VmRole.Relay)
         {
             _logger.LogInformation("VM {VmId} is Relay type - skipping quota application", vmId);
             return false;
@@ -3159,8 +3158,8 @@ public class LibvirtVmManager : IVmManager
         try
         {
             var blockstoreVm = _vms.Values
-                .FirstOrDefault(v => v.Spec.VmType == VmType.BlockStore &&
-                                     v.State == VmState.Running);
+                .FirstOrDefault(v => v.Spec.Role == VmRole.BlockStore &&
+                                     v.Status == VmStatus.Running);
             if (blockstoreVm == null || string.IsNullOrEmpty(blockstoreVm.Spec.IpAddress))
             {
                 _logger.LogDebug("VM {VmId}: no local BlockStore VM running — skipping owner block cleanup", vmId);

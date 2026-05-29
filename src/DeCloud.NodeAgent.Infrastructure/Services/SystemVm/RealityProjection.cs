@@ -2,6 +2,7 @@
 using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Core.Models.Reality;
+using DeCloud.Shared.Enums;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Logging;
 
@@ -17,7 +18,7 @@ namespace DeCloud.NodeAgent.Infrastructure.Services.SystemVm;
 ///
 ///   2. Fetch all locally-tracked VMs and filter to those whose
 ///      <c>Spec.VmType</c> matches the role. Filter out VMs in
-///      <see cref="VmState.NotFound"/> or <see cref="VmState.Deleted"/> —
+///      <see cref="Shared.Enums.VmStatus.NotFound"/> or <see cref="Shared.Enums.VmStatus.Deleted"/> —
 ///      those are tombstones, not present reality.
 ///
 ///   3. Empty filtered set → <see cref="Reality.None"/>.
@@ -71,9 +72,8 @@ public sealed class RealityProjection : IRealityProjection
         // unless we want to enumerate twice.
         var matches = _vmManager.GetAllVms()
             .Where(vm =>
-                vm.Spec.VmType == targetVmType.Value &&
-                vm.State != VmState.NotFound &&
-                vm.State != VmState.Deleted)
+                vm.Spec.Role == targetVmType.Value &&
+                vm.Status != VmStatus.Deleted)
             .ToList();
 
         return matches.Count switch
@@ -88,12 +88,12 @@ public sealed class RealityProjection : IRealityProjection
 
     private static RealitySnapshot Classify(VmInstance vm)
     {
-        var healthy = vm.State == VmState.Running && vm.IsFullyReady;
+        var healthy = vm.Status == Shared.Enums.VmStatus.Running && vm.IsFullyReady;
         return new RealitySnapshot
         {
             State = healthy ? Reality.Healthy : Reality.Unhealthy,
             VmId = vm.VmId,
-            VmState = vm.State,
+            VmState = vm.Status,
         };
     }
 
@@ -110,12 +110,12 @@ public sealed class RealityProjection : IRealityProjection
             "stragglers will be cleaned up on subsequent cycles.",
             role,
             matches.Count,
-            string.Join(", ", matches.Select(v => $"{v.VmId}({v.State})")));
+            string.Join(", ", matches.Select(v => $"{v.VmId}({v.Status})")));
 
         // Prefer a Healthy VM if any — keep the active deploy, let stragglers
         // be cleaned up later (they're not blocking the matrix from converging).
         var healthy = matches
-            .FirstOrDefault(vm => vm.State == VmState.Running && vm.IsFullyReady);
+            .FirstOrDefault(vm => vm.Status == Shared.Enums.VmStatus.Running && vm.IsFullyReady);
 
         if (healthy is not null)
         {
@@ -123,7 +123,7 @@ public sealed class RealityProjection : IRealityProjection
             {
                 State = Reality.Healthy,
                 VmId = healthy.VmId,
-                VmState = healthy.State,
+                VmState = healthy.Status,
             };
         }
 
@@ -138,7 +138,7 @@ public sealed class RealityProjection : IRealityProjection
         {
             State = Reality.Unhealthy,
             VmId = mostRecent.VmId,
-            VmState = mostRecent.State,
+            VmState = mostRecent.Status,
         };
     }
 
@@ -149,11 +149,11 @@ public sealed class RealityProjection : IRealityProjection
     /// Inlined as a switch (rather than a shared mapping helper) because the
     /// set is fixed and small; abstraction would obscure rather than help.
     /// </summary>
-    private static VmType? MapRoleToVmType(string canonicalRole) => canonicalRole switch
+    private static VmRole? MapRoleToVmType(string canonicalRole) => canonicalRole switch
     {
-        ObligationRole.Dht => VmType.Dht,
-        ObligationRole.Relay => VmType.Relay,
-        ObligationRole.BlockStore => VmType.BlockStore,
+        ObligationRole.Dht => VmRole.Dht,
+        ObligationRole.Relay => VmRole.Relay,
+        ObligationRole.BlockStore => VmRole.BlockStore,
         _ => null,
     };
 }

@@ -1,6 +1,6 @@
-﻿using DeCloud.NodeAgent.Core.Constants;
-using DeCloud.NodeAgent.Core.Interfaces;
+﻿using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.Shared.Enums;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using System.Net.Sockets;
@@ -52,7 +52,7 @@ public class SystemVmWatchdogService : BackgroundService
         // regardless of agent-side state. A Failed VM with an orphaned tap has no
         // network and cannot self-heal without the bridge being restored first.
         var runningVms = _vmManager.GetAllVms()
-            .Where(v => v.State is VmState.Running or VmState.Failed)
+            .Where(v => v.Status is VmStatus.Running or VmStatus.Error)
             .ToList();
 
         if (runningVms.Count == 0) return;
@@ -270,8 +270,8 @@ public class SystemVmWatchdogService : BackgroundService
         // After re-attaching tap interfaces, give the VMs' network stacks time to
         // recover before probing them. Without this delay, health checks fire while
         // the bridge attachment is still propagating and timeout erroneously.
-        if (_vmManager.GetAllVms().Any(v => SystemVmConstants.Types.Contains(v.Spec.VmType)
-                                         && v.State is VmState.Running or VmState.Failed))
+        if (_vmManager.GetAllVms().Any(v => v.Spec.Category == VmCategory.System
+                                         && v.Status is VmStatus.Running or VmStatus.Error))
         {
             _logger.LogDebug(
                 "SystemVmStartupService: waiting 30s for VM networking to stabilize before zombie check");
@@ -288,9 +288,9 @@ public class SystemVmWatchdogService : BackgroundService
         // the watchdog fired, but they are still physically running in libvirt.
         // A Failed system VM with a dead guest agent is a zombie and must be hard-reset.
         var candidateZombies = _vmManager.GetAllVms()
-            .Where(v => SystemVmConstants.Types.Contains(v.Spec.VmType)
-                     && v.Spec.VmType != VmType.Relay
-                     && v.State is VmState.Running or VmState.Failed
+            .Where(v => v.Spec.Category == VmCategory.System
+                     && v.Spec.Role != VmRole.Relay
+                     && v.Status is VmStatus.Running or VmStatus.Error
                      && !string.IsNullOrEmpty(v.Spec.IpAddress))
             .ToList();
 
@@ -308,7 +308,7 @@ public class SystemVmWatchdogService : BackgroundService
 
                 _logger.LogDebug(
                     "SystemVmStartupService: VM {VmId} ({VmType}) health check returned {Status} — not a zombie",
-                    candidate.VmId, candidate.Spec.VmType, (int)response.StatusCode);
+                    candidate.VmId, candidate.Spec.Role, (int)response.StatusCode);
             }
             catch (HttpRequestException ex) when (
                 ex.InnerException is SocketException se &&
@@ -317,7 +317,7 @@ public class SystemVmWatchdogService : BackgroundService
                 // Connection refused = nginx is not running = systemd/services are dead
                 _logger.LogDebug(
                     "SystemVmStartupService: VM {VmId} ({VmType}) port 80 refused — zombie confirmed",
-                    candidate.VmId, candidate.Spec.VmType);
+                    candidate.VmId, candidate.Spec.Role);
                 zombieVms.Add(candidate);
             }
             catch (Exception ex)
@@ -325,7 +325,7 @@ public class SystemVmWatchdogService : BackgroundService
                 // Timeout or other error — be conservative, don't hard reset
                 _logger.LogDebug(ex,
                     "SystemVmStartupService: VM {VmId} ({VmType}) health check inconclusive — skipping",
-                    candidate.VmId, candidate.Spec.VmType);
+                    candidate.VmId, candidate.Spec.Role);
             }
         }
 
@@ -334,7 +334,7 @@ public class SystemVmWatchdogService : BackgroundService
             _logger.LogWarning(
                 "SystemVmStartupService: system VM {VmId} ({VmType}) is running but guest agent " +
                 "is not responding (zombie — internal services dead). Hard resetting.",
-                vm.VmId, vm.Spec.VmType);
+                vm.VmId, vm.Spec.Role);
 
             // virsh destroy + start = clean hard power cycle. No guest cooperation needed.
             await _executor.ExecuteAsync("virsh", $"destroy {vm.VmId}", ct);
@@ -344,7 +344,7 @@ public class SystemVmWatchdogService : BackgroundService
             if (resetResult.Success)
                 _logger.LogInformation(
                     "✓ Zombie system VM {VmId} ({VmType}) hard reset — services will restart via systemd",
-                    vm.VmId, vm.Spec.VmType);
+                    vm.VmId, vm.Spec.Role);
             else
                 _logger.LogWarning(
                     "✗ Failed to hard reset zombie VM {VmId}: {Error}",
@@ -357,8 +357,8 @@ public class SystemVmWatchdogService : BackgroundService
                 zombieVms.Count);
 
         var vms = _vmManager.GetAllVms()
-            .Where(v => SystemVmConstants.Types.Contains(v.Spec.VmType)
-                     && v.State is VmState.Stopped or VmState.Failed)
+            .Where(v => v.Spec.Category == VmCategory.System
+                     && v.Status is VmStatus.Stopped or VmStatus.Error)
             .ToList();
 
         if (vms.Count == 0)
@@ -377,7 +377,7 @@ public class SystemVmWatchdogService : BackgroundService
             {
                 _logger.LogInformation(
                     "Starting system VM {VmId} ({VmType}) after node restart",
-                    vm.VmId, vm.Spec.VmType);
+                    vm.VmId, vm.Spec.Role);
 
                 var result = await _vmManager.StartVmAsync(vm.VmId, ct);
 
@@ -385,14 +385,14 @@ public class SystemVmWatchdogService : BackgroundService
                 {
                     _logger.LogInformation(
                         "✓ System VM {VmId} ({VmType}) started — services will re-register via heartbeat",
-                        vm.VmId, vm.Spec.VmType);
+                        vm.VmId, vm.Spec.Role);
                 }
                 else
                 {
                     _logger.LogWarning(
                         "✗ System VM {VmId} ({VmType}) failed to start: {Error} — " +
                         "orchestrator reconciliation will redeploy",
-                        vm.VmId, vm.Spec.VmType, result.ErrorMessage);
+                        vm.VmId, vm.Spec.Role, result.ErrorMessage);
                 }
             }
             catch (Exception ex)
@@ -400,7 +400,7 @@ public class SystemVmWatchdogService : BackgroundService
                 _logger.LogError(ex,
                     "Exception starting system VM {VmId} ({VmType}) — " +
                     "orchestrator reconciliation will redeploy",
-                    vm.VmId, vm.Spec.VmType);
+                    vm.VmId, vm.Spec.Role);
             }
         }
     }

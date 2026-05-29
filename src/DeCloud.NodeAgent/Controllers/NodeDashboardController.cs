@@ -3,6 +3,7 @@ using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
+using DeCloud.Shared.Enums;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 using System.Text.Json;
@@ -946,7 +947,7 @@ public class NodeDashboardController : ControllerBase
 
         // Build tap-interface → VM mapping from all running VMs
         var tapToVm = new Dictionary<string, (string Id, string Name)>(StringComparer.Ordinal);
-        foreach (var vm in _vmManager.GetAllVms().Where(v => v.State == VmState.Running))
+        foreach (var vm in _vmManager.GetAllVms().Where(v => v.Status == Shared.Enums.VmStatus.Running))
         {
             var r = await _executor.ExecuteAsync("virsh", $"domiflist {vm.VmId}",
                 TimeSpan.FromSeconds(3), ct);

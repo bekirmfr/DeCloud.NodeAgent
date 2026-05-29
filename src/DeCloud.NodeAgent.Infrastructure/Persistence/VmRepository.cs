@@ -181,7 +181,8 @@ public class VmRepository : IDisposable
                 BaseImageHash TEXT,
                 SshPublicKey TEXT,
                 EncryptedPassword TEXT,
-                VmType TEXT NOT NULL DEFAULT 'General',
+                Category TEXT NOT NULL DEFAULT 'Tenant',
+                Role TEXT NOT NULL DEFAULT 'General',
                 LabelsJson TEXT,
                 TargetNodeId TEXT,
                 DeletionReason TEXT,
@@ -469,14 +470,14 @@ public class VmRepository : IDisposable
                  State, IpAddress, MacAddress, VncPort, Pid,
                  CreatedAt, StartedAt, StoppedAt, LastUpdated, DiskPath, ConfigPath,
                  BaseImageUrl, BaseImageHash, SshPublicKey, EncryptedPassword,
-                 VmType, LabelsJson, TargetNodeId)
+                 Category, Role, LabelsJson, TargetNodeId)
                 VALUES
                 (@VmId, @Name, @ServicesJson, @OwnerId, @QualityTier, @ReplicationFactor, @ComputePointCost,
                  @VirtualCpuCores, @MemoryBytes, @DiskBytes,
                  @State, @IpAddress, @MacAddress, @VncPort, @Pid,
                  @CreatedAt, @StartedAt, @StoppedAt, @LastUpdated, @DiskPath, @ConfigPath,
                  @BaseImageUrl, @BaseImageHash, @SshPublicKey, @EncryptedPassword,
-                 @VmType, @LabelsJson, @TargetNodeId)
+                 @Category, @Role, @LabelsJson, @TargetNodeId)
             ";
 
             using var cmd = _connection.CreateCommand();
@@ -492,7 +493,7 @@ public class VmRepository : IDisposable
             cmd.Parameters.AddWithValue("@VirtualCpuCores", vm.Spec.VirtualCpuCores);
             cmd.Parameters.AddWithValue("@MemoryBytes", vm.Spec.MemoryBytes);
             cmd.Parameters.AddWithValue("@DiskBytes", vm.Spec.DiskBytes);
-            cmd.Parameters.AddWithValue("@State", vm.State.ToString());
+            cmd.Parameters.AddWithValue("@State", vm.Status.ToString());
             cmd.Parameters.AddWithValue("@IpAddress", vm.Spec.IpAddress ?? (object)DBNull.Value);
             cmd.Parameters.AddWithValue("@MacAddress", vm.Spec.MacAddress ?? (object)DBNull.Value);
             cmd.Parameters.AddWithValue("@VncPort", vm.VncPort ?? (object)DBNull.Value);
@@ -509,7 +510,8 @@ public class VmRepository : IDisposable
             cmd.Parameters.AddWithValue("@ReplicationFactor", vm.Spec.ReplicationFactor);
             // SECURITY: Only store encrypted password, NEVER plaintext
             cmd.Parameters.AddWithValue("@EncryptedPassword", vm.Spec.WalletEncryptedPassword ?? (object)DBNull.Value);
-            cmd.Parameters.AddWithValue("@VmType", vm.Spec.VmType.ToString());
+            cmd.Parameters.AddWithValue("@Category", vm.Spec.Category.ToString());
+            cmd.Parameters.AddWithValue("@Role", vm.Spec.Role.ToString());
             cmd.Parameters.AddWithValue("@LabelsJson",
                 vm.Spec.Labels is { Count: > 0 }
                     ? JsonSerializer.Serialize(vm.Spec.Labels)
@@ -519,7 +521,7 @@ public class VmRepository : IDisposable
 
             await cmd.ExecuteNonQueryAsync();
 
-            _logger.LogDebug("Saved VM {VmId} to database (State: {State})", vm.VmId, vm.State);
+            _logger.LogDebug("Saved VM {VmId} to database (State: {State})", vm.VmId, vm.Status);
         }
         finally
         {
@@ -603,7 +605,7 @@ public class VmRepository : IDisposable
     /// <summary>
     /// Update VM state (optimized for frequent state changes)
     /// </summary>
-    public async Task UpdateVmStateAsync(string vmId, VmState newState)
+    public async Task UpdateVmStateAsync(string vmId, VmStatus newState)
     {
         await _lock.WaitAsync();
         try
@@ -911,7 +913,7 @@ public class VmRepository : IDisposable
                     SshPublicKey = GetNullableString(reader, "SshPublicKey"),
                     ReplicationFactor = reader.GetInt32(reader.GetOrdinal("ReplicationFactor")),
                 },
-                State = Enum.Parse<VmState>(reader.GetString(reader.GetOrdinal("State"))),
+                Status = Enum.Parse<VmStatus>(reader.GetString(reader.GetOrdinal("State"))),
                 VncPort = GetNullableInt(reader, "VncPort"),
                 Pid = GetNullableInt(reader, "Pid"),
                 CreatedAt = DateTime.Parse(reader.GetString(reader.GetOrdinal("CreatedAt"))),
@@ -925,10 +927,12 @@ public class VmRepository : IDisposable
             // Restore VmType — critical for system VM classification (Relay/DHT/BlockStore)
             // after restarts. Without this every VM loads as VmType.General.
             var vmTypeStr = GetNullableString(reader, "VmType");
-            if (!string.IsNullOrEmpty(vmTypeStr) &&
-                Enum.TryParse<VmType>(vmTypeStr, ignoreCase: true, out var parsedVmType))
+            if (!string.IsNullOrEmpty(vmTypeStr))
             {
-                vm.Spec.VmType = parsedVmType;
+                if (Enum.TryParse<VmCategory>(GetNullableString(reader, "Category"), true, out var cat))
+                    vm.Spec.Category = cat;
+                if (Enum.TryParse<VmRole>(GetNullableString(reader, "Role"), true, out var role))
+                    vm.Spec.Role = role;
             }
 
             // Restore Labels — role label is the dashboard fallback for type classification

@@ -2,6 +2,7 @@ using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.Shared.Contracts;
 using DeCloud.Shared.Enums;
+using DeCloud.Shared.Models;
 
 namespace DeCloud.NodeAgent.Core.Interfaces;
 
@@ -65,10 +66,10 @@ public interface IVmManager
     Task<VmOperationResult> ResumeVmAsync(string vmId, CancellationToken ct = default);
     
     Task<VmInstance?> GetVmAsync(string vmId, CancellationToken ct = default);
-    IReadOnlyCollection<VmInstance> GetAllVms(VmType? vmType = null, VmState? vmState = null);
-    IReadOnlyCollection<VmInstance> GetSystemVms(VmState? vmState = null);
+    IReadOnlyCollection<VmInstance> GetAllVms(VmRole? vmType = null, Shared.Enums.VmStatus? vmState = null);
+    IReadOnlyCollection<VmInstance> GetSystemVms(Shared.Enums.VmStatus? vmState = null);
     IReadOnlyCollection<VmInstance> GetRunningVms();
-    VmInstance? GetRunningSystemVm(VmType? vmType = null);
+    VmInstance? GetRunningSystemVm(VmRole? vmType = null);
     Task<VmResourceUsage> GetVmUsageAsync(string vmId, CancellationToken ct = default);
     Task ReconcileAllWithLibvirtAsync(CancellationToken ct = default);
     Task<bool> VmExistsAsync(string vmId, CancellationToken ct = default);
@@ -213,7 +214,7 @@ public interface IOrchestratorClient
         CancellationToken ct = default);
 
     Task<RegistrationResult> RegisterWithPendingAuthAsync(CancellationToken ct = default);
-    Task<RegistrationResult> RegisterNodeAsync(NodeRegistration registration, CancellationToken ct = default);
+    Task<RegistrationResult> RegisterNodeAsync(NodeRegistrationRequest registration, CancellationToken ct = default);
     Task<bool> SendHeartbeatAsync(Heartbeat heartbeat, CancellationToken ct = default);
 
     Task<List<PendingCommand>> GetPendingCommandsAsync(CancellationToken ct = default);
@@ -438,20 +439,6 @@ public class VmAllocationSummary
     public int Points { get; set; }
     public long MemoryBytes { get; set; }
     public VmStatus Status { get; set; }
-}
-
-public enum VmStatus
-{
-    Pending,        // 0 - Waiting to be scheduled
-    Scheduling,     // 1 - Finding a node
-    Provisioning,   // 2 - Being created on node
-    Running,        // 3 - Active and running
-    Stopping,       // 4 - Being stopped
-    Stopped,        // 5 - Stopped but resources reserved
-    Deleting,       // 6 - Deletion in progress, waiting for node confirmation
-    Migrating,      // 7 - Being moved to another node
-    Error,          // 8 - Something went wrong
-    Deleted         // 9 - Deletion confirmed, resources freed
 }
 
 /// <summary>

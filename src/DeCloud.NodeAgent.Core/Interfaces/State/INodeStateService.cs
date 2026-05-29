@@ -9,6 +9,7 @@
 
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.Shared.Contracts;
+using DeCloud.Shared.Models;
 
 namespace DeCloud.NodeAgent.Core.Interfaces.State;
 

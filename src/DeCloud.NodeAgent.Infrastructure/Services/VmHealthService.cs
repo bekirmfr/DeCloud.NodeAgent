@@ -1,6 +1,7 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
+using DeCloud.Shared.Enums;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -50,7 +51,7 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
 
                     foreach (var vm in vms)
                     {
-                        if (vm.Spec.VmType == VmType.Relay)
+                        if (vm.Spec.Role == VmRole.Relay)
                             await CheckRelayVmNatRulesAsync();
                     }
 
@@ -62,7 +63,7 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                     foreach (var vm in vms)  // continue existing loop
                     {
 
-                        if (vm.State != VmState.Failed)
+                        if (vm.Status != Shared.Enums.VmStatus.Error)
                         {
                             // System VMs are managed exclusively by orchestrator reconciliation.
                             // Their health authority is the orchestrator, which has its own
@@ -71,7 +72,7 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                             // qemu-guest-agent, which may not respond after network isolation
                             // or guest OS issues, producing permanent false positives.
                             // The watchdog's zombie check handles local recovery instead.
-                            if (vm.Spec.VmType is VmType.Relay or VmType.Dht or VmType.BlockStore)
+                            if (vm.Spec.Role is VmRole.Relay or VmRole.Dht or VmRole.BlockStore)
                                 continue;
 
                             // Guard: skip VMs with no established heartbeat baseline.
@@ -102,7 +103,7 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                                         "VM {VmId} failed to restart — marking as Failed to stop retry loop. " +
                                         "Orchestrator reconciliation will redeploy.",
                                         vm.VmId);
-                                    vm.State = VmState.Failed;
+                                    vm.Status = Shared.Enums.VmStatus.Error;
                                 }
                                 else
                                 {
@@ -134,8 +135,8 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
         public async Task CheckRelayVmNatRulesAsync(CancellationToken ct = default)
         {
             foreach (var vm in _vmManager.GetAllVms().Where(v =>
-                v.Spec.VmType == VmType.Relay &&
-                v.State == VmState.Running))
+                v.Spec.Role == VmRole.Relay &&
+                v.Status == Shared.Enums.VmStatus.Running))
             {
                 // Check if we recently verified NAT rules for this VM
                 await _natCheckLock.WaitAsync(ct);
@@ -206,7 +207,7 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                     }
                     finally
                     {
-                    _natCheckLock.Release();
+                        _natCheckLock.Release();
                     }
                 }
             }
@@ -215,8 +216,8 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
         private async Task CleanStaleRelayNatIfNotRelayNodeAsync(CancellationToken ct)
         {
             var hasRelayVm = _vmManager.GetAllVms()
-                .Any(v => v.Spec.VmType == VmType.Relay &&
-                          v.State is VmState.Running or VmState.Starting or VmState.Creating);
+                .Any(v => v.Spec.Role == VmRole.Relay &&
+                          v.Status is VmStatus.Running or VmStatus.Provisioning or VmStatus.Provisioning);
 
             if (hasRelayVm) return; // Relay node — rules are managed by CheckRelayVmNatRulesAsync
 

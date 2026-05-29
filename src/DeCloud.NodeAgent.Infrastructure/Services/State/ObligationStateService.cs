@@ -2,6 +2,7 @@ using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Core.Models.State;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
+using DeCloud.Shared.Enums;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Logging;
 
@@ -33,11 +34,11 @@ public sealed class ObligationStateService : IObligationStateService
         _logger = logger;
     }
 
-    public static Dictionary<string, VmType> RoleToVmType = new Dictionary<string, VmType>
+    public static Dictionary<string, VmRole> RoleToVmType = new Dictionary<string, VmRole>
     {
-        ["relay"] = VmType.Relay,
-        ["dht"] = VmType.Dht,
-        ["blockstore"] = VmType.BlockStore,
+        ["relay"] = VmRole.Relay,
+        ["dht"] = VmRole.Dht,
+        ["blockstore"] = VmRole.BlockStore,
     };
 
     // ════════════════════════════════════════════════════════════════════

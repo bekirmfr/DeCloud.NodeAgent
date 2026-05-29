@@ -1,6 +1,7 @@
 ﻿using System.Security.Cryptography;
 using System.Text;
 using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.Shared.Enums;
 using Microsoft.Extensions.Logging;
 
 namespace DeCloud.NodeAgent.Infrastructure.Services;
@@ -165,9 +166,9 @@ public class EphemeralSshKeyService : IEphemeralSshKeyService
             return SshKeyInjectionResult.Fail($"VM {vmId} not found");
         }
 
-        if (vm.State != Core.Models.VmState.Running)
+        if (vm.Status != Shared.Enums.VmStatus.Running)
         {
-            return SshKeyInjectionResult.Fail($"VM {vmId} is not running (state: {vm.State})");
+            return SshKeyInjectionResult.Fail($"VM {vmId} is not running (state: {vm.Status})");
         }
 
         var fingerprint = CalculateFingerprint(publicKey);

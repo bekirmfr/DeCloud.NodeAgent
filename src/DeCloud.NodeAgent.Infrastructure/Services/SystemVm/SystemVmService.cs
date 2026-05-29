@@ -2,6 +2,7 @@
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.Shared.Enums;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Logging;
 using System.Collections.Concurrent;
@@ -60,8 +61,8 @@ public sealed class SystemVmService : ISystemVmService
         return _vmManager
             .GetAllVms()
             .FirstOrDefault(v =>
-                v.Spec.VmType == vmType &&
-                v.State == VmState.Running &&
+                v.Spec.Role == vmType &&
+                v.Status == Shared.Enums.VmStatus.Running &&
                 !string.IsNullOrEmpty(v.Spec.IpAddress));
     }
 

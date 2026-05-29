@@ -1,4 +1,5 @@
 ﻿using DeCloud.NodeAgent.Core.Models;
+using DeCloud.Shared.Enums;
 using DeCloud.Shared.Models;
 
 namespace DeCloud.NodeAgent.Core.Interfaces.SystemVm;
@@ -20,12 +21,12 @@ public interface ISystemVmService
     static readonly IReadOnlyList<string> Roles = ObligationRole.All;
 
     /// <summary>Role string → VmType mapping.</summary>
-    static readonly IReadOnlyDictionary<string, VmType> RoleToVmType =
-        new Dictionary<string, VmType>(StringComparer.OrdinalIgnoreCase)
+    static readonly IReadOnlyDictionary<string, VmRole> RoleToVmType =
+        new Dictionary<string, VmRole>(StringComparer.OrdinalIgnoreCase)
         {
-            [ObligationRole.Relay] = VmType.Relay,
-            [ObligationRole.Dht] = VmType.Dht,
-            [ObligationRole.BlockStore] = VmType.BlockStore,
+            [ObligationRole.Relay] = VmRole.Relay,
+            [ObligationRole.Dht] = VmRole.Dht,
+            [ObligationRole.BlockStore] = VmRole.BlockStore,
         };
 
     // ── VM lookup ────────────────────────────────────────────────────────

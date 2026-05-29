@@ -3,6 +3,7 @@ using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.NodeAgent.Infrastructure.Services.CloudInit;
+using DeCloud.Shared.Enums;
 using DeCloud.Shared.Models;
 using Microsoft.AspNetCore.Mvc;
 using System.Net;
@@ -274,8 +275,8 @@ public class ObligationStateController : ControllerBase
 
         var systemVm = _vmManager.GetAllVms()
             .FirstOrDefault(v =>
-                v.Spec.VmType == expectedType &&
-                v.State is VmState.Running or VmState.Starting or VmState.Creating);
+                v.Spec.Role == expectedType &&
+                v.Status is VmStatus.Running or VmStatus.Provisioning);
 
         if (systemVm is null)
         {
@@ -314,14 +315,14 @@ public class ObligationStateController : ControllerBase
     }
 
     /// <summary>
-    /// Maps an obligation role name to the corresponding <see cref="VmType"/>.
+    /// Maps an obligation role name to the corresponding <see cref="VmRole"/>.
     /// Returns null for unrecognised roles.
     /// </summary>
-    private static VmType? RoleToVmType(string role) => role switch
+    private static VmRole? RoleToVmType(string role) => role switch
     {
-        ObligationRole.Relay => VmType.Relay,
-        ObligationRole.Dht => VmType.Dht,
-        ObligationRole.BlockStore => VmType.BlockStore,
+        ObligationRole.Relay => VmRole.Relay,
+        ObligationRole.Dht => VmRole.Dht,
+        ObligationRole.BlockStore => VmRole.BlockStore,
         _ => null,
     };
 

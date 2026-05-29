@@ -368,16 +368,16 @@ public sealed class SystemVmReconciler : BackgroundService
     ///      persist via <see cref="VmRepository"/>.
     ///   9. Clear the outstanding command in <c>finally</c>.
     /// </summary>
-    private async Task ActCreateAsync(string role, CancellationToken ct)
+    private async Task ActCreateAsync(string obligationRole, CancellationToken ct)
     {
         // ── 1. Fetch template ───────────────────────────────────────────
-        var templateJson = await _obligationState.GetSystemTemplateJsonAsync(role, ct);
+        var templateJson = await _obligationState.GetSystemTemplateJsonAsync(obligationRole, ct);
         if (templateJson is null)
         {
             _logger.LogInformation(
                 "SystemVmReconciler [{Role}]: no system template in SQLite — " +
                 "orchestrator hasn't seeded it yet (P10). Skipping Create this cycle.",
-                role);
+                obligationRole);
             return;
         }
 
@@ -393,7 +393,7 @@ public sealed class SystemVmReconciler : BackgroundService
             _logger.LogError(ex,
                 "SystemVmReconciler [{Role}]: failed to deserialise system template — " +
                 "template JSON may be corrupt. Skipping Create.",
-                role);
+                obligationRole);
             return;
         }
 
@@ -409,7 +409,7 @@ public sealed class SystemVmReconciler : BackgroundService
         // SyncVmStateFromHeartbeatAsync stamps the obligation with this UUID
         // on the next heartbeat after the libvirt domain reports healthy.
         var vmId = Guid.NewGuid().ToString();
-        var vmName = $"{role}-{vmId[..8]}";
+        var vmName = $"{obligationRole}-{vmId[..8]}";
 
         // ── 5. Cloud-init: render-time substitution + deferred __VM_ID__ ──
         // template.CloudInitContent is fully rendered by the orchestrator
@@ -422,19 +422,20 @@ public sealed class SystemVmReconciler : BackgroundService
         // VMs and removed in Phase 4.
         var cloudInit = template.CloudInitContent.Replace("__VM_ID__", vmId);
 
-        var vmType = role switch
+        var vmRole = obligationRole switch
         {
-            ObligationRole.Relay => VmType.Relay,
-            ObligationRole.Dht => VmType.Dht,
-            ObligationRole.BlockStore => VmType.BlockStore,
-            _ => throw new ArgumentException($"Unknown role: {role}")
+            ObligationRole.Relay => VmRole.Relay,
+            ObligationRole.Dht => VmRole.Dht,
+            ObligationRole.BlockStore => VmRole.BlockStore,
+            _ => throw new ArgumentException($"Unknown role: {obligationRole}")
         };
 
         var vmSpec = new VmSpec
         {
             Id = vmId,
             Name = vmName,
-            VmType = vmType,
+            Category = VmCategory.System,
+            Role = vmRole,
             VirtualCpuCores = template.VirtualCpuCores > 0 ? template.VirtualCpuCores : 1,
             MemoryBytes = template.MemoryBytes > 0
                                   ? template.MemoryBytes
@@ -466,7 +467,7 @@ public sealed class SystemVmReconciler : BackgroundService
                 //   those placeholders but find nothing to replace — a no-op.
                 //   Phase 4.1 removes those legacy substitution blocks entirely.
                 ["node-arch"] = arch,
-                ["system-vm-role"] = role,
+                ["system-vm-role"] = obligationRole,
                 ["system-vm-revision"] = template.Revision.ToString(),
                 // TODO (Phase 3 cleanup / BLOCKSTORE-FIX §6): replace Guid.NewGuid()
                 // above with obligation.VmId once NodeService.ReconcileNodeAsync stops
@@ -484,7 +485,7 @@ public sealed class SystemVmReconciler : BackgroundService
 
         // ── 6. Register outstanding command ─────────────────────────────
         var commandId = Guid.NewGuid().ToString();
-        _outstanding.Set(role, new OutstandingCommand
+        _outstanding.Set(obligationRole, new OutstandingCommand
         {
             CommandId = commandId,
             Kind = OutstandingCommandKind.Create,
@@ -513,16 +514,16 @@ public sealed class SystemVmReconciler : BackgroundService
                 _logger.LogError(
                     "SystemVmReconciler [{Role}]: CreateVm failed — {Error}. " +
                     "Will retry on next cycle.",
-                    role, result.ErrorMessage);
+                    obligationRole, result.ErrorMessage);
 
                 // Clear on failure — reality stays None so the next cycle retries.
-                _outstanding.Clear(role);
+                _outstanding.Clear(obligationRole);
                 return;
             }
 
             _logger.LogInformation(
                 "SystemVmReconciler [{Role}]: VM {VmId} created successfully",
-                role, vmId);
+                obligationRole, vmId);
 
             // ── Post-set services so VmReadinessMonitor knows what to probe ──
             if (template.Services.Count > 0)
@@ -534,9 +535,9 @@ public sealed class SystemVmReconciler : BackgroundService
         {
             _logger.LogError(ex,
                 "SystemVmReconciler [{Role}]: CreateVm threw — will retry on next cycle",
-                role);
+                obligationRole);
             // Clear on exception — reality stays None so the next cycle retries.
-            _outstanding.Clear(role);
+            _outstanding.Clear(obligationRole);
         }
     }
 

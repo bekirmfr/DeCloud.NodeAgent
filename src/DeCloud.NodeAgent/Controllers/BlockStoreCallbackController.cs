@@ -1,6 +1,7 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
+using DeCloud.Shared.Enums;
 using Microsoft.AspNetCore.Mvc;
 using System.Security.Cryptography;
 using System.Text;
@@ -168,8 +169,8 @@ public class BlockStoreCallbackController : ControllerBase
         // Find the local BlockStore VM
         var allVms = _vmManager.GetAllVms();
         var blockstoreVm = allVms.FirstOrDefault(v =>
-            v.Spec.VmType == VmType.BlockStore &&
-            v.State == VmState.Running);
+            v.Spec.Role == VmRole.BlockStore &&
+            v.Status == Shared.Enums.VmStatus.Running);
 
         if (blockstoreVm == null || string.IsNullOrEmpty(blockstoreVm.Spec.IpAddress))
         {

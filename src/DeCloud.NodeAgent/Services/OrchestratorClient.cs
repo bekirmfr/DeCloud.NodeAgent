@@ -212,7 +212,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         var sshCaPublicKey = await ReadSshCaPublicKeyAsync(ct);
 
         // Build registration request
-        var registration = new NodeRegistration
+        var registration = new NodeRegistrationRequest
         {
             MachineId = _nodeMetadata.MachineId,
             Name = _nodeMetadata.Name,
@@ -797,7 +797,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
     /// Register the node with the orchestrator.
     /// No token returned - future requests authenticated via wallet signature!
     /// </summary>
-    public async Task<RegistrationResult> RegisterNodeAsync(NodeRegistration request, CancellationToken ct = default)
+    public async Task<RegistrationResult> RegisterNodeAsync(NodeRegistrationRequest request, CancellationToken ct = default)
     {
         try
         {
@@ -1032,8 +1032,9 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         {
             VmId = v.VmId,
             Name = v.Name,
-            State = v.State.ToString(),
-            VmType = v.VmType.ToString(),
+            State = v.Status.ToString(),
+            Category = v.Category.ToString(),
+            Role = v.Role.ToString(),
             OwnerId = v.OwnerId ?? "unknown",
             IsIpAssigned = v.IsIpAssigned,
             IpAddress = v.IpAddress,
@@ -1048,7 +1049,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             GpuMode = v.GpuMode,
             GpuVramBytes = v.GpuVramBytes,
             ImageId = v.Name,
-            StartedAt = v.StartedAt,
+            StartedAt = v.CreatedAt,
             Services = v.Services?.Select(s => new HeartbeatServiceInfo
             {
                 Name = s.Name,

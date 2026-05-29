@@ -2,6 +2,7 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
+using DeCloud.Shared.Enums;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Logging;
 using System.Runtime.InteropServices;
@@ -1205,7 +1206,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         {
             var vms = _vmRepository.LoadAllVmsAsync().GetAwaiter().GetResult();
             return vms
-                .Where(v => v.State != VmState.Deleted)
+                .Where(v => v.Status != VmStatus.Deleted)
                 .Sum(v => v.Spec.ComputePointCost);
         }
         catch (Exception ex)
@@ -1230,7 +1231,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                 .Where(v =>
                     v.Spec.GpuMode == GpuMode.Passthrough
                     && !string.IsNullOrEmpty(v.Spec.GpuPciAddress)
-                    && v.State is not (VmState.Deleted or VmState.Stopped or VmState.Failed))
+                    && v.Status is not (VmStatus.Deleted or VmStatus.Stopped or VmStatus.Error))
                 .ToDictionary(
                     v => v.Spec.GpuPciAddress!,
                     v => v.VmId,
@@ -1263,8 +1264,8 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         {
             var vms = _vmRepository.LoadAllVmsAsync().GetAwaiter().GetResult();
             var active = vms
-                .Where(v => v.State is not
-                    (VmState.Deleted or VmState.Stopped or VmState.Failed))
+                .Where(v => v.Status is not
+                    (VmStatus.Deleted or VmStatus.Stopped or VmStatus.Error))
                 .ToList();
 
             // Passthrough: full GPU VRAM for each physically assigned GPU.

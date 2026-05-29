@@ -342,7 +342,8 @@ public class CommandProcessorService : BackgroundService
         string name = GetStringProperty(root, "name", "Name") ?? $"vm-{vmId?[..8]}";
         string ownerId = GetStringProperty(root, "ownerId", "OwnerId") ?? "unknown";
         string? password = GetStringProperty(root, "password", "Password");
-        int vmType = GetIntProperty(root, "vmType", "VmType") ?? 0;
+        int category = GetIntProperty(root, "category", "Category") ?? 0;
+        int role = GetIntProperty(root, "role", "Role") ?? 0;
         int replicationFactor = GetIntProperty(root, "replicationFactor", "ReplicationFactor") ?? 0;
         int qualityTier = GetIntProperty(root, "qualityTier", "QualityTier") ?? 3;
         int virtualCpuCores = GetIntProperty(root, "virtualCpuCores", "VirtualCpuCores") ?? 1;
@@ -430,7 +431,8 @@ public class CommandProcessorService : BackgroundService
             Id = vmId,
             Name = name,
             OwnerId = ownerId,
-            VmType = (VmType)vmType,
+            Category = (VmCategory)category,
+            Role = (VmRole)role,
             VirtualCpuCores = virtualCpuCores,
             QualityTier = (QualityTier)qualityTier,
             ComputePointCost = computePointCost,
@@ -455,17 +457,17 @@ public class CommandProcessorService : BackgroundService
         // Defense-in-depth: reject duplicate system VMs (DHT/Relay/BlockStore) with the same name.
         // The orchestrator's reconciliation loop can race and issue two CreateVm commands
         // for the same role before the first one is acknowledged.
-        if (vmSpec.VmType is VmType.Dht or VmType.Relay or VmType.BlockStore)
+        if (vmSpec.Role is VmRole.Dht or VmRole.Relay or VmRole.BlockStore)
         {
             var existingVms = _vmManager.GetAllVms();
             var duplicate = existingVms.FirstOrDefault(v =>
                 v.Name == name && v.VmId != vmId &&
-                v.State is not (VmState.Deleted or VmState.Failed));
+                v.Status is not (VmStatus.Deleted or VmStatus.Error));
             if (duplicate != null)
             {
                 _logger.LogWarning(
                     "Rejecting duplicate {VmType} VM {VmId} — a VM with the same name already exists: {ExistingVmId} (state: {State})",
-                    vmSpec.VmType, vmId, duplicate.VmId, duplicate.State);
+                    vmSpec.Role, vmId, duplicate.VmId, duplicate.Status);
                 return true; // Return true to ACK and prevent retry
             }
         }
@@ -536,7 +538,7 @@ public class CommandProcessorService : BackgroundService
         _logger.LogInformation(
             "Creating {VmType} type {Mode} {VmId}: {VCpus} vCPUs, {MemoryMB}MB RAM, " +
             "{DiskGB}GB disk, image: {ImageUrl}, quality tier: {QualityTier}, GPU: {GpuMode}",
-            vmSpec.VmType.ToString(), deploymentMode, vmId, virtualCpuCores,
+            vmSpec.Role.ToString(), deploymentMode, vmId, virtualCpuCores,
             memoryBytes / 1024 / 1024, diskBytes / 1024 / 1024 / 1024,
             deploymentMode == DeploymentMode.Container ? containerImage : baseImageUrl,
             qualityTier, vmSpec.GpuMode);
@@ -585,7 +587,7 @@ public class CommandProcessorService : BackgroundService
         {
             _logger.LogInformation(
                 "{VmType} VM {VmId} created and started successfully on {Architecture} host",
-                vmSpec.VmType.ToString(), vmId,
+                vmSpec.Role.ToString(), vmId,
                 (await _resourceDiscovery.GetInventoryCachedAsync(ct))?.Cpu?.Architecture ?? "unknown");
 
             // Notify orchestrator of successful creation
@@ -596,7 +598,7 @@ public class CommandProcessorService : BackgroundService
         {
             _logger.LogError(
                 "{VmType} VM {VmId} creation failed: {Error}",
-                vmSpec.VmType.ToString(), vmId, result.ErrorMessage);
+                vmSpec.Role.ToString(), vmId, result.ErrorMessage);
 
             // Notify orchestrator of failure
             //await _orchestratorClient.NotifyVmStatusAsync(vmId, VmState.Failed, ct);
@@ -719,7 +721,7 @@ public class CommandProcessorService : BackgroundService
         var vmInstance = await manager.GetVmAsync(vmId, ct);
         
         // Clean up relay VM NAT rules
-        if (vmInstance?.Spec.VmType == VmType.Relay &&
+        if (vmInstance?.Spec.Role == VmRole.Relay &&
             !string.IsNullOrEmpty(vmInstance.Spec.IpAddress))
         {
             _logger.LogInformation(

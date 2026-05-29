@@ -2,6 +2,7 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
+using DeCloud.Shared.Enums;
 using Microsoft.AspNetCore.Mvc;
 
 namespace DeCloud.NodeAgent.Controllers;
@@ -216,11 +217,11 @@ public class SystemVmController : ControllerBase
     [HttpGet("{role}/peer-info")]
     public async Task<IActionResult> GetPeerInfo(string role)
     {
-        var vmType = ISystemVmService.RoleToVmType.TryGetValue(role, out var vt) ? vt : (VmType?)null;
+        var vmType = ISystemVmService.RoleToVmType.TryGetValue(role, out var vt) ? vt : (VmRole?)null;
         if (vmType is null) return NotFound();
 
         var vm = _vmManager.GetRunningVms()
-            .FirstOrDefault(v => v.Spec.VmType == vmType.Value && v.IsFullyReady);
+            .FirstOrDefault(v => v.Spec.Role == vmType.Value && v.IsFullyReady);
         if (vm is null || string.IsNullOrEmpty(vm.Spec.IpAddress))
             return NotFound();  // not yet running — caller polls
 
@@ -233,7 +234,7 @@ public class SystemVmController : ControllerBase
         {
             peerId,
             ipAddress = vm.Spec.IpAddress,   // virbr0 — same-host direct route
-            port = vmType == VmType.Dht ? 4001 : 5001
+            port = vmType == VmRole.Dht ? 4001 : 5001
         });
     }
 

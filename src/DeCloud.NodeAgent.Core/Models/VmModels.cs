@@ -10,7 +10,8 @@ public class VmSpec
 {
     public string Id { get; set; } = Guid.NewGuid().ToString();
     public string Name { get; set; } = string.Empty;
-    public VmType VmType { get; set; } = VmType.Relay;
+    public VmCategory Category { get; set; } = VmCategory.Tenant;
+    public VmRole Role { get; set; } = VmRole.General;
     public string NodeId { get; set; } = string.Empty; // Target node ID
 
     // Resource allocation
@@ -158,7 +159,10 @@ public class VmInstance
 {
     public string VmId { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
-    public VmState State { get; set; }
+    public VmCategory Category { get; set; } = VmCategory.Tenant;
+    public VmRole Role { get; set; } = VmRole.General;
+    public VmStatus Status { get; set; }
+    public VmSpec Spec { get; set; } = new();
 
     /// <summary>
     /// Per-service readiness statuses.
@@ -168,7 +172,6 @@ public class VmInstance
     public List<VmServiceStatus> Services { get; set; } = new();
     public bool IsFullyReady => Services.Count > 0 && Services.All(s => s.Status == ServiceReadiness.Ready);
 
-    public VmSpec Spec { get; set; } = new();
     public string? NetworkInterface { get; set; }  // e.g., "vnet0"
 
     // Runtime info
@@ -178,43 +181,15 @@ public class VmInstance
     // Resource usage
     public VmResourceUsage CurrentUsage { get; set; } = new();
 
+    // Paths
+    public string DiskPath { get; set; } = string.Empty;
+    public string ConfigPath { get; set; } = string.Empty;
+
     // Timestamps
     public DateTime CreatedAt { get; set; }
     public DateTime? StartedAt { get; set; }
     public DateTime? StoppedAt { get; set; }
     public DateTime LastHeartbeat { get; set; }
-
-    // Paths
-    public string DiskPath { get; set; } = string.Empty;
-    public string ConfigPath { get; set; } = string.Empty;
-}
-
-public enum VmState
-{
-    Pending,      // Spec received, not yet created
-    Creating,     // Image downloading, disk creating
-    Starting,     // Booting
-    Running,
-    Paused,
-    Stopping,
-    Stopped,
-    Failed,
-    NotFound,
-    Deleted,
-    Migrating
-}
-
-public enum VmType
-{
-    General,
-    Compute,
-    Memory,
-    Storage,
-    Gpu,
-    Relay,
-    Dht,
-    Inference,
-    BlockStore  // Distributed block storage duty (5% of node storage)
 }
 
 /// <summary>
@@ -269,22 +244,6 @@ public enum BandwidthTier
     Unmetered = 3
 }
 
-/// <summary>
-/// Capability information for a specific tier
-/// </summary>
-public class TierCapability
-{
-    public QualityTier Tier { get; set; }
-    public int MinimumBenchmark { get; set; }
-    public double RequiredPointsPerVCpu { get; set; }
-    public double NodePointsPerCore { get; set; }
-    public int MaxVCpusPerCore { get; set; }
-    public decimal PriceMultiplier { get; set; }
-    public string Description { get; set; } = string.Empty;
-    public bool IsEligible { get; set; }
-    public string? IneligibilityReason { get; set; }
-}
-
 public class VmResourceUsage
 {
     public double CpuPercent { get; set; }
@@ -303,11 +262,11 @@ public class VmOperationResult
 {
     public bool Success { get; set; }
     public string VmId { get; set; } = string.Empty;
-    public VmState? NewState { get; set; }
+    public VmStatus? NewState { get; set; }
     public string? ErrorMessage { get; set; }
     public string? ErrorCode { get; set; }
 
-    public static VmOperationResult Ok(string vmId, VmState state) => new()
+    public static VmOperationResult Ok(string vmId, VmStatus state) => new()
     {
         Success = true,
         VmId = vmId,

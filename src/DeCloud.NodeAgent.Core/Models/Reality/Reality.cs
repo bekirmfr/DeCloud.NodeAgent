@@ -1,4 +1,5 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
+using DeCloud.Shared.Enums;
 
 namespace DeCloud.NodeAgent.Core.Models.Reality;
 
@@ -7,7 +8,7 @@ namespace DeCloud.NodeAgent.Core.Models.Reality;
 /// <see cref="Interfaces.SystemVm.IRealityProjection"/>.
 ///
 /// This is the matrix's <c>reality</c> axis (see SYSTEM_VM_DESIGN.md §5.2).
-/// It deliberately collapses the underlying <see cref="VmState"/> into three
+/// It deliberately collapses the underlying <see cref="VmStatus"/> into three
 /// values — finer granularity belongs inside the VM (per-service readiness,
 /// mesh health endpoints), not in the matrix.
 /// </summary>
@@ -16,13 +17,13 @@ public enum Reality
     /// <summary>
     /// No VM of this role is tracked locally. Either the role has never been
     /// deployed on this node, or any prior VM has been fully removed
-    /// (state <see cref="VmState.Deleted"/> or <see cref="VmState.NotFound"/>
+    /// (state <see cref="VmStatus.Deleted"/> or <see cref="VmStatus.NotFound"/>
     /// — those are filtered out by the projection).
     /// </summary>
     None,
 
     /// <summary>
-    /// A VM exists for this role, is in <see cref="VmState.Running"/>, and
+    /// A VM exists for this role, is in <see cref="VmStatus.Running"/>, and
     /// every entry in its <c>Services</c> list is <c>Ready</c>. This is the
     /// converged state — the matrix takes no action when intent agrees.
     /// </summary>
@@ -73,7 +74,7 @@ public sealed record RealitySnapshot
     /// Not consumed by decision logic — only by log messages and dashboard
     /// output. The matrix decides solely on <see cref="State"/>.
     /// </summary>
-    public VmState? VmState { get; init; }
+    public VmStatus? VmState { get; init; }
 
     /// <summary>
     /// Convenience: a snapshot with no VM tracked.

@@ -1,5 +1,6 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.Shared.Enums;
 using Microsoft.Extensions.Logging;
 using System.Net.Http;
 
@@ -88,7 +89,7 @@ public sealed class NodeRelayConfigProvider : INodeRelayConfigProvider
         // ── Path 2: Public IP node with co-located relay VM ──
         var relayVmIp = await _portForwardingManager.GetRelayVmIpAsync(ct);
         var relayVm = _vmManager.GetAllVms()
-            .FirstOrDefault(v => v.Spec.VmType == VmType.Relay && v.State == VmState.Running);
+            .FirstOrDefault(v => v.Spec.Role == VmRole.Relay && v.Status == Shared.Enums.VmStatus.Running);
 
         if (relayVmIp != null && relayVm != null)
         {

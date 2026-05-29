@@ -7,6 +7,7 @@ using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.Shared.Enums;
+using DeCloud.Shared.Models;
 using Microsoft.Extensions.Options;
 
 namespace DeCloud.NodeAgent.Services;
@@ -111,13 +112,13 @@ public class HeartbeatService : BackgroundService
             // Get all active VMs with detailed information
             var allVms = _vmManager.GetAllVms();
             var activeVms = allVms
-                .Where(vm => vm.State != VmState.Deleted)
+                .Where(vm => vm.Status != VmStatus.Deleted)
                 .ToList(); ;
 
             // =====================================================
             // Apply quota to Burstable non-relay type VMs after boot
             // =====================================================
-            foreach (var vm in activeVms.Where(v => v.Spec.QualityTier == QualityTier.Burstable && v.Spec.VmType == VmType.General))
+            foreach (var vm in activeVms.Where(v => v.Spec.QualityTier == QualityTier.Burstable && v.Spec.Role == VmRole.General))
             {
                 if (ShouldApplyQuota(vm))
                 {
@@ -131,10 +132,10 @@ public class HeartbeatService : BackgroundService
             var myNodeId = _orchestratorClient.NodeId;
             if (!string.IsNullOrEmpty(myNodeId))
             {
-                foreach (var vm in activeVms.Where(v =>
+                foreach (var vm in Enumerable.Where<VmInstance>(activeVms, (Func<VmInstance, bool>)(v =>
                     !string.IsNullOrEmpty(v.Spec.TargetNodeId) &&
                     v.Spec.TargetNodeId != myNodeId &&
-                    v.State == VmState.Running))
+                    v.Status == Shared.Enums.VmStatus.Running)))
                 {
                     _logger.LogWarning(
                         "VM {VmId} has TargetNodeId={Target} but we are {Us} — zombie, destroying",
@@ -159,30 +160,30 @@ public class HeartbeatService : BackgroundService
             {
                 try
                 {
-                    var actualState = vm.State; //Fetvh actual virsh state using CommandExecutor
+                    var actualState = vm.Status; //Fetvh actual virsh state using CommandExecutor
                     // Get current usage metrics if VM is running
-                    var usage = vm.State == VmState.Running
-                        ? await _vmManager.GetVmUsageAsync(vm.VmId, ct)
+                    var usage = vm.Status == Shared.Enums.VmStatus.Running
+                        ? await _vmManager.GetVmUsageAsync((string)vm.VmId, ct)
                         : null;
 
                     // Get IP address for running VMs
                     string? ipAddress = null;
                     bool isIpAssigned = false;
-                    if (vm.State == VmState.Running)
+                    if (vm.Status == Shared.Enums.VmStatus.Running)
                     {
                         // Always get fresh libvirt IP first, fall back to stored IP
-                        var vmIpAddress = await _vmManager.GetVmIpAddressAsync(vm.VmId, ct);
-                        isIpAssigned = !string.IsNullOrEmpty(vmIpAddress);
+                        var vmIpAddress = await _vmManager.GetVmIpAddressAsync((string)vm.VmId, ct);
+                        isIpAssigned = !string.IsNullOrEmpty((string?)vmIpAddress);
                         ipAddress = vmIpAddress;
                         var vncPort = vm.VncPort;
 
                         if (isIpAssigned && vm.Spec.IpAddress != ipAddress)
                         {
                             vm.Spec.IpAddress = ipAddress!;
-                            await _repository.SaveVmAsync(vm);
+                            await _repository.SaveVmAsync((VmInstance)vm);
                             _logger.LogInformation(
                                 "Updated VM {VmId} IP address: {IpAddress}",
-                                vm.VmId, ipAddress);
+                                (object)vm.VmId, (object?)ipAddress);
                         }
                     }
 
@@ -190,18 +191,19 @@ public class HeartbeatService : BackgroundService
                     {
                         VmId = vm.VmId,
                         Name = vm.Name,
+                        Category = vm.Spec.Category,
+                        Role = vm.Spec.Role,
                         OwnerId = vm.Spec.OwnerId,
-                        State = vm.State,
-                        VmType = vm.Spec.VmType,
+                        Status = vm.Status,
                         VirtualCpuCores = vm.Spec.VirtualCpuCores,
                         QualityTier = (int)vm.Spec.QualityTier,
                         ComputePointCost = vm.Spec.ComputePointCost,
                         MemoryBytes = vm.Spec.MemoryBytes,
                         DiskBytes = vm.Spec.DiskBytes,
                         GpuMode = (int)vm.Spec.GpuMode,
-                        GpuVramBytes = vm.Spec.GpuVramBytes,
+                        GpuVramBytes = vm.Spec.GpuVramBytes ?? 0L,
                         VirtualCpuUsagePercent = usage?.CpuPercent ?? 0,
-                        StartedAt = vm.StartedAt ?? vm.CreatedAt,
+                        CreatedAt = vm.StartedAt ?? vm.CreatedAt,
                         IsIpAssigned = isIpAssigned,
                         IpAddress = ipAddress,
                         VncPort = vm.VncPort,
@@ -224,12 +226,12 @@ public class HeartbeatService : BackgroundService
             }
 
             // Update resource usage based on running VMs
-            snapshot.UsedVirtualCpuCores = activeVms.Where(v => v.State == VmState.Running)
+            snapshot.UsedVirtualCpuCores = activeVms.Where(v => v.Status == VmStatus.Running)
                 .Sum(v => v.Spec.VirtualCpuCores);
-            snapshot.UsedMemoryBytes = activeVms.Where(v => v.State == VmState.Running)
+            snapshot.UsedMemoryBytes = activeVms.Where(v => v.Status == VmStatus.Running)
                 .Sum(v => v.Spec.MemoryBytes);
             // Calculate used compute points
-            snapshot.UsedComputePoints = activeVms.Where(v => v.State != VmState.Deleted)
+            snapshot.UsedComputePoints = activeVms.Where(v => v.Status != VmStatus.Deleted)
                 .Sum(v => v.Spec.ComputePointCost);
 
             // Get CGNAT info from last heartbeat response (if available)
@@ -331,7 +333,7 @@ public class HeartbeatService : BackgroundService
             return false;
 
         // Only apply to running VMs
-        if (vm.State != VmState.Running)
+        if (vm.Status != Shared.Enums.VmStatus.Running)
             return false;
 
         // Already applied?

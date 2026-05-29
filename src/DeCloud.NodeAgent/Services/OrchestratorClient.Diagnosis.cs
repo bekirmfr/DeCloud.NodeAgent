@@ -11,6 +11,7 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Core.Models.State;
 using DeCloud.Shared.Contracts;
+using DeCloud.Shared.Models;
 using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Services;

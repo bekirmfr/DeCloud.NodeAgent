@@ -2,6 +2,7 @@
 using DeCloud.NodeAgent.Core.Interfaces.Qmp;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
+using DeCloud.Shared.Enums;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -143,7 +144,7 @@ public class LazysyncDaemon : BackgroundService
 
         var vms = _vmManager.GetRunningVms()
             .Where(v => v.Spec.ReplicationFactor > 0 &&
-                        v.Spec.VmType == VmType.General &&
+                        v.Spec.Role == VmRole.General &&
                         v.IsFullyReady)  // wait for cloud-init + guest agent
             .ToList();
 
@@ -688,7 +689,7 @@ public class LazysyncDaemon : BackgroundService
     private async Task<string?> FindBlockstoreApiAsync(CancellationToken ct)
     {
         var vms = _vmManager.GetRunningVms();
-        var blockstoreVm = vms.FirstOrDefault(v => v.Spec.VmType == VmType.BlockStore);
+        var blockstoreVm = vms.FirstOrDefault(v => v.Spec.Role == VmRole.BlockStore);
         if (blockstoreVm == null || string.IsNullOrEmpty(blockstoreVm.Spec.IpAddress))
             return null;
 
