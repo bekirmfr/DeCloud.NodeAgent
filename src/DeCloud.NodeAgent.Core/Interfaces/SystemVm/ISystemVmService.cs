@@ -20,15 +20,6 @@ public interface ISystemVmService
     /// <summary>Canonical role names in dependency order.</summary>
     static readonly IReadOnlyList<string> Roles = ObligationRole.All;
 
-    /// <summary>Role string → VmType mapping.</summary>
-    static readonly IReadOnlyDictionary<string, VmRole> RoleToVmType =
-        new Dictionary<string, VmRole>(StringComparer.OrdinalIgnoreCase)
-        {
-            [ObligationRole.Relay] = VmRole.Relay,
-            [ObligationRole.Dht] = VmRole.Dht,
-            [ObligationRole.BlockStore] = VmRole.BlockStore,
-        };
-
     // ── VM lookup ────────────────────────────────────────────────────────
 
     /// <summary>

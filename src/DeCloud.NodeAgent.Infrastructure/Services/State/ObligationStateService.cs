@@ -34,7 +34,7 @@ public sealed class ObligationStateService : IObligationStateService
         _logger = logger;
     }
 
-    public static Dictionary<string, VmRole> RoleToVmType = new Dictionary<string, VmRole>
+    public static Dictionary<string, VmRole> ObligationToVmRole = new Dictionary<string, VmRole>
     {
         ["relay"] = VmRole.Relay,
         ["dht"] = VmRole.Dht,

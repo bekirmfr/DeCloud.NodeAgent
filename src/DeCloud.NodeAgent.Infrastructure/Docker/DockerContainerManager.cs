@@ -486,7 +486,7 @@ public class DockerContainerManager : IVmManager
         return arg;
     }
 
-    public IReadOnlyCollection<VmInstance> GetAllVms(VmRole? vmType = null, Shared.Enums.VmStatus? vmState = null)
+    public IReadOnlyCollection<VmInstance> GetAllVms(VmRole? vmRole = null, Shared.Enums.VmStatus? vmState = null)
     {
         throw new NotImplementedException();
     }
@@ -496,7 +496,7 @@ public class DockerContainerManager : IVmManager
         throw new NotImplementedException();
     }
 
-    public VmInstance? GetRunningSystemVm(VmRole? vmType = null)
+    public VmInstance? GetRunningSystemVm(VmRole? vmRole = null)
     {
         throw new NotImplementedException();
     }

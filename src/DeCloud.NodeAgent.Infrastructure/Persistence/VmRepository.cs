@@ -211,59 +211,7 @@ public class VmRepository : IDisposable
         using var transaction = _connection.BeginTransaction();
         try
         {
-            // Migration from v0 (or v1 without QualityTier/ComputePointCost) to v2
-            if (fromVersion < 2)
-            {
-                _logger.LogInformation("Applying migration: v{From} → v{To}", fromVersion, 2);
-                MigrateToV2();
-                SetSchemaVersion(2);
-            }
-
-            // Migration v2 → v3: Add ServicesJson column
-            if (fromVersion < 3)
-            {
-                _logger.LogInformation("Applying migration: v{From} → v3 (ServicesJson column)", Math.Max(fromVersion, 2));
-                MigrateToV3();
-                SetSchemaVersion(3);
-            }
-
-            // Migration v3 → v4: Add ReplicationFactor column
-            if (fromVersion < 4)
-            {
-                _logger.LogInformation("Applying migration: v{From} → v4 (ReplicationFactor column)", Math.Max(fromVersion, 3));
-                MigrateToV4();
-                SetSchemaVersion(4);
-            }
-
-            // Migration v4 → v5: Add VmType and LabelsJson columns
-            if (fromVersion < 5)
-            {
-                _logger.LogInformation("Applying migration: v{From} → v5 (VmType, LabelsJson columns)", Math.Max(fromVersion, 4));
-                MigrateToV5();
-                SetSchemaVersion(5);
-            }
-
-            // Migration v5 → v6: Add TargetNodeId column for zombie fencing
-            if (fromVersion < 6)
-            {
-                _logger.LogInformation("Applying migration: v{From} → v6 (TargetNodeId column)", Math.Max(fromVersion, 5));
-                MigrateToV6();
-                SetSchemaVersion(6);
-            }
-
-            if (fromVersion < 7)
-            {
-                _logger.LogInformation("Applying migration: v{From} → v7 (DeletionReason column)", Math.Max(fromVersion, 6));
-                MigrateToV7();
-                SetSchemaVersion(7);
-            }
-
-            if (fromVersion < 8)
-            {
-                _logger.LogInformation("Applying migration: v{From} → v8 (CrashJournal column)", Math.Max(fromVersion, 7));
-                MigrateToV8();
-                SetSchemaVersion(8);
-            }
+            // Add migration function calls here.
 
             transaction.Commit();
         }
@@ -273,77 +221,6 @@ public class VmRepository : IDisposable
             transaction.Rollback();
             throw;
         }
-    }
-
-    /// <summary>
-    /// Migrate to schema v2: Add QualityTier and ComputePointCost columns
-    /// </summary>
-    private void MigrateToV2()
-    {
-        _logger.LogInformation("Adding QualityTier and ComputePointCost columns...");
-
-        // Check if VmRecords table exists
-        using (var cmd = _connection.CreateCommand())
-        {
-            cmd.CommandText = "SELECT name FROM sqlite_master WHERE type='table' AND name='VmRecords'";
-            var tableExists = cmd.ExecuteScalar() != null;
-
-            if (!tableExists)
-            {
-                // Table doesn't exist - create new schema
-                _logger.LogInformation("VmRecords table doesn't exist. Creating fresh schema...");
-                CreateInitialSchema();
-                return;
-            }
-        }
-
-        // Check if columns already exist
-        var hasQualityTier = ColumnExists("VmRecords", "QualityTier");
-        var hasComputePointCost = ColumnExists("VmRecords", "ComputePointCost");
-
-        if (hasQualityTier && hasComputePointCost)
-        {
-            _logger.LogInformation("QualityTier and ComputePointCost columns already exist. No migration needed.");
-            return;
-        }
-
-        // Create backup table name
-        var backupTable = $"VmRecords_backup_{DateTime.UtcNow:yyyyMMddHHmmss}";
-        _logger.LogInformation("Creating backup table: {Table}", backupTable);
-
-        // Rename old table to backup
-        using (var cmd = _connection.CreateCommand())
-        {
-            cmd.CommandText = $"ALTER TABLE VmRecords RENAME TO {backupTable}";
-            cmd.ExecuteNonQuery();
-        }
-
-        // Create new table with correct schema
-        CreateInitialSchema();
-
-        // Migrate data from backup to new table
-        _logger.LogInformation("Migrating data from backup table...");
-        using (var cmd = _connection.CreateCommand())
-        {
-            cmd.CommandText = $@"
-                INSERT INTO VmRecords 
-                SELECT 
-                    VmId, Name, OwnerId,
-                    3 as QualityTier,      -- Default to Burstable tier
-                    4 as ComputePointCost, -- Default compute points for Burstable
-                    VirtualCpuCores, MemoryBytes, DiskBytes,
-                    State, IpAddress, MacAddress, VncPort, Pid,
-                    CreatedAt, StartedAt, StoppedAt, LastUpdated,
-                    DiskPath, ConfigPath, BaseImageUrl, BaseImageHash,
-                    SshPublicKey, EncryptedPassword
-                FROM {backupTable}";
-
-            var rowsMigrated = cmd.ExecuteNonQuery();
-            _logger.LogInformation("✓ Migrated {Count} VM records", rowsMigrated);
-        }
-
-        // Keep backup table for safety (can be manually dropped later)
-        _logger.LogInformation("Backup table {Table} retained for safety", backupTable);
     }
 
     /// <summary>
@@ -363,96 +240,6 @@ public class VmRepository : IDisposable
             }
         }
         return false;
-    }
-
-    /// <summary>
-    /// Migrate to schema v3: Add ServicesJson column for per-service readiness tracking
-    /// </summary>
-    private void MigrateToV3()
-    {
-        if (!ColumnExists("VmRecords", "ServicesJson"))
-        {
-            using var cmd = _connection.CreateCommand();
-            cmd.CommandText = "ALTER TABLE VmRecords ADD COLUMN ServicesJson TEXT DEFAULT '[]'";
-            cmd.ExecuteNonQuery();
-            _logger.LogInformation("Added ServicesJson column to VmRecords");
-        }
-    }
-
-    /// <summary>
-    /// Migrate to schema v4: Add ReplicationFactor column for lazysync block replication.
-    /// </summary>
-    private void MigrateToV4()
-    {
-        if (!ColumnExists("VmRecords", "ReplicationFactor"))
-        {
-            using var cmd = _connection.CreateCommand();
-            cmd.CommandText = "ALTER TABLE VmRecords ADD COLUMN ReplicationFactor INTEGER NOT NULL DEFAULT 0";
-            cmd.ExecuteNonQuery();
-            _logger.LogInformation("Added ReplicationFactor column to VmRecords");
-        }
-    }
-
-    /// <summary>
-    /// Migrate to schema v5: Add VmType and LabelsJson columns so that system VM
-    /// classification (Relay/DHT/BlockStore) survives NodeAgent restarts.
-    /// Without these columns every VM loaded from SQLite gets VmType=General and
-    /// Labels=null, causing the dashboard to show all system VMs as "Not deployed".
-    /// </summary>
-    private void MigrateToV5()
-    {
-        if (!ColumnExists("VmRecords", "VmType"))
-        {
-            using var cmd = _connection.CreateCommand();
-            cmd.CommandText = "ALTER TABLE VmRecords ADD COLUMN VmType TEXT NOT NULL DEFAULT 'General'";
-            cmd.ExecuteNonQuery();
-            _logger.LogInformation("Added VmType column to VmRecords");
-        }
-
-        if (!ColumnExists("VmRecords", "LabelsJson"))
-        {
-            using var cmd = _connection.CreateCommand();
-            cmd.CommandText = "ALTER TABLE VmRecords ADD COLUMN LabelsJson TEXT";
-            cmd.ExecuteNonQuery();
-            _logger.LogInformation("Added LabelsJson column to VmRecords");
-        }
-    }
-
-    private void MigrateToV6()
-    {
-        if (!ColumnExists("VmRecords", "TargetNodeId"))
-        {
-            using var cmd = _connection.CreateCommand();
-            cmd.CommandText = "ALTER TABLE VmRecords ADD COLUMN TargetNodeId TEXT";
-            cmd.ExecuteNonQuery();
-            _logger.LogInformation("Added TargetNodeId column to VmRecords");
-        }
-    }
-
-    /// <summary>
-    /// Migrate to schema v7: Add DeletionReason column so the reconciliation
-    /// matrix's decision reason is persisted on deleted system VM records.
-    /// </summary>
-    private void MigrateToV7()
-    {
-        if (!ColumnExists("VmRecords", "DeletionReason"))
-        {
-            using var cmd = _connection.CreateCommand();
-            cmd.CommandText = "ALTER TABLE VmRecords ADD COLUMN DeletionReason TEXT";
-            cmd.ExecuteNonQuery();
-            _logger.LogInformation("Added DeletionReason column to VmRecords");
-        }
-    }
-
-    private void MigrateToV8()
-    {
-        if (!ColumnExists("VmRecords", "CrashJournal"))
-        {
-            using var cmd = _connection.CreateCommand();
-            cmd.CommandText = "ALTER TABLE VmRecords ADD COLUMN CrashJournal TEXT";
-            cmd.ExecuteNonQuery();
-            _logger.LogInformation("Added CrashJournal column to VmRecords");
-        }
     }
 
     /// <summary>
@@ -917,6 +704,7 @@ public class VmRepository : IDisposable
                     BaseImageHash = GetNullableString(reader, "BaseImageHash"),
                     SshPublicKey = GetNullableString(reader, "SshPublicKey"),
                     ReplicationFactor = reader.GetInt32(reader.GetOrdinal("ReplicationFactor")),
+                    TargetNodeId = GetNullableString(reader, "TargetNodeId")
                 },
                 Status = Enum.Parse<VmStatus>(reader.GetString(reader.GetOrdinal("State"))),
                 VncPort = GetNullableInt(reader, "VncPort"),
@@ -929,17 +717,6 @@ public class VmRepository : IDisposable
                 ConfigPath = GetNullableString(reader, "ConfigPath") ?? string.Empty
             };
 
-            // Restore VmType — critical for system VM classification (Relay/DHT/BlockStore)
-            // after restarts. Without this every VM loads as VmType.General.
-            var vmTypeStr = GetNullableString(reader, "VmType");
-            if (!string.IsNullOrEmpty(vmTypeStr))
-            {
-                if (Enum.TryParse<VmCategory>(GetNullableString(reader, "Category"), true, out var cat))
-                    vm.Spec.Category = cat;
-                if (Enum.TryParse<VmRole>(GetNullableString(reader, "Role"), true, out var role))
-                    vm.Spec.Role = role;
-            }
-
             // Restore Labels — role label is the dashboard fallback for type classification
             var labelsJson = GetNullableString(reader, "LabelsJson");
             if (!string.IsNullOrEmpty(labelsJson))
@@ -950,12 +727,9 @@ public class VmRepository : IDisposable
                 }
                 catch
                 {
-                    // Leave Labels null — VmType alone is sufficient for classification
+                    // Leave Labels null — VmRole alone is sufficient for classification
                 }
             }
-
-            // Restore TargetNodeId for zombie fencing
-            vm.Spec.TargetNodeId = GetNullableString(reader, "TargetNodeId");
 
             return vm;
         }

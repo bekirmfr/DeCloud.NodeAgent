@@ -3,6 +3,7 @@ using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.NodeAgent.Infrastructure.Services.CloudInit;
+using DeCloud.NodeAgent.Infrastructure.Services.State;
 using DeCloud.Shared.Enums;
 using DeCloud.Shared.Models;
 using Microsoft.AspNetCore.Mvc;
@@ -269,13 +270,12 @@ public class ObligationStateController : ControllerBase
     private async Task<bool> EnforceRoleBinding(
         string role, string callerIp, CancellationToken ct)
     {
-        var expectedType = RoleToVmType(role);
-        if (expectedType is null)
+        if (!ObligationStateService.ObligationToVmRole.TryGetValue(role, out var expectedRole))
             return true;
 
         var systemVm = _vmManager.GetAllVms()
             .FirstOrDefault(v =>
-                v.Spec.Role == expectedType &&
+                v.Spec.Role == expectedRole &&
                 v.Status is VmStatus.Running or VmStatus.Provisioning);
 
         if (systemVm is null)
@@ -313,18 +313,6 @@ public class ObligationStateController : ControllerBase
 
         return true;
     }
-
-    /// <summary>
-    /// Maps an obligation role name to the corresponding <see cref="VmRole"/>.
-    /// Returns null for unrecognised roles.
-    /// </summary>
-    private static VmRole? RoleToVmType(string role) => role switch
-    {
-        ObligationRole.Relay => VmRole.Relay,
-        ObligationRole.Dht => VmRole.Dht,
-        ObligationRole.BlockStore => VmRole.BlockStore,
-        _ => null,
-    };
 
     /// <summary>
     /// Validates that the caller's remote IP is within the virbr0 subnet

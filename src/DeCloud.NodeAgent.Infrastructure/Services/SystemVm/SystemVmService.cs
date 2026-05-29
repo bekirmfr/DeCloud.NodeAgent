@@ -2,6 +2,7 @@
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Infrastructure.Services.State;
 using DeCloud.Shared.Enums;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Logging;
@@ -55,13 +56,13 @@ public sealed class SystemVmService : ISystemVmService
 
     public VmInstance? GetRunningVm(string role)
     {
-        if (!ISystemVmService.RoleToVmType.TryGetValue(role, out var vmType))
+        if (!ObligationStateService.ObligationToVmRole.TryGetValue(role, out var vmRole))
             return null;
 
         return _vmManager
             .GetAllVms()
             .FirstOrDefault(v =>
-                v.Spec.Role == vmType &&
+                v.Spec.Role == vmRole &&
                 v.Status == Shared.Enums.VmStatus.Running &&
                 !string.IsNullOrEmpty(v.Spec.IpAddress));
     }

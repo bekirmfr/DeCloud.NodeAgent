@@ -90,7 +90,7 @@ def _render_vm_details(vm: dict[str, Any]) -> Text:
     rows: list[tuple[str, str]] = [
         ("ID",        vm.get("vmId") or DASH),
         ("State",     vm.get("state") or DASH),
-        ("Type",      vm.get("vmType") or DASH),
+        ("Type",      vm.get("vmRole") or DASH),
         ("IP",        vm.get("ipAddress") or DASH),
         ("vCPU",      str(vm.get("virtualCpuCores", DASH))),
         ("RAM",       fmt_bytes(vm.get("memoryBytes"))),

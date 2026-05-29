@@ -307,7 +307,7 @@ public class SystemVmWatchdogService : BackgroundService
                     $"http://{candidate.Spec.IpAddress}/health", ct);
 
                 _logger.LogDebug(
-                    "SystemVmStartupService: VM {VmId} ({VmType}) health check returned {Status} — not a zombie",
+                    "SystemVmStartupService: VM {VmId} ({vmRole}) health check returned {Status} — not a zombie",
                     candidate.VmId, candidate.Spec.Role, (int)response.StatusCode);
             }
             catch (HttpRequestException ex) when (
@@ -316,7 +316,7 @@ public class SystemVmWatchdogService : BackgroundService
             {
                 // Connection refused = nginx is not running = systemd/services are dead
                 _logger.LogDebug(
-                    "SystemVmStartupService: VM {VmId} ({VmType}) port 80 refused — zombie confirmed",
+                    "SystemVmStartupService: VM {VmId} ({vmRole}) port 80 refused — zombie confirmed",
                     candidate.VmId, candidate.Spec.Role);
                 zombieVms.Add(candidate);
             }
@@ -324,7 +324,7 @@ public class SystemVmWatchdogService : BackgroundService
             {
                 // Timeout or other error — be conservative, don't hard reset
                 _logger.LogDebug(ex,
-                    "SystemVmStartupService: VM {VmId} ({VmType}) health check inconclusive — skipping",
+                    "SystemVmStartupService: VM {VmId} ({vmRole}) health check inconclusive — skipping",
                     candidate.VmId, candidate.Spec.Role);
             }
         }
@@ -332,7 +332,7 @@ public class SystemVmWatchdogService : BackgroundService
         foreach (var vm in zombieVms)
         {
             _logger.LogWarning(
-                "SystemVmStartupService: system VM {VmId} ({VmType}) is running but guest agent " +
+                "SystemVmStartupService: system VM {VmId} ({vmRole}) is running but guest agent " +
                 "is not responding (zombie — internal services dead). Hard resetting.",
                 vm.VmId, vm.Spec.Role);
 
@@ -343,7 +343,7 @@ public class SystemVmWatchdogService : BackgroundService
 
             if (resetResult.Success)
                 _logger.LogInformation(
-                    "✓ Zombie system VM {VmId} ({VmType}) hard reset — services will restart via systemd",
+                    "✓ Zombie system VM {VmId} ({vmRole}) hard reset — services will restart via systemd",
                     vm.VmId, vm.Spec.Role);
             else
                 _logger.LogWarning(
@@ -376,7 +376,7 @@ public class SystemVmWatchdogService : BackgroundService
             try
             {
                 _logger.LogInformation(
-                    "Starting system VM {VmId} ({VmType}) after node restart",
+                    "Starting system VM {VmId} ({vmRole}) after node restart",
                     vm.VmId, vm.Spec.Role);
 
                 var result = await _vmManager.StartVmAsync(vm.VmId, ct);
@@ -384,13 +384,13 @@ public class SystemVmWatchdogService : BackgroundService
                 if (result.Success)
                 {
                     _logger.LogInformation(
-                        "✓ System VM {VmId} ({VmType}) started — services will re-register via heartbeat",
+                        "✓ System VM {VmId} ({vmRole}) started — services will re-register via heartbeat",
                         vm.VmId, vm.Spec.Role);
                 }
                 else
                 {
                     _logger.LogWarning(
-                        "✗ System VM {VmId} ({VmType}) failed to start: {Error} — " +
+                        "✗ System VM {VmId} ({vmRole}) failed to start: {Error} — " +
                         "orchestrator reconciliation will redeploy",
                         vm.VmId, vm.Spec.Role, result.ErrorMessage);
                 }
@@ -398,7 +398,7 @@ public class SystemVmWatchdogService : BackgroundService
             catch (Exception ex)
             {
                 _logger.LogError(ex,
-                    "Exception starting system VM {VmId} ({VmType}) — " +
+                    "Exception starting system VM {VmId} ({vmRole}) — " +
                     "orchestrator reconciliation will redeploy",
                     vm.VmId, vm.Spec.Role);
             }

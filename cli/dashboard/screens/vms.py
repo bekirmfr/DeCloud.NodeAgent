@@ -206,7 +206,7 @@ class VmsScreen(BaseScreen):
             name = (vm.get("name") or spec.get("name") or "").lower()
             if s and s not in name:
                 continue
-            t = _vm_type(spec.get("vmType"))
+            t = _vm_type(spec.get("vmRole"))
             state = vm.get("state")
             if f == "running" and state != 3:
                 continue
@@ -227,7 +227,7 @@ class VmsScreen(BaseScreen):
             spec = vm.get("spec") or {}
             vm_id = vm.get("vmId") or spec.get("id") or ""
             name = vm.get("name") or spec.get("name") or "—"
-            t_int = _vm_type(spec.get("vmType"))
+            t_int = _vm_type(spec.get("vmRole"))
             ingress = self._ingress.get(vm_id) or spec.get("ipAddress") \
                 or vm.get("ipAddress") or "—"
             t.add_row(
@@ -243,7 +243,7 @@ class VmsScreen(BaseScreen):
             )
         # Meta line
         sysn = sum(1 for v in items
-                   if _vm_type((v.get("spec") or {}).get("vmType")) in _SYSTEM_TYPES)
+                   if _vm_type((v.get("spec") or {}).get("vmRole")) in _SYSTEM_TYPES)
         run = sum(1 for v in items if v.get("state") == 3)
         meta = (f"{len(items)} shown ({sysn} system / {len(items)-sysn} tenant) "
                 f"· {run} running")

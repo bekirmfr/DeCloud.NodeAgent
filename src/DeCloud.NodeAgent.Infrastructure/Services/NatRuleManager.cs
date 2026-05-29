@@ -399,7 +399,7 @@ public class NatRuleManager : INatRuleManager
 
 // In CommandProcessorService.HandleCreateVmAsync(), after relay VM is created:
 
-if (vmType == (int)VmType.Relay && result.Success)
+if (vmRole == (int)VmRole.Relay && result.Success)
 {
     _logger.LogInformation("Relay VM {VmId} created, configuring NAT rules...", vmId);
     
@@ -467,7 +467,7 @@ if (vmType == (int)VmType.Relay && result.Success)
 // Note: The 'add' command cleans old rules automatically, so removal is optional
 
 var vmInstance = await _vmManager.GetVmAsync(vmId, ct);
-if (vmInstance?.Spec.VmType == VmType.Relay && !string.IsNullOrEmpty(vmInstance.IpAddress))
+if (vmInstance?.Spec.VmRole == VmRole.Relay && !string.IsNullOrEmpty(vmInstance.IpAddress))
 {
     _logger.LogInformation("Removing NAT rules for relay VM {VmId}", vmId);
     

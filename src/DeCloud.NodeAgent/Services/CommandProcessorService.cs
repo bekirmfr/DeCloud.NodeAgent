@@ -466,7 +466,7 @@ public class CommandProcessorService : BackgroundService
             if (duplicate != null)
             {
                 _logger.LogWarning(
-                    "Rejecting duplicate {VmType} VM {VmId} — a VM with the same name already exists: {ExistingVmId} (state: {State})",
+                    "Rejecting duplicate {VmRole} VM {VmId} — a VM with the same name already exists: {ExistingVmId} (state: {State})",
                     vmSpec.Role, vmId, duplicate.VmId, duplicate.Status);
                 return true; // Return true to ACK and prevent retry
             }
@@ -536,7 +536,7 @@ public class CommandProcessorService : BackgroundService
         }
 
         _logger.LogInformation(
-            "Creating {VmType} type {Mode} {VmId}: {VCpus} vCPUs, {MemoryMB}MB RAM, " +
+            "Creating {VmRole} type {Mode} {VmId}: {VCpus} vCPUs, {MemoryMB}MB RAM, " +
             "{DiskGB}GB disk, image: {ImageUrl}, quality tier: {QualityTier}, GPU: {GpuMode}",
             vmSpec.Role.ToString(), deploymentMode, vmId, virtualCpuCores,
             memoryBytes / 1024 / 1024, diskBytes / 1024 / 1024 / 1024,
@@ -586,7 +586,7 @@ public class CommandProcessorService : BackgroundService
         if (result.Success)
         {
             _logger.LogInformation(
-                "{VmType} VM {VmId} created and started successfully on {Architecture} host",
+                "{VmRole} VM {VmId} created and started successfully on {Architecture} host",
                 vmSpec.Role.ToString(), vmId,
                 (await _resourceDiscovery.GetInventoryCachedAsync(ct))?.Cpu?.Architecture ?? "unknown");
 
@@ -597,7 +597,7 @@ public class CommandProcessorService : BackgroundService
         else
         {
             _logger.LogError(
-                "{VmType} VM {VmId} creation failed: {Error}",
+                "{VmRole} VM {VmId} creation failed: {Error}",
                 vmSpec.Role.ToString(), vmId, result.ErrorMessage);
 
             // Notify orchestrator of failure

@@ -358,7 +358,7 @@ class OverviewScreen(BaseScreen):
             t.add_row(
                 vm_state_badge(vm.get("state")),
                 truncate(vm.get("name") or spec.get("name") or "—", 24),
-                _vm_type_name(spec.get("vmType")),
+                _vm_type_name(spec.get("vmRole")),
                 str(spec.get("virtualCpuCores", "—")),
                 fmt_bytes(spec.get("memoryBytes")),
                 spec.get("ipAddress") or vm.get("ipAddress") or "—",

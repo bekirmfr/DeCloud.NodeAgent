@@ -2,6 +2,7 @@ using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
+using DeCloud.NodeAgent.Infrastructure.Services.State;
 using DeCloud.Shared.Enums;
 using Microsoft.AspNetCore.Mvc;
 
@@ -61,7 +62,7 @@ public class SystemVmController : ControllerBase
         CancellationToken ct = default)
     {
         // ── 1. Validate role ────────────────────────────────────────────
-        if (!ISystemVmService.RoleToVmType.ContainsKey(role))
+        if (!ObligationStateService.ObligationToVmRole.ContainsKey(role))
         {
             return NotFound(new
             {
@@ -217,11 +218,11 @@ public class SystemVmController : ControllerBase
     [HttpGet("{role}/peer-info")]
     public async Task<IActionResult> GetPeerInfo(string role)
     {
-        var vmType = ISystemVmService.RoleToVmType.TryGetValue(role, out var vt) ? vt : (VmRole?)null;
-        if (vmType is null) return NotFound();
+        var vmRole = ObligationStateService.ObligationToVmRole.TryGetValue(role, out var vt) ? vt : (VmRole?)null;
+        if (vmRole is null) return NotFound();
 
         var vm = _vmManager.GetRunningVms()
-            .FirstOrDefault(v => v.Spec.Role == vmType.Value && v.IsFullyReady);
+            .FirstOrDefault(v => v.Spec.Role == vmRole.Value && v.IsFullyReady);
         if (vm is null || string.IsNullOrEmpty(vm.Spec.IpAddress))
             return NotFound();  // not yet running — caller polls
 
@@ -234,7 +235,7 @@ public class SystemVmController : ControllerBase
         {
             peerId,
             ipAddress = vm.Spec.IpAddress,   // virbr0 — same-host direct route
-            port = vmType == VmRole.Dht ? 4001 : 5001
+            port = vmRole == VmRole.Dht ? 4001 : 5001
         });
     }
 

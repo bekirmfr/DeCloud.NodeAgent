@@ -23,7 +23,7 @@ def _is_running(vm: dict) -> bool:
 
 def _is_system(vm: dict) -> bool:
     try:
-        return int((vm.get("spec") or {}).get("vmType", -1)) in _SYS_VM_TYPES
+        return int((vm.get("spec") or {}).get("vmRole", -1)) in _SYS_VM_TYPES
     except (TypeError, ValueError):
         return False
 

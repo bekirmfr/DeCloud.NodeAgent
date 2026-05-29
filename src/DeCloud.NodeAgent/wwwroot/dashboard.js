@@ -466,13 +466,13 @@ function renderVMs() {
     if (!S.vms) return;
     const all = S.vms;
 
-    // VmType enum: General=0, Compute=1, Memory=2, Storage=3, Gpu=4,
+    // VmRole enum: General=0, Compute=1, Memory=2, Storage=3, Gpu=4,
     //              Relay=5, Dht=6, Inference=7, BlockStore=8
-    // vmType lives in vm.spec.vmType (integer). Labels are the reliable
+    // vmRole lives in vm.spec.vmRole (integer). Labels are the reliable
     // fallback for any serialisation that flattens the spec.
-    const isRelay = v => v.spec?.vmType === 5 || v.labels?.role === 'relay';
-    const isDht = v => v.spec?.vmType === 6 || v.labels?.role === 'dht';
-    const isBs = v => v.spec?.vmType === 8 || v.labels?.role === 'blockstore';
+    const isRelay = v => v.spec?.vmRole === 5 || v.labels?.role === 'relay';
+    const isDht = v => v.spec?.vmRole === 6 || v.labels?.role === 'dht';
+    const isBs = v => v.spec?.vmRole === 8 || v.labels?.role === 'blockstore';
 
     // Resolve each obligation once so findSysVm can use the vmId.
     const relayObl = S.obligations.find(o => o.role === ROLE_FOR_KEY.relay);
@@ -556,7 +556,7 @@ async function fetchAndRenderDatabase() {
                 : vmRows.map(v => `<tr>
                     <td>${esc(v.name)}</td>
                     <td class="mono" title="${esc(v.vmId)}">${esc(v.vmId.slice(0, 8))}…</td>
-                    <td>${esc(v.vmType)}</td>
+                    <td>${esc(v.vmRole)}</td>
                     <td>${stateBadgeStr(v.state)}</td>
                     <td class="mono">${v.ipAddress ?? '—'}</td>
                     <td>${v.virtualCpuCores}</td>
@@ -1782,7 +1782,7 @@ function buildTextReport(p) {
             const spec = vm.spec ?? {};
             lines.push(`  [${vmStateName(vm.state)}] ${vm.name ?? spec.name ?? vm.vmId}`);
             lines.push(`    ID:    ${vm.vmId}`);
-            lines.push(`    Type:  vmType=${spec.vmType}  role=${spec.labels?.role ?? '—'}`);
+            lines.push(`    Type:  vmRole=${spec.vmRole}  role=${spec.labels?.role ?? '—'}`);
             lines.push(`    IP:    ${spec.ipAddress || '—'}   VNC: ${vm.vncPort ?? '—'}`);
             lines.push(`    CPU:   ${spec.virtualCpuCores ?? '—'} vCPU   RAM: ${fmtBytes(spec.memoryBytes ?? 0)}`);
         }

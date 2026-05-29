@@ -1524,14 +1524,14 @@ public class LibvirtVmManager : IVmManager
         return Task.FromResult(vm);
     }
 
-    public IReadOnlyCollection<VmInstance> GetAllVms(VmRole? vmType = null, Shared.Enums.VmStatus? vmState = null)
+    public IReadOnlyCollection<VmInstance> GetAllVms(VmRole? vmRole = null, Shared.Enums.VmStatus? vmState = null)
     {
         lock (_vms)
         {
             IEnumerable<VmInstance> result = _vms.Values;
 
-            if (vmType != null)
-                result = result.Where(vm => vm.Spec.Role == vmType);
+            if (vmRole != null)
+                result = result.Where(vm => vm.Spec.Role == vmRole);
             if (vmState != null)
                 result = result.Where(vm => vm.Status == vmState);
 
@@ -1553,10 +1553,10 @@ public class LibvirtVmManager : IVmManager
         }
     }
 
-    public VmInstance? GetRunningSystemVm(VmRole? vmType = null)
+    public VmInstance? GetRunningSystemVm(VmRole? vmRole = null)
     {
         var systemVms = GetSystemVms(VmStatus.Running);
-        return systemVms.Where(vm => vm.Spec.Role == vmType).FirstOrDefault();
+        return systemVms.Where(vm => vm.Spec.Role == vmRole).FirstOrDefault();
     }
 
     public IReadOnlyCollection<VmInstance> GetRunningVms()
@@ -1829,7 +1829,7 @@ public class LibvirtVmManager : IVmManager
         CancellationToken ct = default)
     {
         _logger.LogInformation(
-            "VM {VmId}: Creating cloud-init ISO using template for VM type {VmType}",
+            "VM {VmId}: Creating cloud-init ISO using template for VM type {vmRole}",
             spec.Id, spec.Role);
 
         try
@@ -2224,7 +2224,7 @@ public class LibvirtVmManager : IVmManager
             }
 
             _logger.LogInformation(
-                "✓ VM {VmId}: Created cloud-init ISO at {Path} (type: {VmType}, password: {HasPassword}, ssh: {HasSshKey}, CA: {HasCA})",
+                "✓ VM {VmId}: Created cloud-init ISO at {Path} (type: {vmRole}, password: {HasPassword}, ssh: {HasSshKey}, CA: {HasCA})",
                 spec.Id,
                 isoPath,
                 spec.Role,

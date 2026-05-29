@@ -2,6 +2,7 @@
 using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Core.Models.Reality;
+using DeCloud.NodeAgent.Infrastructure.Services.State;
 using DeCloud.Shared.Enums;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Logging;
@@ -17,7 +18,7 @@ namespace DeCloud.NodeAgent.Infrastructure.Services.SystemVm;
 ///   1. Canonicalise the role string. Unknown → <see cref="Reality.None"/>.
 ///
 ///   2. Fetch all locally-tracked VMs and filter to those whose
-///      <c>Spec.VmType</c> matches the role. Filter out VMs in
+///      <c>Spec.VmRole</c> matches the role. Filter out VMs in
 ///      <see cref="Shared.Enums.VmStatus.NotFound"/> or <see cref="Shared.Enums.VmStatus.Deleted"/> —
 ///      those are tombstones, not present reality.
 ///
@@ -63,8 +64,7 @@ public sealed class RealityProjection : IRealityProjection
         if (canonical is null)
             return RealitySnapshot.None;
 
-        var targetVmType = MapRoleToVmType(canonical);
-        if (targetVmType is null)
+        if (!ObligationStateService.ObligationToVmRole.TryGetValue(canonical, out var targetVmRole))
             return RealitySnapshot.None;
 
         // Fetch + filter. Allocates a List<T> only because GetAllVms() returns
@@ -72,7 +72,7 @@ public sealed class RealityProjection : IRealityProjection
         // unless we want to enumerate twice.
         var matches = _vmManager.GetAllVms()
             .Where(vm =>
-                vm.Spec.Role == targetVmType.Value &&
+                vm.Spec.Role == targetVmRole &&
                 vm.Status != VmStatus.Deleted)
             .ToList();
 
@@ -141,19 +141,4 @@ public sealed class RealityProjection : IRealityProjection
             VmState = mostRecent.Status,
         };
     }
-
-    // ── Role ↔ VmType mapping ───────────────────────────────────────────
-
-    /// <summary>
-    /// Canonical role string → <see cref="VmType"/>.
-    /// Inlined as a switch (rather than a shared mapping helper) because the
-    /// set is fixed and small; abstraction would obscure rather than help.
-    /// </summary>
-    private static VmRole? MapRoleToVmType(string canonicalRole) => canonicalRole switch
-    {
-        ObligationRole.Dht => VmRole.Dht,
-        ObligationRole.Relay => VmRole.Relay,
-        ObligationRole.BlockStore => VmRole.BlockStore,
-        _ => null,
-    };
 }

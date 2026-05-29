@@ -2325,7 +2325,7 @@ cmd_vm_diagnose_system() {
 
     if [[ -n "$vms" ]]; then
         echo "$vms" | jq -r '
-            .[] | select(.spec.vmType == 6 or .spec.vmType == 7 or .spec.vmType == 8) |
+            .[] | select(.spec.vmRole == 6 or .spec.vmRole == 7 or .spec.vmRole == 8) |
             "  \(.name)\t state=\(.state)\t heartbeat=\(.lastHeartbeat)"
         ' 2>/dev/null || true
     fi
@@ -2374,7 +2374,7 @@ cmd_vm_diagnose_system() {
     echo -e "${BOLD}VM Service Health (via NodeAgent proxy):${NC}"
     if [[ -n "$vms" ]]; then
         echo "$vms" | jq -r '
-            .[] | select(.spec.vmType == 6 or .spec.vmType == 7 or .spec.vmType == 8) |
+            .[] | select(.spec.vmRole == 6 or .spec.vmRole == 7 or .spec.vmRole == 8) |
             "\(.vmId) \(.name) \(.spec.ipAddress // "")"
         ' 2>/dev/null | while read -r vmid name ip; do
             if [[ -z "$ip" ]]; then
