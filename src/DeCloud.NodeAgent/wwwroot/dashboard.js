@@ -468,11 +468,13 @@ function renderVMs() {
     if (!S.vms) return;
     const all = S.vms;
 
-    // VmRole serialises as a string via [JsonStringEnumConverter].
-    // Label fallback retained as a safety net for edge cases.
-    const isRelay = v => v.spec?.vmRole === 'Relay' || v.labels?.role === 'relay';
-    const isDht = v => v.spec?.vmRole === 'Dht' || v.labels?.role === 'dht';
-    const isBs = v => v.spec?.vmRole === 'BlockStore' || v.labels?.role === 'blockstore';
+    // v.role — top-level VmInstance.Role serialised as a string by [JsonStringEnumConverter].
+    // v.spec.labels — labels dict lives on Spec, not at the top level of VmInstance.
+    // v.category — "System" / "Tenant"; used for tenant filter so future system roles
+    //              don't leak into the tenant table without a dashboard change.
+    const isRelay = v => v.role === 'Relay' || v.spec?.labels?.role === 'relay';
+    const isDht = v => v.role === 'Dht' || v.spec?.labels?.role === 'dht';
+    const isBs = v => v.role === 'BlockStore' || v.spec?.labels?.role === 'blockstore';
 
     // Resolve each obligation once so findSysVm can use the vmId.
     const relayObl = S.obligations.find(o => o.role === ROLE_FOR_KEY.relay);
@@ -482,7 +484,7 @@ function renderVMs() {
     const relay = findSysVm(all, isRelay, relayObl);
     const dht = findSysVm(all, isDht, dhtObl);
     const bs = findSysVm(all, isBs, bsObl);
-    const tenants = all.filter(v => !isRelay(v) && !isDht(v) && !isBs(v));
+    const tenants = all.filter(v => v.category !== 'System');
 
     $('vm-count-badge').textContent = all.length;
     // Update tenant collapsible meta
