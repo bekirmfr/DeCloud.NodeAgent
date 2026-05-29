@@ -1,4 +1,5 @@
 using DeCloud.Shared.Enums;
+using DeCloud.Shared.Models;
 using System.Text.Json.Serialization;
 
 namespace DeCloud.NodeAgent.Core.Models;
@@ -169,8 +170,8 @@ public class VmInstance
     /// "System" (cloud-init) always first. Additional services from template.
     /// Checked via qemu-guest-agent by VmReadinessMonitor.
     /// </summary>
-    public List<VmServiceStatus> Services { get; set; } = new();
-    public bool IsFullyReady => Services.Count > 0 && Services.All(s => s.Status == ServiceReadiness.Ready);
+    public List<VmServiceModel> Services { get; set; } = new();
+    public bool IsFullyReady => Services.Count > 0 && Services.All(s => s.Status == ServiceStatus.Ready);
 
     public string? NetworkInterface { get; set; }  // e.g., "vnet0"
 
@@ -190,39 +191,6 @@ public class VmInstance
     public DateTime? StartedAt { get; set; }
     public DateTime? StoppedAt { get; set; }
     public DateTime LastHeartbeat { get; set; }
-}
-
-/// <summary>
-/// How a workload is deployed on a node.
-/// VirtualMachine: KVM/QEMU VM via libvirt (default, full isolation)
-/// Container: Docker container with GPU sharing (for nodes without IOMMU, e.g. WSL2)
-/// </summary>
-public enum DeploymentMode
-{
-    VirtualMachine = 0,
-    Container = 1
-}
-
-/// <summary>
-/// How GPU access is provided to a virtual machine.
-/// </summary>
-public enum GpuMode
-{
-    /// <summary>No GPU access</summary>
-    None = 0,
-
-    /// <summary>
-    /// VFIO passthrough: GPU bound to vfio-pci, passed as PCI hostdev to VM.
-    /// Requires IOMMU enabled in BIOS/kernel. One GPU per VM, full performance.
-    /// </summary>
-    Passthrough = 1,
-
-    /// <summary>
-    /// GPU proxy: VM communicates with a host-side GPU proxy daemon over virtio-vsock.
-    /// A CUDA shim (LD_PRELOAD) inside the VM intercepts CUDA calls and forwards them.
-    /// Works without IOMMU. Multiple VMs can share one GPU.
-    /// </summary>
-    Proxied = 2
 }
 
 /// <summary>
@@ -280,83 +248,6 @@ public class VmOperationResult
         ErrorMessage = error,
         ErrorCode = code
     };
-}
-
-/// <summary>
-/// Readiness status of a single service inside a VM.
-/// Checked via qemu-guest-agent (virtio channel, no network needed).
-/// </summary>
-public class VmServiceStatus
-{
-    public string Name { get; set; } = string.Empty;
-    public int? Port { get; set; }
-    public string? Protocol { get; set; }
-    public CheckType CheckType { get; set; } = CheckType.CloudInitDone;
-    public string? HttpPath { get; set; }
-    public string? ExecCommand { get; set; }
-
-    [JsonConverter(typeof(JsonStringEnumConverter))]
-    public ServiceReadiness Status { get; set; } = ServiceReadiness.Pending;
-    /// <summary>
-    /// When true, this service is periodically re-verified after reaching
-    /// Ready. A failed re-check reverts Ready → Failed. Default: false.
-    /// </summary>
-    public bool LivenessCheck { get; set; } = false;
-
-    public string? StatusMessage { get; set; }
-
-    /// <summary>
-    /// Last successful HTTP response body from this service's health endpoint
-    /// (truncated to 512 chars). Persists across status transitions so the
-    /// pre-crash state (memory pressure, OOM count, peer info) survives in
-    /// ServicesJson when the VM is deleted. Only populated for HttpGet checks.
-    /// </summary>
-    public string? LastSuccessBody { get; set; }
-    public DateTime? ReadyAt { get; set; }
-    public DateTime? LastCheckAt { get; set; }
-    public int TimeoutSeconds { get; set; } = 300;
-}
-
-[JsonConverter(typeof(JsonStringEnumConverter))]
-public enum CheckType
-{
-    /// <summary>cloud-init status --format json → status == "done"</summary>
-    CloudInitDone,
-
-    /// <summary>nc -zv -w2 localhost {port} → exit 0</summary>
-    TcpPort,
-
-    /// <summary>curl -sf -o /dev/null http://localhost:{port}{path} → exit 0</summary>
-    HttpGet,
-
-    /// <summary>Arbitrary command via bash -c → exit 0</summary>
-    ExecCommand,
-
-    /// <summary>
-    /// Host-side guest-agent ping via virsh qemu-agent-command guest-ping.
-    /// Does not run through guest-exec — it IS the agent liveness test.
-    /// Evaluated before the guest-agent gate in VmReadinessMonitor.
-    /// </summary>
-    GuestAgentPing
-}
-
-[JsonConverter(typeof(JsonStringEnumConverter))]
-public enum ServiceReadiness
-{
-    /// <summary>Waiting for System (cloud-init) to complete first</summary>
-    Pending,
-
-    /// <summary>Actively being probed</summary>
-    Checking,
-
-    /// <summary>Check passed — service is accepting traffic</summary>
-    Ready,
-
-    /// <summary>Timeout expired without passing check</summary>
-    TimedOut,
-
-    /// <summary>cloud-init reported error (System service only)</summary>
-    Failed
 }
 
 /// <summary>

@@ -102,9 +102,9 @@ public class BlockStoreCallbackController : ControllerBase
             // Always update StatusMessage with peer ID — even if already Ready
             // (handles race where cloud-init readiness fires before peerId is known)
             var previousStatus = systemService.Status;
-            var alreadyReady = systemService.Status == ServiceReadiness.Ready;
+            var alreadyReady = systemService.Status == ServiceStatus.Ready;
 
-            systemService.Status = ServiceReadiness.Ready;
+            systemService.Status = ServiceStatus.Ready;
             systemService.StatusMessage = $"peerId={notification.PeerId}";
             systemService.LastCheckAt = DateTime.UtcNow;
             if (!alreadyReady)

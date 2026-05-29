@@ -208,7 +208,7 @@ public class HeartbeatService : BackgroundService
                         IpAddress = ipAddress,
                         VncPort = vm.VncPort,
                         MacAddress = vm.Spec.MacAddress,
-                        Services = vm.Services.Count > 0 ? vm.Services.Select(s => new ServiceSummary
+                        Services = vm.Services.Count > 0 ? vm.Services.Select(s => new VmServiceSummary
                         {
                             Name = s.Name,
                             Port = s.Port,

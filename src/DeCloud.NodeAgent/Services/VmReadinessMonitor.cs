@@ -4,6 +4,7 @@ using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.Shared.Enums;
+using DeCloud.Shared.Models;
 
 namespace DeCloud.NodeAgent.Services;
 
@@ -112,9 +113,9 @@ public class VmReadinessMonitor : BackgroundService
         var systemService = vm.Services.FirstOrDefault(s => s.Name == "System");
         foreach (var service in vm.Services)
         {
-            if (service.Status is ServiceReadiness.Ready
-                or ServiceReadiness.TimedOut
-                or ServiceReadiness.Failed)
+            if (service.Status is ServiceStatus.Ready
+                or ServiceStatus.TimedOut
+                or ServiceStatus.Failed)
                 continue;
 
             var timeoutBase = service.Name == "System"
@@ -123,7 +124,7 @@ public class VmReadinessMonitor : BackgroundService
             var elapsed = (DateTime.UtcNow - timeoutBase).TotalSeconds;
             if (elapsed > service.TimeoutSeconds)
             {
-                service.Status = ServiceReadiness.TimedOut;
+                service.Status = ServiceStatus.TimedOut;
                 service.LastCheckAt = DateTime.UtcNow;
                 anyChanged = true;
                 _logger.LogWarning(
@@ -136,7 +137,7 @@ public class VmReadinessMonitor : BackgroundService
         foreach (var service in vm.Services.Where(s => s.CheckType == CheckType.GuestAgentPing))
         {
             // Apply same cadence rules as other services
-            if (service.Status == ServiceReadiness.Ready)
+            if (service.Status == ServiceStatus.Ready)
             {
                 if (!service.LivenessCheck) continue;
                 var since = service.LastCheckAt.HasValue
@@ -144,7 +145,7 @@ public class VmReadinessMonitor : BackgroundService
                     : double.MaxValue;
                 if (since < RecheckInterval.TotalSeconds) continue;
             }
-            else if (service.Status is ServiceReadiness.TimedOut or ServiceReadiness.Failed)
+            else if (service.Status is ServiceStatus.TimedOut or ServiceStatus.Failed)
             {
                 var since = service.LastCheckAt.HasValue
                     ? (DateTime.UtcNow - service.LastCheckAt.Value).TotalSeconds
@@ -157,12 +158,12 @@ public class VmReadinessMonitor : BackgroundService
 
             if (alive)
             {
-                if (prev != ServiceReadiness.Ready)
+                if (prev != ServiceStatus.Ready)
                 {
-                    service.Status = ServiceReadiness.Ready;
+                    service.Status = ServiceStatus.Ready;
                     service.ReadyAt = DateTime.UtcNow;
                     service.StatusMessage = null;
-                    _logger.LogInformation(prev is ServiceReadiness.TimedOut or ServiceReadiness.Failed
+                    _logger.LogInformation(prev is ServiceStatus.TimedOut or ServiceStatus.Failed
                         ? "Service {Service} on VM {VmId} RECOVERED from {Prev}"
                         : "Service {Service} on VM {VmId} is READY",
                         service.Name, vm.VmId, prev);
@@ -170,9 +171,9 @@ public class VmReadinessMonitor : BackgroundService
             }
             else
             {
-                service.Status = ServiceReadiness.Failed;
+                service.Status = ServiceStatus.Failed;
                 service.StatusMessage = "Guest agent unreachable";
-                if (prev != ServiceReadiness.Failed)
+                if (prev != ServiceStatus.Failed)
                     _logger.LogWarning(
                         "Service {Service} on VM {VmId} FAILED — guest agent unreachable",
                         service.Name, vm.VmId);
@@ -187,7 +188,7 @@ public class VmReadinessMonitor : BackgroundService
         var agentPingService = vm.Services
             .FirstOrDefault(s => s.CheckType == CheckType.GuestAgentPing);
         var agentAlive = agentPingService != null
-            ? agentPingService.Status == ServiceReadiness.Ready
+            ? agentPingService.Status == ServiceStatus.Ready
             : await IsGuestAgentReady(domainName, ct);
 
         if (!agentAlive)
@@ -198,14 +199,14 @@ public class VmReadinessMonitor : BackgroundService
             return;
         }
 
-        bool systemReady = systemService?.Status == ServiceReadiness.Ready;
+        bool systemReady = systemService?.Status == ServiceStatus.Ready;
 
         foreach (var service in vm.Services)
         {
             if (service.CheckType == CheckType.GuestAgentPing)
                 continue;
 
-            if (service.Status == ServiceReadiness.Ready)
+            if (service.Status == ServiceStatus.Ready)
             {
                 if (!service.LivenessCheck)
                     continue;
@@ -218,7 +219,7 @@ public class VmReadinessMonitor : BackgroundService
             }
 
             // Self-healing: recheck TimedOut/Failed services at a slower interval
-            if (service.Status is ServiceReadiness.TimedOut or ServiceReadiness.Failed)
+            if (service.Status is ServiceStatus.TimedOut or ServiceStatus.Failed)
             {
                 var sinceLastCheck = service.LastCheckAt.HasValue
                     ? (DateTime.UtcNow - service.LastCheckAt.Value).TotalSeconds
@@ -230,9 +231,9 @@ public class VmReadinessMonitor : BackgroundService
             // Gate: non-System services wait for System to be Ready
             if (service.Name != "System" && !systemReady)
             {
-                if (service.Status != ServiceReadiness.Pending)
+                if (service.Status != ServiceStatus.Pending)
                 {
-                    service.Status = ServiceReadiness.Pending;
+                    service.Status = ServiceStatus.Pending;
                     anyChanged = true;
                 }
                 continue;
@@ -244,18 +245,18 @@ public class VmReadinessMonitor : BackgroundService
 
             if (success)
             {
-                if (previousStatus is ServiceReadiness.TimedOut or ServiceReadiness.Failed)
+                if (previousStatus is ServiceStatus.TimedOut or ServiceStatus.Failed)
                 {
                     _logger.LogInformation(
                         "Service {Service} on VM {VmId} RECOVERED from {PreviousStatus} (port: {Port})",
                         service.Name, vm.VmId, previousStatus, service.Port);
                 }
-                else if (previousStatus != ServiceReadiness.Ready)
+                else if (previousStatus != ServiceStatus.Ready)
                 {
                     _logger.LogInformation("Service {Service} on VM {VmId} is READY (port: {Port})",
                         service.Name, vm.VmId, service.Port);
                 }
-                service.Status = ServiceReadiness.Ready;
+                service.Status = ServiceStatus.Ready;
                 service.ReadyAt = DateTime.UtcNow;
                 service.LastCheckAt = DateTime.UtcNow;
                 service.StatusMessage = null; // clear stale failure message
@@ -271,19 +272,19 @@ public class VmReadinessMonitor : BackgroundService
             }
             else if (failed)
             {
-                service.Status = ServiceReadiness.Failed;
+                service.Status = ServiceStatus.Failed;
                 service.StatusMessage = diagnostic;
                 service.LastCheckAt = DateTime.UtcNow;
-                if (previousStatus != ServiceReadiness.Failed)
+                if (previousStatus != ServiceStatus.Failed)
                     _logger.LogWarning("Service {Service} on VM {VmId} FAILED", service.Name, vm.VmId);
             }
             else
             {
-                if (previousStatus == ServiceReadiness.Ready)
+                if (previousStatus == ServiceStatus.Ready)
                 {
                     // Liveness re-check failure: service was Ready but no longer
                     // responding. Revert so IsFullyReady reflects reality.
-                    service.Status = ServiceReadiness.Failed;
+                    service.Status = ServiceStatus.Failed;
                     service.StatusMessage = diagnostic ?? "Liveness check failed";
                     service.LastCheckAt = DateTime.UtcNow;
                     _logger.LogWarning(
@@ -293,8 +294,8 @@ public class VmReadinessMonitor : BackgroundService
                 else
                 {
                     // Boot-time path: don't downgrade TimedOut/Failed to Checking
-                    if (previousStatus is not (ServiceReadiness.TimedOut or ServiceReadiness.Failed))
-                        service.Status = ServiceReadiness.Checking;
+                    if (previousStatus is not (ServiceStatus.TimedOut or ServiceStatus.Failed))
+                        service.Status = ServiceStatus.Checking;
                     service.LastCheckAt = DateTime.UtcNow;
                 }
             }
@@ -344,7 +345,7 @@ public class VmReadinessMonitor : BackgroundService
     /// Returns (success, hardFailed). hardFailed is true only for cloud-init error state.
     /// </summary>
     private async Task<(bool success, bool failed, string? diagnostic)> ExecuteServiceCheckAsync(
-        string domain, VmServiceStatus service, CancellationToken ct)
+        string domain, VmServiceModel service, CancellationToken ct)
     {
         string path;
         string[] args;

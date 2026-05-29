@@ -1,5 +1,6 @@
 ﻿using DeCloud.NodeAgent.Core.Models;
 using DeCloud.Shared.Enums;
+using DeCloud.Shared.Models;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using System.Security.Cryptography;
@@ -762,16 +763,16 @@ public class VmRepository : IDisposable
     /// <summary>
     /// Deserialize services JSON from database, with fallback to empty list.
     /// </summary>
-    private static List<VmServiceStatus> DeserializeServices(string? json)
+    private static List<VmServiceModel> DeserializeServices(string? json)
     {
-        if (string.IsNullOrEmpty(json) || json == "[]") return new List<VmServiceStatus>();
+        if (string.IsNullOrEmpty(json) || json == "[]") return new List<VmServiceModel>();
         try
         {
-            return JsonSerializer.Deserialize<List<VmServiceStatus>>(json) ?? new List<VmServiceStatus>();
+            return JsonSerializer.Deserialize<List<VmServiceModel>>(json) ?? new List<VmServiceModel>();
         }
         catch
         {
-            return new List<VmServiceStatus>();
+            return new List<VmServiceModel>();
         }
     }
 

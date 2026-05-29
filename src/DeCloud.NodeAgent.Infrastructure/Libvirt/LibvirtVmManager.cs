@@ -6,6 +6,7 @@ using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.Shared.Enums;
+using DeCloud.Shared.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Text;
@@ -472,7 +473,7 @@ public class LibvirtVmManager : IVmManager
                             var systemService = instance.Services.FirstOrDefault(s => s.Name == "System");
                             if (systemService == null)
                             {
-                                systemService = new VmServiceStatus
+                                systemService = new VmServiceModel
                                 {
                                     Name = "System",
                                     CheckType = CheckType.CloudInitDone,
@@ -481,7 +482,7 @@ public class LibvirtVmManager : IVmManager
                                 instance.Services.Add(systemService);
                             }
 
-                            systemService.Status = ServiceReadiness.Ready;
+                            systemService.Status = ServiceStatus.Ready;
                             systemService.StatusMessage = $"peerId={peerId}";
                             systemService.ReadyAt ??= DateTime.UtcNow;
                             systemService.LastCheckAt = DateTime.UtcNow;

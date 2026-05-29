@@ -1,6 +1,7 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
+using DeCloud.Shared.Enums;
 using Microsoft.AspNetCore.Mvc;
 using System.Security.Cryptography;
 using System.Text;
@@ -104,9 +105,9 @@ public class DhtCallbackController : ControllerBase
             // Ready with null StatusMessage, then this callback's old idempotency guard
             // would short-circuit and the peerId was never captured).
             var previousStatus = systemService.Status;
-            var alreadyReady = systemService.Status == ServiceReadiness.Ready;
+            var alreadyReady = systemService.Status == ServiceStatus.Ready;
 
-            systemService.Status = ServiceReadiness.Ready;
+            systemService.Status = ServiceStatus.Ready;
             systemService.StatusMessage = $"peerId={notification.PeerId}";
             systemService.LastCheckAt = DateTime.UtcNow;
             if (!alreadyReady)

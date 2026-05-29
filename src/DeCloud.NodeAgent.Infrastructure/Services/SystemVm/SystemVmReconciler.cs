@@ -551,7 +551,7 @@ public sealed class SystemVmReconciler : BackgroundService
     /// This mirrors <c>CommandProcessorService.HandleCreateVmAsync</c>'s
     /// <c>ParseServiceDefinitions</c> + <c>SaveVmAsync</c> pattern.
     /// Without this, VmReadinessMonitor has no services to probe and the VM
-    /// can never reach <see cref="ServiceReadiness.Ready"/>.
+    /// can never reach <see cref="ServiceStatus.Ready"/>.
     /// </summary>
     private async Task SetVmServicesAsync(
         string vmId,
@@ -570,7 +570,7 @@ public sealed class SystemVmReconciler : BackgroundService
                 return;
             }
 
-            vm.Services = declarations.Select(d => new VmServiceStatus
+            vm.Services = declarations.Select(d => new VmServiceModel
             {
                 Name = d.Name,
                 Port = d.Port,
@@ -580,7 +580,7 @@ public sealed class SystemVmReconciler : BackgroundService
                 HttpPath = d.HttpPath,
                 LivenessCheck = d.LivenessCheck,
                 TimeoutSeconds = d.TimeoutSeconds,
-                Status = ServiceReadiness.Pending,
+                Status = ServiceStatus.Pending,
             }).ToList();
 
             await _repository.SaveVmAsync(vm);

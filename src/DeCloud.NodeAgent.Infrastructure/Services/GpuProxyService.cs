@@ -1,5 +1,6 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.Shared.Enums;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
 

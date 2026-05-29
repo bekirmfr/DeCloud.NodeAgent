@@ -5,6 +5,7 @@ using DeCloud.NodeAgent.Infrastructure.Docker;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
+using DeCloud.Shared.Contracts;
 using DeCloud.Shared.Enums;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Options;
@@ -137,7 +138,7 @@ public class CommandProcessorService : BackgroundService
                     _logger.LogInformation(
                         "✓ Processed {Count} pushed command(s)",
                         pushedCount);
-                    
+
                     // Reset backoff when commands are processed
                     currentPollInterval = _options.PollInterval;
                     consecutiveEmptyPolls = 0;
@@ -159,7 +160,7 @@ public class CommandProcessorService : BackgroundService
                     _logger.LogInformation(
                         "✓ Retrieved {Count} command(s) via pull",
                         pulledCommands.Count);
-                    
+
                     // Reset backoff when commands found
                     currentPollInterval = _options.PollInterval;
                     consecutiveEmptyPolls = 0;
@@ -336,128 +337,68 @@ public class CommandProcessorService : BackgroundService
             return false; // Command will be retried by orchestrator
         }
 
-        var root = JsonDocument.Parse(payload).RootElement;
-
-        string? vmId = GetStringProperty(root, "vmId", "VmId");
-        string name = GetStringProperty(root, "name", "Name") ?? $"vm-{vmId?[..8]}";
-        string ownerId = GetStringProperty(root, "ownerId", "OwnerId") ?? "unknown";
-        string? password = GetStringProperty(root, "password", "Password");
-        int category = GetIntProperty(root, "category", "Category") ?? 0;
-        int role = GetIntProperty(root, "role", "Role") ?? 0;
-        int replicationFactor = GetIntProperty(root, "replicationFactor", "ReplicationFactor") ?? 0;
-        int qualityTier = GetIntProperty(root, "qualityTier", "QualityTier") ?? 3;
-        int virtualCpuCores = GetIntProperty(root, "virtualCpuCores", "VirtualCpuCores") ?? 1;
-        int computePointCost = GetIntProperty(root, "computePointCost", "ComputePointCost") ?? 0;
-        long memoryBytes = GetLongProperty(root, "memoryBytes", "MemoryBytes") ?? 1024;
-        long diskBytes = GetLongProperty(root, "diskBytes", "DiskBytes") ?? 10;
-        string? baseImageUrl = GetStringProperty(root, "baseImageUrl", "BaseImageUrl");
-        string? imageId = GetStringProperty(root, "imageId", "ImageId");
-        string? sshPublicKey = GetStringProperty(root, "sshPublicKey", "SshPublicKey");
-        string? userData = GetStringProperty(root, "userData", "UserData");
-        string? gpuPciAddress = GetStringProperty(root, "gpuPciAddress", "GpuPciAddress");
-        int gpuModeInt = GetIntProperty(root, "gpuMode", "GpuMode") ?? 0;
-        var gpuMode = (GpuMode)gpuModeInt;
-        var gpuVramBytes = GetLongProperty(root, "gpuVramBytes", "GpuVramBytes"); ;
-        int deploymentModeInt = GetIntProperty(root, "deploymentMode", "DeploymentMode") ?? 0;
-        var deploymentMode = (DeploymentMode)deploymentModeInt;
-        string? containerImage = GetStringProperty(root, "containerImage", "ContainerImage");
-        string? overlayRootCid = GetStringProperty(root, "manifestRootCid", "ManifestRootCid");
-        string? targetNodeId = GetStringProperty(root, "targetNodeId", "TargetNodeId");
-
-        Dictionary<long, string>? overlayChunkMap = null;
-        if (root.TryGetProperty("ChunkMap", out var cmElement) ||
-            root.TryGetProperty("chunkMap", out cmElement))
+        // Deserialize the typed wire contract. Enum encoding and casing are owned
+        // by CreateVmPayload + JsonOptions.Wire (case-insensitive), so the prior
+        // dual-key GetStringProperty(root, "x", "X") reads are no longer needed.
+        CreateVmPayload req;
+        try
         {
-            if (cmElement.ValueKind == JsonValueKind.Object)
-            {
-                overlayChunkMap = new Dictionary<long, string>();
-                foreach (var prop in cmElement.EnumerateObject())
-                {
-                    if (long.TryParse(prop.Name, out var offset))
-                        overlayChunkMap[offset] = prop.Value.GetString() ?? "";
-                }
-            }
+            req = JsonSerializer.Deserialize<CreateVmPayload>(payload, Core.Json.JsonOptions.Wire)
+                ?? throw new JsonException("CreateVm payload deserialised to null");
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogError(ex,
+                "CreateVm: malformed payload — rejecting command. ACKing to prevent " +
+                "an infinite retry of an unparseable command.");
+            return true; // ACK: retrying a structurally-invalid payload cannot succeed
         }
 
-        // Parse environment variables for containers
-        Dictionary<string, string>? environmentVariables = null;
-        if (root.TryGetProperty("EnvironmentVariables", out var envElement) ||
-            root.TryGetProperty("environmentVariables", out envElement))
-        {
-            environmentVariables = JsonSerializer.Deserialize<Dictionary<string, string>>(
-                envElement.GetRawText());
-        }
-
-        Dictionary<string, string>? labels = null;
-        if (root.TryGetProperty("Labels", out var labelsElement) ||
-            root.TryGetProperty("labels", out labelsElement))
-        {
-            labels = JsonSerializer.Deserialize<Dictionary<string, string>>(
-                labelsElement.GetRawText());
-        }
-
-        // Parse artifacts (P2.5). The orchestrator includes the template's
-        // architecture-filtered Artifacts list so the pipeline can prefetch
-        // before VM creation. Empty list for custom-cloud-init and container
-        // deployments — the pipeline no-ops in that case.
-        List<TemplateArtifact> artifacts = new();
-        if (root.TryGetProperty("Artifacts", out var artifactsElement) ||
-            root.TryGetProperty("artifacts", out artifactsElement))
-        {
-            if (artifactsElement.ValueKind == JsonValueKind.Array)
-            {
-                try
-                {
-                    artifacts = JsonSerializer.Deserialize<List<TemplateArtifact>>(
-                        artifactsElement.GetRawText(),
-                        Core.Json.JsonOptions.Wire)
-                        ?? new List<TemplateArtifact>();
-                }
-                catch (JsonException ex)
-                {
-                    _logger.LogWarning(ex,
-                        "VM {VmId}: failed to parse Artifacts payload — proceeding with " +
-                        "empty list. The VM may fail at boot if cloud-init references " +
-                        "uncached artifacts.", vmId);
-                }
-            }
-        }
-
-        // Resolve image URL with architecture awareness
-        baseImageUrl = await ResolveImageUrlAsync(imageId, baseImageUrl, ct);
+        // Resolve image URL with architecture awareness. The orchestrator sends a
+        // fully-resolved BaseImageUrl and does not put ImageId on the wire (it is
+        // resolved orchestrator-side), so pass null — the resolver only falls back
+        // to a default when BaseImageUrl is empty.
+        var baseImageUrl = await ResolveImageUrlAsync(imageId: null, providedUrl: req.BaseImageUrl, ct);
 
         var vmSpec = new VmSpec
         {
-            Id = vmId,
-            Name = name,
-            OwnerId = ownerId,
-            Category = (VmCategory)category,
-            Role = (VmRole)role,
-            VirtualCpuCores = virtualCpuCores,
-            QualityTier = (QualityTier)qualityTier,
-            ComputePointCost = computePointCost,
-            MemoryBytes = memoryBytes,
-            DiskBytes = diskBytes,
+            Id = req.VmId,
+            Name = req.Name,
+            OwnerId = req.OwnerId ?? "unknown",
+            Category = req.Category,
+            Role = req.Role,
+            VirtualCpuCores = req.VirtualCpuCores,
+            QualityTier = req.QualityTier,
+            ComputePointCost = req.ComputePointCost,
+            MemoryBytes = req.MemoryBytes,
+            DiskBytes = req.DiskBytes,
             BaseImageUrl = baseImageUrl,
-            SshPublicKey = sshPublicKey,
-            CloudInitUserData = userData,
-            GpuPciAddress = gpuPciAddress,
-            GpuMode = gpuMode,
-            GpuVramBytes = gpuVramBytes,
-            DeploymentMode = deploymentMode,
-            ContainerImage = containerImage,
-            EnvironmentVariables = environmentVariables,
-            Labels = labels,
-            ReplicationFactor = replicationFactor,
-            TargetNodeId = targetNodeId,
-            OverlayRootCid = overlayRootCid,
-            OverlayChunkMap = overlayChunkMap
+            SshPublicKey = req.SshPublicKey,
+            CloudInitUserData = req.CloudInitUserData,
+            GpuPciAddress = req.GpuPciAddress,
+            GpuMode = req.GpuMode,
+            GpuVramBytes = req.GpuVramBytes,
+            DeploymentMode = req.DeploymentMode,
+            ContainerImage = req.ContainerImage,
+            EnvironmentVariables = req.EnvironmentVariables,
+            Labels = req.Labels,
+            ReplicationFactor = req.ReplicationFactor,
+            TargetNodeId = req.TargetNodeId,
+            OverlayRootCid = req.ManifestRootCid,
+            OverlayChunkMap = req.ChunkMap
         };
+
+        // Local aliases so the duplicate-check, GPU-assignment and logging blocks
+        // below read naturally without threading req.* through every line.
+        var vmId = req.VmId;
+        var name = req.Name;
+        var deploymentMode = vmSpec.DeploymentMode;
+        var password = req.Password;
 
         // Defense-in-depth: reject duplicate system VMs (DHT/Relay/BlockStore) with the same name.
         // The orchestrator's reconciliation loop can race and issue two CreateVm commands
         // for the same role before the first one is acknowledged.
-        if (vmSpec.Role is VmRole.Dht or VmRole.Relay or VmRole.BlockStore)
+        if (vmSpec.Category is VmCategory.System)
         {
             var existingVms = _vmManager.GetAllVms();
             var duplicate = existingVms.FirstOrDefault(v =>
@@ -538,28 +479,28 @@ public class CommandProcessorService : BackgroundService
         _logger.LogInformation(
             "Creating {VmRole} type {Mode} {VmId}: {VCpus} vCPUs, {MemoryMB}MB RAM, " +
             "{DiskGB}GB disk, image: {ImageUrl}, quality tier: {QualityTier}, GPU: {GpuMode}",
-            vmSpec.Role.ToString(), deploymentMode, vmId, virtualCpuCores,
-            memoryBytes / 1024 / 1024, diskBytes / 1024 / 1024 / 1024,
-            deploymentMode == DeploymentMode.Container ? containerImage : baseImageUrl,
-            qualityTier, vmSpec.GpuMode);
+            vmSpec.Role.ToString(), deploymentMode, vmId, vmSpec.VirtualCpuCores,
+            vmSpec.MemoryBytes / 1024 / 1024, vmSpec.DiskBytes / 1024 / 1024 / 1024,
+            deploymentMode == DeploymentMode.Container ? vmSpec.ContainerImage : baseImageUrl,
+            (int)vmSpec.QualityTier, vmSpec.GpuMode);
 
         if (deploymentMode == DeploymentMode.Container)
         {
             _logger.LogInformation(
                 "VM {VmId}: Container mode - image: {Image}, GPU shared via NVIDIA runtime",
-                vmId, containerImage);
+                vmId, vmSpec.ContainerImage);
         }
-        else if (!string.IsNullOrEmpty(userData))
+        else if (!string.IsNullOrEmpty(vmSpec.CloudInitUserData))
         {
             _logger.LogInformation(
                 "VM {VmId}: Using cloud-init UserData ({Bytes} bytes)",
-                vmId, userData.Length);
+                vmId, vmSpec.CloudInitUserData.Length);
         }
 
         // Dispatch via unified pipeline (P2.5). Pipeline owns prefetch +
         // binary verification + manager routing. We still need a reference
         // to the chosen manager for the post-create services lookup below.
-        var result = await _pipeline.DeployAsync(vmSpec, artifacts, password, ct);
+        var result = await _pipeline.DeployAsync(vmSpec, req.Artifacts, password, ct);
 
         // Parse service definitions from orchestrator payload.
         // Manager lookup mirrors the pipeline's internal routing; we cannot
@@ -576,7 +517,7 @@ public class CommandProcessorService : BackgroundService
             var vm = (manager.GetAllVms()).FirstOrDefault(v => v.VmId == vmId);
             if (vm != null)
             {
-                vm.Services = ParseServiceDefinitions(root);
+                vm.Services = ToServiceStatuses(req.Services);
                 await _repository.SaveVmAsync(vm);
                 _logger.LogInformation("VM {VmId}: {Count} service readiness checks registered",
                     vmId, vm.Services.Count);
@@ -607,56 +548,41 @@ public class CommandProcessorService : BackgroundService
     }
 
     /// <summary>
-    /// Parse service definitions from the orchestrator's CreateVm command payload.
-    /// Falls back to default System-only service if none provided.
-    /// Uses GetIntProperty/GetStringProperty helpers for null-safe JSON parsing.
+    /// Map the typed wire service definitions onto the node's runtime
+    /// <see cref="VmServiceStatus"/> list consumed by VmReadinessMonitor.
+    /// Falls back to a default System-only (cloud-init) service when none provided.
+    /// CheckType travels as a string on the wire (matching SystemVmServiceDeclaration);
+    /// an unknown or empty value falls back to CloudInitDone.
     /// </summary>
-    private static List<VmServiceStatus> ParseServiceDefinitions(JsonElement root)
+    private static List<VmServiceModel> ToServiceStatuses(IReadOnlyList<VmServiceDefinition> definitions)
     {
-        var services = new List<VmServiceStatus>();
+        var services = new List<VmServiceModel>(definitions.Count);
 
-        if (root.TryGetProperty("Services", out var servicesElement) ||
-            root.TryGetProperty("services", out servicesElement))
+        foreach (var d in definitions)
         {
-            if (servicesElement.ValueKind == JsonValueKind.Array)
+            if (!Enum.TryParse<CheckType>(d.CheckType, ignoreCase: true, out var checkType))
+                checkType = CheckType.CloudInitDone;
+
+            services.Add(new VmServiceModel
             {
-                foreach (var svcElement in servicesElement.EnumerateArray())
-                {
-                    // Use existing helpers — they check ValueKind before calling
-                    // GetInt32/GetString, preventing crashes on null JSON values
-                    var name = GetStringProperty(svcElement, "Name", "name");
-                    var port = GetIntProperty(svcElement, "Port", "port");
-                    var protocol = GetStringProperty(svcElement, "Protocol", "protocol");
-
-                    var checkTypeStr = GetStringProperty(svcElement, "CheckType", "checkType") ?? "CloudInitDone";
-                    Enum.TryParse<CheckType>(checkTypeStr, true, out var checkType);
-
-                    var httpPath = GetStringProperty(svcElement, "HttpPath", "httpPath");
-                    var execCommand = GetStringProperty(svcElement, "ExecCommand", "execCommand");
-                    var timeout = GetIntProperty(svcElement, "TimeoutSeconds", "timeoutSeconds") ?? 300;
-
-                    services.Add(new VmServiceStatus
-                    {
-                        Name = name ?? "Unknown",
-                        Port = port,
-                        Protocol = protocol,
-                        CheckType = checkType,
-                        HttpPath = httpPath,
-                        ExecCommand = execCommand,
-                        Status = ServiceReadiness.Pending,
-                        TimeoutSeconds = timeout
-                    });
-                }
-            }
+                Name = string.IsNullOrEmpty(d.Name) ? "Unknown" : d.Name,
+                Port = d.Port,
+                Protocol = d.Protocol,
+                CheckType = checkType,
+                HttpPath = d.HttpPath,
+                ExecCommand = d.ExecCommand,
+                Status = ServiceStatus.Pending,
+                TimeoutSeconds = d.TimeoutSeconds
+            });
         }
 
         if (services.Count == 0)
         {
-            services.Add(new VmServiceStatus
+            services.Add(new VmServiceModel
             {
                 Name = "System",
                 CheckType = CheckType.CloudInitDone,
-                Status = ServiceReadiness.Pending,
+                Status = ServiceStatus.Pending,
                 TimeoutSeconds = 300
             });
         }
@@ -687,7 +613,7 @@ public class CommandProcessorService : BackgroundService
 
         // Release GPU assignment on stop (VFIO will unbind)
         var vmInstance = await manager.GetVmAsync(vmId, ct);
-        
+
         if (vmInstance?.Spec.GpuMode == GpuMode.Passthrough &&
             !string.IsNullOrEmpty(vmInstance.Spec.GpuPciAddress))
         {
@@ -719,7 +645,7 @@ public class CommandProcessorService : BackgroundService
 
         var manager = await ResolveManagerForVmAsync(vmId, ct);
         var vmInstance = await manager.GetVmAsync(vmId, ct);
-        
+
         // Clean up relay VM NAT rules
         if (vmInstance?.Spec.Role == VmRole.Relay &&
             !string.IsNullOrEmpty(vmInstance.Spec.IpAddress))
@@ -938,10 +864,10 @@ public class CommandProcessorService : BackgroundService
             int? vmPort = GetIntProperty(root, "vmPort", "VmPort");
             int? protocolInt = GetIntProperty(root, "protocol", "Protocol");
             string? label = GetStringProperty(root, "label", "Label");
-            
+
             // NEW: Relay forwarding fields
-            bool? isRelayForwarding = root.TryGetProperty("isRelayForwarding", out var relayProp) || root.TryGetProperty("IsRelayForwarding", out relayProp) 
-                ? relayProp.GetBoolean() 
+            bool? isRelayForwarding = root.TryGetProperty("isRelayForwarding", out var relayProp) || root.TryGetProperty("IsRelayForwarding", out relayProp)
+                ? relayProp.GetBoolean()
                 : false;
             string? tunnelDestinationIp = GetStringProperty(root, "tunnelDestinationIp", "TunnelDestinationIp");
 
@@ -956,13 +882,13 @@ public class CommandProcessorService : BackgroundService
             // Determine forwarding destination
             string forwardingDestination;
             string forwardingType;
-            
+
             if (isRelayForwarding == true && !string.IsNullOrEmpty(tunnelDestinationIp))
             {
                 // Relay node - forward to CGNAT node via tunnel
                 forwardingDestination = tunnelDestinationIp;
                 forwardingType = "relay→tunnel";
-                
+
                 _logger.LogInformation(
                     "Relay forwarding for CGNAT VM {VmId}: will forward to tunnel {TunnelIp}:{VmPort}",
                     vmId, tunnelDestinationIp, vmPort);
@@ -972,7 +898,7 @@ public class CommandProcessorService : BackgroundService
                 // Direct access - forward to local VM
                 forwardingDestination = vmPrivateIp;
                 forwardingType = "direct→vm";
-                
+
                 _logger.LogInformation(
                     "Direct forwarding for VM {VmId}: will forward to {VmIp}:{VmPort}",
                     vmId, vmPrivateIp, vmPort);
@@ -984,7 +910,7 @@ public class CommandProcessorService : BackgroundService
 
             // Check if a specific public port was requested (for 3-hop CGNAT forwarding)
             int? requestedPublicPort = GetIntProperty(root, "publicPort", "PublicPort");
-            
+
             int? publicPort;
             if (requestedPublicPort.HasValue && requestedPublicPort.Value > 0)
             {
@@ -992,7 +918,7 @@ public class CommandProcessorService : BackgroundService
                 _logger.LogInformation(
                     "Using specified public port {PublicPort} for VM {VmId} (3-hop forwarding)",
                     requestedPublicPort.Value, vmId);
-                    
+
                 // Reserve this specific port in the pool
                 bool reserved = await _portPoolManager.ReserveSpecificPortAsync(requestedPublicPort.Value, ct);
                 if (!reserved)
@@ -1002,7 +928,7 @@ public class CommandProcessorService : BackgroundService
                         requestedPublicPort.Value, vmId);
                     return (false, null);
                 }
-                
+
                 publicPort = requestedPublicPort.Value;
             }
             else
@@ -1102,7 +1028,7 @@ public class CommandProcessorService : BackgroundService
 
             // Get mapping to find public port
             var mappings = await _portMappingRepository.GetByVmIdAsync(vmId);
-            
+
             // For relay forwarding (VmPort=0), match by PublicPort instead
             // All relay mappings have VmPort=0, so matching by VmPort would return first mapping
             PortMapping? mapping;
@@ -1128,7 +1054,7 @@ public class CommandProcessorService : BackgroundService
             // Remove iptables rules (both DNAT and FORWARD)
             // For relay forwarding, iptables rules use relay VM IP, not tunnel IP
             string ipForIptables = mapping.VmPrivateIp;
-            
+
             // Check if this is relay forwarding (tunnel IP)
             if (mapping.VmPrivateIp.StartsWith("10.20.") || mapping.VmPrivateIp.StartsWith("10.30."))
             {
@@ -1147,7 +1073,7 @@ public class CommandProcessorService : BackgroundService
                         "Tunnel IP detected but no relay VM found - deletion may fail");
                 }
             }
-            
+
             var success = await _portForwardingManager.RemoveForwardingAsync(
                 ipForIptables,
                 mapping.VmPort,
@@ -1172,7 +1098,7 @@ public class CommandProcessorService : BackgroundService
             {
                 removed = await _portMappingRepository.RemoveAsync(vmId, vmPort.Value);
             }
-            
+
             if (!removed)
             {
                 _logger.LogError("Failed to remove port mapping from database");
