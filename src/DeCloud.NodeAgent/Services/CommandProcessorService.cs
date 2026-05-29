@@ -549,7 +549,7 @@ public class CommandProcessorService : BackgroundService
 
     /// <summary>
     /// Map the typed wire service definitions onto the node's runtime
-    /// <see cref="VmServiceStatus"/> list consumed by VmReadinessMonitor.
+    /// <see cref="VmServiceModel"/> list consumed by VmReadinessMonitor.
     /// Falls back to a default System-only (cloud-init) service when none provided.
     /// CheckType travels as a string on the wire (matching SystemVmServiceDeclaration);
     /// an unknown or empty value falls back to CloudInitDone.
@@ -571,6 +571,7 @@ public class CommandProcessorService : BackgroundService
                 CheckType = checkType,
                 HttpPath = d.HttpPath,
                 ExecCommand = d.ExecCommand,
+                LivenessCheck = d.LivenessCheck,
                 Status = ServiceStatus.Pending,
                 TimeoutSeconds = d.TimeoutSeconds
             });

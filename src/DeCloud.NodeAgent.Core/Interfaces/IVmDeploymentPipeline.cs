@@ -25,7 +25,7 @@ namespace DeCloud.NodeAgent.Core.Interfaces;
 ///         tenant VMs receive already-rendered cloud-init from the orchestrator.</item>
 ///   <item>Service readiness check registration. System VMs register from template
 ///         declarations (<c>SetVmServicesAsync</c>); tenant VMs from the command
-///         payload (<c>ParseServiceDefinitions</c>). Two different sources, two
+///         payload (<c>ToServiceStatuses</c>). Two different sources, two
 ///         different code paths — keeping this in the pipeline would force one
 ///         caller to translate to the other's format. Cleaner to leave it out.</item>
 ///   <item>Outstanding-command tracking (system-VM-only concept).</item>
