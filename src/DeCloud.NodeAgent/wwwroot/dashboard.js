@@ -472,9 +472,9 @@ function renderVMs() {
     // v.spec.labels — labels dict lives on Spec, not at the top level of VmInstance.
     // v.category — "System" / "Tenant"; used for tenant filter so future system roles
     //              don't leak into the tenant table without a dashboard change.
-    const isRelay = v => v.role === 'Relay' || v.spec?.labels?.role === 'relay';
-    const isDht = v => v.role === 'Dht' || v.spec?.labels?.role === 'dht';
-    const isBs = v => v.role === 'BlockStore' || v.spec?.labels?.role === 'blockstore';
+    const isRelay = v => v.role === 'Relay' || v.spec?.labels?.['system-vm-role'] === 'relay';
+    const isDht = v => v.role === 'Dht' || v.spec?.labels?.['system-vm-role'] === 'dht';
+    const isBs = v => v.role === 'BlockStore' || v.spec?.labels?.['system-vm-role'] === 'blockstore';
 
     // Resolve each obligation once so findSysVm can use the vmId.
     const relayObl = S.obligations.find(o => o.role === ROLE_FOR_KEY.relay);
@@ -1345,8 +1345,8 @@ function truncId(id, head = 4, tail = 4) {
 }
 
 function isRunning(vm) {
-    // VmState.Running = 3
-    return vm.state === 3;
+    // VmStatus.Running = 3 — serialised as integer (no [JsonStringEnumConverter])
+    return vm.status === 3;
 }
 
 // ── Service health helpers ────────────────────────────────────────────────
@@ -1448,6 +1448,9 @@ function resolveVmUrl(vm) {
 }
 
 function vmStateName(state) {
+    // Must match VmStatus enum exactly:
+    // 0=Pending, 1=Scheduling, 2=Provisioning, 3=Running, 4=Paused,
+    // 5=Suspended, 6=Stopping, 7=Stopped, 8=Deleting, 9=Deleted, 10=Migrating, 11=Error
     const map = {
         0: 'Pending', 1: 'Scheduling', 2: 'Provisioning', 3: 'Running',
         4: 'Paused', 5: 'Suspended', 6: 'Stopping', 7: 'Stopped',
