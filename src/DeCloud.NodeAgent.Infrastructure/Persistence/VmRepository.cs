@@ -81,37 +81,32 @@ public class VmRepository : IDisposable
     /// </summary>
     private void InitializeOrMigrateDatabase()
     {
-        // Create schema version table if it doesn't exist
         using (var cmd = _connection.CreateCommand())
         {
             cmd.CommandText = @"
-                CREATE TABLE IF NOT EXISTS SchemaVersion (
-                    Version INTEGER PRIMARY KEY,
-                    AppliedAt TEXT NOT NULL
-                )";
+            CREATE TABLE IF NOT EXISTS SchemaVersion (
+                Version INTEGER PRIMARY KEY,
+                AppliedAt TEXT NOT NULL
+            )";
             cmd.ExecuteNonQuery();
         }
 
-        // Get current schema version
         var currentVersion = GetSchemaVersion();
         _logger.LogInformation("Current database schema version: {Version}", currentVersion);
 
-        // Apply migrations if needed
-        if (currentVersion < CURRENT_SCHEMA_VERSION)
+        if (currentVersion == 0)
         {
-            _logger.LogWarning("Database schema outdated (v{Current}). Migrating to v{Target}...",
-                currentVersion, CURRENT_SCHEMA_VERSION);
-
-            MigrateSchema(currentVersion, CURRENT_SCHEMA_VERSION);
-
-            _logger.LogInformation("✓ Database schema migrated successfully to v{Version}", CURRENT_SCHEMA_VERSION);
-        }
-        else if (currentVersion == 0)
-        {
-            // Fresh database - create initial schema
+            // Fresh database — create full schema and stamp the current version.
             CreateInitialSchema();
             SetSchemaVersion(CURRENT_SCHEMA_VERSION);
             _logger.LogInformation("✓ Database schema initialized at v{Version}", CURRENT_SCHEMA_VERSION);
+        }
+        else if (currentVersion < CURRENT_SCHEMA_VERSION)
+        {
+            _logger.LogWarning("Database schema outdated (v{Current}). Migrating to v{Target}...",
+                currentVersion, CURRENT_SCHEMA_VERSION);
+            MigrateSchema(currentVersion, CURRENT_SCHEMA_VERSION);
+            _logger.LogInformation("✓ Database schema migrated successfully to v{Version}", CURRENT_SCHEMA_VERSION);
         }
         else
         {
