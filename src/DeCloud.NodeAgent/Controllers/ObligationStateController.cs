@@ -140,7 +140,8 @@ public class ObligationStateController : ControllerBase
                 relayEndpoint = cfg.RelayEndpoint,
                 relayPublicKey = cfg.RelayPublicKey,
                 relayApiUrl = cfg.RelayApiUrl,
-                tunnelIp = cfg.TunnelIp
+                tunnelIp = cfg.TunnelIp,
+                mtu = cfg.Mtu
             });
         }
 

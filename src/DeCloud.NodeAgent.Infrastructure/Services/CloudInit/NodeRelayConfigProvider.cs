@@ -26,7 +26,22 @@ public sealed record NodeRelayConfig(
     string RelayEndpoint,    // e.g. "142.234.200.95:51820"
     string RelayPublicKey,
     string RelayApiUrl,      // e.g. "http://142.234.200.95:8080"
-    string TunnelIp);        // e.g. "10.30.0.248/24"
+    string TunnelIp,         // e.g. "10.30.0.248/24"
+    int Mtu);                // wg-mesh interface MTU for this node's path
+
+// WireGuard mesh MTU per encapsulation depth. The mesh interface defaults to
+// 1420 (single-WireGuard assumption). A CGNAT node carries DHT traffic as
+// WireGuard-inside-WireGuard (mesh tunnel over the relay tunnel), so its path
+// MTU is ~120 bytes lower; 1220 is measured-safe across that stacked path.
+// Public nodes have one WireGuard layer and could run higher, but 1220 is
+// used uniformly — an under-MTU costs marginal throughput, never connectivity,
+// and a single value keeps both ends of any link symmetric (the path MTU is
+// the min of both ends, so the lower governs regardless).
+public static class WgMeshMtu
+{
+    public const int Cgnat = 1220;
+    public const int Public = 1220;
+}
 
 public sealed class NodeRelayConfigProvider : INodeRelayConfigProvider
 {
@@ -81,7 +96,8 @@ public sealed class NodeRelayConfigProvider : INodeRelayConfigProvider
                         RelayEndpoint: relayEndpoint,
                         RelayPublicKey: relayPubKey,
                         RelayApiUrl: $"http://{relayHostIp}:8080",
-                        TunnelIp: $"{vmTunnelIp}/24");
+                        TunnelIp: $"{vmTunnelIp}/24",
+                        Mtu: WgMeshMtu.Cgnat);
                 }
             }
         }
@@ -115,7 +131,8 @@ public sealed class NodeRelayConfigProvider : INodeRelayConfigProvider
                     RelayEndpoint: $"{relayVmIp}:51820",
                     RelayPublicKey: relayPubKey,
                     RelayApiUrl: $"http://{relayVmIp}:8080",
-                    TunnelIp: $"{vmTunnelIp}/24");
+                    TunnelIp: $"{vmTunnelIp}/24",
+                    Mtu: WgMeshMtu.Public);
             }
             catch (Exception ex)
             {
