@@ -349,9 +349,14 @@ public class CommandProcessorService : BackgroundService
         catch (JsonException ex)
         {
             _logger.LogError(ex,
-                "CreateVm: malformed payload — rejecting command. ACKing to prevent " +
-                "an infinite retry of an unparseable command.");
-            return true; // ACK: retrying a structurally-invalid payload cannot succeed
+                "CreateVm: malformed payload — rejecting as a terminal failure. " +
+                "Re-issuing an identical unparseable payload cannot succeed.");
+            // Throw so ProcessCommandAsync's catch acks Success=false WITH this
+            // message. The TERMINAL: marker tells the orchestrator not to loop the
+            // migration scan on it. Previously returned true, which falsely
+            // reported success and corrupted VM placement state.
+            throw new InvalidOperationException(
+                $"TERMINAL:MALFORMED_PAYLOAD: {ex.Message}");
         }
 
         // Resolve image URL with architecture awareness. The orchestrator sends a
