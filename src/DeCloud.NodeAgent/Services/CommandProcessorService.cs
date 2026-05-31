@@ -359,11 +359,17 @@ public class CommandProcessorService : BackgroundService
                 $"TERMINAL:MALFORMED_PAYLOAD: {ex.Message}");
         }
 
-        // Resolve image URL with architecture awareness. The orchestrator sends a
-        // fully-resolved BaseImageUrl and does not put ImageId on the wire (it is
-        // resolved orchestrator-side), so pass null — the resolver only falls back
-        // to a default when BaseImageUrl is empty.
-        var baseImageUrl = await ResolveImageUrlAsync(imageId: null, providedUrl: req.BaseImageUrl, ct);
+        // The orchestrator is the single source of truth for base image
+        // identity (BASE_IMAGE_DESIGN.md §7). An empty URL means the
+        // orchestrator forgot to set it — a bug to surface, not a condition
+        // to paper over with a node-side default.
+        if (string.IsNullOrEmpty(req.BaseImageUrl))
+        {
+            throw new InvalidOperationException(
+                "TERMINAL: CreateVm payload missing BaseImageUrl. " +
+                "The orchestrator must provide a resolved URL — empty URL is a bug.");
+        }
+        var baseImageUrl = req.BaseImageUrl;
 
         var vmSpec = new VmSpec
         {
@@ -751,58 +757,6 @@ public class CommandProcessorService : BackgroundService
         var resources = await _resourceDiscovery.DiscoverAllAsync(ct);
         _logger.LogInformation("Benchmark complete");
         return true;
-    }
-
-    /// <summary>
-    /// Resolve base image URL with architecture awareness
-    /// </summary>
-    private async Task<string> ResolveImageUrlAsync(string? imageId, string? providedUrl, CancellationToken ct)
-    {
-        // If URL provided directly, use it (orchestrator override)
-        if (!string.IsNullOrEmpty(providedUrl))
-        {
-            _logger.LogInformation("Using provided image URL: {Url}", providedUrl);
-            return providedUrl;
-        }
-
-        // Get host architecture
-        var inventory = await _resourceDiscovery.GetInventoryCachedAsync(ct);
-        var hostArchitecture = inventory?.Cpu?.Architecture ?? "x86_64";
-
-        _logger.LogInformation("Resolving image for architecture: {Architecture}", hostArchitecture);
-
-        // Normalize architecture to archTag (amd64/arm64)
-        var archConfig = ArchitectureHelper.GetHostArchConfig(hostArchitecture);
-        var archTag = archConfig.ArchTag;
-
-        // Default to ubuntu-22.04 if no image specified
-        var imageIdToResolve = imageId ?? "ubuntu-22.04";
-
-        // Resolve from architecture-specific image map
-        var resolvedUrl = ArchitectureHelper.ResolveImageUrl(archTag, imageIdToResolve);
-
-        if (resolvedUrl == null)
-        {
-            _logger.LogWarning(
-                "Image {ImageId} not available for {Architecture}, falling back to default",
-                imageIdToResolve, archTag);
-
-            // Fallback to ubuntu-22.04 for the architecture
-            resolvedUrl = ArchitectureHelper.ResolveImageUrl(archTag, "ubuntu-22.04");
-        }
-
-        if (resolvedUrl == null)
-        {
-            throw new NotSupportedException(
-                $"No images available for architecture {hostArchitecture}. " +
-                $"Supported architectures: {string.Join(", ", ArchitectureHelper.SupportedArchitectures.Keys)}");
-        }
-
-        _logger.LogInformation(
-            "Resolved image '{ImageId}' for {Architecture} ({ArchTag}): {Url}",
-            imageIdToResolve, hostArchitecture, archTag, resolvedUrl);
-
-        return resolvedUrl;
     }
 
     /// <summary>
