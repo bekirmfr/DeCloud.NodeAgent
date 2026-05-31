@@ -1048,7 +1048,17 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             DiskBytes = v.DiskBytes,
             GpuMode = v.GpuMode,
             GpuVramBytes = v.GpuVramBytes,
-            ImageId = v.Name,
+            // ImageId is the catalogue ID (e.g. "debian-12") if known. VmSummary
+            // doesn't carry it today; the (URL, hash) pair below is the
+            // authoritative identity. Left null — orchestrator joins on VmId
+            // for catalogue display.
+            ImageId = null,
+            // Base image identity round-trip (BASE_IMAGE_DESIGN.md §4.5).
+            // VmSummary is flat (no Spec) — HeartbeatService projects
+            // vm.Spec.BaseImageUrl/Hash into these top-level fields when it
+            // builds VmSummary from VmInstance.
+            BaseImageUrl = v.BaseImageUrl,
+            BaseImageHash = v.BaseImageHash,
             StartedAt = v.CreatedAt,
             Services = v.Services?.Select(s => new HeartbeatServiceInfo
             {

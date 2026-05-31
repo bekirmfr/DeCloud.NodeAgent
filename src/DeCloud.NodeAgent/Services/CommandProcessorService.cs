@@ -378,6 +378,7 @@ public class CommandProcessorService : BackgroundService
             MemoryBytes = req.MemoryBytes,
             DiskBytes = req.DiskBytes,
             BaseImageUrl = baseImageUrl,
+            BaseImageHash = req.BaseImageHash ?? string.Empty,
             SshPublicKey = req.SshPublicKey,
             CloudInitUserData = req.CloudInitUserData,
             GpuPciAddress = req.GpuPciAddress,

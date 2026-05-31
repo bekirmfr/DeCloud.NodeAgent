@@ -11,9 +11,25 @@ namespace DeCloud.NodeAgent.Infrastructure.Services;
 public interface ICloudInitCleaner
 {
     /// <summary>
-    /// Clean cloud-init state from a disk image (base or overlay).
-    /// Returns true if cleaned successfully, false if cleaning was skipped but VM can still work.
-    /// Throws only on critical errors that should prevent VM creation.
+    /// Clean cloud-init state from a VM overlay disk image.
+    ///
+    /// CALLED FROM
+    /// <see cref="DeCloud.NodeAgent.Infrastructure.Libvirt.LibvirtVmManager.CreateVmAsync"/>
+    /// after the overlay is created (and after migration reconstruction, if
+    /// applicable). NOT called against cached base images — those must remain
+    /// byte-identical across nodes for content-addressed verification to work.
+    /// See BASE_IMAGE_DESIGN.md §4.4.
+    ///
+    /// EFFECT
+    /// Removes <c>/var/lib/cloud</c>, <c>/etc/machine-id</c>,
+    /// <c>/var/lib/dbus/machine-id</c>, and cloud-init logs from the overlay
+    /// view. On fresh deploys, this clears state inherited from the upstream
+    /// image. On migration, it clears state inherited from the source VM so
+    /// the target's cloud-init re-runs with a fresh instance-id.
+    ///
+    /// Returns true if cleaned successfully (or correctly skipped because no
+    /// cleaning tools are installed), false on a real failure that should
+    /// prevent VM creation. Throws only on critical errors.
     /// </summary>
     Task<CloudInitCleanResult> CleanAsync(string diskPath, CancellationToken ct = default);
 

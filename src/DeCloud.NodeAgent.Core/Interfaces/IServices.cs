@@ -85,11 +85,22 @@ public interface IVmManager
 }
 
 /// <summary>
+/// Result of <see cref="IImageManager.EnsureImageAvailableAsync"/>. Carries
+/// the local file path AND the SHA256 of the cached bytes so the caller can
+/// record the hash back into <c>VmSpec.BaseImageHash</c> for the
+/// orchestrator heartbeat round-trip. See BASE_IMAGE_DESIGN.md §4.3/§4.5.
+/// </summary>
+/// <param name="LocalPath">Path to the cached base image on disk
+///   (content-addressed: <c>{cache}/{Sha256}.img</c>).</param>
+/// <param name="Sha256">Lower-case hex SHA256 of the cached bytes.</param>
+public sealed record EnsureImageResult(string LocalPath, string Sha256);
+
+/// <summary>
 /// Manages base VM images (download, cache, verify)
 /// </summary>
 public interface IImageManager
 {
-    Task<string> EnsureImageAvailableAsync(string imageUrl, string expectedHash, CancellationToken ct = default);
+    Task<EnsureImageResult> EnsureImageAvailableAsync(string imageUrl, string expectedHash, CancellationToken ct = default);
     Task<bool> VerifyImageAsync(string imagePath, string expectedHash, CancellationToken ct = default);
     Task<string> CreateOverlayDiskAsync(string baseImagePath, string vmId, long sizeBytes, CancellationToken ct = default);
     Task DeleteDiskAsync(string diskPath, CancellationToken ct = default);

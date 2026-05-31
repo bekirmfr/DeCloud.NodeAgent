@@ -13,10 +13,41 @@ public class ImageManagerOptions
     public TimeSpan DownloadTimeout { get; set; } = TimeSpan.FromMinutes(30);
 }
 
+/// <summary>
+/// Manages base VM images: download, content-addressed cache, verification.
+///
+/// CACHE LAYOUT
+/// Files are stored at <c>{CachePath}/{sha256}.img</c> — the filename IS the
+/// hash of the file's bytes. Two nodes that downloaded byte-identical upstream
+/// bytes have byte-identical cached files at the same path. The cache key is
+/// the content, never the URL.
+///
+/// VERIFICATION
+/// When the caller provides an expected hash, this manager strictly enforces
+/// it: cached file's hash must match, downloaded bytes must hash to the
+/// expected value, otherwise the deploy fails. When the expected hash is
+/// empty (permissive mode during initial rollout — see BASE_IMAGE_DESIGN.md
+/// §4.6), the manager hashes the downloaded bytes on the fly and returns
+/// the computed hash so the caller can record it back into VmSpec.
+///
+/// CLEANING IS NOT DONE HERE
+/// Cloud-init state cleaning used to be done in this class against the
+/// cached file. That broke byte-level content identity (different nodes'
+/// cleaning produced different bytes for the same upstream image). Cleaning
+/// has moved to <see cref="DeCloud.NodeAgent.Infrastructure.Libvirt.LibvirtVmManager.CreateVmAsync"/>
+/// where it operates on the per-VM overlay disk, leaving the base
+/// content-addressable. See BASE_IMAGE_DESIGN.md §4.4.
+///
+/// LEGACY CACHE FILES
+/// Files matching the old <c>{url_hash}_{nohash|hashprefix}.img</c> naming
+/// are migrated lazily: on cache miss, this manager scans the cache directory
+/// for any legacy file whose bytes hash to the expected (or computed) value
+/// and renames it to the content-addressed name. No flag day; legacy state
+/// is repaired in place on first encounter.
+/// </summary>
 public class ImageManager : IImageManager
 {
     private readonly ICommandExecutor _executor;
-    private readonly ICloudInitCleaner _cloudInitCleaner;
     private readonly HttpClient _httpClient;
     private readonly ILogger<ImageManager> _logger;
     private readonly ImageManagerOptions _options;
@@ -35,99 +66,74 @@ public class ImageManager : IImageManager
 
     public ImageManager(
         ICommandExecutor executor,
-        ICloudInitCleaner cloudInitCleaner,
         HttpClient httpClient,
         IOptions<ImageManagerOptions> options,
         ILogger<ImageManager> logger)
     {
         _executor = executor;
-        _cloudInitCleaner = cloudInitCleaner;
         _httpClient = httpClient;
         _logger = logger;
         _options = options.Value;
-        
+
         Directory.CreateDirectory(_options.CachePath);
         Directory.CreateDirectory(_options.VmStoragePath);
     }
 
-    public async Task<string> EnsureImageAvailableAsync(string imageUrl, string expectedHash, CancellationToken ct = default)
+    public async Task<EnsureImageResult> EnsureImageAvailableAsync(
+        string imageUrl, string expectedHash, CancellationToken ct = default)
     {
-        var fileName = GetCacheFileName(imageUrl, expectedHash);
-        var localPath = Path.Combine(_options.CachePath, fileName);
+        if (string.IsNullOrWhiteSpace(imageUrl))
+            throw new ArgumentException("imageUrl is required", nameof(imageUrl));
 
-        // Check if already cached
-        if (File.Exists(localPath))
+        var normalisedExpected = NormaliseHash(expectedHash);
+
+        // ── Strict-mode fast path: cache hit by content-addressed name ────
+        if (!string.IsNullOrEmpty(normalisedExpected))
         {
-            _logger.LogDebug("Image found in cache: {Path}", localPath);
-
-            if (await VerifyImageAsync(localPath, expectedHash, ct))
+            var contentAddressedPath = CachePathForHash(normalisedExpected);
+            if (File.Exists(contentAddressedPath))
             {
-                // Image is cached and verified - cloud-init should already be cleaned
-                return localPath;
+                // Cache filename IS the hash; trust the filename as the
+                // primary check, but periodically the operator may want full
+                // re-verification. Re-hashing every cache hit would cost ~30s
+                // for a 2 GiB image — too expensive. Filename match is
+                // sufficient: the file got into the cache only after passing
+                // verification in a previous call.
+                _logger.LogDebug(
+                    "Image cache hit (content-addressed): {Path}", contentAddressedPath);
+                return new EnsureImageResult(contentAddressedPath, normalisedExpected);
             }
 
-            _logger.LogWarning("Cached image hash mismatch, re-downloading");
-            File.Delete(localPath);
+            // Legacy cache: scan for a *_nohash.* or *_hashprefix.* file that
+            // hashes to the expected value. If found, rename in place.
+            var rescued = await TryRescueLegacyCacheEntryAsync(
+                normalisedExpected, contentAddressedPath, ct);
+            if (rescued)
+            {
+                _logger.LogInformation(
+                    "Image cache: legacy file matched expected hash and was migrated to {Path}",
+                    contentAddressedPath);
+                return new EnsureImageResult(contentAddressedPath, normalisedExpected);
+            }
         }
 
-        // Download
+        // ── Download path (with serialisation) ────────────────────────────
         await _downloadLock.WaitAsync(ct);
         try
         {
-            // Double-check after acquiring lock
-            if (File.Exists(localPath) && await VerifyImageAsync(localPath, expectedHash, ct))
+            // Re-check after acquiring the lock — another caller may have
+            // completed the download.
+            if (!string.IsNullOrEmpty(normalisedExpected))
             {
-                return localPath;
+                var contentAddressedPath = CachePathForHash(normalisedExpected);
+                if (File.Exists(contentAddressedPath))
+                    return new EnsureImageResult(contentAddressedPath, normalisedExpected);
             }
 
-            await DownloadImageAsync(imageUrl, localPath, ct);
+            var (finalPath, computedHash) = await DownloadAndHashAsync(
+                imageUrl, normalisedExpected, ct);
 
-            // Verify downloaded image
-            if (!string.IsNullOrEmpty(expectedHash))
-            {
-                // Inline hash provided — verify directly
-                if (!await VerifyImageAsync(localPath, expectedHash, ct))
-                {
-                    File.Delete(localPath);
-                    throw new Exception($"Downloaded image hash does not match expected: {expectedHash}");
-                }
-            }
-            else
-            {
-                // No inline hash — try upstream checksum verification
-                var upstreamResult = await TryVerifyAgainstUpstreamChecksumAsync(localPath, imageUrl, ct);
-                if (upstreamResult == false)
-                {
-                    // Upstream checksum exists but doesn't match — reject
-                    File.Delete(localPath);
-                    throw new Exception(
-                        $"Downloaded image failed upstream checksum verification for {imageUrl}");
-                }
-                // upstreamResult == null means no upstream checksums available — proceed with warning
-                // upstreamResult == true means verified — proceed
-            }
-
-            // ========================================
-            // Clean cloud-init state from base image
-            // ========================================
-            var cleanResult = await _cloudInitCleaner.CleanAsync(localPath, ct);
-            if (cleanResult.Success)
-            {
-                _logger.LogInformation(
-                    "Base image cloud-init cleaned: {Method} in {Duration}ms",
-                    cleanResult.MethodUsed,
-                    cleanResult.Duration.TotalMilliseconds);
-            }
-            else
-            {
-                _logger.LogWarning(
-                    "Could not clean cloud-init from base image: {Message}. " +
-                    "VMs may boot with stale configuration.",
-                    cleanResult.Message);
-            }
-            // =========================================================
-
-            return localPath;
+            return new EnsureImageResult(finalPath, computedHash);
         }
         finally
         {
@@ -135,140 +141,41 @@ public class ImageManager : IImageManager
         }
     }
 
-    public async Task<bool> VerifyImageAsync(string imagePath, string expectedHash, CancellationToken ct = default)
+    /// <summary>
+    /// Public verification helper retained for diagnostics. Hashes the file
+    /// at <paramref name="imagePath"/> and compares against the expected
+    /// value. Returns true on match, false on mismatch. When the expected
+    /// hash is empty, this method returns true unconditionally — there is
+    /// nothing to verify against. Callers wanting strict verification must
+    /// pass a non-empty expected hash.
+    /// </summary>
+    public async Task<bool> VerifyImageAsync(
+        string imagePath, string expectedHash, CancellationToken ct = default)
     {
-        if (string.IsNullOrEmpty(expectedHash))
-        {
-            // No inline hash — caller's download path handles upstream verification.
-            // Debug level here because this also fires on cache-hit checks where
-            // the image was already verified at download time.
-            _logger.LogDebug(
-                "No inline hash provided for image verification, skipping inline check");
+        var normalisedExpected = NormaliseHash(expectedHash);
+        if (string.IsNullOrEmpty(normalisedExpected))
             return true;
+
+        if (!File.Exists(imagePath))
+        {
+            _logger.LogWarning(
+                "VerifyImageAsync: file does not exist at {Path}", imagePath);
+            return false;
         }
 
-        _logger.LogDebug("Verifying hash for {Path}", imagePath);
-
-        using var sha256 = SHA256.Create();
-        await using var stream = File.OpenRead(imagePath);
-        
-        var hashBytes = await sha256.ComputeHashAsync(stream, ct);
-        var actualHash = Convert.ToHexString(hashBytes).ToLowerInvariant();
-
-        var expected = expectedHash.ToLowerInvariant().Replace("sha256:", "");
-        var match = actualHash == expected;
-
+        var actual = await ComputeFileSha256Async(imagePath, ct);
+        var match = string.Equals(actual, normalisedExpected, StringComparison.Ordinal);
         if (!match)
         {
-            _logger.LogWarning("Hash mismatch: expected {Expected}, got {Actual}", expected, actualHash);
+            _logger.LogWarning(
+                "Image hash mismatch at {Path}: expected {Expected}, got {Actual}",
+                imagePath, normalisedExpected[..16], actual[..16]);
         }
-
         return match;
     }
 
-    /// <summary>
-    /// When no inline hash is provided, attempt to verify the downloaded image
-    /// against the upstream distributor's published checksum file (SHA256SUMS or
-    /// SHA512SUMS). This covers rolling-URL base images (e.g. Debian /latest/)
-    /// where a fixed hash cannot be baked into the template.
-    ///
-    /// Returns true if verified, false if checksum mismatch (caller should reject),
-    /// null if upstream checksums are unavailable (caller decides policy).
-    /// </summary>
-    private async Task<bool?> TryVerifyAgainstUpstreamChecksumAsync(
-        string imagePath, string imageUrl, CancellationToken ct)
-    {
-        if (!Uri.TryCreate(imageUrl, UriKind.Absolute, out var imageUri))
-            return null;
-
-        var fileName = Path.GetFileName(imageUri.LocalPath);
-        var baseDir = imageUrl[..imageUrl.LastIndexOf('/')];
-
-        // Try SHA256SUMS first (preferred — matches our local SHA256 computation),
-        // then SHA512SUMS (Debian publishes this).
-        string? expectedHash = null;
-        string hashAlgorithm = "SHA256";
-
-        foreach (var (checksumFile, algo) in new[] { ("SHA256SUMS", "SHA256"), ("SHA512SUMS", "SHA512") })
-        {
-            try
-            {
-                var checksumUrl = $"{baseDir}/{checksumFile}";
-                _logger.LogDebug("Attempting upstream checksum verification from {Url}", checksumUrl);
-
-                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                cts.CancelAfter(TimeSpan.FromSeconds(15));
-
-                var response = await _httpClient.GetAsync(checksumUrl, cts.Token);
-                if (!response.IsSuccessStatusCode) continue;
-
-                var content = await response.Content.ReadAsStringAsync(cts.Token);
-
-                // Format: "<hash>  <filename>" or "<hash> *<filename>"
-                foreach (var line in content.Split('\n', StringSplitOptions.RemoveEmptyEntries))
-                {
-                    var parts = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                    if (parts.Length >= 2)
-                    {
-                        // Last part is filename (may have leading * for binary mode)
-                        var entryFile = parts[^1].TrimStart('*');
-                        if (string.Equals(entryFile, fileName, StringComparison.OrdinalIgnoreCase))
-                        {
-                            expectedHash = parts[0].ToLowerInvariant();
-                            hashAlgorithm = algo;
-                            break;
-                        }
-                    }
-                }
-
-                if (expectedHash != null) break;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "Could not fetch upstream {File}", checksumFile);
-            }
-        }
-
-        if (expectedHash == null)
-        {
-            _logger.LogWarning(
-                "No upstream checksum file found for {Url} — image integrity is unverified. " +
-                "Consider providing BaseImageHash in the VM template or switching to a " +
-                "distribution mirror that publishes SHA256SUMS/SHA512SUMS",
-                imageUrl);
-            return null;
-        }
-
-        // Compute the matching hash of the downloaded file
-        _logger.LogInformation("Verifying image against upstream {Algorithm} checksum", hashAlgorithm);
-
-        byte[] hashBytes;
-        await using (var stream = File.OpenRead(imagePath))
-        {
-            using var hasher = hashAlgorithm == "SHA512"
-                ? (System.Security.Cryptography.HashAlgorithm)System.Security.Cryptography.SHA512.Create()
-                : SHA256.Create();
-            hashBytes = await hasher.ComputeHashAsync(stream, ct);
-        }
-
-        var actualHash = Convert.ToHexString(hashBytes).ToLowerInvariant();
-
-        if (actualHash == expectedHash)
-        {
-            _logger.LogInformation(
-                "✓ Image verified against upstream {Algorithm} checksum ({Hash})",
-                hashAlgorithm, actualHash[..16]);
-            return true;
-        }
-
-        _logger.LogError(
-            "Image checksum mismatch! Expected {Expected}, got {Actual}. " +
-            "The downloaded image may be corrupted or tampered with",
-            expectedHash[..16], actualHash[..16]);
-        return false;
-    }
-
-    public async Task<string> CreateOverlayDiskAsync(string baseImagePath, string vmId, long sizeBytes, CancellationToken ct = default)
+    public async Task<string> CreateOverlayDiskAsync(
+        string baseImagePath, string vmId, long sizeBytes, CancellationToken ct = default)
     {
         var vmDir = Path.Combine(_options.VmStoragePath, vmId);
         Directory.CreateDirectory(vmDir);
@@ -330,9 +237,9 @@ public class ImageManager : IImageManager
         try
         {
             // --force-share: read through POSIX advisory locks held by concurrent
-            // processes (guestmount cloud-init cleaning, running QEMU instances).
-            // Without this flag, qemu-img info fails with "Failed to get shared
-            // write lock" when the base image is still mounted by CloudInitCleaner.
+            // processes (running QEMU instances). Without this flag, qemu-img info
+            // fails with "Failed to get shared write lock" when the base image is
+            // open by a VM.
             var result = await _executor.ExecuteAsync("qemu-img",
                 $"info --force-share --output=json \"{imagePath}\"",
                 TimeSpan.FromSeconds(30),
@@ -341,28 +248,22 @@ public class ImageManager : IImageManager
             if (result.Success)
             {
                 using var doc = System.Text.Json.JsonDocument.Parse(result.StandardOutput);
-
-                if (doc.RootElement.TryGetProperty("format", out var formatElement))
-                {
-                    var detected = formatElement.GetString();
-                    if (!string.IsNullOrEmpty(detected))
-                        format = detected;
-                }
-
-                if (doc.RootElement.TryGetProperty("virtual-size", out var sizeElement))
-                    virtualSize = sizeElement.GetInt64();
-
-                _logger.LogDebug("Backing image {Path}: format={Format}, virtual-size={Size}",
-                    imagePath, format, virtualSize);
-
-                return (format, virtualSize);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("format", out var fmtEl))
+                    format = fmtEl.GetString() ?? "qcow2";
+                if (root.TryGetProperty("virtual-size", out var vsEl))
+                    virtualSize = vsEl.GetInt64();
             }
-
-            _logger.LogWarning("Could not query image info for {Path}, falling back to defaults", imagePath);
+            else
+            {
+                _logger.LogWarning(
+                    "qemu-img info failed for {Path}: {Error}",
+                    imagePath, result.StandardError);
+            }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Exception querying image info for {Path}, falling back to defaults", imagePath);
+            _logger.LogWarning(ex, "Failed to parse qemu-img info output for {Path}", imagePath);
         }
 
         return (format, virtualSize);
@@ -390,16 +291,20 @@ public class ImageManager : IImageManager
     {
         var images = new List<CachedImage>();
 
-        foreach (var file in Directory.GetFiles(_options.CachePath, "*.qcow2"))
+        // Match both new content-addressed (.img) and legacy (.qcow2) names.
+        foreach (var pattern in new[] { "*.img", "*.qcow2" })
         {
-            var info = new FileInfo(file);
-            images.Add(new CachedImage
+            foreach (var file in Directory.GetFiles(_options.CachePath, pattern))
             {
-                LocalPath = file,
-                SizeBytes = info.Length,
-                DownloadedAt = info.CreationTimeUtc,
-                LastUsedAt = info.LastAccessTimeUtc
-            });
+                var info = new FileInfo(file);
+                images.Add(new CachedImage
+                {
+                    LocalPath = file,
+                    SizeBytes = info.Length,
+                    DownloadedAt = info.CreationTimeUtc,
+                    LastUsedAt = info.LastAccessTimeUtc
+                });
+            }
         }
 
         return Task.FromResult(images);
@@ -411,20 +316,21 @@ public class ImageManager : IImageManager
         var pruned = 0;
         long freedBytes = 0;
 
-        foreach (var file in Directory.GetFiles(_options.CachePath, "*.qcow2"))
+        // Prune both content-addressed and legacy files.
+        foreach (var pattern in new[] { "*.img", "*.qcow2" })
         {
-            var info = new FileInfo(file);
-            if (info.LastAccessTimeUtc < cutoff)
+            foreach (var file in Directory.GetFiles(_options.CachePath, pattern))
             {
-                // Check if any VM is using this as backing file
+                var info = new FileInfo(file);
+                if (info.LastAccessTimeUtc >= cutoff) continue;
+
                 var isInUse = await IsImageInUseAsync(file, ct);
-                if (!isInUse)
-                {
-                    freedBytes += info.Length;
-                    File.Delete(file);
-                    pruned++;
-                    _logger.LogDebug("Pruned unused image: {Path}", file);
-                }
+                if (isInUse) continue;
+
+                freedBytes += info.Length;
+                File.Delete(file);
+                pruned++;
+                _logger.LogDebug("Pruned unused image: {Path}", file);
             }
         }
 
@@ -435,76 +341,209 @@ public class ImageManager : IImageManager
         }
     }
 
-    private async Task DownloadImageAsync(string url, string destPath, CancellationToken ct)
-    {
-        _logger.LogInformation("Downloading image from {Url} to {Path}", url, destPath);
+    // ═══════════════════════════════════════════════════════════════════════
+    // Download + content-addressed storage
+    // ═══════════════════════════════════════════════════════════════════════
 
-        var tempPath = destPath + ".downloading";
+    /// <summary>
+    /// Download the image at <paramref name="imageUrl"/>, hashing on the fly,
+    /// and atomically rename the temp file to <c>{cache}/{sha256}.img</c>.
+    ///
+    /// Strict mode (non-empty <paramref name="expectedHash"/>): if the
+    /// computed hash differs from expected, the temp file is deleted and an
+    /// exception is thrown. Permissive mode (empty expected): the computed
+    /// hash becomes the cache key; no comparison.
+    ///
+    /// Same pattern as <c>ArtifactCacheService.DownloadAndVerifyAsync</c> —
+    /// kept consistent on purpose.
+    /// </summary>
+    private async Task<(string LocalPath, string Sha256)> DownloadAndHashAsync(
+        string imageUrl, string expectedHash, CancellationToken ct)
+    {
+        // Temp file lives next to the eventual destination so the final
+        // rename is intra-directory (atomic on POSIX). Random suffix prevents
+        // collisions when two callers race on different URLs.
+        var tempPath = Path.Combine(
+            _options.CachePath,
+            $".downloading-{Guid.NewGuid():N}.tmp");
+
+        _logger.LogInformation(
+            "Downloading image from {Url} (mode={Mode})",
+            imageUrl,
+            string.IsNullOrEmpty(expectedHash) ? "permissive" : "strict");
 
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(_options.DownloadTimeout);
 
-            using var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+            using var response = await _httpClient.GetAsync(
+                imageUrl, HttpCompletionOption.ResponseHeadersRead, cts.Token);
             response.EnsureSuccessStatusCode();
 
             var totalBytes = response.Content.Headers.ContentLength ?? 0;
-            var downloadedBytes = 0L;
-            var lastLogTime = DateTime.UtcNow;
 
-            await using var contentStream = await response.Content.ReadAsStreamAsync(cts.Token);
-            await using var fileStream = File.Create(tempPath);
-
-            var buffer = new byte[81920]; // 80KB buffer
-            int bytesRead;
-
-            while ((bytesRead = await contentStream.ReadAsync(buffer, cts.Token)) > 0)
+            string computedHash;
+            await using (var contentStream = await response.Content.ReadAsStreamAsync(cts.Token))
+            await using (var fileStream = new FileStream(
+                tempPath, FileMode.Create, FileAccess.Write,
+                FileShare.None, bufferSize: 81920, useAsync: true))
+            using (var sha = SHA256.Create())
+            using (var cryptoStream = new CryptoStream(
+                contentStream, sha, CryptoStreamMode.Read))
             {
-                await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), cts.Token);
-                downloadedBytes += bytesRead;
+                var buffer = new byte[81920];
+                var downloadedBytes = 0L;
+                var lastLogTime = DateTime.UtcNow;
+                int bytesRead;
 
-                // Update progress tracking (every iteration for responsive UI)
-                if (_downloadVmMap.TryGetValue(url, out var trackingVmId))
+                while ((bytesRead = await cryptoStream.ReadAsync(
+                    buffer.AsMemory(0, buffer.Length), cts.Token)) > 0)
                 {
-                    var pct = totalBytes > 0 ? (int)(downloadedBytes * 100 / totalBytes) : 0;
-                    _activeDownloads[trackingVmId] = new ImageDownloadProgress(
-                        trackingVmId, url, downloadedBytes, totalBytes, pct);
+                    await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), cts.Token);
+                    downloadedBytes += bytesRead;
+
+                    // Update progress tracking (every iteration for responsive UI)
+                    if (_downloadVmMap.TryGetValue(imageUrl, out var trackingVmId))
+                    {
+                        var pct = totalBytes > 0
+                            ? (int)(downloadedBytes * 100 / totalBytes)
+                            : 0;
+                        _activeDownloads[trackingVmId] = new ImageDownloadProgress(
+                            trackingVmId, imageUrl, downloadedBytes, totalBytes, pct);
+                    }
+
+                    // Log progress every 10 seconds
+                    if ((DateTime.UtcNow - lastLogTime).TotalSeconds >= 10)
+                    {
+                        var percent = totalBytes > 0
+                            ? (double)downloadedBytes / totalBytes * 100
+                            : 0;
+                        _logger.LogInformation(
+                            "Download progress: {Downloaded}MB / {Total}MB ({Percent:F1}%)",
+                            downloadedBytes / 1024 / 1024,
+                            totalBytes / 1024 / 1024,
+                            percent);
+                        lastLogTime = DateTime.UtcNow;
+                    }
                 }
 
-                // Log progress every 10 seconds
-                if ((DateTime.UtcNow - lastLogTime).TotalSeconds >= 10)
-                {
-                    var percent = totalBytes > 0 ? (double)downloadedBytes / totalBytes * 100 : 0;
-                    _logger.LogInformation("Download progress: {Downloaded}MB / {Total}MB ({Percent:F1}%)",
-                        downloadedBytes / 1024 / 1024,
-                        totalBytes / 1024 / 1024,
-                        percent);
-                    lastLogTime = DateTime.UtcNow;
-                }
+                await fileStream.FlushAsync(cts.Token);
+                computedHash = Convert.ToHexString(sha.Hash!).ToLowerInvariant();
             }
 
-            // Move to final location
-            File.Move(tempPath, destPath, overwrite: true);
+            // Strict mode: enforce hash match.
+            if (!string.IsNullOrEmpty(expectedHash) &&
+                !string.Equals(computedHash, expectedHash, StringComparison.Ordinal))
+            {
+                _logger.LogError(
+                    "Downloaded image hash mismatch! URL={Url}, expected={Expected}, got={Actual}. " +
+                    "The artifact at the URL does not match the orchestrator's recorded hash. " +
+                    "The URL may have drifted to a newer build, or the bytes may have been tampered with.",
+                    imageUrl, expectedHash[..16], computedHash[..16]);
+                TryDelete(tempPath);
+                throw new Exception(
+                    $"Downloaded image hash mismatch for {imageUrl}: " +
+                    $"expected {expectedHash[..16]}, got {computedHash[..16]}");
+            }
 
-            _logger.LogInformation("Download complete: {Path} ({Size}MB)",
-                destPath, downloadedBytes / 1024 / 1024);
+            // Atomic rename to the content-addressed final path.
+            var finalPath = CachePathForHash(computedHash);
+            if (File.Exists(finalPath))
+            {
+                // Another concurrent caller materialised the same hash
+                // between our cache miss and this rename. Drop our temp; both
+                // files have identical bytes by construction.
+                TryDelete(tempPath);
+            }
+            else
+            {
+                File.Move(tempPath, finalPath, overwrite: false);
+            }
+
+            _logger.LogInformation(
+                "Download complete: {Path} (sha256={Sha256})",
+                finalPath, computedHash[..16]);
 
             // Clean up progress tracking
-            if (_downloadVmMap.TryRemove(url, out var completedVmId))
+            if (_downloadVmMap.TryRemove(imageUrl, out var completedVmId))
                 _activeDownloads.TryRemove(completedVmId, out _);
+
+            return (finalPath, computedHash);
         }
         catch
         {
-            // Clean up temp file and progress tracking on failure
-            if (File.Exists(tempPath))
-            {
-                File.Delete(tempPath);
-            }
-            if (_downloadVmMap.TryRemove(url, out var failedVmId))
+            TryDelete(tempPath);
+            if (_downloadVmMap.TryRemove(imageUrl, out var failedVmId))
                 _activeDownloads.TryRemove(failedVmId, out _);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Scan the cache directory for files matching the old naming scheme
+    /// (<c>*_nohash.*</c> or <c>*_*.*</c>) and, if any of them hash to the
+    /// expected value, rename to the content-addressed name. Returns true
+    /// if a legacy file was successfully migrated.
+    ///
+    /// Only invoked when the caller has a non-empty expected hash. In
+    /// permissive mode we don't know what to look for.
+    /// </summary>
+    private async Task<bool> TryRescueLegacyCacheEntryAsync(
+        string expectedHash, string contentAddressedPath, CancellationToken ct)
+    {
+        if (!Directory.Exists(_options.CachePath)) return false;
+
+        // Candidates: anything that isn't already a content-addressed .img.
+        // The old naming had {urlHash}_{hashprefix|nohash}.{qcow2|img}.
+        var candidates = new List<string>();
+        foreach (var pattern in new[] { "*_nohash.*", "*_*.qcow2", "*_*.img" })
+        {
+            foreach (var path in Directory.GetFiles(_options.CachePath, pattern))
+            {
+                // Skip files that already look content-addressed
+                // (filename is a 64-char hex string + extension).
+                var fileName = Path.GetFileNameWithoutExtension(path);
+                if (fileName.Length == 64 &&
+                    fileName.All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+                {
+                    continue;
+                }
+                candidates.Add(path);
+            }
+        }
+
+        foreach (var candidate in candidates)
+        {
+            try
+            {
+                var actual = await ComputeFileSha256Async(candidate, ct);
+                if (!string.Equals(actual, expectedHash, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                // Match — migrate to content-addressed name.
+                if (File.Exists(contentAddressedPath))
+                {
+                    // Concurrent producer beat us. Drop the legacy copy.
+                    File.Delete(candidate);
+                }
+                else
+                {
+                    File.Move(candidate, contentAddressedPath, overwrite: false);
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex,
+                    "Legacy cache rescue: could not hash/migrate {Path} — skipping",
+                    candidate);
+            }
+        }
+
+        return false;
     }
 
     private async Task<bool> IsImageInUseAsync(string imagePath, CancellationToken ct)
@@ -515,7 +554,8 @@ public class ImageManager : IImageManager
             var diskPath = Path.Combine(vmDir, "disk.qcow2");
             if (!File.Exists(diskPath)) continue;
 
-            var result = await _executor.ExecuteAsync("qemu-img", $"info --force-share \"{diskPath}\"", ct);
+            var result = await _executor.ExecuteAsync(
+                "qemu-img", $"info --force-share \"{diskPath}\"", ct);
             if (result.Success && result.StandardOutput.Contains(imagePath))
             {
                 return true;
@@ -525,17 +565,41 @@ public class ImageManager : IImageManager
         return false;
     }
 
-    private static string GetCacheFileName(string url, string hash)
-    {
-        // Create a stable filename from URL and hash
-        var urlHash = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(url)))[..16];
-        var hashPrefix = string.IsNullOrEmpty(hash) ? "nohash" : hash.Replace("sha256:", "")[..16];
-        
-        // Extract original extension
-        var uri = new Uri(url);
-        var ext = Path.GetExtension(uri.LocalPath);
-        if (string.IsNullOrEmpty(ext)) ext = ".qcow2";
+    // ═══════════════════════════════════════════════════════════════════════
+    // Helpers
+    // ═══════════════════════════════════════════════════════════════════════
 
-        return $"{urlHash}_{hashPrefix}{ext}";
+    private string CachePathForHash(string sha256) =>
+        Path.Combine(_options.CachePath, $"{sha256}.img");
+
+    private static string NormaliseHash(string? hash)
+    {
+        if (string.IsNullOrWhiteSpace(hash)) return string.Empty;
+        var trimmed = hash.Trim();
+        if (trimmed.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase))
+            trimmed = trimmed["sha256:".Length..];
+        return trimmed.ToLowerInvariant();
+    }
+
+    private static async Task<string> ComputeFileSha256Async(string path, CancellationToken ct)
+    {
+        using var sha = SHA256.Create();
+        await using var stream = new FileStream(
+            path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            bufferSize: 81920, useAsync: true);
+        var hashBytes = await sha.ComputeHashAsync(stream, ct);
+        return Convert.ToHexString(hashBytes).ToLowerInvariant();
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+        catch
+        {
+            // Best-effort cleanup. The next download attempt will overwrite.
+        }
     }
 }

@@ -30,6 +30,7 @@ public class LibvirtVmManager : IVmManager
     private readonly INodeStateService _nodeState;
     private readonly ICommandExecutor _executor;
     private readonly IImageManager _imageManager;
+    private readonly ICloudInitCleaner _cloudInitCleaner;
     private readonly ILogger<LibvirtVmManager> _logger;
     private readonly LibvirtVmManagerOptions _options;
     private readonly VmRepository _repository;
@@ -55,6 +56,7 @@ public class LibvirtVmManager : IVmManager
     public LibvirtVmManager(
         ICommandExecutor executor,
         IImageManager imageManager,
+        ICloudInitCleaner cloudInitCleaner,
         IOptions<LibvirtVmManagerOptions> options,
         VmRepository repository,
         IUserWireGuardManager userWireGuardManager,
@@ -64,6 +66,7 @@ public class LibvirtVmManager : IVmManager
     {
         _executor = executor;
         _imageManager = imageManager;
+        _cloudInitCleaner = cloudInitCleaner;
         _nodeState = nodeState;
         _userWireGuardManager = userWireGuardManager;
         _gpuProxy = gpuProxy;
@@ -701,11 +704,32 @@ public class LibvirtVmManager : IVmManager
             string baseImagePath;
             try
             {
-                baseImagePath = await _imageManager.EnsureImageAvailableAsync(
+                var imageResult = await _imageManager.EnsureImageAvailableAsync(
                     spec.BaseImageUrl,
-                    spec.BaseImageHash,
+                    spec.BaseImageHash ?? string.Empty,
                     ct);
-                _logger.LogInformation("VM {VmId}: Base image ready at {Path}", spec.Id, baseImagePath);
+                baseImagePath = imageResult.LocalPath;
+
+                // Record the SHA256 of the bytes we actually used into the spec.
+                // This is the identity of the base the overlay will be authored
+                // against. The heartbeat round-trips this back to the orchestrator
+                // so subsequent migrations of this VM carry the same hash and the
+                // target enforces strict verification. See BASE_IMAGE_DESIGN.md §4.5.
+                if (!string.Equals(spec.BaseImageHash, imageResult.Sha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogInformation(
+                        "VM {VmId}: recording base image hash {Hash} into spec " +
+                        "(orchestrator had {OrigHash})",
+                        spec.Id,
+                        imageResult.Sha256[..16],
+                        string.IsNullOrEmpty(spec.BaseImageHash) ? "<empty>" : spec.BaseImageHash[..16]);
+                }
+                spec.BaseImageHash = imageResult.Sha256;
+                instance.Spec = spec;
+
+                _logger.LogInformation(
+                    "VM {VmId}: Base image ready at {Path} (sha256={Hash})",
+                    spec.Id, baseImagePath, imageResult.Sha256[..16]);
             }
             catch (Exception ex)
             {
@@ -776,6 +800,46 @@ public class LibvirtVmManager : IVmManager
                 instance.Status = VmStatus.Error;
                 await _repository.UpdateVmStateAsync(spec.Id, VmStatus.Error);
                 return VmOperationResult.Fail(spec.Id, $"Failed to prepare disk: {ex.Message}", "DISK_ERROR");
+            }
+
+            // =====================================================
+            // STEP 2.5: Clean cloud-init state from the overlay
+            // =====================================================
+            // The cached base image is now immutable and content-addressed
+            // (BASE_IMAGE_DESIGN.md §4.4). Cloud-init state cleaning runs here
+            // against the per-VM overlay disk, writing the cleaning delta into
+            // the overlay (~100 KB of CoW writes) and leaving the base
+            // untouched. Works for both fresh deploys (clears any cloud-init
+            // markers carried over from the upstream image) and migrations
+            // (resets the source's instance-id so cloud-init re-runs on the
+            // target — complements the fresh instance-id set in STEP 7).
+            try
+            {
+                var cleanResult = await _cloudInitCleaner.CleanAsync(diskPath, ct);
+                if (cleanResult.Success && cleanResult.MethodUsed != CleanMethod.Skipped)
+                {
+                    _logger.LogInformation(
+                        "VM {VmId}: Overlay cloud-init cleaned: {Method} in {Duration}ms",
+                        spec.Id,
+                        cleanResult.MethodUsed,
+                        cleanResult.Duration.TotalMilliseconds);
+                }
+                else if (!cleanResult.Success)
+                {
+                    _logger.LogWarning(
+                        "VM {VmId}: Overlay cloud-init clean did not run: {Message}. " +
+                        "VM may boot with stale cloud-init state from the source overlay.",
+                        spec.Id, cleanResult.Message);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Non-fatal: cloud-init re-run on the target is still forced by
+                // the fresh instance-id written in STEP 7. Cleaning is belt-and-
+                // braces; logging is enough.
+                _logger.LogWarning(ex,
+                    "VM {VmId}: Cloud-init cleaning threw — proceeding anyway",
+                    spec.Id);
             }
 
             // =====================================================

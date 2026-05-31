@@ -208,6 +208,13 @@ public class HeartbeatService : BackgroundService
                         IpAddress = ipAddress,
                         VncPort = vm.VncPort,
                         MacAddress = vm.Spec.MacAddress,
+                        // Base image identity round-trip. The node computes the
+                        // hash on first download (LibvirtVmManager STEP 1) and
+                        // stamps it onto vm.Spec; we forward both URL and hash
+                        // up to the orchestrator's SyncVmStateFromHeartbeatAsync.
+                        // See BASE_IMAGE_DESIGN.md §4.5.
+                        BaseImageUrl = vm.Spec.BaseImageUrl,
+                        BaseImageHash = vm.Spec.BaseImageHash,
                         Services = vm.Services.Count > 0 ? vm.Services.Select(s => new VmServiceSummary
                         {
                             Name = s.Name,
