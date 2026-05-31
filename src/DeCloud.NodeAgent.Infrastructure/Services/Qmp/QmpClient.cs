@@ -197,4 +197,84 @@ public class QmpClient : IQmpClient
         else
             _logger.LogDebug("VM {VmId}: AppArmor scratch access revoked ({Path})", vmId, path);
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Phase D+2: guest agent commands (qemu-agent-command, not qemu-monitor-command)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Send a raw guest-agent command. Same escaping pattern as SendAsync
+    /// but targets qemu-agent-command, which goes to the guest agent socket
+    /// (vsock or virtio-serial) rather than the QMP monitor socket.
+    /// </summary>
+    private async Task<JsonElement> SendAgentAsync(
+        string vmId, string execute, object? arguments = null,
+        TimeSpan? timeout = null, CancellationToken ct = default)
+    {
+        var json = arguments == null
+            ? $"{{\"execute\":\"{execute}\"}}"
+            : $"{{\"execute\":\"{execute}\",\"arguments\":{JsonSerializer.Serialize(arguments)}}}";
+
+        var escaped = json.Replace("\\", "\\\\").Replace("\"", "\\\"");
+        var args = $"qemu-agent-command {vmId} \"{escaped}\"";
+
+        var result = await _executor.ExecuteAsync(
+            "virsh", args, timeout ?? TimeSpan.FromSeconds(10), ct);
+
+        if (!result.Success)
+            throw new InvalidOperationException(
+                $"Guest agent {execute} failed for VM {vmId}: {result.StandardError}");
+
+        using var doc = JsonDocument.Parse(result.StandardOutput.Trim());
+        if (doc.RootElement.TryGetProperty("error", out var err))
+        {
+            var desc = err.TryGetProperty("desc", out var d) ? d.GetString() : "unknown";
+            throw new InvalidOperationException(
+                $"Guest agent {execute} error for VM {vmId}: {desc}");
+        }
+        if (doc.RootElement.TryGetProperty("return", out var ret))
+            return ret.Clone();
+
+        return doc.RootElement.Clone();
+    }
+
+    public async Task<int> FsFreezeAsync(string vmId, CancellationToken ct = default)
+    {
+        // Generous timeout: freeze drives a sync inside the guest, which on a
+        // VM under write pressure can take many seconds. 30s is the floor used
+        // by libvirt's own virsh domfsfreeze when no override is given.
+        var ret = await SendAgentAsync(
+            vmId, "guest-fsfreeze-freeze",
+            timeout: TimeSpan.FromSeconds(30), ct: ct);
+
+        var count = ret.ValueKind == JsonValueKind.Number ? ret.GetInt32() : 0;
+        _logger.LogDebug("VM {VmId}: froze {Count} filesystem(s)", vmId, count);
+        return count;
+    }
+
+    public async Task<int> FsThawAsync(string vmId, CancellationToken ct = default)
+    {
+        var ret = await SendAgentAsync(
+            vmId, "guest-fsfreeze-thaw",
+            timeout: TimeSpan.FromSeconds(30), ct: ct);
+
+        var count = ret.ValueKind == JsonValueKind.Number ? ret.GetInt32() : 0;
+        _logger.LogDebug("VM {VmId}: thawed {Count} filesystem(s)", vmId, count);
+        return count;
+    }
+
+    public async Task<bool> GuestAgentPingAsync(string vmId, CancellationToken ct = default)
+    {
+        try
+        {
+            await SendAgentAsync(
+                vmId, "guest-ping",
+                timeout: TimeSpan.FromSeconds(2), ct: ct);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 }

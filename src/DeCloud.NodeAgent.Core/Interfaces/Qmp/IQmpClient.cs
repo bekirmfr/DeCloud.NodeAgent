@@ -1,9 +1,14 @@
 ﻿namespace DeCloud.NodeAgent.Core.Interfaces.Qmp;
 
 /// <summary>
-/// Thin wrapper over 'virsh qemu-monitor-command' for QMP interactions.
-/// Phase D: used for query-block (drive node name discovery).
+/// Thin wrapper over 'virsh qemu-monitor-command' (QMP) and
+/// 'virsh qemu-agent-command' (guest agent). Both flow through virsh so
+/// the implementation can share execution and escaping machinery, even
+/// though they target different sockets on the QEMU process.
+///
+/// Phase D:   query-block (drive node name discovery).
 /// Phase D+1: dirty bitmap add/clear + drive-backup for incremental export.
+/// Phase D+2: guest-fsfreeze for application-consistent capture.
 /// </summary>
 public interface IQmpClient
 {
@@ -49,4 +54,36 @@ public interface IQmpClient
     /// Non-fatal on failure — always called in a finally block.
     /// </summary>
     Task RevokeScratchAppArmorAsync(string vmId, string path, CancellationToken ct = default);
+
+    /// <summary>
+    /// Phase D+2: Freeze all mounted filesystems inside the guest via
+    /// qemu-guest-agent's guest-fsfreeze-freeze. Forces ext4/xfs journal
+    /// commit and dirty-page writeback to the virtio device, producing
+    /// an application-consistent snapshot point.
+    ///
+    /// Returns the number of frozen filesystems on success. Throws if
+    /// the guest agent is unreachable or returns an error — callers
+    /// should catch and fall back to crash-consistent capture.
+    ///
+    /// The freeze MUST be matched with a thaw; failure to thaw leaves
+    /// the guest unable to write. Callers wrap in try/finally.
+    /// </summary>
+    Task<int> FsFreezeAsync(string vmId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Phase D+2: Thaw guest filesystems previously frozen by
+    /// FsFreezeAsync. Returns the number of thawed filesystems.
+    ///
+    /// Safe to call even if no freeze is currently active (returns 0
+    /// or an error that the caller should swallow).
+    /// </summary>
+    Task<int> FsThawAsync(string vmId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Phase D+2: Cheap host-side liveness check on the guest agent.
+    /// Returns true if guest-ping returns within ~2 seconds.
+    /// Used to decide whether to attempt fsfreeze at all — there's no
+    /// point calling freeze if ping is already failing.
+    /// </summary>
+    Task<bool> GuestAgentPingAsync(string vmId, CancellationToken ct = default);
 }

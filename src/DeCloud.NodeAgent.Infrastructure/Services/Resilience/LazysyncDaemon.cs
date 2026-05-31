@@ -238,7 +238,12 @@ public class LazysyncDaemon : BackgroundService
                     return;
                 }
 
-                await ExportOverlayAsync(diskPath, tmpPath, ct);
+                // Application-consistent: freeze guest filesystems, run qemu-img convert,
+                // thaw. Without this, qemu-img convert reads whatever has been flushed to
+                // the qcow2 — which on a fresh-boot VM still mid-writeback can include
+                // torn writes (file size updated, data extent not yet committed).
+                await RunUnderGuestFreezeAsync(vm.VmId,
+                    () => ExportOverlayAsync(diskPath, tmpPath, ct), ct);
 
                 // Signal that next cycle should use incremental export.
                 // Written to disk in SaveStateAsync (step 8) — only persists if the
@@ -289,8 +294,15 @@ public class LazysyncDaemon : BackgroundService
                     await _qmpClient.GrantScratchAppArmorAsync(vm.VmId, tmpPath, ct);
                     attached = true;
 
-                    await _qmpClient.DriveBackupIncrementalAsync(
-                        vm.VmId, driveNode, BitmapName, tmpPath, ct);
+                    // Application-consistent: freeze guest filesystems before drive-backup.
+                    // drive-backup with a dirty bitmap captures all clusters QEMU has dirty;
+                    // freeze forces the guest to flush its page cache into QEMU first so
+                    // those just-flushed clusters are picked up in this cycle's bitmap
+                    // rather than waiting for the next cycle to catch them.
+                    await RunUnderGuestFreezeAsync(vm.VmId,
+                        () => _qmpClient.DriveBackupIncrementalAsync(
+                            vm.VmId, driveNode, BitmapName, tmpPath, ct),
+                        ct);
                 }
                 catch (Exception ex)
                 {
@@ -714,6 +726,91 @@ public class LazysyncDaemon : BackgroundService
 
         using var doc = JsonDocument.Parse(result.StandardOutput);
         return doc.RootElement.GetProperty("virtual-size").GetInt64();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Application-consistent capture via guest agent fsfreeze
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Execute <paramref name="captureBody"/> inside a guest-fsfreeze /
+    /// guest-fsthaw bracket so the qcow2 file the body reads is in an
+    /// application-consistent state.
+    ///
+    /// Best-effort: if the guest agent is unreachable or freeze fails,
+    /// runs <paramref name="captureBody"/> without freeze (crash-consistent
+    /// fallback — equivalent to pre-D+2 behaviour). Logs a warning so
+    /// repeated agent failures are visible.
+    ///
+    /// Thaw runs in a finally block. If the body throws, the guest is still
+    /// thawed before the exception propagates. If thaw itself fails after a
+    /// successful freeze, that's a logged-but-non-fatal condition — the host
+    /// can't unfreeze a guest agent that has stopped responding mid-capture,
+    /// but the guest's own fsfreeze-timeout (libvirt's domfsfreeze adds one
+    /// by default; we rely on it) will auto-thaw after a bounded interval.
+    ///
+    /// Why we bother:
+    ///   crash-consistent capture sees torn writes — file metadata says the
+    ///   file is N bytes long but the last extents may be zero-padded because
+    ///   the guest's page cache hadn't flushed when the qcow2 was sampled.
+    ///   This was observed on a migrated VM whose libnetplan.cpython-311.pyc
+    ///   had a valid header and a tail of zeros, causing cloud-init's
+    ///   init-local to throw ValueError: bad marshal data on the target.
+    /// </summary>
+    private async Task RunUnderGuestFreezeAsync(
+        string vmId, Func<Task> captureBody, CancellationToken ct)
+    {
+        // Cheap precheck — skip the whole dance if the agent isn't responding.
+        // Avoids a 30s timeout per cycle for VMs without qemu-guest-agent.
+        var agentOk = await _qmpClient.GuestAgentPingAsync(vmId, ct);
+        if (!agentOk)
+        {
+            _logger.LogWarning(
+                "VM {VmId}: guest agent unresponsive — capturing crash-consistent " +
+                "(application-level data may be torn until agent recovers)",
+                vmId);
+            await captureBody();
+            return;
+        }
+
+        var frozen = false;
+        try
+        {
+            try
+            {
+                var count = await _qmpClient.FsFreezeAsync(vmId, ct);
+                frozen = count > 0;
+                if (!frozen)
+                    _logger.LogWarning(
+                        "VM {VmId}: fsfreeze returned 0 filesystems — proceeding without freeze",
+                        vmId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "VM {VmId}: fsfreeze failed — capturing crash-consistent", vmId);
+            }
+
+            await captureBody();
+        }
+        finally
+        {
+            if (frozen)
+            {
+                try
+                {
+                    await _qmpClient.FsThawAsync(vmId, CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    // Cannot rethrow from finally without masking the body's exception.
+                    // Guest's libvirt-side freeze timeout will auto-thaw eventually.
+                    _logger.LogError(ex,
+                        "VM {VmId}: fsthaw failed after successful freeze — " +
+                        "guest may be paused until libvirt fsfreeze-timeout expires", vmId);
+                }
+            }
+        }
     }
 
     /// <summary>
