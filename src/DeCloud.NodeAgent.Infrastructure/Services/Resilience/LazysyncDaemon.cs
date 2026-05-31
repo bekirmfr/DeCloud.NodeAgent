@@ -392,8 +392,12 @@ public class LazysyncDaemon : BackgroundService
             // Step 9: Notify local blockstore VM so its /manifests endpoint
             // reflects the current manifest — populates the dashboard Resources table.
             // Fire-and-forget: dashboard display is non-critical, never block the cycle.
+            // ReplicationFactor flows from VmSpec → blockstore's owners/{vmId}.meta →
+            // GossipSub new-blocks announcements, letting peers self-organize repair
+            // without orchestrator round-trips (Phase B+).
             _ = NotifyBlockstoreManifestAsync(
-                blockstoreAddr, vm.VmId, rootCid, state, changedChunks, totalBytes, ct);
+                blockstoreAddr, vm.VmId, rootCid, state, changedChunks, totalBytes,
+                vm.Spec.ReplicationFactor, ct);
 
             _logger.LogInformation(
                 "VM {VmId}: lazysync v{Version} — {Changed} changed / {Total} chunks, {Bytes} bytes",
@@ -413,6 +417,7 @@ public class LazysyncDaemon : BackgroundService
         LazysyncState state,
         List<(long Offset, string Cid)> changedChunks,
         long totalBytes,
+        int replicationFactor,
         CancellationToken ct)
     {
         try
@@ -427,7 +432,8 @@ public class LazysyncDaemon : BackgroundService
                 totalBytes,
                 resourceType = "VMOverlay",
                 resourceId = vmId,
-                chunkCids = changedChunks.Select(c => c.Cid).ToList()
+                chunkCids = changedChunks.Select(c => c.Cid).ToList(),
+                replicationFactor
             };
 
             var json = System.Text.Json.JsonSerializer.Serialize(payload);
