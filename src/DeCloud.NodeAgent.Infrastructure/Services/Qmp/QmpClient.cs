@@ -103,7 +103,7 @@ public class QmpClient : IQmpClient
         _logger.LogDebug("Cleared dirty bitmap {Name} on VM {VmId}", bitmapName, vmId);
     }
 
-    public async Task<string> DriveBackupIncrementalAsync(
+    public async Task<string> StartDriveBackupIncrementalAsync(
         string vmId, string driveNode, string bitmapName, string targetPath, CancellationToken ct = default)
     {
         // QEMU requires a non-empty job-id for drive-backup.
@@ -124,9 +124,57 @@ public class QmpClient : IQmpClient
             ["mode"] = "existing",  // file is pre-created by NodeAgent; skip bdrv_create()
         }, ct);
 
-        // Poll query-block-jobs by job-id until the job completes (max 10 min).
-        // Matching by job-id is reliable; "device" field varies across QEMU versions.
-        var deadline = DateTime.UtcNow.AddMinutes(10);
+        // The QMP return is synchronous: when SendAsync returns successfully,
+        // the job exists in QEMU and its copy-on-write snapshot point is fixed.
+        // The copy itself proceeds in the background — observe via WaitForBackupJobAsync.
+        return jobId;
+    }
+
+    public async Task<string> StartDriveBackupTopAsync(
+        string vmId, string driveNode, string targetPath, CancellationToken ct = default)
+    {
+        // Phase H: full-overlay capture inside the live qemu's block layer.
+        // sync=top copies only sectors present in the topmost BDS (the overlay);
+        // backing-chain fall-through is skipped natively, so no external
+        // whitelist is needed. No bitmap involved — this is the first cycle;
+        // the caller adds the bitmap separately to track writes for V2.
+        //
+        // Why not qemu-img convert --force-share: that runs as a separate
+        // process opening the qcow2 file directly. --force-share disables
+        // POSIX advisory locking, but the reader still maintains its own
+        // qcow2 driver state (L2 cache, refcount cache) which doesn't
+        // synchronize with the live qemu's freshly-flushed writes. Result:
+        // torn captures where the file's head clusters land in the output
+        // but tail clusters read as zero from the external view. Diagnosed
+        // on a migrated VM whose libnetplan.cpython-311.pyc had cluster 1
+        // at depth=0 with real bytes and cluster 2 missing entirely from
+        // the overlay, causing cloud-init init-local to throw
+        // ValueError: bad marshal data.
+        var jobId = $"ls-{vmId[..8]}-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+
+        await SendAsync(vmId, "drive-backup", new Dictionary<string, object>
+        {
+            ["job-id"] = jobId,
+            ["device"] = driveNode,
+            ["target"] = targetPath,
+            ["format"] = "raw",
+            ["sync"] = "top",
+            ["mode"] = "existing",
+        }, ct);
+
+        return jobId;
+    }
+
+    public async Task WaitForBackupJobAsync(
+        string vmId, string jobId, TimeSpan timeout, CancellationToken ct = default)
+    {
+        // Poll query-block-jobs by job-id every 2s. Matching by job-id is reliable;
+        // "device" field varies across QEMU versions.
+        //
+        // Runs OUTSIDE the freeze envelope — drive-backup's before-write notifier
+        // protects the target while the guest writes proceed normally. Freeze is
+        // not needed once the snapshot point is fixed at job creation time.
+        var deadline = DateTime.UtcNow.Add(timeout);
         while (DateTime.UtcNow < deadline)
         {
             await Task.Delay(2000, ct);
@@ -139,12 +187,12 @@ public class QmpClient : IQmpClient
                     running = true;
                     if (job.TryGetProperty("status", out var status) &&
                         status.GetString() == "concluded")
-                        return targetPath;
+                        return;
                 }
             }
-            if (!running) return targetPath; // job finished and removed from list
+            if (!running) return; // job finished and removed from list
         }
-        throw new TimeoutException($"drive-backup timed out for VM {vmId}");
+        throw new TimeoutException($"drive-backup job {jobId} timed out for VM {vmId}");
     }
 
     public async Task GrantScratchAppArmorAsync(string vmId, string path, CancellationToken ct = default)

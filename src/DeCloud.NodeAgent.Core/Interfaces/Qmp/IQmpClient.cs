@@ -9,6 +9,11 @@
 /// Phase D:   query-block (drive node name discovery).
 /// Phase D+1: dirty bitmap add/clear + drive-backup for incremental export.
 /// Phase D+2: guest-fsfreeze for application-consistent capture.
+/// Phase H:   drive-backup split into Start + Wait so the freeze envelope
+///            brackets only the snapshot-point creation (one QMP round-trip),
+///            not the whole copy. Adds sync=top for first-cycle full overlay
+///            capture inside the live qemu's coherent block layer, eliminating
+///            the cross-process coherence gap of qemu-img convert --force-share.
 /// </summary>
 public interface IQmpClient
 {
@@ -34,12 +39,60 @@ public interface IQmpClient
     /// <summary>Phase D+1: Clear (reset) a dirty bitmap after successful export.</summary>
     Task ClearDirtyBitmapAsync(string vmId, string driveNode, string bitmapName, CancellationToken ct = default);
 
-    /// <summary>Phase D+1: Start incremental drive-backup block job and wait for completion.</summary>
-    Task<string> DriveBackupIncrementalAsync(
+    /// <summary>
+    /// Phase H: Start an incremental drive-backup block job and return its
+    /// job-id immediately. QEMU installs the copy-on-write snapshot point
+    /// synchronously when this call returns; the actual copy runs
+    /// asynchronously, observed via WaitForBackupJobAsync.
+    ///
+    /// Callers wrap only this Start call in the freeze envelope. Freeze
+    /// duration becomes one QMP round-trip regardless of how many clusters
+    /// the backup will copy — pre-Phase-H this scaled with disk delta size.
+    /// </summary>
+    Task<string> StartDriveBackupIncrementalAsync(
         string vmId,
         string driveNode,
         string bitmapName,
         string targetPath,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Phase H: Start a full-overlay drive-backup via sync=top and return
+    /// its job-id. Captures every cluster present in the topmost BDS (the
+    /// overlay), skipping backing-chain fall-through. Output is overlay-only
+    /// — no external whitelist required.
+    ///
+    /// Runs as a block job inside the live qemu process, reading through
+    /// the same coherent block layer that committed the freeze-flushed data.
+    /// Eliminates the cross-process coherence gap that qemu-img convert
+    /// --force-share introduces (a separate process maintains its own qcow2
+    /// driver state — L2 cache, refcount cache — which doesn't synchronize
+    /// with the live qemu's freshly-flushed writes).
+    ///
+    /// Callers wrap only this Start call in the freeze envelope. Pair with
+    /// WaitForBackupJobAsync to await the background copy.
+    /// </summary>
+    Task<string> StartDriveBackupTopAsync(
+        string vmId,
+        string driveNode,
+        string targetPath,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Phase H: Block until the named drive-backup job completes. Polls
+    /// query-block-jobs every 2s; returns when the job reports
+    /// status=concluded or disappears from the list (older QEMU versions).
+    ///
+    /// Runs OUTSIDE the freeze envelope — guest writes proceed normally
+    /// during the wait, protected by drive-backup's before-write notifier
+    /// which copies old cluster contents to the target before allowing any
+    /// in-place overwrite. The captured snapshot is fixed at job creation
+    /// time; the wait just observes the copy completing.
+    /// </summary>
+    Task WaitForBackupJobAsync(
+        string vmId,
+        string jobId,
+        TimeSpan timeout,
         CancellationToken ct = default);
 
     /// <summary>

@@ -49,6 +49,22 @@ namespace DeCloud.NodeAgent.Services;
 ///   1a+1b with block-dirty-bitmap-add + drive-backup sync=incremental to export
 ///   only actually-written clusters, eliminating the need for the overlay map step.
 ///
+/// Phase H — V1 inside live qemu + bounded-duration freeze:
+///   The first cycle (V1) also runs via QMP drive-backup, using sync=top instead
+///   of sync=incremental. This removes the qemu-img convert --force-share path
+///   entirely. Pre-Phase-H V1 read the qcow2 from a separate process; Phase G
+///   (guest-fsfreeze) ensured the guest had flushed to qemu's block layer, but
+///   the external reader saw an inconsistent file-level view of qcow2 metadata
+///   vs. recently-written data clusters — producing torn captures where head
+///   clusters of a file landed correctly but tail clusters read as zero.
+///
+///   Equally important: the freeze now brackets only the QMP Start call that
+///   creates the backup job. drive-backup's copy-on-write notifier fixes the
+///   snapshot point at job creation; the copy runs unfrozen in the background.
+///   Freeze duration is constant regardless of VM disk size. Pre-Phase-H V2
+///   held the freeze for the entire incremental copy duration, which would
+///   not have scaled to multi-hundred-GB volumes.
+///
 /// State persisted per VM: {VmStoragePath}/{vmId}/lazysync.json
 /// </summary>
 public class LazysyncDaemon : BackgroundService
@@ -185,71 +201,125 @@ public class LazysyncDaemon : BackgroundService
 
         try
         {
-            // Step 1a: Build the overlay whitelist — depth=0 chunk offsets only.
-            // Must run before the raw export so we know which chunks belong to the
-            // overlay vs. the backing base image.s
+            // Phase H: overlay capture is always overlay-only — both first and
+            // subsequent cycles use drive-backup, which writes only top-BDS clusters
+            // to the target. ScanChunksAsync's whitelist parameter is retained for
+            // safety but is always null in this code path.
+            HashSet<long>? overlayOffsets = null;
 
-            // overlayOffsets == null  → incremental export (already overlay-only, no whitelist needed)
-            // overlayOffsets != null  → full export (must filter backing-file chunks)
-            HashSet<long>? overlayOffsets;
+            // Tracked so step 7.5 doesn't clear the bitmap immediately after V1.
+            // Under Phase G fallback (crash-consistent capture when guest agent is
+            // unresponsive), writes can occur during V1's backup window and must
+            // remain tracked for V2 to pick up.
+            var wasFirstCycle = !state.BitmapCreated;
 
-            if (!state.BitmapCreated)
+            if (wasFirstCycle)
             {
-                // ── First cycle: full export + bitmap creation ────────────────────
-                // Create the bitmap BEFORE the export so we start tracking writes
-                // immediately. Any writes during the export will be captured by the
-                // next incremental cycle — no data is ever missed.
+                // ── Phase H: First cycle — drive-backup sync=top inside live qemu ──
+                // Reads the overlay through qemu's own block layer, eliminating the
+                // cross-process coherence gap that qemu-img convert --force-share
+                // exposed (Phase G's freeze drains the guest to qemu's block layer,
+                // but an external reader sees an inconsistent file-level view of
+                // L2 tables vs. freshly-written data clusters).
+                //
+                // The bitmap is added BEFORE the backup so V2 captures every write
+                // from V1 onwards. The freeze brackets only the Start call: once
+                // drive-backup returns the job-id, the copy-on-write snapshot point
+                // is fixed and the guest can be thawed. The copy runs unfrozen.
                 var driveNode = await TryGetDriveNodeAsync(vm.VmId, ct);
-                if (driveNode != null)
+                if (driveNode == null)
                 {
-                    try
-                    {
-                        // Bitmap may already exist if this VM was migrated from another node.
-                        // Delete it first to ensure we start clean on this node.
-                        try
-                        {
-                            await _qmpClient.RemoveDirtyBitmapAsync(vm.VmId, driveNode, BitmapName, ct);
-                            _logger.LogDebug("VM {VmId}: Removed existing lazysync bitmap before re-adding", vm.VmId);
-                        }
-                        catch
-                        {
-                            // Not present — that's fine, ignore
-                        }
-                        await _qmpClient.AddDirtyBitmapAsync(vm.VmId, driveNode, BitmapName, ct);
-                        // BitmapCreated = true is set after the full cycle succeeds (step 8),
-                        // so a crash before SaveStateAsync leaves BitmapCreated = false.
-                        // Next cycle retries AddDirtyBitmap — QEMU returns an error if it
-                        // already exists (persistent), which we catch and treat as success.
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex,
-                            "VM {VmId}: AddDirtyBitmap failed — full export each cycle until QMP recovers",
-                            vm.VmId);
-                        // driveNode = null triggers the BitmapCreated = false path below
-                        driveNode = null;
-                    }
-                }
-
-                overlayOffsets = await GetOverlayChunkOffsetsAsync(diskPath, ct);
-                if (overlayOffsets.Count == 0)
-                {
-                    _logger.LogDebug("VM {VmId}: overlay has no allocated chunks — skipping", vm.VmId);
+                    _logger.LogWarning(
+                        "VM {VmId}: QMP drive node unavailable on first cycle — " +
+                        "skipping cycle, will retry next interval", vm.VmId);
                     return;
                 }
 
-                // Application-consistent: freeze guest filesystems, run qemu-img convert,
-                // thaw. Without this, qemu-img convert reads whatever has been flushed to
-                // the qcow2 — which on a fresh-boot VM still mid-writeback can include
-                // torn writes (file size updated, data extent not yet committed).
-                await RunUnderGuestFreezeAsync(vm.VmId,
-                    () => ExportOverlayAsync(diskPath, tmpPath, ct), ct);
+                // Pre-create target as sparse file at virtual disk size.
+                // drive-backup mode=existing requires size match; SetLength uses
+                // ftruncate() — no actual disk space consumed for the sparse region.
+                var virtualSize = await GetDiskVirtualSizeAsync(diskPath, ct);
+                using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write,
+                           FileShare.None, bufferSize: 4096, useAsync: false))
+                    fs.SetLength(virtualSize);
 
-                // Signal that next cycle should use incremental export.
-                // Written to disk in SaveStateAsync (step 8) — only persists if the
-                // full cycle completes without exception.
-                if (driveNode != null)
-                    state.BitmapCreated = true;
+                // 0600 before chown so there is no window where the file is
+                // root:root readable by group/other in a world-traversable directory.
+                File.SetUnixFileMode(tmpPath,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite);
+
+                var chownResult = await _executor.ExecuteAsync(
+                    "chown", $"libvirt-qemu:libvirt-qemu \"{tmpPath}\"",
+                    TimeSpan.FromSeconds(5), ct);
+                if (!chownResult.Success)
+                    throw new InvalidOperationException(
+                        $"chown libvirt-qemu failed for {tmpPath}: {chownResult.StandardError}");
+
+                // Bitmap may already exist if this VM was migrated from another node.
+                // Remove then re-add to ensure a clean tracking window from V1 onwards.
+                try
+                {
+                    await _qmpClient.RemoveDirtyBitmapAsync(vm.VmId, driveNode, BitmapName, ct);
+                    _logger.LogDebug(
+                        "VM {VmId}: removed pre-existing lazysync bitmap", vm.VmId);
+                }
+                catch
+                {
+                    // Not present — fine, ignore.
+                }
+
+                try
+                {
+                    await _qmpClient.AddDirtyBitmapAsync(vm.VmId, driveNode, BitmapName, ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "VM {VmId}: AddDirtyBitmap failed on first cycle — " +
+                        "skipping cycle, will retry next interval", vm.VmId);
+                    if (File.Exists(tmpPath)) File.Delete(tmpPath);
+                    return;
+                }
+
+                var attached = false;
+                string jobId;
+                try
+                {
+                    await _qmpClient.GrantScratchAppArmorAsync(vm.VmId, tmpPath, ct);
+                    attached = true;
+
+                    // Freeze brackets ONLY the Start call. Snapshot point is fixed
+                    // at the moment drive-backup returns its job-id; thaw immediately
+                    // and let the copy run in the background.
+                    jobId = await RunUnderGuestFreezeAsync(vm.VmId,
+                        () => _qmpClient.StartDriveBackupTopAsync(
+                            vm.VmId, driveNode, tmpPath, ct),
+                        ct);
+
+                    // Wait for the copy unfrozen. drive-backup's before-write notifier
+                    // protects the target while the guest continues to write.
+                    await _qmpClient.WaitForBackupJobAsync(
+                        vm.VmId, jobId, TimeSpan.FromMinutes(10), ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "VM {VmId}: first-cycle drive-backup sync=top failed — " +
+                        "leaving BitmapCreated=false; next cycle will retry V1",
+                        vm.VmId);
+                    if (File.Exists(tmpPath)) File.Delete(tmpPath);
+                    await SaveStateAsync(vm.VmId, state);
+                    return;
+                }
+                finally
+                {
+                    // Only revoke if grant succeeded — avoids a spurious apparmor_parser
+                    // error when the catch path is entered due to a grant failure.
+                    if (attached)
+                        await _qmpClient.RevokeScratchAppArmorAsync(vm.VmId, tmpPath, ct);
+                }
+
+                state.BitmapCreated = true;
             }
             else
             {
@@ -294,15 +364,23 @@ public class LazysyncDaemon : BackgroundService
                     await _qmpClient.GrantScratchAppArmorAsync(vm.VmId, tmpPath, ct);
                     attached = true;
 
-                    // Application-consistent: freeze guest filesystems before drive-backup.
-                    // drive-backup with a dirty bitmap captures all clusters QEMU has dirty;
-                    // freeze forces the guest to flush its page cache into QEMU first so
-                    // those just-flushed clusters are picked up in this cycle's bitmap
-                    // rather than waiting for the next cycle to catch them.
-                    await RunUnderGuestFreezeAsync(vm.VmId,
-                        () => _qmpClient.DriveBackupIncrementalAsync(
+                    // Phase H: freeze brackets only the Start call. drive-backup's
+                    // copy-on-write notifier installs at job creation, fixing the
+                    // snapshot point — the copy runs unfrozen in the background.
+                    // Freeze duration is bounded by one QMP round-trip; pre-Phase-H
+                    // this scaled with the incremental delta size, which on a busy
+                    // VM with a large dirty bitmap could be many seconds.
+                    //
+                    // Freeze still matters: it forces the guest to flush its page
+                    // cache into QEMU before the snapshot point is taken, so the
+                    // bitmap snapshot reflects the freshly-flushed clusters rather
+                    // than deferring them to the next cycle.
+                    var jobId = await RunUnderGuestFreezeAsync(vm.VmId,
+                        () => _qmpClient.StartDriveBackupIncrementalAsync(
                             vm.VmId, driveNode, BitmapName, tmpPath, ct),
                         ct);
+                    await _qmpClient.WaitForBackupJobAsync(
+                        vm.VmId, jobId, TimeSpan.FromMinutes(10), ct);
                 }
                 catch (Exception ex)
                 {
@@ -369,9 +447,15 @@ public class LazysyncDaemon : BackgroundService
 
             // Step 7.5: Clear the dirty bitmap so the next cycle tracks only
             // writes that occur after this successful push.
-            // Only done when BitmapCreated=true (i.e. an incremental cycle ran).
-            // On first-cycle (full export), the bitmap keeps tracking from creation.
-            if (state.BitmapCreated && overlayOffsets == null)
+            //
+            // Skipped on the V1 cycle (wasFirstCycle) because the bitmap was
+            // added BEFORE V1's drive-backup; under Phase G fallback (crash-
+            // consistent capture when the guest agent is unresponsive), writes
+            // can occur during V1's backup window and must remain tracked for
+            // V2 to pick up. With Phase G's freeze active, the bitmap is empty
+            // at V1's end and clearing would be a no-op anyway; the guard
+            // matters only for the fallback path.
+            if (state.BitmapCreated && overlayOffsets == null && !wasFirstCycle)
             {
                 var driveNode = await TryGetDriveNodeAsync(vm.VmId, ct);
                 if (driveNode != null)
@@ -467,87 +551,22 @@ public class LazysyncDaemon : BackgroundService
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Overlay extent map — depth=0 whitelist
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// Returns the set of 1 MB chunk offsets that belong to the overlay itself
-    /// (depth=0 in qemu-img map output). Chunks at depth≥1 come from the backing
-    /// file (the base OS image) and must NOT be replicated — they are a shared,
-    /// downloadable artifact reconstructible from the image registry.
-    ///
-    /// qemu-img map JSON fields used:
-    ///   start  — byte offset of the extent in the virtual disk address space
-    ///   length — byte count of the extent
-    ///   depth  — 0 = in the overlay (disk.qcow2), 1+ = in a backing file
-    ///   zero   — true = extent is all-zero (unallocated / sparse free space)
-    /// </summary>
-    private async Task<HashSet<long>> GetOverlayChunkOffsetsAsync(string diskPath, CancellationToken ct)
-    {
-        var result = await _executor.ExecuteAsync(
-            "qemu-img",
-            $"map --force-share --output=json \"{diskPath}\"",
-            TimeSpan.FromMinutes(5),
-            ct);
-
-        if (!result.Success)
-            throw new Exception($"qemu-img map failed: {result.StandardError}");
-
-        var offsets = new HashSet<long>();
-        var extents = JsonSerializer.Deserialize<JsonElement[]>(result.StandardOutput) ?? [];
-
-        foreach (var extent in extents)
-        {
-            // depth=0: extent lives in the overlay file — replicate it.
-            // depth≥1: extent comes from the backing chain — skip it.
-            if (extent.GetProperty("depth").GetInt32() != 0) continue;
-
-            // zero=true: unallocated / all-zero region — nothing useful to replicate.
-            if (extent.GetProperty("zero").GetBoolean()) continue;
-
-            var start = extent.GetProperty("start").GetInt64();
-            var length = extent.GetProperty("length").GetInt64();
-
-            // Mark every 1 MB chunk that overlaps this extent.
-            // An extent may span a partial leading chunk and a partial trailing chunk,
-            // both of which still need to be included.
-            var firstChunk = (start / BlockSizeBytes) * BlockSizeBytes;
-            var lastChunk = ((start + length - 1) / BlockSizeBytes) * BlockSizeBytes;
-            for (var off = firstChunk; off <= lastChunk; off += BlockSizeBytes)
-                offsets.Add(off);
-        }
-
-        _logger.LogDebug(
-            "VM {DiskFile}: overlay map — {Count} chunk offset(s) at depth=0",
-            Path.GetFileName(diskPath), offsets.Count);
-
-        return offsets;
-    }
+    // GetOverlayChunkOffsetsAsync removed in Phase H. The depth=0 whitelist
+    // was needed because qemu-img convert merged the backing chain into the
+    // raw output; drive-backup sync=top filters by topmost-BDS natively, so
+    // no external whitelist computation is required. The QMP round-trip that
+    // sync=top performs is also coherent with the live qemu, avoiding the
+    // L2/refcount-cache mismatch that --force-share exposed.
 
     // ═══════════════════════════════════════════════════════════════════════
-    // qemu-img export
-    // ═══════════════════════════════════════════════════════════════════════
 
-    private async Task ExportOverlayAsync(string diskPath, string tmpPath, CancellationToken ct)
-    {
-        // --force-share: read QEMU-locked qcow2 (POSIX advisory locks, safe for reads).
-        // -S 65536: skip zero/unallocated regions in the merged output (free disk space).
-        //
-        // WARNING: qemu-img convert merges the full backing chain — the output raw file
-        //          contains both overlay data AND base OS image data. The -S flag only
-        //          skips truly zero regions; it does NOT filter backing-file extents.
-        //          Use GetOverlayChunkOffsetsAsync() + the overlayOffsets whitelist in
-        //          ScanChunksAsync() to exclude backing-file chunks from replication.
-        var result = await _executor.ExecuteAsync(
-            "qemu-img",
-            $"convert --force-share -f qcow2 -O raw -S {SparseScanThreshold} \"{diskPath}\" \"{tmpPath}\"",
-            TimeSpan.FromMinutes(10),
-            ct);
-
-        if (!result.Success)
-            throw new Exception($"qemu-img convert failed: {result.StandardError}");
-    }
+    // ExportOverlayAsync removed in Phase H. The qemu-img convert --force-share
+    // path was the source of the cross-process coherence gap: a separate process
+    // opening the qcow2 file did not synchronize its qcow2-driver state with the
+    // live qemu's freshly-flushed writes. V1 now uses StartDriveBackupTopAsync,
+    // which runs as a block job inside the live qemu and reads through the same
+    // block layer that committed the freeze-drained data. See LazysyncDaemon
+    // class summary (Phase H) and QmpClient.StartDriveBackupTopAsync.
 
     // ═══════════════════════════════════════════════════════════════════════
     // Chunk scan + CID computation
@@ -734,8 +753,16 @@ public class LazysyncDaemon : BackgroundService
 
     /// <summary>
     /// Execute <paramref name="captureBody"/> inside a guest-fsfreeze /
-    /// guest-fsthaw bracket so the qcow2 file the body reads is in an
-    /// application-consistent state.
+    /// guest-fsthaw bracket and return its result. Callers pass the minimal
+    /// operation that must happen while the guest is quiesced — in Phase H,
+    /// that's the QMP Start call which creates a drive-backup job and fixes
+    /// its copy-on-write snapshot point. The actual copy runs unfrozen in
+    /// the background, awaited via WaitForBackupJobAsync.
+    ///
+    /// Bounded freeze duration: the bracket holds for one QMP round-trip
+    /// (sub-millisecond on the same host) regardless of VM disk size or
+    /// backup data volume. Pre-Phase-H the body was the full backup copy,
+    /// which scaled with delta size and did not bound the guest write-pause.
     ///
     /// Best-effort: if the guest agent is unreachable or freeze fails,
     /// runs <paramref name="captureBody"/> without freeze (crash-consistent
@@ -757,8 +784,8 @@ public class LazysyncDaemon : BackgroundService
     ///   had a valid header and a tail of zeros, causing cloud-init's
     ///   init-local to throw ValueError: bad marshal data on the target.
     /// </summary>
-    private async Task RunUnderGuestFreezeAsync(
-        string vmId, Func<Task> captureBody, CancellationToken ct)
+    private async Task<T> RunUnderGuestFreezeAsync<T>(
+        string vmId, Func<Task<T>> captureBody, CancellationToken ct)
     {
         // Cheap precheck — skip the whole dance if the agent isn't responding.
         // Avoids a 30s timeout per cycle for VMs without qemu-guest-agent.
@@ -769,8 +796,7 @@ public class LazysyncDaemon : BackgroundService
                 "VM {VmId}: guest agent unresponsive — capturing crash-consistent " +
                 "(application-level data may be torn until agent recovers)",
                 vmId);
-            await captureBody();
-            return;
+            return await captureBody();
         }
 
         var frozen = false;
@@ -791,7 +817,10 @@ public class LazysyncDaemon : BackgroundService
                     "VM {VmId}: fsfreeze failed — capturing crash-consistent", vmId);
             }
 
-            await captureBody();
+            // The body is awaited inside the try; its result is held while the
+            // finally runs (thaw), then returned. Exceptions from the body
+            // propagate after the finally, still leaving the guest thawed.
+            return await captureBody();
         }
         finally
         {
