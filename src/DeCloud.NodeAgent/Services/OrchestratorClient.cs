@@ -844,15 +844,6 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                     _orchestratorPublicKey = registrationResponse.OrchestratorWireGuardPublicKey ?? throw new ArgumentNullException(nameof(registrationResponse.OrchestratorWireGuardPublicKey));
                     await SaveOrchestratorPublicKeyAsync(_orchestratorPublicKey, ct);
 
-                    // Registration is now identity-only. Evaluation, obligations,
-                    // and system templates are delivered by the evaluate endpoint.
-                    // Clear any stale local obligations so the reconciler does not
-                    // act on a previous evaluation before the new one completes.
-                    await _obligationState.SaveObligationsAsync(
-                        Array.Empty<ObligationDescriptor>(), ct);
-                    _logger.LogInformation(
-                        "Stale local obligations cleared — awaiting 'decloud evaluate'");
-
                     // Log non-compliant VMs if present (re-registration).
                     if (registrationResponse.NonCompliantVms is { Count: > 0 } ncVms)
                     {
