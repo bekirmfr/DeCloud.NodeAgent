@@ -788,10 +788,18 @@ public class LibvirtVmManager : IVmManager
                     _logger.LogInformation(
                         "VM {VmId}: overlay reconstruction complete", spec.Id);
 
-                    // Clear dirty journal state from abrupt source node shutdown.
-                    // Without this, the kernel aborts the EXT4 journal on the
-                    // receiving node and remounts the filesystem read-only mid-boot.
-                    await RunFsckOnOverlayAsync(diskPath, ct);
+                    // Phase H + fsck removal (2026-06-02): RunFsckOnOverlayAsync removed.
+                    // The overlay is a crash-consistent block-level snapshot. Its ext4
+                    // journal has in-flight transactions from before the source went
+                    // offline. fsck.ext4 -fy "repaired" these by clearing extent mappings
+                    // for files whose data blocks collided with journal entries — zeroing
+                    // welcome.service, welcome-server.py, and orphaning 9 netplan .pyc
+                    // files into lost+found. The kernel's own journal replay at mount
+                    // time handles this correctly: it completes the in-flight transactions
+                    // (the data IS in the overlay, captured coherently by Phase H's
+                    // drive-backup sync=top). External fsck is the wrong boundary —
+                    // it applies crash-recovery heuristics to a dataset that the kernel's
+                    // journal layer can process faithfully.
                 }
             }
             catch (Exception ex)
@@ -1058,75 +1066,6 @@ public class LibvirtVmManager : IVmManager
         finally
         {
             _lock.Release();
-        }
-    }
-
-    /// <summary>
-    /// Runs fsck.ext4 on the reconstructed overlay before first boot.
-    /// Clears dirty journal state caused by abrupt source node shutdown,
-    /// preventing EXT4 journal abort and read-only remount during migration boot.
-    /// Non-fatal — logs warning and continues if fsck cannot run.
-    /// </summary>
-    private async Task RunFsckOnOverlayAsync(string diskPath, CancellationToken ct)
-    {
-        const string NbdDevice = "/dev/nbd0";
-        const string NbdPartition = "/dev/nbd0p1";
-
-        await _nbdLock.WaitAsync(ct);
-        try
-        {
-            await _executor.ExecuteAsync("modprobe", "nbd max_part=8", ct);
-
-            var connect = await _executor.ExecuteAsync(
-                "qemu-nbd",
-                $"--connect={NbdDevice} \"{diskPath}\"",
-                TimeSpan.FromSeconds(30),
-                ct);
-
-            if (!connect.Success)
-            {
-                _logger.LogWarning(
-                    "VM overlay fsck: could not connect {Disk} via qemu-nbd — skipping: {Error}",
-                    diskPath, connect.StandardError);
-                return;
-            }
-
-            try
-            {
-                // Allow the kernel time to read the partition table
-                await Task.Delay(500, ct);
-
-                _logger.LogInformation(
-                    "VM overlay fsck: running fsck.ext4 on {Partition}", NbdPartition);
-
-                var fsck = await _executor.ExecuteAsync(
-                    "fsck.ext4",
-                    $"-fy {NbdPartition}",
-                    TimeSpan.FromMinutes(10),
-                    ct);
-
-                // ExitCode 0 = clean, 1 = errors corrected — both are success.
-                // ExitCode 2+ = uncorrected errors or operational failure.
-                if (fsck.ExitCode <= 1)
-                    _logger.LogInformation(
-                        "VM overlay fsck: complete (exitCode={ExitCode})", fsck.ExitCode);
-                else
-                    _logger.LogWarning(
-                        "VM overlay fsck: exitCode={ExitCode} — {Error}",
-                        fsck.ExitCode, fsck.StandardError);
-            }
-            finally
-            {
-                await _executor.ExecuteAsync(
-                    "qemu-nbd",
-                    $"--disconnect {NbdDevice}",
-                    TimeSpan.FromSeconds(30),
-                    ct);
-            }
-        }
-        finally
-        {
-            _nbdLock.Release();
         }
     }
 
