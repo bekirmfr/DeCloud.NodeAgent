@@ -9,6 +9,7 @@ using DeCloud.NodeAgent.Core.Models.State;
 using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.Shared.Contracts;
 using DeCloud.Shared.Enums;
+using DeCloud.Shared.Json;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
@@ -946,7 +947,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
 
             // Use Wire options (camelCase) so the orchestrator deserialises correctly.
             var response = await _httpClient.PostAsJsonAsync(
-                requestPath, payload, Core.Json.JsonOptions.Wire, ct);
+                requestPath, payload, JsonOptions.Wire, ct);
 
             _lastHeartbeat.Response = response;
 
@@ -1089,7 +1090,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             // The orchestrator wraps every response in ApiResponse<T> { success, data }.
             // Deserialise with Wire options (camelCase, case-insensitive) to match.
             var envelope = JsonSerializer.Deserialize<ApiResponse<NodeHeartbeatResponse>>(
-                content, Core.Json.JsonOptions.Wire);
+                content, JsonOptions.Wire);
 
             var data = envelope?.Data;
             if (data is null)
@@ -1243,7 +1244,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
 
             var content = await response.Content.ReadAsStringAsync(ct);
             var envelope = JsonSerializer.Deserialize<ApiResponse<List<NodeCommand>>>(
-                content, Core.Json.JsonOptions.Wire);
+                content, JsonOptions.Wire);
 
             var commands = new List<PendingCommand>();
 
@@ -1310,7 +1311,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             );
 
             var request = new HttpRequestMessage(HttpMethod.Post, requestPath);
-            request.Content = JsonContent.Create(ack, options: Core.Json.JsonOptions.Wire);
+            request.Content = JsonContent.Create(ack, options: JsonOptions.Wire);
 
             var response = await _httpClient.SendAsync(request, ct);
 
@@ -1369,7 +1370,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             };
 
             var response = await _httpClient.PostAsJsonAsync(
-                "/api/blockstore/manifest", request, Core.Json.JsonOptions.Wire, ct);
+                "/api/blockstore/manifest", request, JsonOptions.Wire, ct);
 
             if (!response.IsSuccessStatusCode)
             {

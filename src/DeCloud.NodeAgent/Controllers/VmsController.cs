@@ -1,9 +1,8 @@
-using DeCloud.NodeAgent.Core.Enums;
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
-using DeCloud.NodeAgent.Infrastructure.Services;
+using DeCloud.Shared.Enums;
+using DeCloud.Shared.Models;
 using Microsoft.AspNetCore.Mvc;
-using Nethereum.Contracts.QueryHandlers.MultiCall;
 
 namespace DeCloud.NodeAgent.Controllers;
 

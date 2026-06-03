@@ -1,4 +1,5 @@
-﻿using System.Text.Json;
+﻿using DeCloud.Shared.Json;
+using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Core.Models
 {
@@ -34,7 +35,7 @@ namespace DeCloud.NodeAgent.Core.Models
 
                 var data = JsonSerializer.Deserialize<T>(
                         dataJson.GetRawText(),
-                        Json.JsonOptions.Wire);
+                        JsonOptions.Wire);
                 if (data == null)
                 {
                     throw new ArgumentException("Http response 'data' property could not be deserialized");

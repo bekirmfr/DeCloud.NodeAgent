@@ -3,6 +3,7 @@ using DeCloud.NodeAgent.Core.Interfaces.Qmp;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using DeCloud.Shared.Enums;
+using DeCloud.Shared.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -874,7 +875,7 @@ public class LazysyncDaemon : BackgroundService
             try
             {
                 var json = await File.ReadAllTextAsync(path);
-                var state = JsonSerializer.Deserialize<LazysyncState>(json, Core.Json.JsonOptions.Wire);
+                var state = JsonSerializer.Deserialize<LazysyncState>(json, JsonOptions.Wire);
                 if (state != null)
                 {
                     _states[vmId] = state;
@@ -897,7 +898,7 @@ public class LazysyncDaemon : BackgroundService
         var path = StatePath(vmId);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         await File.WriteAllTextAsync(path,
-            JsonSerializer.Serialize(state, Core.Json.JsonOptions.Wire));
+            JsonSerializer.Serialize(state, JsonOptions.Wire));
     }
 
     private string StatePath(string vmId) =>

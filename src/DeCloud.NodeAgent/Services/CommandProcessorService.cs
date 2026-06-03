@@ -7,6 +7,7 @@ using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
 using DeCloud.Shared.Contracts;
 using DeCloud.Shared.Enums;
+using DeCloud.Shared.Json;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
@@ -343,7 +344,7 @@ public class CommandProcessorService : BackgroundService
         CreateVmPayload req;
         try
         {
-            req = JsonSerializer.Deserialize<CreateVmPayload>(payload, Core.Json.JsonOptions.Wire)
+            req = JsonSerializer.Deserialize<CreateVmPayload>(payload, JsonOptions.Wire)
                 ?? throw new JsonException("CreateVm payload deserialised to null");
         }
         catch (JsonException ex)

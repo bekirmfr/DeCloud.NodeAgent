@@ -1,7 +1,7 @@
-﻿using DeCloud.NodeAgent.Core.Enums;
-using DeCloud.NodeAgent.Core.Interfaces;
-using DeCloud.NodeAgent.Core.Models;
+﻿using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
+using DeCloud.Shared.Enums;
+using DeCloud.Shared.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 

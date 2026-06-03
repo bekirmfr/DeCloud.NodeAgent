@@ -3,7 +3,7 @@ using DeCloud.NodeAgent.Core.Interfaces.Qmp;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Interfaces.UserNetwork;
-using DeCloud.NodeAgent.Core.Json;
+using DeCloud.Shared.Json;
 using DeCloud.NodeAgent.Core.Settings;
 using DeCloud.NodeAgent.Infrastructure.Docker;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
@@ -354,7 +354,7 @@ builder.Services.AddSingleton<IAuditService, AuditService>();
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
     {
-        var wire = DeCloud.NodeAgent.Core.Json.JsonOptions.Wire;
+        var wire = JsonOptions.Wire;
         options.JsonSerializerOptions.PropertyNamingPolicy = wire.PropertyNamingPolicy;
         options.JsonSerializerOptions.PropertyNameCaseInsensitive = wire.PropertyNameCaseInsensitive;
         options.JsonSerializerOptions.DefaultIgnoreCondition = wire.DefaultIgnoreCondition;
