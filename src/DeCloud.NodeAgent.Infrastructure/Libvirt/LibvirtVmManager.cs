@@ -783,7 +783,7 @@ public class LibvirtVmManager : IVmManager
                         spec.Id, spec.OverlayChunkMap.Count, spec.OverlayRootCid?[..12] ?? "?");
 
                     await ReconstructOverlayAsync(
-                        diskPath, baseImagePath, spec.OverlayChunkMap, spec.DiskBytes, ct);
+                        spec.Id, diskPath, baseImagePath, spec.OverlayChunkMap, spec.DiskBytes, ct);
 
                     _logger.LogInformation(
                         "VM {VmId}: overlay reconstruction complete", spec.Id);
@@ -1086,6 +1086,7 @@ public class LibvirtVmManager : IVmManager
     /// image — functionally identical to what the source node had.
     /// </summary>
     private async Task ReconstructOverlayAsync(
+        string ownerId,
         string diskPath,
         string baseImagePath,
         Dictionary<long, string> chunkMap,
@@ -1127,7 +1128,7 @@ public class LibvirtVmManager : IVmManager
                     // ?owner= causes the blockstore to index this CID under the VM's
                     // owner file on receipt, making it visible to /owners/{vmId} queries
                     // and the pre-flight check on subsequent migrations.
-                    var url = $"{blockstoreAddr}/blocks/{Uri.EscapeDataString(cid)}?owner={Uri.EscapeDataString(spec.Id)}";
+                    var url = $"{blockstoreAddr}/blocks/{Uri.EscapeDataString(cid)}?owner={Uri.EscapeDataString(ownerId)}";
                     HttpResponseMessage response;
                     try
                     {
