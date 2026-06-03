@@ -3030,6 +3030,21 @@ public class LibvirtVmManager : IVmManager
             : "";
 
         // ========================================
+        // CONSOLE / SERIAL LOG FILE
+        // ========================================
+        // Mirror the serial console pty to a host-side file so cloud-init,
+        // kernel boot, runcmd output, and panics survive cases where the
+        // qemu-guest-agent never starts (cloud-init parse error, apt failure,
+        // network never up, kernel panic). The file lives next to disk.qcow2
+        // in the per-VM directory (already chown root:kvm 0750 by
+        // CreateVmAsync). Declared in domain XML so libvirt's virt-aa-helper
+        // emits the AppArmor RW rule automatically — no GrantScratchAppArmorAsync
+        // call needed. append='on' preserves the log across stop/start and
+        // virsh destroy + start (force restart) cycles. CleanupVmDirectory's
+        // recursive delete removes it with the rest of the VM directory.
+        var consoleLogPath = Path.Combine(_options.VmStoragePath, spec.Id, "console.log");
+
+        // ========================================
         // COMPLETE LIBVIRT XML
         // ========================================
         var kvmAvailable = File.Exists("/dev/kvm");
@@ -3075,6 +3090,7 @@ public class LibvirtVmManager : IVmManager
                   <model type='virtio'/>{bandwidthXml}
                 </interface>
                 <serial type='pty'>
+                  <log file='{consoleLogPath}' append='on'/>
                   <target port='0'/>
                 </serial>
                 <console type='pty'>
