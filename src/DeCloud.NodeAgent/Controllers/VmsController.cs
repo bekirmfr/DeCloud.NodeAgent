@@ -1,5 +1,7 @@
+using DeCloud.NodeAgent.Core.Enums;
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Infrastructure.Services;
 using Microsoft.AspNetCore.Mvc;
 using Nethereum.Contracts.QueryHandlers.MultiCall;
 
@@ -10,11 +12,16 @@ namespace DeCloud.NodeAgent.Controllers;
 public class VmsController : ControllerBase
 {
     private readonly IVmManager _vmManager;
+    private readonly IVmGuestDiagnostics _diagnostics;
     private readonly ILogger<VmsController> _logger;
 
-    public VmsController(IVmManager vmManager, ILogger<VmsController> logger)
+    public VmsController(
+        IVmManager vmManager,
+        IVmGuestDiagnostics diagnostics,
+        ILogger<VmsController> logger)
     {
         _vmManager = vmManager;
+        _diagnostics = diagnostics;
         _logger = logger;
     }
 
@@ -156,8 +163,36 @@ public class VmsController : ControllerBase
     {
         if (!await _vmManager.VmExistsAsync(vmId, ct))
             return NotFound();
-        
+
         var usage = await _vmManager.GetVmUsageAsync(vmId, ct);
         return Ok(usage);
+    }
+
+    /// <summary>
+    /// Get a diagnostic log stream for a VM.
+    ///
+    /// Default source <c>Console</c> returns the tail of the host-side
+    /// <c>console.log</c> captured by libvirt's <c>&lt;log file='...'/&gt;</c>
+    /// directive — works even when the guest agent never started (cloud-init
+    /// parse error, apt failure, network never up, kernel panic). Other
+    /// sources (guest-side cloud-init.log, journal) land in follow-ups.
+    ///
+    /// Ownership check is performed by the orchestrator-side proxy endpoint —
+    /// the node agent API has no per-user identity and follows the existing
+    /// pattern of the surrounding VM endpoints.
+    /// </summary>
+    [HttpGet("{vmId}/logs")]
+    public async Task<ActionResult<DiagnosticsResult>> GetLogs(
+        string vmId,
+        [FromQuery] DiagnosticSource source = DiagnosticSource.Console,
+        [FromQuery] int maxBytes = 0,
+        CancellationToken ct = default)
+    {
+        var result = await _diagnostics.CaptureAsync(vmId, source, maxBytes, ct);
+
+        if (!result.Available)
+            return NotFound(result);
+
+        return Ok(result);
     }
 }

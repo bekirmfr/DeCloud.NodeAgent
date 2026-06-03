@@ -289,6 +289,7 @@ builder.Services.AddSingleton<INetworkManager, WireGuardNetworkManager>();
 builder.Services.AddSingleton<IUserWireGuardManager, UserWireGuardManager>();
 builder.Services.AddSingleton<ICloudInitCleaner, CloudInitCleaner>();
 builder.Services.AddSingleton<IEphemeralSshKeyService, EphemeralSshKeyService>();
+builder.Services.AddSingleton<IVmGuestDiagnostics, VmGuestDiagnostics>();
 
 // =====================================================
 // Background Services
