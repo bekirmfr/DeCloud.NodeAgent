@@ -1124,7 +1124,10 @@ public class LibvirtVmManager : IVmManager
                 {
                     ct.ThrowIfCancellationRequested();
 
-                    var url = $"{blockstoreAddr}/blocks/{Uri.EscapeDataString(cid)}";
+                    // ?owner= causes the blockstore to index this CID under the VM's
+                    // owner file on receipt, making it visible to /owners/{vmId} queries
+                    // and the pre-flight check on subsequent migrations.
+                    var url = $"{blockstoreAddr}/blocks/{Uri.EscapeDataString(cid)}?owner={Uri.EscapeDataString(spec.Id)}";
                     HttpResponseMessage response;
                     try
                     {
