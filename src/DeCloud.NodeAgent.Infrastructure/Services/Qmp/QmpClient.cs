@@ -56,18 +56,21 @@ public class QmpClient : IQmpClient
         try
         {
             var ret = await SendAsync(vmId, "query-block", ct: ct);
-            // QEMU 8.2.2 (libvirt-managed): the top-level "device" field is always
-            // empty. Identify the primary disk by finding the inserted drive that:
-            //   - is not read-only (excludes cloud-init ISO)
-            //   - has inserted.file ending in "disk.qcow2"
+            // QEMU 8.2.2 / libvirt: the top-level "device" field is always empty.
+            // Identify the primary disk by two stable invariants:
+            //   1. Not read-only (excludes cloud-init ISO CDROM)
+            //   2. backing_file_depth >= 1 (is an overlay on top of the base image;
+            //      excludes the base image node and raw file storage layer nodes)
             // Return inserted.node-name (e.g. "libvirt-2-format") — the block node
-            // identifier used by blockdev-add + blockdev-snapshot (Phase J).
+            // identifier accepted by blockdev-snapshot's "node" argument.
+            // The "file" field is not used — after blockdev-add + blockdev-snapshot
+            // it becomes a JSON blob string, not a plain path.
             foreach (var dev in ret.EnumerateArray())
             {
                 if (!dev.TryGetProperty("inserted", out var ins)) continue;
                 if (ins.TryGetProperty("ro", out var ro) && ro.GetBoolean()) continue;
-                if (!ins.TryGetProperty("file", out var file)) continue;
-                if (!file.GetString()!.EndsWith("disk.qcow2", StringComparison.Ordinal)) continue;
+                if (!ins.TryGetProperty("backing_file_depth", out var depth)) continue;
+                if (depth.GetInt32() < 1) continue;
                 if (ins.TryGetProperty("node-name", out var nodeName))
                 {
                     var name = nodeName.GetString();
@@ -153,48 +156,97 @@ public class QmpClient : IQmpClient
     public async Task DeleteSnapshotNodeAsync(
         string vmId, string newOverlayNode, string snapshotPath, CancellationToken ct = default)
     {
-        // Phase J: detach the snapshot backing file from the live overlay.
+        // Phase J: merge the overlay back into disk.qcow2 and remove it.
         //
-        // The snapshot (original disk.qcow2) is now the backing file of newOverlayNode
-        // (the live overlay receiving guest writes). To free it:
-        //   1. blockdev-snapshot-delete removes the backing file relationship,
-        //      merging the snapshot's content into the overlay and making the
-        //      overlay self-contained.
-        //   2. Delete the snapshot file from disk.
+        // After blockdev-snapshot, the block graph is:
+        //   disk.qcow2 (libvirt-2-format, backing/frozen)
+        //     ← newOverlayNode (ls-ov-*, live, receives all guest writes)
         //
-        // blockdev-snapshot-delete is the symmetric inverse of blockdev-snapshot-sync.
-        // It commits the backing file content into the overlay — equivalent to
-        // qemu-img commit but live, without stopping the VM.
+        // Teardown sequence confirmed on QEMU 8.2.2:
+        //   1. block-commit: merge newOverlayNode's content into libvirt-2-format
+        //      (disk.qcow2). Runs as a background job. On a fresh snapshot with
+        //      minimal writes the job completes near-instantly (status=ready).
+        //   2. job-complete: signal QEMU to finalize the commit job and restore
+        //      libvirt-2-format as the active write destination. After this,
+        //      disk.qcow2 is the live disk again.
+        //   3. blockdev-del: remove the now-detached overlay block node.
+        //   4. Delete the overlay file from disk.
         //
-        // Non-fatal: if the QMP command fails (e.g. node already detached),
-        // log at Warning and proceed to file deletion. The worst outcome of
-        // leaving a detached backing file is a dangling file on disk — the
-        // crash-recovery path in LibvirtVmManager handles it at next startup.
+        // All steps non-fatal: if any QMP step fails, log at Warning and proceed.
+        // The overlay file is always deleted in the finally path. An orphaned
+        // overlay node (if blockdev-del fails) is handled by crash-recovery in
+        // LibvirtVmManager on next startup.
+        var jobId = $"ls-commit-{vmId[..8]}";
         try
         {
-            await SendAsync(vmId, "blockdev-snapshot-delete", new Dictionary<string, object>
+            // Step 1: block-commit — merge overlay into disk.qcow2
+            await SendAsync(vmId, "block-commit", new Dictionary<string, object>
             {
-                ["node"] = newOverlayNode,
-                ["overlay"] = newOverlayNode,
+                ["device"] = newOverlayNode,
+                ["top-node"] = newOverlayNode,
+                ["base-node"] = "libvirt-2-format",
+                ["job-id"] = jobId,
             }, ct);
+
+            // Step 2: poll until job is ready (offset == len), then finalize
+            var deadline = DateTime.UtcNow.AddMinutes(10);
+            while (DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(1000, ct);
+                var jobs = await SendAsync(vmId, "query-block-jobs", ct: ct);
+                var found = false;
+                foreach (var job in jobs.EnumerateArray())
+                {
+                    if (!job.TryGetProperty("device", out var id)) continue;
+                    if (id.GetString() != jobId) continue;
+                    found = true;
+                    if (job.TryGetProperty("ready", out var ready) && ready.GetBoolean())
+                        goto jobReady;
+                }
+                if (!found) goto jobReady; // job auto-dismissed
+            }
+            throw new TimeoutException($"block-commit job {jobId} timed out for VM {vmId}");
+
+        jobReady:
+            await SendAsync(vmId, "job-complete", new Dictionary<string, object>
+            {
+                ["id"] = jobId,
+            }, ct);
+
             _logger.LogDebug(
-                "VM {VmId}: snapshot node {Node} detached", vmId, newOverlayNode);
+                "VM {VmId}: block-commit complete, disk.qcow2 restored as live disk",
+                vmId);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex,
-                "VM {VmId}: blockdev-snapshot-delete failed for node {Node} — " +
-                "proceeding to file deletion; crash-recovery will handle any orphan",
-                vmId, newOverlayNode);
+                "VM {VmId}: block-commit teardown failed for overlay {Node} — " +
+                "crash-recovery will handle orphan on next startup", vmId, newOverlayNode);
         }
 
+        // Step 3: remove the overlay block node from QEMU's block graph
+        try
+        {
+            await SendAsync(vmId, "blockdev-del", new Dictionary<string, object>
+            {
+                ["node-name"] = newOverlayNode,
+            }, ct);
+            _logger.LogDebug("VM {VmId}: overlay block node {Node} removed", vmId, newOverlayNode);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "VM {VmId}: blockdev-del failed for node {Node}", vmId, newOverlayNode);
+        }
+
+        // Step 4: delete overlay file from disk
         if (File.Exists(snapshotPath))
         {
             try { File.Delete(snapshotPath); }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex,
-                    "VM {VmId}: failed to delete snapshot file {Path}", vmId, snapshotPath);
+                    "VM {VmId}: failed to delete overlay file {Path}", vmId, snapshotPath);
             }
         }
     }

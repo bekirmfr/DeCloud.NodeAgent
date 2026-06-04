@@ -217,13 +217,15 @@ public class LazysyncDaemon : BackgroundService
                 return;
             }
 
-            // Pre-create the new overlay as an empty qcow2 backed by disk.qcow2.
-            // blockdev-snapshot-sync requires mode=existing — QEMU does not create
-            // the file itself; it merely redirects writes to the pre-existing file.
-            // Security: 0600 before chown so there is no world-readable window.
+            // Create the overlay WITHOUT a backing-file header entry.
+            // The backing relationship is wired in QEMU's block graph by
+            // blockdev-snapshot — it must not be in the qcow2 header because
+            // blockdev-add would try to open disk.qcow2 as a backing file,
+            // which fails: QEMU already holds an exclusive write lock on it.
+            var virtualSize = await GetDiskVirtualSizeAsync(diskPath, ct);
             var createResult = await _executor.ExecuteAsync(
                 "qemu-img",
-                $"create -f qcow2 -b \"{diskPath}\" -F qcow2 \"{newOverlayPath}\"",
+                $"create -f qcow2 \"{newOverlayPath}\" {virtualSize}",
                 TimeSpan.FromSeconds(30), ct);
             if (!createResult.Success)
                 throw new InvalidOperationException(
