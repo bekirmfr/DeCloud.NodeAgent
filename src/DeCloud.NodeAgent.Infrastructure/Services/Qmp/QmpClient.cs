@@ -129,6 +129,20 @@ public class QmpClient : IQmpClient
         //      to the new overlay node
         // Both tested and confirmed working on QEMU 8.2.2 / libvirt.
         // The overlay file must be chown'd to libvirt-qemu before blockdev-add.
+        // Silently remove any stale node with this name before adding.
+        // This is a no-op on the normal path. It handles the case where a
+        // previous cycle crashed between blockdev-add and blockdev-del,
+        // leaving a detached orphan node registered in QEMU's block graph.
+        try
+        {
+            await SendAsync(vmId, "blockdev-del",
+                new Dictionary<string, object> { ["node-name"] = newNodeName }, ct);
+            _logger.LogDebug(
+                "VM {VmId}: removed stale overlay node {Node} before snapshot",
+                vmId, newNodeName);
+        }
+        catch { /* expected on the normal path — node doesn't exist */ }
+
         await SendAsync(vmId, "blockdev-add", new Dictionary<string, object>
         {
             ["driver"] = "qcow2",
