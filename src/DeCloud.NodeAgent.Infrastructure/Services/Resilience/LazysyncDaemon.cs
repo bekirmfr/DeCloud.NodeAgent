@@ -19,51 +19,54 @@ namespace DeCloud.NodeAgent.Services;
 ///
 /// Cycle (every 5 minutes, 5 minute startup delay):
 ///   For each Running tenant VM with ReplicationFactor > 0:
-///   1. Capture the full merged disk as a coherent point-in-time snapshot
-///      via QMP drive-backup, bracketed by a guest-fsfreeze envelope:
-///         • First cycle: block-dirty-bitmap-add (drive-level), then
-///           drive-backup sync=full inside the freeze envelope. Output is
-///           a self-contained raw image — no backing-file dependency on
-///           reconstruction.
-///         • Subsequent cycles: drive-backup sync=incremental against the
-///           dirty bitmap inside the freeze envelope. Only clusters
-///           written since the last successful clear are exported.
-///      The freeze brackets ONLY the QMP Start call (one round-trip,
-///      sub-second). drive-backup's copy-on-write notifier fixes the
-///      snapshot point at job creation; the actual copy runs unfrozen.
-///   2. Scan the captured raw file in 1 MB chunks. Skip all-zero chunks
-///      (sparse free space). No qcow2-layer reasoning — the captured
-///      image is what the guest sees.
+///   1. Take a coherent point-in-time snapshot via blockdev-snapshot-sync
+///      inside a guest-fsfreeze envelope:
+///         a. fsfreeze — guest page cache flushed, no writes in flight
+///         b. blockdev-snapshot-sync — QEMU atomically redirects guest
+///            writes to a new overlay at newOverlayPath. The original
+///            disk.qcow2 is now frozen and coherent at this exact moment.
+///         c. thaw — guest resumes, writing to the new overlay
+///      The freeze wraps the snapshot creation only (one QMP round-trip,
+///      sub-second). No data movement occurs during the freeze — the
+///      snapshot is instantaneous.
+///   2. Scan disk.qcow2 (the frozen snapshot) in 1 MB chunks. Skip all-zero
+///      chunks (sparse free space). Every byte is at the same filesystem
+///      transaction boundary — no COW race, no temporal incoherence.
 ///   3. Compute CIDv1 (raw codec, sha2-256 multihash, base32lower) for
 ///      each non-zero chunk.
-///   4. Compare against stored manifest: push only genuinely changed
-///      chunks (content-addressed dedup across all VMs sharing an image).
-///   5. POST each new block to the local BlockStore VM HTTP API
-///      (POST /blocks).
+///   4. Compare against stored manifest: push only genuinely changed chunks
+///      (content-addressed dedup across all VMs sharing an image).
+///   5. POST each new block to the local BlockStore VM HTTP API (POST /blocks).
 ///   6. Update the in-memory + on-disk manifest state.
 ///   7. POST updated manifest to the orchestrator.
-///   8. Clear the dirty bitmap so the next cycle tracks only writes that
-///      occur after this successful push.
-///   9. Delete the temp raw file.
+///   8. DeleteSnapshotNodeAsync — merges the new overlay back into disk.qcow2
+///      (blockdev-snapshot-delete) and deletes the overlay file. disk.qcow2
+///      is now the live disk again, self-contained, with all guest writes
+///      from the cycle window incorporated.
 ///
-/// Phase I — Full-disk snapshot replication:
-///   Replaces the overlay-only model (Phase D–H) with full-disk capture
-///   via drive-backup sync=full. Eliminates the metadata temporal
-///   incoherence failure mode where ext4 structures (inode bitmap,
-///   journal, inode table) captured at different lazysync versions
-///   formed internally inconsistent on-disk state that neither journal
-///   replay nor fsck could reconcile (observed 2026-06-03 on msi-0d04).
-///   Every confirmed manifest version is now an application-consistent
-///   coherent point-in-time snapshot — planned and unplanned recovery
-///   produce identical correctness guarantees; only their RPO differs.
-///   See MIGRATION_SYSTEM_DESIGN.md §6.1.6 / §6.1.7 and
-///   PHASE_I_FULL_DISK_REPLICATION.md.
+/// Phase J — blockdev-snapshot-sync (correct coherence model):
+///   Replaces drive-backup (Phase H/I). drive-backup's COW model reads
+///   clusters sequentially over tens of seconds unfrozen; coupled ext4
+///   metadata structures captured at different wall-clock moments produce
+///   temporal incoherence. Observed on msi-1867: journal transactions 9331
+///   and 9332 absent, dozens of directory entries pointing to "deleted/unused"
+///   inodes, VM unbootable (EXT4-fs error at initramfs pivot). This failure
+///   is structural to drive-backup and cannot be fixed within that model.
 ///
-///   Storage cost is bounded by content-addressed dedup: base image
-///   CIDs appear once on the network regardless of how many VMs share
-///   the image. Aggregate network growth is K × BaseImage × RF, not
-///   N × Disk × RF. At platform scale (N≥1000 VMs, K≤20 base images)
-///   growth is under 2%.
+///   blockdev-snapshot-sync fixes coherence by construction: no data movement
+///   at snapshot time, guest frozen for one QMP round-trip only, original disk
+///   file immutable as of the exact freeze moment.
+///
+///   The dirty bitmap (Phase D+1) is removed. Incremental tracking is already
+///   provided by ScanChunksAsync's CID diff against state.Chunks — only chunks
+///   whose content changed since the last cycle are pushed. The bitmap was a
+///   second, redundant mechanism for the same purpose.
+///
+///   Storage cost: during the lazysync window (~30–60 s), two files exist:
+///   disk.qcow2 (frozen snapshot, read by daemon) and newOverlayPath (new live
+///   overlay, receiving guest writes). Peak = 2× current disk size. Steady
+///   state = 1× after DeleteSnapshotNodeAsync completes. This is the honest
+///   price of correct coherence.
 ///
 /// State persisted per VM: {VmStoragePath}/{vmId}/lazysync.json
 /// </summary>
@@ -74,10 +77,6 @@ public class LazysyncDaemon : BackgroundService
     private const int BlockSizeBytes = 1024 * 1024; // 1 MB
     private const int BlockSizeKb = 1024;
     private const long SparseScanThreshold = 65536; // -S value for qemu-img convert
-
-    // Bitmap name written to the qcow2 file. Fixed across all VMs so the daemon
-    // can find it by name on startup without querying QEMU for the list.
-    private const string BitmapName = "lazysync";
 
     // No per-cycle block cap is applied during seeding.
     //
@@ -196,209 +195,80 @@ public class LazysyncDaemon : BackgroundService
         // Use VM's storage directory. NodeAgent pre-creates the file here;
         // AppArmor access is granted per-VM via GrantScratchAppArmorAsync.
         // /tmp/ is blocked by the per-VM AppArmor confinement regardless.
-        var tmpPath = Path.Combine(_vmOptions.VmStoragePath, vm.VmId,
-            $"lazysync-tmp-{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}.raw");
+        // Phase J: the new overlay receives all guest writes during lazysync.
+        // disk.qcow2 (the original) becomes the frozen coherent snapshot we read.
+        var newOverlayPath = Path.Combine(_vmOptions.VmStoragePath, vm.VmId,
+            $"lazysync-overlay-{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}.qcow2");
+        var tmpRawPath = Path.Combine(_vmOptions.VmStoragePath, vm.VmId,
+            $"lazysync-raw-{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}.raw");
+
+        string? newOverlayNode = null;
+        var appArmorGranted = false;
 
         try
         {
-            // Tracked so step 7.5 doesn't clear the bitmap immediately after V1.
-            // Under Phase G fallback (crash-consistent capture when guest agent is
-            // unresponsive), writes can occur during V1's backup window and must
-            // remain tracked for V2 to pick up.
-            var wasFirstCycle = !state.BitmapCreated;
-
-            if (wasFirstCycle)
+            // ── Step 1: Coherent snapshot via blockdev-snapshot-sync ──────────────
+            var driveNode = await TryGetDriveNodeAsync(vm.VmId, ct);
+            if (driveNode == null)
             {
-                // ── Phase I: First cycle — drive-backup sync=full inside live qemu ──
-                // Captures the full merged disk as a coherent point-in-time snapshot:
-                // backing chain is dereferenced inline by QEMU's block layer, output
-                // is a self-contained raw image. No backing-file dependency on
-                // reconstruction; the target needs only the chunks.
-                //
-                // The bitmap is added BEFORE the backup so V2 captures every write
-                // from V1 onwards. The freeze brackets only the Start call: once
-                // drive-backup returns the job-id, the copy-on-write snapshot point
-                // is fixed and the guest can be thawed. The copy runs unfrozen.
-                var driveNode = await TryGetDriveNodeAsync(vm.VmId, ct);
-                if (driveNode == null)
-                {
-                    _logger.LogWarning(
-                        "VM {VmId}: QMP drive node unavailable on first cycle — " +
-                        "skipping cycle, will retry next interval", vm.VmId);
-                    return;
-                }
-
-                // Pre-create target as sparse file at virtual disk size.
-                // drive-backup mode=existing requires size match; SetLength uses
-                // ftruncate() — no actual disk space consumed for the sparse region.
-                var virtualSize = await GetDiskVirtualSizeAsync(diskPath, ct);
-                using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write,
-                           FileShare.None, bufferSize: 4096, useAsync: false))
-                    fs.SetLength(virtualSize);
-
-                // 0600 before chown so there is no window where the file is
-                // root:root readable by group/other in a world-traversable directory.
-                File.SetUnixFileMode(tmpPath,
-                    UnixFileMode.UserRead | UnixFileMode.UserWrite);
-
-                var chownResult = await _executor.ExecuteAsync(
-                    "chown", $"libvirt-qemu:libvirt-qemu \"{tmpPath}\"",
-                    TimeSpan.FromSeconds(5), ct);
-                if (!chownResult.Success)
-                    throw new InvalidOperationException(
-                        $"chown libvirt-qemu failed for {tmpPath}: {chownResult.StandardError}");
-
-                // Bitmap may already exist if this VM was migrated from another node.
-                // Remove then re-add to ensure a clean tracking window from V1 onwards.
-                try
-                {
-                    await _qmpClient.RemoveDirtyBitmapAsync(vm.VmId, driveNode, BitmapName, ct);
-                    _logger.LogDebug(
-                        "VM {VmId}: removed pre-existing lazysync bitmap", vm.VmId);
-                }
-                catch
-                {
-                    // Not present — fine, ignore.
-                }
-
-                try
-                {
-                    await _qmpClient.AddDirtyBitmapAsync(vm.VmId, driveNode, BitmapName, ct);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex,
-                        "VM {VmId}: AddDirtyBitmap failed on first cycle — " +
-                        "skipping cycle, will retry next interval", vm.VmId);
-                    if (File.Exists(tmpPath)) File.Delete(tmpPath);
-                    return;
-                }
-
-                var attached = false;
-                string jobId;
-                try
-                {
-                    await _qmpClient.GrantScratchAppArmorAsync(vm.VmId, tmpPath, ct);
-                    attached = true;
-
-                    // Freeze brackets ONLY the Start call. Snapshot point is fixed
-                    // at the moment drive-backup returns its job-id; thaw immediately
-                    // and let the copy run in the background.
-                    jobId = await RunUnderGuestFreezeAsync(vm.VmId,
-                        () => _qmpClient.StartDriveBackupFullAsync(
-                            vm.VmId, driveNode, tmpPath, ct),
-                        ct);
-
-                    // Wait for the copy unfrozen. drive-backup's before-write notifier
-                    // protects the target while the guest continues to write.
-                    await _qmpClient.WaitForBackupJobAsync(
-                        vm.VmId, jobId, TimeSpan.FromMinutes(10), ct);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex,
-                        "VM {VmId}: first-cycle drive-backup sync=full failed — " +
-                        "leaving BitmapCreated=false; next cycle will retry V1",
-                        vm.VmId);
-                    if (File.Exists(tmpPath)) File.Delete(tmpPath);
-                    await SaveStateAsync(vm.VmId, state);
-                    return;
-                }
-                finally
-                {
-                    // Only revoke if grant succeeded — avoids a spurious apparmor_parser
-                    // error when the catch path is entered due to a grant failure.
-                    if (attached)
-                        await _qmpClient.RevokeScratchAppArmorAsync(vm.VmId, tmpPath, ct);
-                }
-
-                state.BitmapCreated = true;
-            }
-            else
-            {
-                // ── Subsequent cycles: incremental export via QMP ─────────────────
-                // Only clusters written since last ClearDirtyBitmap are exported.
-                // Output raw file is already overlay-only — no whitelist filter needed.
-                var driveNode = await TryGetDriveNodeAsync(vm.VmId, ct);
-                if (driveNode == null)
-                {
-                    _logger.LogWarning(
-                        "VM {VmId}: QMP drive node unavailable — resetting to full export next cycle",
-                        vm.VmId);
-                    state.BitmapCreated = false;
-                    await SaveStateAsync(vm.VmId, state);
-                    return;
-                }
-
-                // Pre-create as a sparse file at the exact virtual disk size.
-                // drive-backup mode=existing requires size match; SetLength uses
-                // ftruncate() — no actual disk space consumed for the sparse region.
-                var virtualSize = await GetDiskVirtualSizeAsync(diskPath, ct);
-                using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write,
-                           FileShare.None, bufferSize: 4096, useAsync: false))
-                    fs.SetLength(virtualSize);
-
-                // 0600 before chown so there is no window where the file is
-                // root:root readable by group/other in a world-traversable directory.
-                File.SetUnixFileMode(tmpPath,
-                    UnixFileMode.UserRead | UnixFileMode.UserWrite);
-
-                var chownResult = await _executor.ExecuteAsync(
-                    "chown", $"libvirt-qemu:libvirt-qemu \"{tmpPath}\"",
-                    TimeSpan.FromSeconds(5), ct);
-                if (!chownResult.Success)
-                    throw new InvalidOperationException(
-                        $"chown libvirt-qemu failed for {tmpPath}: {chownResult.StandardError}");
-
-                // Grant this VM's QEMU process rw access via per-VM AppArmor .files profile.
-                var attached = false;
-                try
-                {
-                    await _qmpClient.GrantScratchAppArmorAsync(vm.VmId, tmpPath, ct);
-                    attached = true;
-
-                    // Phase H: freeze brackets only the Start call. drive-backup's
-                    // copy-on-write notifier installs at job creation, fixing the
-                    // snapshot point — the copy runs unfrozen in the background.
-                    // Freeze duration is bounded by one QMP round-trip; pre-Phase-H
-                    // this scaled with the incremental delta size, which on a busy
-                    // VM with a large dirty bitmap could be many seconds.
-                    //
-                    // Freeze still matters: it forces the guest to flush its page
-                    // cache into QEMU before the snapshot point is taken, so the
-                    // bitmap snapshot reflects the freshly-flushed clusters rather
-                    // than deferring them to the next cycle.
-                    var jobId = await RunUnderGuestFreezeAsync(vm.VmId,
-                        () => _qmpClient.StartDriveBackupIncrementalAsync(
-                            vm.VmId, driveNode, BitmapName, tmpPath, ct),
-                        ct);
-                    await _qmpClient.WaitForBackupJobAsync(
-                        vm.VmId, jobId, TimeSpan.FromMinutes(10), ct);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex,
-                        "VM {VmId}: incremental backup failed — resetting to full export next cycle",
-                        vm.VmId);
-                    state.BitmapCreated = false;
-                    if (File.Exists(tmpPath)) File.Delete(tmpPath);
-                    // Persist the BitmapCreated=false reset so the next cycle uses full export.
-                    // Without this, LoadStateAsync would read BitmapCreated=true from disk and
-                    // retry the failing incremental path indefinitely, never falling back.
-                    await SaveStateAsync(vm.VmId, state);
-                    return;
-                }
-                finally
-                {
-                    // Only revoke if grant succeeded — avoids a spurious apparmor_parser
-                    // error when the catch path is entered due to a grant failure.
-                    if (attached)
-                        await _qmpClient.RevokeScratchAppArmorAsync(vm.VmId, tmpPath, ct);
-                }
+                _logger.LogWarning(
+                    "VM {VmId}: QMP drive node unavailable — skipping cycle, will retry next interval",
+                    vm.VmId);
+                return;
             }
 
-            // Step 2-4: Scan raw, skip all-zero chunks, compute CIDs, diff against manifest.
-            var (changedChunks, totalBytes) = await ScanChunksAsync(tmpPath, state, ct);
+            // Pre-create the new overlay as an empty qcow2 backed by disk.qcow2.
+            // blockdev-snapshot-sync requires mode=existing — QEMU does not create
+            // the file itself; it merely redirects writes to the pre-existing file.
+            // Security: 0600 before chown so there is no world-readable window.
+            var createResult = await _executor.ExecuteAsync(
+                "qemu-img",
+                $"create -f qcow2 -b \"{diskPath}\" -F qcow2 \"{newOverlayPath}\"",
+                TimeSpan.FromSeconds(30), ct);
+            if (!createResult.Success)
+                throw new InvalidOperationException(
+                    $"qemu-img create overlay failed for VM {vm.VmId}: {createResult.StandardError}");
+
+            File.SetUnixFileMode(newOverlayPath,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite);
+
+            var chownResult = await _executor.ExecuteAsync(
+                "chown", $"libvirt-qemu:libvirt-qemu \"{newOverlayPath}\"",
+                TimeSpan.FromSeconds(5), ct);
+            if (!chownResult.Success)
+                throw new InvalidOperationException(
+                    $"chown libvirt-qemu failed for {newOverlayPath}: {chownResult.StandardError}");
+
+            await _qmpClient.GrantScratchAppArmorAsync(vm.VmId, newOverlayPath, ct);
+            appArmorGranted = true;
+
+            // Freeze → snapshot → thaw. Total freeze duration: one QMP round-trip.
+            // After this call, disk.qcow2 is immutable — QEMU will never write to
+            // it again until DeleteSnapshotNodeAsync merges newOverlayPath back.
+            newOverlayNode = await RunUnderGuestFreezeAsync(vm.VmId,
+                () => _qmpClient.CreateSnapshotAsync(vm.VmId, driveNode, newOverlayPath, ct),
+                ct);
+
+            _logger.LogInformation(
+                "VM {VmId}: snapshot taken — disk.qcow2 frozen, writes redirected to overlay node={Node}",
+                vm.VmId, newOverlayNode);
+
+            // ── Step 1.5: Convert frozen disk.qcow2 to flat raw for scanning ──────
+            // disk.qcow2 is now open by QEMU as a backing file (read-only, no writes).
+            // --force-share is safe: qemu-img reads through the qcow2 L2 tables and
+            // backing chain; QEMU does not modify disk.qcow2 while it is the backing
+            // file. This is the correct use of --force-share — the file is immutable.
+            // -S 65536: skip zero regions (unallocated sparse space).
+            var convertResult = await _executor.ExecuteAsync(
+                "qemu-img",
+                $"convert --force-share -f qcow2 -O raw -S 65536 \"{diskPath}\" \"{tmpRawPath}\"",
+                TimeSpan.FromMinutes(30), ct);
+            if (!convertResult.Success)
+                throw new InvalidOperationException(
+                    $"qemu-img convert failed for VM {vm.VmId}: {convertResult.StandardError}");
+
+            // ── Step 2-4: Scan raw, compute CIDs, diff against manifest ────────────
+            var (changedChunks, totalBytes) = await ScanChunksAsync(tmpRawPath, state, ct);
 
             if (changedChunks.Count == 0)
             {
@@ -412,8 +282,7 @@ public class LazysyncDaemon : BackgroundService
             var isSeeding = state.Version == 0;
 
             // Step 5: Push new blocks to BlockStore
-            await PushBlocksAsync(vm.VmId, tmpPath, changedChunks, blockstoreAddr, state.Version + 1, ct);
-
+            await PushBlocksAsync(vm.VmId, tmpRawPath, changedChunks, blockstoreAddr, state.Version + 1, ct);
             // Step 6: Update state
             foreach (var (offset, cid) in changedChunks)
                 state.Chunks[offset] = cid;
@@ -436,52 +305,20 @@ public class LazysyncDaemon : BackgroundService
                 state.Chunks,
                 ct);
 
-            // Step 7.5: Clear the dirty bitmap so the next cycle tracks only
-            // writes that occur after this successful push.
-            //
-            // Skipped on the V1 cycle (wasFirstCycle) because the bitmap was
-            // added BEFORE V1's drive-backup; under Phase G fallback (crash-
-            // consistent capture when the guest agent is unresponsive), writes
-            // can occur during V1's backup window and must remain tracked for
-            // V2 to pick up. With Phase G's freeze active, the bitmap is empty
-            // at V1's end and clearing would be a no-op anyway; the guard
-            // matters only for the fallback path.
-            if (state.BitmapCreated && !wasFirstCycle)
-            {
-                var driveNode = await TryGetDriveNodeAsync(vm.VmId, ct);
-                if (driveNode != null)
-                {
-                    try
-                    {
-                        await _qmpClient.ClearDirtyBitmapAsync(vm.VmId, driveNode, BitmapName, ct);
-                    }
-                    catch (Exception ex)
-                    {
-                        // Non-fatal: next cycle falls back to full export.
-                        _logger.LogWarning(ex,
-                            "VM {VmId}: ClearDirtyBitmap failed — resetting to full export next cycle",
-                            vm.VmId);
-                        state.BitmapCreated = false;
-                    }
-                }
-                else
-                {
-                    _logger.LogWarning(
-                        "VM {VmId}: drive node lost after export — resetting to full export next cycle",
-                        vm.VmId);
-                    state.BitmapCreated = false;
-                }
-            }
+            // Step 8: Merge overlay back into disk.qcow2, delete overlay file.
+            // blockdev-snapshot-delete commits newOverlayPath's content into
+            // disk.qcow2 (the backing file), making disk.qcow2 the live disk again.
+            // After this call: disk.qcow2 is self-contained and writable by QEMU.
+            // Non-fatal: crash-recovery in LibvirtVmManager handles any orphan.
+            if (newOverlayNode != null)
+                await _qmpClient.DeleteSnapshotNodeAsync(vm.VmId, newOverlayNode, newOverlayPath, ct);
 
-            // Step 8: Persist state
+            // Step 9: Persist state
             await SaveStateAsync(vm.VmId, state);
 
-            // Step 9: Notify local blockstore VM so its /manifests endpoint
+            // Step 10: Notify local blockstore VM so its /manifests endpoint
             // reflects the current manifest — populates the dashboard Resources table.
             // Fire-and-forget: dashboard display is non-critical, never block the cycle.
-            // ReplicationFactor flows from VmSpec → blockstore's owners/{vmId}.meta →
-            // GossipSub new-blocks announcements, letting peers self-organize repair
-            // without orchestrator round-trips (Phase B+).
             _ = NotifyBlockstoreManifestAsync(
                 blockstoreAddr, vm.VmId, rootCid, state, changedChunks, totalBytes,
                 vm.Spec.ReplicationFactor, ct);
@@ -492,8 +329,15 @@ public class LazysyncDaemon : BackgroundService
         }
         finally
         {
-            if (File.Exists(tmpPath))
-                File.Delete(tmpPath);
+            // Revoke AppArmor grant for the overlay file regardless of outcome.
+            if (appArmorGranted)
+                await _qmpClient.RevokeScratchAppArmorAsync(vm.VmId, newOverlayPath, ct);
+
+            // Clean up temp files on any failure path.
+            // On success, newOverlayPath is already deleted by DeleteSnapshotNodeAsync;
+            // File.Delete is idempotent (no-op if already gone).
+            if (File.Exists(newOverlayPath)) File.Delete(newOverlayPath);
+            if (File.Exists(tmpRawPath)) File.Delete(tmpRawPath);
         }
     }
 
@@ -882,7 +726,7 @@ public class LazysyncState
     /// <summary>Monotonically increasing version. Matches ManifestRecord.Version on orchestrator.</summary>
     public int Version { get; set; } = 0;
 
-    /// <summary>Total overlay bytes in the last sync (for billing estimate).</summary>
+    /// <summary>Total disk bytes in the last sync (for billing estimate).</summary>
     public long TotalBytes { get; set; }
 
     /// <summary>Chunk map: virtual disk offset (bytes) → CIDv1 string.</summary>
@@ -890,16 +734,4 @@ public class LazysyncState
 
     /// <summary>When the last successful sync completed.</summary>
     public DateTime LastSyncAt { get; set; } = DateTime.MinValue;
-
-    /// <summary>
-    /// True once a persistent dirty bitmap named "lazysync" has been added to
-    /// the VM's primary qcow2 via QMP. When true, SyncVmAsync uses incremental
-    /// drive-backup instead of full qemu-img map + convert, exporting only
-    /// clusters written since the last successful cycle.
-    ///
-    /// Reset to false on any QMP failure so the next cycle falls back to
-    /// the full export path, which recreates the bitmap cleanly.
-    /// Also reset when lazysync.json is deleted (reseed command).
-    /// </summary>
-    public bool BitmapCreated { get; set; } = false;
 }

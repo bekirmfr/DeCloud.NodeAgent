@@ -7,17 +7,12 @@
 /// though they target different sockets on the QEMU process.
 ///
 /// Phase D:   query-block (drive node name discovery).
-/// Phase D+1: dirty bitmap add/clear + drive-backup for incremental export.
 /// Phase D+2: guest-fsfreeze for application-consistent capture.
-/// Phase H:   drive-backup split into Start + Wait so the freeze envelope
-///            brackets only the snapshot-point creation (one QMP round-trip),
-///            not the whole copy.
-/// Phase I:   sync=full for first-cycle full-disk capture inside the live
-///            qemu's coherent block layer. Captures the full merged disk
-///            as a coherent point-in-time snapshot, eliminating both the
-///            cross-process coherence gap of qemu-img convert --force-share
-///            AND the metadata temporal incoherence of overlay-only
-///            replication (see MIGRATION_SYSTEM_DESIGN.md §6.1.6 / §6.1.7).
+/// Phase J:   blockdev-snapshot-sync for coherent point-in-time disk
+///            snapshots. Replaces drive-backup (Phases H/I) and the
+///            dirty bitmap (Phase D+1). See MIGRATION_SYSTEM_DESIGN.md
+///            §6.1.8 for why drive-backup's COW model cannot produce
+///            coherent snapshots on an active guest.
 /// </summary>
 public interface IQmpClient
 {
@@ -30,77 +25,49 @@ public interface IQmpClient
 
     /// <summary>
     /// Return the QEMU block node name for the primary virtio disk (e.g. "virtio0").
-    /// Used to target dirty bitmap and drive-backup commands at the correct drive.
+    /// Used to target snapshot commands at the correct drive.
     /// </summary>
     Task<string?> GetPrimaryDriveNodeAsync(string vmId, CancellationToken ct = default);
 
-    /// <summary>Phase D+1: Add persistent dirty bitmap to the primary drive.</summary>
-    Task AddDirtyBitmapAsync(string vmId, string driveNode, string bitmapName, CancellationToken ct = default);
-
-    /// <summary>Phase D+1: Remove a dirty bitmap (e.g. before re-adding on migrated VMs).</summary>
-    Task RemoveDirtyBitmapAsync(string vmId, string driveNode, string bitmapName, CancellationToken ct = default);
-
-    /// <summary>Phase D+1: Clear (reset) a dirty bitmap after successful export.</summary>
-    Task ClearDirtyBitmapAsync(string vmId, string driveNode, string bitmapName, CancellationToken ct = default);
-
     /// <summary>
-    /// Phase H: Start an incremental drive-backup block job and return its
-    /// job-id immediately. QEMU installs the copy-on-write snapshot point
-    /// synchronously when this call returns; the actual copy runs
-    /// asynchronously, observed via WaitForBackupJobAsync.
+    /// Phase J: Atomically redirect the VM's write path to a new qcow2
+    /// overlay at <paramref name="snapshotPath"/>, making the current disk
+    /// (identified by <paramref name="driveNode"/>) read-only and coherent
+    /// as of the moment this call returns.
     ///
-    /// Callers wrap only this Start call in the freeze envelope. Freeze
-    /// duration becomes one QMP round-trip regardless of how many clusters
-    /// the backup will copy — pre-Phase-H this scaled with disk delta size.
+    /// Must be called inside a guest-fsfreeze envelope so that the guest's
+    /// page cache is flushed and no writes are in flight when the snapshot
+    /// point is fixed. The freeze envelopes both the creation of the new
+    /// overlay and the redirection of the write path — total freeze duration
+    /// is one QMP round-trip (sub-second).
+    ///
+    /// After this call the guest can be thawed: all new writes go to the
+    /// new overlay. The original disk file is immutable and can be read by
+    /// the lazysync daemon at leisure without any COW race.
+    ///
+    /// Returns the QEMU block node name of the new (now live) overlay,
+    /// needed by DeleteSnapshotNodeAsync to detach it after lazysync.
     /// </summary>
-    Task<string> StartDriveBackupIncrementalAsync(
+    Task<string> CreateSnapshotAsync(
         string vmId,
         string driveNode,
-        string bitmapName,
-        string targetPath,
+        string snapshotPath,
         CancellationToken ct = default);
 
     /// <summary>
-    /// Phase I: Start a full-disk drive-backup via sync=full and return its
-    /// job-id. Captures the full merged disk as the guest sees it — the
-    /// backing chain is read inline by QEMU's block layer, producing a
-    /// self-contained raw image with no backing-file dependency. No external
-    /// whitelist required; no qcow2-layer reasoning in the caller.
+    /// Phase J: Detach and delete the snapshot backing file created by
+    /// CreateSnapshotAsync after lazysync has finished reading it.
     ///
-    /// Runs as a block job inside the live qemu process, reading through
-    /// the same coherent block layer that committed the freeze-flushed data.
-    /// Eliminates both the cross-process coherence gap of qemu-img convert
-    /// --force-share AND the metadata temporal incoherence of the prior
-    /// overlay-only model (see MIGRATION_SYSTEM_DESIGN.md §6.1.6 / §6.1.7):
-    /// the captured image is a coherent point-in-time snapshot, so ext4
-    /// metadata structures (inode bitmap, journal, inode table) are
-    /// mutually consistent and reconstruct into a bootable disk without
-    /// fsck or manual intervention.
+    /// Issues 'blockdev-snapshot-delete' (or equivalent commit-and-remove
+    /// sequence) to disconnect the backing file relationship, then deletes
+    /// the file at <paramref name="snapshotPath"/> from disk.
     ///
-    /// Callers wrap only this Start call in the freeze envelope. Pair with
-    /// WaitForBackupJobAsync to await the background copy.
+    /// Safe to call even if the snapshot file no longer exists (idempotent).
     /// </summary>
-    Task<string> StartDriveBackupFullAsync(
+    Task DeleteSnapshotNodeAsync(
         string vmId,
-        string driveNode,
-        string targetPath,
-        CancellationToken ct = default);
-
-    /// <summary>
-    /// Phase H: Block until the named drive-backup job completes. Polls
-    /// query-block-jobs every 2s; returns when the job reports
-    /// status=concluded or disappears from the list (older QEMU versions).
-    ///
-    /// Runs OUTSIDE the freeze envelope — guest writes proceed normally
-    /// during the wait, protected by drive-backup's before-write notifier
-    /// which copies old cluster contents to the target before allowing any
-    /// in-place overwrite. The captured snapshot is fixed at job creation
-    /// time; the wait just observes the copy completing.
-    /// </summary>
-    Task WaitForBackupJobAsync(
-        string vmId,
-        string jobId,
-        TimeSpan timeout,
+        string newOverlayNode,
+        string snapshotPath,
         CancellationToken ct = default);
 
     /// <summary>
