@@ -130,26 +130,9 @@ public class QmpClient : IQmpClient
         return jobId;
     }
 
-    public async Task<string> StartDriveBackupTopAsync(
+    public async Task<string> StartDriveBackupFullAsync(
         string vmId, string driveNode, string targetPath, CancellationToken ct = default)
     {
-        // Phase H: full-overlay capture inside the live qemu's block layer.
-        // sync=top copies only sectors present in the topmost BDS (the overlay);
-        // backing-chain fall-through is skipped natively, so no external
-        // whitelist is needed. No bitmap involved — this is the first cycle;
-        // the caller adds the bitmap separately to track writes for V2.
-        //
-        // Why not qemu-img convert --force-share: that runs as a separate
-        // process opening the qcow2 file directly. --force-share disables
-        // POSIX advisory locking, but the reader still maintains its own
-        // qcow2 driver state (L2 cache, refcount cache) which doesn't
-        // synchronize with the live qemu's freshly-flushed writes. Result:
-        // torn captures where the file's head clusters land in the output
-        // but tail clusters read as zero from the external view. Diagnosed
-        // on a migrated VM whose libnetplan.cpython-311.pyc had cluster 1
-        // at depth=0 with real bytes and cluster 2 missing entirely from
-        // the overlay, causing cloud-init init-local to throw
-        // ValueError: bad marshal data.
         var jobId = $"ls-{vmId[..8]}-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
 
         await SendAsync(vmId, "drive-backup", new Dictionary<string, object>
@@ -158,7 +141,7 @@ public class QmpClient : IQmpClient
             ["device"] = driveNode,
             ["target"] = targetPath,
             ["format"] = "raw",
-            ["sync"] = "top",
+            ["sync"] = "full",
             ["mode"] = "existing",
         }, ct);
 

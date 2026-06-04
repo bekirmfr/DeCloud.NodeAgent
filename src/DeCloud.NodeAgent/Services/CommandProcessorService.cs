@@ -361,14 +361,26 @@ public class CommandProcessorService : BackgroundService
         }
 
         // The orchestrator is the single source of truth for base image
-        // identity (BASE_IMAGE_DESIGN.md §7). An empty URL means the
-        // orchestrator forgot to set it — a bug to surface, not a condition
-        // to paper over with a node-side default.
-        if (string.IsNullOrEmpty(req.BaseImageUrl))
+        // identity on fresh deploys (BASE_IMAGE_DESIGN.md §7). An empty URL
+        // means the orchestrator forgot to set it — a bug to surface, not a
+        // condition to paper over with a node-side default.
+        //
+        // Phase I exception: on the migration path (req.ChunkMap non-empty),
+        // BaseImageUrl is provenance only — the target reconstructs the disk
+        // directly from the manifest CIDs and never fetches the base image.
+        // Empty URL on migration is legitimate (e.g. the orchestrator's
+        // image registry rotated the URL between source deploy and target
+        // migration); the migration must succeed regardless because the
+        // manifest CIDs are the contract. See PHASE_I_FULL_DISK_REPLICATION.md
+        // §3.3 / §5.
+        var isMigration = req.ChunkMap is { Count: > 0 };
+        if (string.IsNullOrEmpty(req.BaseImageUrl) && !isMigration)
         {
             throw new InvalidOperationException(
-                "TERMINAL: CreateVm payload missing BaseImageUrl. " +
-                "The orchestrator must provide a resolved URL — empty URL is a bug.");
+                "TERMINAL: CreateVm payload missing BaseImageUrl on a fresh deploy. " +
+                "The orchestrator must provide a resolved URL for fresh deploys — " +
+                "empty URL is a bug. (Migration payloads MAY omit BaseImageUrl; " +
+                "this guard fires only when ChunkMap is also empty.)");
         }
         var baseImageUrl = req.BaseImageUrl;
 
@@ -397,8 +409,8 @@ public class CommandProcessorService : BackgroundService
             Labels = req.Labels,
             ReplicationFactor = req.ReplicationFactor,
             TargetNodeId = req.TargetNodeId,
-            OverlayRootCid = req.ManifestRootCid,
-            OverlayChunkMap = req.ChunkMap
+            DiskRootCid = req.ManifestRootCid,
+            DiskChunkMap = req.ChunkMap
         };
 
         // Local aliases so the duplicate-check, GPU-assignment and logging blocks

@@ -134,17 +134,22 @@ public class VmSpec
     /// <summary>
     /// Non-null when this CreateVm is a migration, not a fresh deployment.
     /// The confirmed manifest root CID — used only for logging/diagnostics.
-    /// Disk reconstruction uses OverlayChunkMap.
+    /// Disk reconstruction uses DiskChunkMap.
     /// </summary>
-    public string? OverlayRootCid { get; set; }
+    public string? DiskRootCid { get; set; }
 
     /// <summary>
-    /// Offset→CID map from the confirmed manifest.
+    /// Offset→CID map from the confirmed manifest. Phase I: identifies the
+    /// full-disk snapshot captured by lazysync — base + overlay merged into
+    /// a single coherent point-in-time image at the QMP snapshot point.
+    ///
     /// When non-null, LibvirtVmManager fetches each block from the local
     /// BlockStore (which bitswap-fetches from DHT providers) and writes it
-    /// at the correct byte offset in the newly-created overlay before boot.
+    /// at the correct byte offset to reconstruct the disk before boot.
+    /// No backing-file dependency on reconstruction; the resulting qcow2 is
+    /// self-contained.
     /// </summary>
-    public Dictionary<long, string>? OverlayChunkMap { get; set; }
+    public Dictionary<long, string>? DiskChunkMap { get; set; }
 }
 
 public class VmNetworkConfig

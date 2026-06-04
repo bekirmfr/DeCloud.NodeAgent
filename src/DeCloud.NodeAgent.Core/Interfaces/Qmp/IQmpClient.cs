@@ -11,9 +11,13 @@
 /// Phase D+2: guest-fsfreeze for application-consistent capture.
 /// Phase H:   drive-backup split into Start + Wait so the freeze envelope
 ///            brackets only the snapshot-point creation (one QMP round-trip),
-///            not the whole copy. Adds sync=top for first-cycle full overlay
-///            capture inside the live qemu's coherent block layer, eliminating
-///            the cross-process coherence gap of qemu-img convert --force-share.
+///            not the whole copy.
+/// Phase I:   sync=full for first-cycle full-disk capture inside the live
+///            qemu's coherent block layer. Captures the full merged disk
+///            as a coherent point-in-time snapshot, eliminating both the
+///            cross-process coherence gap of qemu-img convert --force-share
+///            AND the metadata temporal incoherence of overlay-only
+///            replication (see MIGRATION_SYSTEM_DESIGN.md §6.1.6 / §6.1.7).
 /// </summary>
 public interface IQmpClient
 {
@@ -57,22 +61,26 @@ public interface IQmpClient
         CancellationToken ct = default);
 
     /// <summary>
-    /// Phase H: Start a full-overlay drive-backup via sync=top and return
-    /// its job-id. Captures every cluster present in the topmost BDS (the
-    /// overlay), skipping backing-chain fall-through. Output is overlay-only
-    /// — no external whitelist required.
+    /// Phase I: Start a full-disk drive-backup via sync=full and return its
+    /// job-id. Captures the full merged disk as the guest sees it — the
+    /// backing chain is read inline by QEMU's block layer, producing a
+    /// self-contained raw image with no backing-file dependency. No external
+    /// whitelist required; no qcow2-layer reasoning in the caller.
     ///
     /// Runs as a block job inside the live qemu process, reading through
     /// the same coherent block layer that committed the freeze-flushed data.
-    /// Eliminates the cross-process coherence gap that qemu-img convert
-    /// --force-share introduces (a separate process maintains its own qcow2
-    /// driver state — L2 cache, refcount cache — which doesn't synchronize
-    /// with the live qemu's freshly-flushed writes).
+    /// Eliminates both the cross-process coherence gap of qemu-img convert
+    /// --force-share AND the metadata temporal incoherence of the prior
+    /// overlay-only model (see MIGRATION_SYSTEM_DESIGN.md §6.1.6 / §6.1.7):
+    /// the captured image is a coherent point-in-time snapshot, so ext4
+    /// metadata structures (inode bitmap, journal, inode table) are
+    /// mutually consistent and reconstruct into a bootable disk without
+    /// fsck or manual intervention.
     ///
     /// Callers wrap only this Start call in the freeze envelope. Pair with
     /// WaitForBackupJobAsync to await the background copy.
     /// </summary>
-    Task<string> StartDriveBackupTopAsync(
+    Task<string> StartDriveBackupFullAsync(
         string vmId,
         string driveNode,
         string targetPath,

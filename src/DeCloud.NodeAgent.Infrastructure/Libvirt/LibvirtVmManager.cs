@@ -693,55 +693,11 @@ public class LibvirtVmManager : IVmManager
             }
 
             // =====================================================
-            // STEP 1: Prepare base image
-            // =====================================================
-            _logger.LogInformation("VM {VmId}: Downloading/preparing base image from {Url}",
-                spec.Id, spec.BaseImageUrl);
-
-            // Register for progress tracking before starting download
-            _imageManager.TrackDownload(spec.Id, spec.BaseImageUrl);
-
-            string baseImagePath;
-            try
-            {
-                var imageResult = await _imageManager.EnsureImageAvailableAsync(
-                    spec.BaseImageUrl,
-                    spec.BaseImageHash ?? string.Empty,
-                    ct);
-                baseImagePath = imageResult.LocalPath;
-
-                // Record the SHA256 of the bytes we actually used into the spec.
-                // This is the identity of the base the overlay will be authored
-                // against. The heartbeat round-trips this back to the orchestrator
-                // so subsequent migrations of this VM carry the same hash and the
-                // target enforces strict verification. See BASE_IMAGE_DESIGN.md §4.5.
-                if (!string.Equals(spec.BaseImageHash, imageResult.Sha256, StringComparison.OrdinalIgnoreCase))
-                {
-                    _logger.LogInformation(
-                        "VM {VmId}: recording base image hash {Hash} into spec " +
-                        "(orchestrator had {OrigHash})",
-                        spec.Id,
-                        imageResult.Sha256[..16],
-                        string.IsNullOrEmpty(spec.BaseImageHash) ? "<empty>" : spec.BaseImageHash[..16]);
-                }
-                spec.BaseImageHash = imageResult.Sha256;
-                instance.Spec = spec;
-
-                _logger.LogInformation(
-                    "VM {VmId}: Base image ready at {Path} (sha256={Hash})",
-                    spec.Id, baseImagePath, imageResult.Sha256[..16]);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "VM {VmId}: Failed to prepare base image", spec.Id);
-                instance.Status = VmStatus.Error;
-                await _repository.UpdateVmStateAsync(spec.Id, VmStatus.Error);
-                return VmOperationResult.Fail(spec.Id, $"Failed to prepare base image: {ex.Message}", "IMAGE_ERROR");
-            }
-
-            // =====================================================
             // STEP 1.5: Setup User WireGuard Network
             // =====================================================
+            // Moved ahead of base-image / disk preparation: the WireGuard IP
+            // assignment is independent of capture model and applies to every
+            // VM regardless of deploy vs. migration path.
             if (!string.IsNullOrEmpty(spec.OwnerId))
             {
                 _logger.LogInformation(
@@ -762,49 +718,98 @@ public class LibvirtVmManager : IVmManager
             }
 
             // =====================================================
-            // STEP 2: Create overlay disk
+            // STEP 2: Prepare disk
             // =====================================================
+            // Two paths, structurally distinct:
+            //
+            //   Fresh deploy (spec.DiskChunkMap is null/empty):
+            //     Download/cache the base image, then create an empty qcow2
+            //     overlay backed by it. The VM boots with the base providing
+            //     the OS and the overlay absorbing all writes.
+            //
+            //   Migration (spec.DiskChunkMap is non-empty):
+            //     Reconstruct a self-contained qcow2 directly from the block
+            //     store's content-addressed chunks. No base image dependency
+            //     on the target — the manifest is the contract. Phase I §3.3.
+            //
+            // Note: spec.BaseImageUrl and spec.BaseImageHash remain populated
+            // on the migration path as provenance (recorded in the spec for
+            // audit / heartbeat) but are NOT used to fetch or verify anything.
+            // The disk identity comes from the manifest CIDs, not the base URL.
             string diskPath;
             try
             {
-                diskPath = await _imageManager.CreateOverlayDiskAsync(
-                    baseImagePath, spec.Id, spec.DiskBytes, ct);
-                instance.DiskPath = diskPath;
-                _logger.LogInformation("VM {VmId}: Overlay disk created at {Path}", spec.Id, diskPath);
-
-                // If this is a migration, populate the overlay from the block store
-                // before booting. The chunk map tells us which blocks to fetch and
-                // where to write them. The block store bitswap-fetches from DHT
-                // providers automatically when a block is not cached locally.
-                if (spec.OverlayChunkMap is { Count: > 0 })
+                if (spec.DiskChunkMap is { Count: > 0 })
                 {
+                    // ── Migration path ────────────────────────────────────
                     _logger.LogInformation(
-                        "VM {VmId}: migration — reconstructing overlay from {Count} blocks (rootCid={RootCid})",
-                        spec.Id, spec.OverlayChunkMap.Count, spec.OverlayRootCid?[..12] ?? "?");
+                        "VM {VmId}: migration — reconstructing disk from {Count} blocks (rootCid={RootCid})",
+                        spec.Id, spec.DiskChunkMap.Count, spec.DiskRootCid?[..12] ?? "?");
 
-                    await ReconstructOverlayAsync(
-                        spec.Id, diskPath, baseImagePath, spec.OverlayChunkMap, spec.DiskBytes, ct);
+                    diskPath = Path.Combine(_options.VmStoragePath, spec.Id, "disk.qcow2");
+                    instance.DiskPath = diskPath;
+
+                    await ReconstructDiskAsync(
+                        spec.Id, diskPath, spec.DiskChunkMap, spec.DiskBytes, ct);
 
                     _logger.LogInformation(
-                        "VM {VmId}: overlay reconstruction complete", spec.Id);
+                        "VM {VmId}: disk reconstruction complete", spec.Id);
 
                     // Phase H + fsck removal (2026-06-02): RunFsckOnOverlayAsync removed.
-                    // The overlay is a crash-consistent block-level snapshot. Its ext4
-                    // journal has in-flight transactions from before the source went
-                    // offline. fsck.ext4 -fy "repaired" these by clearing extent mappings
-                    // for files whose data blocks collided with journal entries — zeroing
-                    // welcome.service, welcome-server.py, and orphaning 9 netplan .pyc
-                    // files into lost+found. The kernel's own journal replay at mount
-                    // time handles this correctly: it completes the in-flight transactions
-                    // (the data IS in the overlay, captured coherently by Phase H's
-                    // drive-backup sync=top). External fsck is the wrong boundary —
-                    // it applies crash-recovery heuristics to a dataset that the kernel's
-                    // journal layer can process faithfully.
+                    // The captured disk is a coherent point-in-time snapshot (Phase I:
+                    // drive-backup sync=full inside a guest-fsfreeze envelope). Its ext4
+                    // journal contains in-flight transactions from the moment of capture;
+                    // the kernel's own journal layer replays these correctly at mount
+                    // time. External fsck is the wrong boundary — it applies crash-
+                    // recovery heuristics to a dataset that the kernel's journal layer
+                    // can process faithfully.
+                }
+                else
+                {
+                    // ── Fresh deploy path ─────────────────────────────────
+                    _logger.LogInformation(
+                        "VM {VmId}: Downloading/preparing base image from {Url}",
+                        spec.Id, spec.BaseImageUrl);
+
+                    // Register for progress tracking before starting download
+                    _imageManager.TrackDownload(spec.Id, spec.BaseImageUrl);
+
+                    var imageResult = await _imageManager.EnsureImageAvailableAsync(
+                        spec.BaseImageUrl,
+                        spec.BaseImageHash ?? string.Empty,
+                        ct);
+                    var baseImagePath = imageResult.LocalPath;
+
+                    // Record the SHA256 of the bytes we actually used into the spec.
+                    // This is the identity of the base the overlay will be authored
+                    // against. The heartbeat round-trips this back to the orchestrator
+                    // so subsequent migrations of this VM carry the same hash for
+                    // provenance. See BASE_IMAGE_DESIGN.md §4.5.
+                    if (!string.Equals(spec.BaseImageHash, imageResult.Sha256, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logger.LogInformation(
+                            "VM {VmId}: recording base image hash {Hash} into spec " +
+                            "(orchestrator had {OrigHash})",
+                            spec.Id,
+                            imageResult.Sha256[..16],
+                            string.IsNullOrEmpty(spec.BaseImageHash) ? "<empty>" : spec.BaseImageHash[..16]);
+                    }
+                    spec.BaseImageHash = imageResult.Sha256;
+                    instance.Spec = spec;
+
+                    _logger.LogInformation(
+                        "VM {VmId}: Base image ready at {Path} (sha256={Hash})",
+                        spec.Id, baseImagePath, imageResult.Sha256[..16]);
+
+                    diskPath = await _imageManager.CreateOverlayDiskAsync(
+                        baseImagePath, spec.Id, spec.DiskBytes, ct);
+                    instance.DiskPath = diskPath;
+                    _logger.LogInformation("VM {VmId}: Overlay disk created at {Path}", spec.Id, diskPath);
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "VM {VmId}: Failed to create/reconstruct overlay disk", spec.Id);
+                _logger.LogError(ex, "VM {VmId}: Failed to prepare disk", spec.Id);
                 instance.Status = VmStatus.Error;
                 await _repository.UpdateVmStateAsync(spec.Id, VmStatus.Error);
                 return VmOperationResult.Fail(spec.Id, $"Failed to prepare disk: {ex.Message}", "DISK_ERROR");
@@ -1070,30 +1075,39 @@ public class LibvirtVmManager : IVmManager
     }
 
     /// <summary>
-    /// Reconstructs a VM overlay disk from blocks stored in the local BlockStore VM.
+    /// Phase I: Reconstructs a VM disk from blocks stored in the local
+    /// BlockStore VM. Produces a self-contained qcow2 — no backing file,
+    /// no base-image dependency on the target.
     ///
     /// Steps:
     ///   1. Create a sparse temp raw file at the virtual disk size.
     ///   2. For each (offset, cid) in chunkMap: GET /blocks/{cid} from the
-    ///      local blockstore (port 5090). The blockstore bitswap-fetches from
-    ///      DHT providers automatically when the block is not cached locally.
+    ///      local blockstore (port 5090). The blockstore bitswap-fetches
+    ///      from DHT providers automatically when the block is not cached
+    ///      locally.
     ///   3. Write the returned bytes at the correct offset in the raw file.
     ///   4. Convert raw → qcow2 (skipping zero regions for sparseness).
-    ///   5. Rebase the qcow2 to use the base image as backing file.
-    ///   6. Delete the temp raw file.
+    ///   5. Delete the temp raw file.
     ///
-    /// The resulting disk.qcow2 is a correct qcow2 overlay backed by the base
-    /// image — functionally identical to what the source node had.
+    /// The resulting disk.qcow2 is a complete qcow2 image containing the
+    /// merged disk contents captured at the source's QMP snapshot point.
+    /// No qemu-img rebase, no backing chain — the manifest CIDs are the
+    /// full contract. See PHASE_I_FULL_DISK_REPLICATION.md §3.3.
     /// </summary>
-    private async Task ReconstructOverlayAsync(
+    private async Task ReconstructDiskAsync(
         string ownerId,
         string diskPath,
-        string baseImagePath,
         Dictionary<long, string> chunkMap,
         long virtualSizeBytes,
         CancellationToken ct)
     {
         var rawPath = diskPath + ".migration.raw";
+
+        // Ensure the destination directory exists. On the migration path,
+        // STEP 2 in CreateVmAsync no longer pre-creates the per-VM directory
+        // via CreateOverlayDiskAsync — we create it here so the qemu-img
+        // convert output below has a place to land.
+        Directory.CreateDirectory(Path.GetDirectoryName(diskPath)!);
 
         try
         {
@@ -1119,7 +1133,7 @@ public class LibvirtVmManager : IVmManager
                     : null;
 
                 if (string.IsNullOrEmpty(blockstoreAddr))
-                    throw new Exception("No local BlockStore VM running — cannot reconstruct overlay");
+                    throw new Exception("No local BlockStore VM running — cannot reconstruct disk");
 
                 foreach (var (offset, cid) in chunkMap.OrderBy(kv => kv.Key))
                 {
@@ -1153,7 +1167,7 @@ public class LibvirtVmManager : IVmManager
 
             // ── Step 4: Convert raw → qcow2 ─────────────────────────────────
             // -S 65536: skip zero regions (keeps the qcow2 sparse).
-            // Overwrites the empty overlay created by CreateOverlayDiskAsync.
+            // No backing file — the qcow2 is self-contained. Phase I §3.3.
             var convertResult = await _executor.ExecuteAsync(
                 "qemu-img",
                 $"convert -f raw -O qcow2 -S 65536 \"{rawPath}\" \"{diskPath}\"",
@@ -1163,24 +1177,10 @@ public class LibvirtVmManager : IVmManager
             if (!convertResult.Success)
                 throw new Exception(
                     $"qemu-img convert failed: {convertResult.StandardError}");
-
-            // ── Step 5: Rebase to attach backing chain ───────────────────────
-            // -u (unsafe): updates the backing-file pointer without verifying
-            // that the backing data matches. Safe here because we only wrote
-            // overlay chunks; any missing offset reads through to the base image.
-            var rebaseResult = await _executor.ExecuteAsync(
-                "qemu-img",
-                $"rebase -u -f qcow2 -b \"{baseImagePath}\" -F qcow2 \"{diskPath}\"",
-                TimeSpan.FromMinutes(5),
-                ct);
-
-            if (!rebaseResult.Success)
-                throw new Exception(
-                    $"qemu-img rebase failed: {rebaseResult.StandardError}");
         }
         finally
         {
-            // ── Step 6: Clean up ─────────────────────────────────────────────
+            // ── Step 5: Clean up ─────────────────────────────────────────────
             if (File.Exists(rawPath))
                 try { File.Delete(rawPath); } catch { /* non-fatal */ }
         }
@@ -2085,7 +2085,7 @@ public class LibvirtVmManager : IVmManager
                     }
                 }
             }
-            else if (spec.OverlayChunkMap is { Count: > 0 })
+            else if (spec.DiskChunkMap is { Count: > 0 })
             {
                 // Migration: the orchestrator sends no user-data by design. The overlay
                 // already carries the fully-initialised guest (rendered cloud-init,
@@ -2152,7 +2152,7 @@ public class LibvirtVmManager : IVmManager
             // On migration, use a minimal cloud-config that only fixes machine-specific
             // state (network, guest agent). The full user-data would re-run write_files
             // and runcmd, overwriting user changes that are already preserved in the overlay.
-            if (spec.OverlayChunkMap is { Count: > 0 })
+            if (spec.DiskChunkMap is { Count: > 0 })
             {
                 cloudInitYaml =
                     "#cloud-config\n" +
@@ -2180,13 +2180,13 @@ public class LibvirtVmManager : IVmManager
             // on the receiving node. The overlay contains the source node's
             // cloud-init marker — a new instance-id forces full re-initialization,
             // fixing machine-specific state (network, guest agent, hostname).
-            var instanceId = spec.OverlayChunkMap is { Count: > 0 }
+            var instanceId = spec.DiskChunkMap is { Count: > 0 }
                 ? $"migration-{spec.Id}-{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}"
                 : spec.Id;
             var metaData = $"instance-id: {instanceId}\nlocal-hostname: {spec.Name}\n";
             await File.WriteAllTextAsync(metaDataPath, metaData, ct);
 
-            if (spec.OverlayChunkMap is { Count: > 0 })
+            if (spec.DiskChunkMap is { Count: > 0 })
             {
                 _logger.LogInformation(
                     "VM {VmId}: migration — using fresh cloud-init instance-id {InstanceId}",

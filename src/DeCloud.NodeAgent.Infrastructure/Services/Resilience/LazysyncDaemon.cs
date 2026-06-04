@@ -14,57 +14,56 @@ using System.Text.Json;
 namespace DeCloud.NodeAgent.Services;
 
 /// <summary>
-/// Background service that continuously replicates VM overlay disks to the
-/// local BlockStore VM via the lazysync protocol.
+/// Background service that continuously replicates VM disks to the local
+/// BlockStore VM via the lazysync protocol.
 ///
-/// Cycle (every 5 minutes, 3 minute startup delay):
+/// Cycle (every 5 minutes, 5 minute startup delay):
 ///   For each Running tenant VM with ReplicationFactor > 0:
-///   1a. Map the overlay extents via:
-///           qemu-img map --force-share --output=json disk.qcow2
-///       Collect all 1 MB chunk offsets where depth=0 (owned by the overlay,
-///       not the backing image) and zero=false. This is the replication whitelist.
-///   1b. Export the full merged raw file via:
-///           qemu-img convert --force-share -f qcow2 -O raw -S 65536 disk.qcow2 tmp.raw
-///       Used only to read actual byte data for CID computation.
-///       NOTE: -S skips zero regions in the merged output (free disk space).
-///             It does NOT filter backing-file data — that is handled by step 1a.
-///   2. Scan the raw file in 1 MB chunks. Skip chunks not in the overlay whitelist
-///      (backing-file data) and skip all-zero chunks (sparse free space).
-///   3. Compute CIDv1 (raw codec, sha2-256 multihash, base32lower) for each chunk.
-///   4. Compare against stored manifest: push only genuinely changed chunks.
-///   5. POST each new block to the local BlockStore VM HTTP API (POST /blocks).
+///   1. Capture the full merged disk as a coherent point-in-time snapshot
+///      via QMP drive-backup, bracketed by a guest-fsfreeze envelope:
+///         • First cycle: block-dirty-bitmap-add (drive-level), then
+///           drive-backup sync=full inside the freeze envelope. Output is
+///           a self-contained raw image — no backing-file dependency on
+///           reconstruction.
+///         • Subsequent cycles: drive-backup sync=incremental against the
+///           dirty bitmap inside the freeze envelope. Only clusters
+///           written since the last successful clear are exported.
+///      The freeze brackets ONLY the QMP Start call (one round-trip,
+///      sub-second). drive-backup's copy-on-write notifier fixes the
+///      snapshot point at job creation; the actual copy runs unfrozen.
+///   2. Scan the captured raw file in 1 MB chunks. Skip all-zero chunks
+///      (sparse free space). No qcow2-layer reasoning — the captured
+///      image is what the guest sees.
+///   3. Compute CIDv1 (raw codec, sha2-256 multihash, base32lower) for
+///      each non-zero chunk.
+///   4. Compare against stored manifest: push only genuinely changed
+///      chunks (content-addressed dedup across all VMs sharing an image).
+///   5. POST each new block to the local BlockStore VM HTTP API
+///      (POST /blocks).
 ///   6. Update the in-memory + on-disk manifest state.
 ///   7. POST updated manifest to the orchestrator.
-///   8. Delete the temp raw file.
+///   8. Clear the dirty bitmap so the next cycle tracks only writes that
+///      occur after this successful push.
+///   9. Delete the temp raw file.
 ///
-/// Why overlay-only matters:
-///   qemu-img convert merges the full backing chain (overlay + base OS image).
-///   The base image (~2 GB, non-zero EXT4 data) would be replicated every cycle
-///   without the depth=0 whitelist from step 1a. With the whitelist, only chunks
-///   that live in disk.qcow2 itself are replicated — typically 100–500 MB on first
-///   boot, then small deltas each cycle. Base image and cloud-init are excluded
-///   because they are reconstructible artifacts (image registry + VM labels).
+/// Phase I — Full-disk snapshot replication:
+///   Replaces the overlay-only model (Phase D–H) with full-disk capture
+///   via drive-backup sync=full. Eliminates the metadata temporal
+///   incoherence failure mode where ext4 structures (inode bitmap,
+///   journal, inode table) captured at different lazysync versions
+///   formed internally inconsistent on-disk state that neither journal
+///   replay nor fsck could reconcile (observed 2026-06-03 on msi-0d04).
+///   Every confirmed manifest version is now an application-consistent
+///   coherent point-in-time snapshot — planned and unplanned recovery
+///   produce identical correctness guarantees; only their RPO differs.
+///   See MIGRATION_SYSTEM_DESIGN.md §6.1.6 / §6.1.7 and
+///   PHASE_I_FULL_DISK_REPLICATION.md.
 ///
-/// Dirty bitmap optimization (Phase D+1):
-///   IQmpClient is injected but not used in Phase D. In Phase D+1, replace steps
-///   1a+1b with block-dirty-bitmap-add + drive-backup sync=incremental to export
-///   only actually-written clusters, eliminating the need for the overlay map step.
-///
-/// Phase H — V1 inside live qemu + bounded-duration freeze:
-///   The first cycle (V1) also runs via QMP drive-backup, using sync=top instead
-///   of sync=incremental. This removes the qemu-img convert --force-share path
-///   entirely. Pre-Phase-H V1 read the qcow2 from a separate process; Phase G
-///   (guest-fsfreeze) ensured the guest had flushed to qemu's block layer, but
-///   the external reader saw an inconsistent file-level view of qcow2 metadata
-///   vs. recently-written data clusters — producing torn captures where head
-///   clusters of a file landed correctly but tail clusters read as zero.
-///
-///   Equally important: the freeze now brackets only the QMP Start call that
-///   creates the backup job. drive-backup's copy-on-write notifier fixes the
-///   snapshot point at job creation; the copy runs unfrozen in the background.
-///   Freeze duration is constant regardless of VM disk size. Pre-Phase-H V2
-///   held the freeze for the entire incremental copy duration, which would
-///   not have scaled to multi-hundred-GB volumes.
+///   Storage cost is bounded by content-addressed dedup: base image
+///   CIDs appear once on the network regardless of how many VMs share
+///   the image. Aggregate network growth is K × BaseImage × RF, not
+///   N × Disk × RF. At platform scale (N≥1000 VMs, K≤20 base images)
+///   growth is under 2%.
 ///
 /// State persisted per VM: {VmStoragePath}/{vmId}/lazysync.json
 /// </summary>
@@ -202,12 +201,6 @@ public class LazysyncDaemon : BackgroundService
 
         try
         {
-            // Phase H: overlay capture is always overlay-only — both first and
-            // subsequent cycles use drive-backup, which writes only top-BDS clusters
-            // to the target. ScanChunksAsync's whitelist parameter is retained for
-            // safety but is always null in this code path.
-            HashSet<long>? overlayOffsets = null;
-
             // Tracked so step 7.5 doesn't clear the bitmap immediately after V1.
             // Under Phase G fallback (crash-consistent capture when guest agent is
             // unresponsive), writes can occur during V1's backup window and must
@@ -216,12 +209,11 @@ public class LazysyncDaemon : BackgroundService
 
             if (wasFirstCycle)
             {
-                // ── Phase H: First cycle — drive-backup sync=top inside live qemu ──
-                // Reads the overlay through qemu's own block layer, eliminating the
-                // cross-process coherence gap that qemu-img convert --force-share
-                // exposed (Phase G's freeze drains the guest to qemu's block layer,
-                // but an external reader sees an inconsistent file-level view of
-                // L2 tables vs. freshly-written data clusters).
+                // ── Phase I: First cycle — drive-backup sync=full inside live qemu ──
+                // Captures the full merged disk as a coherent point-in-time snapshot:
+                // backing chain is dereferenced inline by QEMU's block layer, output
+                // is a self-contained raw image. No backing-file dependency on
+                // reconstruction; the target needs only the chunks.
                 //
                 // The bitmap is added BEFORE the backup so V2 captures every write
                 // from V1 onwards. The freeze brackets only the Start call: once
@@ -293,7 +285,7 @@ public class LazysyncDaemon : BackgroundService
                     // at the moment drive-backup returns its job-id; thaw immediately
                     // and let the copy run in the background.
                     jobId = await RunUnderGuestFreezeAsync(vm.VmId,
-                        () => _qmpClient.StartDriveBackupTopAsync(
+                        () => _qmpClient.StartDriveBackupFullAsync(
                             vm.VmId, driveNode, tmpPath, ct),
                         ct);
 
@@ -305,7 +297,7 @@ public class LazysyncDaemon : BackgroundService
                 catch (Exception ex)
                 {
                     _logger.LogWarning(ex,
-                        "VM {VmId}: first-cycle drive-backup sync=top failed — " +
+                        "VM {VmId}: first-cycle drive-backup sync=full failed — " +
                         "leaving BitmapCreated=false; next cycle will retry V1",
                         vm.VmId);
                     if (File.Exists(tmpPath)) File.Delete(tmpPath);
@@ -403,12 +395,10 @@ public class LazysyncDaemon : BackgroundService
                     if (attached)
                         await _qmpClient.RevokeScratchAppArmorAsync(vm.VmId, tmpPath, ct);
                 }
-
-                overlayOffsets = null; // no whitelist — incremental export is overlay-only
             }
 
-            // Step 2-4: Scan raw, skip non-overlay chunks, compute CIDs, diff against manifest.
-            var (changedChunks, totalBytes) = await ScanChunksAsync(tmpPath, overlayOffsets, state, ct);
+            // Step 2-4: Scan raw, skip all-zero chunks, compute CIDs, diff against manifest.
+            var (changedChunks, totalBytes) = await ScanChunksAsync(tmpPath, state, ct);
 
             if (changedChunks.Count == 0)
             {
@@ -456,7 +446,7 @@ public class LazysyncDaemon : BackgroundService
             // V2 to pick up. With Phase G's freeze active, the bitmap is empty
             // at V1's end and clearing would be a no-op anyway; the guard
             // matters only for the fallback path.
-            if (state.BitmapCreated && overlayOffsets == null && !wasFirstCycle)
+            if (state.BitmapCreated && !wasFirstCycle)
             {
                 var driveNode = await TryGetDriveNodeAsync(vm.VmId, ct);
                 if (driveNode != null)
@@ -552,29 +542,12 @@ public class LazysyncDaemon : BackgroundService
         }
     }
 
-    // GetOverlayChunkOffsetsAsync removed in Phase H. The depth=0 whitelist
-    // was needed because qemu-img convert merged the backing chain into the
-    // raw output; drive-backup sync=top filters by topmost-BDS natively, so
-    // no external whitelist computation is required. The QMP round-trip that
-    // sync=top performs is also coherent with the live qemu, avoiding the
-    // L2/refcount-cache mismatch that --force-share exposed.
-
-    // ═══════════════════════════════════════════════════════════════════════
-
-    // ExportOverlayAsync removed in Phase H. The qemu-img convert --force-share
-    // path was the source of the cross-process coherence gap: a separate process
-    // opening the qcow2 file did not synchronize its qcow2-driver state with the
-    // live qemu's freshly-flushed writes. V1 now uses StartDriveBackupTopAsync,
-    // which runs as a block job inside the live qemu and reads through the same
-    // block layer that committed the freeze-drained data. See LazysyncDaemon
-    // class summary (Phase H) and QmpClient.StartDriveBackupTopAsync.
-
     // ═══════════════════════════════════════════════════════════════════════
     // Chunk scan + CID computation
     // ═══════════════════════════════════════════════════════════════════════
 
     private async Task<(List<(long Offset, string Cid)> Changed, long TotalBytes)>
-        ScanChunksAsync(string rawPath, HashSet<long>? overlayOffsets, LazysyncState state, CancellationToken ct)
+        ScanChunksAsync(string rawPath, LazysyncState state, CancellationToken ct)
     {
         var changed = new List<(long Offset, string Cid)>();
         long totalBytes = 0;
@@ -592,16 +565,11 @@ public class LazysyncDaemon : BackgroundService
             var read = await fs.ReadAsync(buf, 0, BlockSizeBytes, ct);
             if (read == 0) break;
 
-            // Skip backing-file chunks (depth≥1 extents — base OS image data).
-            // qemu-img convert merges the backing chain into the raw output, so
-            // without this guard we would replicate the entire OS image every cycle.
-            if (overlayOffsets != null && !overlayOffsets.Contains(offset))
-            {
-                offset += read;
-                continue;
-            }
-
-            // Skip all-zero chunks — unallocated / sparse free space within the overlay.
+            // Skip all-zero chunks — unallocated / sparse free space.
+            // Base image clusters that the guest hasn't read or written through
+            // are dereferenced by qemu's block layer into either real bytes
+            // (then they get CIDs and replicate) or zeros (then they're skipped
+            // here, same as a hole in a fresh-deploy overlay).
             if (IsAllZero(buf, read))
             {
                 offset += read;
