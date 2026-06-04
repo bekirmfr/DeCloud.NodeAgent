@@ -2167,8 +2167,8 @@ public class LibvirtVmManager : IVmManager
                     // Remove MAC-bound netplan before networkd starts — overlay netplan
                     // contains the source node's MAC address which causes network-online.target
                     // to hang forever on the receiving node (different MAC).
-                    "  - \"printf 'network:\\\\n  version: 2\\\\n  ethernets:\\\\n    enp1s0:\\\\n      dhcp4: true\\\\n' > /etc/netplan/50-cloud-init.yaml\"\n" +
-                    "  - systemctl start qemu-guest-agent 2>/dev/null || true\n";
+                    "  - \"printf 'network:\\\\n  version: 2\\\\n  ethernets:\\\\n    enp1s0:\\\\n      dhcp4: true\\\\n' > /etc/netplan/50-cloud-init.yaml\"\n";
+
                 _logger.LogInformation(
                     "VM {VmId}: migration — using minimal cloud-init to preserve overlay state",
                     spec.Id);
