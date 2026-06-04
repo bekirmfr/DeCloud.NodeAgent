@@ -56,12 +56,20 @@ public class QmpClient : IQmpClient
         try
         {
             var ret = await SendAsync(vmId, "query-block", ct: ct);
-            // Find the first device that has a backing file (the overlay drive)
+            // Return the top-level device name (e.g. "drive-virtio-disk0") — this is
+            // what blockdev-snapshot-sync's "device" argument expects. The internal
+            // block node-name (inserted.node-name, e.g. "libvirt-2-format") is the
+            // layer identifier used by newer QEMU node-based commands; blockdev-snapshot-sync
+            // on this QEMU version uses the device name.
             foreach (var dev in ret.EnumerateArray())
             {
-                if (dev.TryGetProperty("inserted", out var ins) &&
-                    ins.TryGetProperty("node-name", out var node))
-                    return node.GetString();
+                if (dev.TryGetProperty("inserted", out _) &&
+                    dev.TryGetProperty("device", out var deviceName))
+                {
+                    var name = deviceName.GetString();
+                    if (!string.IsNullOrEmpty(name))
+                        return name;
+                }
             }
         }
         catch (Exception ex)
@@ -104,7 +112,7 @@ public class QmpClient : IQmpClient
 
         var ret = await SendAsync(vmId, "blockdev-snapshot-sync", new Dictionary<string, object>
         {
-            ["node"] = driveNode,           // block node name, not device name
+            ["device"] = driveNode,         // top-level device name from query-block
             ["snapshot-file"] = snapshotPath,
             ["snapshot-node-name"] = newNodeName,
             ["format"] = "qcow2",
