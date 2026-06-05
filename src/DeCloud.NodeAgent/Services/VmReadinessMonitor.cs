@@ -23,6 +23,21 @@ public class VmReadinessMonitor : BackgroundService
     private static readonly TimeSpan GuestExecWait = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan RecheckInterval = TimeSpan.FromSeconds(60);
 
+    /// <summary>
+    /// Number of consecutive failed guest-agent probes required before
+    /// transitioning a GuestAgentPing service to Failed. Mirrors the
+    /// Kubernetes liveness-probe failureThreshold default (3).
+    ///
+    /// A single virsh qemu-agent-command failure is not, by itself, evidence
+    /// of VM death — the virtio-serial channel is known to hiccup during
+    /// transient conditions (node-agent restart, libvirt reconnect, tap
+    /// re-attach by SystemVmWatchdog, brief guest scheduler stall). Requiring
+    /// N consecutive misses keeps the contract of ServiceStatus.Failed
+    /// (sustained, real failure) intact and prevents the SystemVmReconciler
+    /// matrix from issuing premature delete+redeploy on a transient signal.
+    /// </summary>
+    private const int GuestAgentFailureThreshold = 3;
+
     public VmReadinessMonitor(
         IVmManager vmManager,
         VmRepository repository,
@@ -158,6 +173,7 @@ public class VmReadinessMonitor : BackgroundService
 
             if (alive)
             {
+                service.ConsecutiveFailures = 0;
                 if (prev != ServiceStatus.Ready)
                 {
                     service.Status = ServiceStatus.Ready;
@@ -171,12 +187,37 @@ public class VmReadinessMonitor : BackgroundService
             }
             else
             {
-                service.Status = ServiceStatus.Failed;
-                service.StatusMessage = "Guest agent unreachable";
-                if (prev != ServiceStatus.Failed)
-                    _logger.LogWarning(
-                        "Service {Service} on VM {VmId} FAILED — guest agent unreachable",
-                        service.Name, vm.VmId);
+                // Transient miss vs. sustained failure: only downgrade to Failed
+                // after GuestAgentFailureThreshold consecutive probes have missed.
+                // Aligns to the Kubernetes liveness-probe failureThreshold contract.
+                //
+                // The natural system boundary being respected here is the meaning
+                // of ServiceStatus.Failed itself — sustained, real failure — which
+                // the SystemVmReconciler matrix consumes as Reality.Unhealthy. A
+                // single virtio-channel reconnect miss (notably after node-agent
+                // restart, while SystemVmWatchdog is still re-attaching tap
+                // interfaces) is not that boundary, and previously caused the
+                // matrix to issue Delete on perfectly healthy system VMs.
+                service.ConsecutiveFailures++;
+
+                if (service.ConsecutiveFailures >= GuestAgentFailureThreshold)
+                {
+                    service.Status = ServiceStatus.Failed;
+                    service.StatusMessage =
+                        $"Guest agent unreachable ({service.ConsecutiveFailures} consecutive probes)";
+                    if (prev != ServiceStatus.Failed)
+                        _logger.LogWarning(
+                            "Service {Service} on VM {VmId} FAILED — guest agent unreachable after {Count} consecutive probes",
+                            service.Name, vm.VmId, service.ConsecutiveFailures);
+                }
+                else
+                {
+                    // Leave Status unchanged so IsFullyReady is not perturbed;
+                    // log the miss at Debug for diagnosability without escalation noise.
+                    _logger.LogDebug(
+                        "Service {Service} on VM {VmId} guest-agent probe miss {Count}/{Threshold} — not yet downgrading",
+                        service.Name, vm.VmId, service.ConsecutiveFailures, GuestAgentFailureThreshold);
+                }
             }
 
             service.LastCheckAt = DateTime.UtcNow;
