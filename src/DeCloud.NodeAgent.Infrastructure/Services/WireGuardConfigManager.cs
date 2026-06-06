@@ -19,6 +19,23 @@ public class WireGuardConfigManager : BackgroundService
     // Reconciliation interval
     private static readonly TimeSpan ReconcileInterval = TimeSpan.FromMinutes(1);
 
+    // Handshake-liveness self-healing for CgnatClient role.
+    // Mirrors wg-mesh-watchdog STALE_THRESHOLD=180s (used inside system VMs).
+    // Persistent keepalive is 25s → 7 consecutive missed keepalives before we act.
+    // Dashboard classifies "stale" at 180s, "dead" at 600s — we recover before "dead".
+    // Relay-side eviction kicks in at 300s — we self-heal before the relay drops us.
+    private static readonly TimeSpan HandshakeStaleThreshold = TimeSpan.FromSeconds(180);
+
+    // Grace after interface creation: don't bounce a tunnel that hasn't had a chance
+    // to handshake yet. Mirrors wg-mesh-watchdog's OnBootSec=2min precedent.
+    private static readonly TimeSpan HandshakeColdStartGrace = TimeSpan.FromSeconds(120);
+
+    // Tracks when each interface was last (re)created, used for cold-start grace.
+    // In-memory only: on agent restart this effectively resets the grace from the
+    // restart moment, which is the safer direction (avoids a false-positive bounce
+    // immediately after the agent comes up while the interface is already healthy).
+    private readonly Dictionary<string, DateTime> _interfaceCreatedAt = new();
+
     public WireGuardConfigManager(
         ILogger<WireGuardConfigManager> logger,
         INetworkManager networkManager,
@@ -120,6 +137,24 @@ public class WireGuardConfigManager : BackgroundService
                 _logger.LogInformation(
                     "Configuration drift detected, recreating interface: {Interface}",
                     desiredConfig.InterfaceName);
+
+                await RemoveInterfaceAsync(desiredConfig.InterfaceName, ct);
+                await CreateInterfaceAsync(desiredConfig, ct);
+            }
+            else if (await IsHandshakeStaleAsync(desiredConfig, ct))
+            {
+                // Data-plane drift: config is correct, interface is up, but the
+                // tunnel hasn't handshook in a while. Typical cause on CGNAT hosts
+                // is the upstream carrier-grade NAT mapping dying. A clean bounce
+                // rebinds the local UDP socket and forces a fresh outbound mapping.
+                // The reused /etc/wireguard/{iface}.conf preserves the private key,
+                // so the relay's peer entry stays valid — only the local socket
+                // changes.
+                _logger.LogWarning(
+                    "Handshake stale on {Interface} (>{Threshold}s) — " +
+                    "bouncing interface to refresh upstream NAT mapping",
+                    desiredConfig.InterfaceName,
+                    (int)HandshakeStaleThreshold.TotalSeconds);
 
                 await RemoveInterfaceAsync(desiredConfig.InterfaceName, ct);
                 await CreateInterfaceAsync(desiredConfig, ct);
@@ -295,6 +330,8 @@ public class WireGuardConfigManager : BackgroundService
             $"enable wg-quick@{config.InterfaceName}",
             ct);
 
+        _interfaceCreatedAt[config.InterfaceName] = DateTime.UtcNow;
+
         _logger.LogInformation(
             "✓ Created WireGuard interface: {Interface} (Role: {Role}, IP: {TunnelIp})",
             config.InterfaceName,
@@ -320,6 +357,83 @@ public class WireGuardConfigManager : BackgroundService
 
         // Simple comparison - could be more sophisticated
         return actualConfig.Trim() == desired.Configuration.Trim();
+    }
+
+    /// <summary>
+    /// CGNAT-client self-healing: the host has a single peer (the relay).
+    /// If that peer's handshake is stale beyond <see cref="HandshakeStaleThreshold"/>
+    /// the tunnel is broken — typically because the upstream CGNAT NAT mapping
+    /// died (e.g. the host was offline long enough for the carrier to drop its
+    /// UDP outbound mapping). A clean interface bounce rebinds the local UDP
+    /// socket and forces a fresh outbound mapping. The reused
+    /// /etc/wireguard/{iface}.conf preserves the private key, so the relay's
+    /// peer entry stays valid.
+    ///
+    /// Scope: <see cref="WireGuardRole.CgnatClient"/> only. Multi-peer interfaces
+    /// (RelayServer, HubNode) have peers that may legitimately be stale at any
+    /// given moment — bouncing the whole interface to fix one would be
+    /// disproportionate. They need per-peer healing, which is handled elsewhere
+    /// (relay-api.py cleanup thread, orchestrator EnsurePeerRegisteredAsync).
+    /// </summary>
+    private async Task<bool> IsHandshakeStaleAsync(
+        WireGuardDesiredConfig desired,
+        CancellationToken ct)
+    {
+        if (desired.Role != WireGuardRole.CgnatClient)
+        {
+            return false;
+        }
+
+        // Cold-start grace: a freshly created interface has no handshake yet,
+        // and that's expected, not stale.
+        if (_interfaceCreatedAt.TryGetValue(desired.InterfaceName, out var createdAt) &&
+            DateTime.UtcNow - createdAt < HandshakeColdStartGrace)
+        {
+            return false;
+        }
+
+        var result = await _executor.ExecuteAsync(
+            "wg",
+            $"show {desired.InterfaceName} latest-handshakes",
+            ct);
+
+        if (!result.Success || string.IsNullOrWhiteSpace(result.StandardOutput))
+        {
+            // Can't read handshake state → don't act. The interface-existence
+            // check above already passed, so this is a transient wg-show failure,
+            // not a missing interface.
+            return false;
+        }
+
+        // Output format per peer: "<base64-pubkey>\t<unix-seconds>\n"
+        // CgnatClient has exactly one peer (the relay); take the first line
+        // defensively in case wg adds metadata in future versions.
+        var firstLine = result.StandardOutput
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault()
+            ?.Trim();
+
+        if (string.IsNullOrEmpty(firstLine))
+        {
+            return false;
+        }
+
+        var parts = firstLine.Split('\t', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2 || !long.TryParse(parts[1], out var lastUnix))
+        {
+            return false;
+        }
+
+        // lastUnix == 0 means "never handshook". If we're past the cold-start
+        // grace window, the interface is up but has never reached the relay —
+        // that's stale by any reasonable definition.
+        if (lastUnix == 0)
+        {
+            return true;
+        }
+
+        var ageSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - lastUnix;
+        return ageSeconds > (long)HandshakeStaleThreshold.TotalSeconds;
     }
 
     /// <summary>
