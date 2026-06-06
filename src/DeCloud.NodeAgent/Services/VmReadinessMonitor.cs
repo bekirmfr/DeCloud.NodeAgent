@@ -297,6 +297,7 @@ public class VmReadinessMonitor : BackgroundService
                     _logger.LogInformation("Service {Service} on VM {VmId} is READY (port: {Port})",
                         service.Name, vm.VmId, service.Port);
                 }
+                service.ConsecutiveFailures = 0;
                 service.Status = ServiceStatus.Ready;
                 service.ReadyAt = DateTime.UtcNow;
                 service.LastCheckAt = DateTime.UtcNow;
@@ -323,14 +324,40 @@ public class VmReadinessMonitor : BackgroundService
             {
                 if (previousStatus == ServiceStatus.Ready)
                 {
-                    // Liveness re-check failure: service was Ready but no longer
-                    // responding. Revert so IsFullyReady reflects reality.
-                    service.Status = ServiceStatus.Failed;
-                    service.StatusMessage = diagnostic ?? "Liveness check failed";
+                    // Liveness re-check failure: service was Ready but the probe
+                    // missed. Apply the same consecutive-failures threshold the
+                    // GuestAgentPing path uses (Kubernetes liveness-probe contract).
+                    //
+                    // Without this, a single transient miss on the first cycle
+                    // after a host or agent restart — when the in-guest listener
+                    // hasn't finished binding yet — flips Ready → Failed instantly.
+                    // The SystemVmReconciler matrix then observes Reality.Unhealthy
+                    // with pending=null (the in-memory IOutstandingCommands resets
+                    // on agent start) and issues an unnecessary Delete + redeploy
+                    // of perfectly healthy system VMs.
+                    service.ConsecutiveFailures++;
                     service.LastCheckAt = DateTime.UtcNow;
-                    _logger.LogWarning(
-                        "Service {Service} on VM {VmId} FAILED liveness check (port {Port})",
-                        service.Name, vm.VmId, service.Port);
+
+                    if (service.ConsecutiveFailures >= GuestAgentFailureThreshold)
+                    {
+                        service.Status = ServiceStatus.Failed;
+                        service.StatusMessage = diagnostic ?? "Liveness check failed";
+                        _logger.LogWarning(
+                            "Service {Service} on VM {VmId} FAILED liveness check (port {Port}) — " +
+                            "{Count} consecutive probes missed",
+                            service.Name, vm.VmId, service.Port, service.ConsecutiveFailures);
+                    }
+                    else
+                    {
+                        // Leave Status=Ready so IsFullyReady is not perturbed.
+                        // Log at Debug for diagnosability without escalation noise.
+                        _logger.LogDebug(
+                            "Service {Service} on VM {VmId} liveness probe miss {Count}/{Threshold} " +
+                            "(port {Port}) — not yet downgrading",
+                            service.Name, vm.VmId,
+                            service.ConsecutiveFailures, GuestAgentFailureThreshold,
+                            service.Port);
+                    }
                 }
                 else
                 {
