@@ -253,6 +253,32 @@ public class SystemVmWatchdogService : BackgroundService
     }
 
     /// <summary>
+    /// Probes the VM's qemu-guest-agent via virtio-serial. Returns true if the agent
+    /// responds, false on any failure or timeout. Used as a second confirmation signal
+    /// before classifying a VM as a zombie: virtio-serial is independent of the VM's
+    /// network bridge, so this probe is reliable even immediately after a tap re-attach.
+    /// </summary>
+    private async Task<bool> IsGuestAgentAliveAsync(string vmId, CancellationToken ct)
+    {
+        try
+        {
+            // Argument escaping mirrors VmReadinessMonitor.VirshQemuAgentArgs:
+            // .NET Process.Start uses Windows-style splitting — double quotes delimit
+            // argument groups, backslash-quote is a literal quote inside a group.
+            var result = await _executor.ExecuteAsync(
+                "virsh",
+                $"qemu-agent-command {vmId} \"{{\\\"execute\\\":\\\"guest-ping\\\"}}\"",
+                TimeSpan.FromSeconds(5),
+                ct);
+            return result.Success;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// One-shot startup sequence: ensure libvirt network is active, reattach orphaned
     /// tap interfaces, check for zombies, and start any stopped system VMs.
     /// Extracted from ExecuteAsync so early returns don't bypass the periodic loop.
@@ -314,11 +340,30 @@ public class SystemVmWatchdogService : BackgroundService
                 ex.InnerException is SocketException se &&
                 se.SocketErrorCode == SocketError.ConnectionRefused)
             {
-                // Connection refused = nginx is not running = systemd/services are dead
-                _logger.LogDebug(
-                    "SystemVmStartupService: VM {VmId} ({vmRole}) port 80 refused — zombie confirmed",
-                    candidate.VmId, candidate.Spec.Role);
-                zombieVms.Add(candidate);
+                // Port 80 refused is a necessary but not sufficient signal for zombie.
+                // After a host restart the tap interface may have been detached from
+                // virbr0 and only just re-attached. In that window nginx may not yet
+                // be listening even though the VM is internally healthy. Confirm with
+                // a guest-agent ping, which communicates over virtio-serial and is
+                // immune to bridge/tap state. Only declare zombie when BOTH signals fail:
+                // no HTTP AND no guest-agent. If guest-agent responds, the VM is alive
+                // and services are recovering — leave it alone.
+                var agentAlive = await IsGuestAgentAliveAsync(candidate.VmId, ct);
+                if (agentAlive)
+                {
+                    _logger.LogDebug(
+                        "SystemVmStartupService: VM {VmId} ({vmRole}) port 80 refused but guest agent " +
+                        "is responding — services still starting after tap re-attach, not a zombie",
+                        candidate.VmId, candidate.Spec.Role);
+                }
+                else
+                {
+                    _logger.LogDebug(
+                        "SystemVmStartupService: VM {VmId} ({vmRole}) port 80 refused AND guest agent " +
+                        "unreachable — zombie confirmed",
+                        candidate.VmId, candidate.Spec.Role);
+                    zombieVms.Add(candidate);
+                }
             }
             catch (Exception ex)
             {
