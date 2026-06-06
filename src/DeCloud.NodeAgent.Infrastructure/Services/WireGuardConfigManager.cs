@@ -36,6 +36,13 @@ public class WireGuardConfigManager : BackgroundService
     // immediately after the agent comes up while the interface is already healthy).
     private readonly Dictionary<string, DateTime> _interfaceCreatedAt = new();
 
+    // Bound the number of /etc/wireguard/{iface}.conf.removed-* backup files
+    // kept per interface. Each RemoveInterfaceAsync writes a backup before
+    // replacing the config; with handshake-stale healing in place, recreates
+    // are no longer rare events on flaky CGNAT links and these backups would
+    // otherwise grow without bound.
+    private const int MaxConfigBackups = 10;
+
     public WireGuardConfigManager(
         ILogger<WireGuardConfigManager> logger,
         INetworkManager networkManager,
@@ -282,12 +289,13 @@ public class WireGuardConfigManager : BackgroundService
                     ct);
             }
 
-            // Remove config file (backup first)
+            // Remove config file (backup first, then prune backups beyond retention)
             if (File.Exists(configPath))
             {
                 var backupPath = $"{configPath}.removed-{DateTime.UtcNow:yyyyMMdd-HHmmss}";
                 File.Move(configPath, backupPath);
                 _logger.LogInformation("Backed up old config: {Path}", backupPath);
+                PruneOldConfigBackups(interfaceName);
             }
 
             _logger.LogInformation("✓ Removed WireGuard interface: {Interface}", interfaceName);
@@ -295,6 +303,63 @@ public class WireGuardConfigManager : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error removing interface: {Interface}", interfaceName);
+        }
+    }
+
+    /// <summary>
+    /// Keep at most <see cref="MaxConfigBackups"/> backup files per interface
+    /// in /etc/wireguard. Backup filenames carry yyyyMMdd-HHmmss timestamps so
+    /// ordinal lexicographic ordering equals chronological ordering — the
+    /// oldest backups sort first and are the ones we delete.
+    ///
+    /// Best-effort: logs failures but never throws. Backup retention is hygiene,
+    /// not a correctness invariant. A failed delete here must not prevent the
+    /// rest of RemoveInterfaceAsync from completing.
+    /// </summary>
+    private void PruneOldConfigBackups(string interfaceName)
+    {
+        try
+        {
+            const string wgDir = "/etc/wireguard";
+            var pattern = $"{interfaceName}.conf.removed-*";
+
+            if (!Directory.Exists(wgDir))
+            {
+                return;
+            }
+
+            var backups = Directory.GetFiles(wgDir, pattern);
+            if (backups.Length <= MaxConfigBackups)
+            {
+                return;
+            }
+
+            // Ordinal sort: oldest timestamps first → delete from the head.
+            Array.Sort(backups, StringComparer.Ordinal);
+
+            var toDelete = backups.Length - MaxConfigBackups;
+            for (var i = 0; i < toDelete; i++)
+            {
+                try
+                {
+                    File.Delete(backups[i]);
+                    _logger.LogDebug("Pruned old config backup: {Path}", backups[i]);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "Failed to prune config backup: {Path}", backups[i]);
+                }
+            }
+
+            _logger.LogInformation(
+                "Pruned {Count} old config backup(s) for {Interface}, kept {Kept}",
+                toDelete, interfaceName, MaxConfigBackups);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Error during config backup pruning for {Interface}", interfaceName);
         }
     }
 
