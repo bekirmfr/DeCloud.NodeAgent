@@ -1,5 +1,7 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Models;
+using DeCloud.NodeAgent.Core.Models.SystemVm;
 using DeCloud.Shared.Enums;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -25,15 +27,18 @@ public class SystemVmWatchdogService : BackgroundService
 {
     private readonly IVmManager _vmManager;
     private readonly ICommandExecutor _executor;
+    private readonly IOutstandingCommands _outstanding;
     private readonly ILogger<SystemVmWatchdogService> _logger;
 
     public SystemVmWatchdogService(
         IVmManager vmManager,
         ICommandExecutor executor,
+        IOutstandingCommands outstanding,
         ILogger<SystemVmWatchdogService> logger)
     {
         _vmManager = vmManager;
         _executor = executor;
+        _outstanding = outstanding;
         _logger = logger;
     }
 
@@ -387,9 +392,43 @@ public class SystemVmWatchdogService : BackgroundService
             var resetResult = await _executor.ExecuteAsync("virsh", $"start {vm.VmId}", ct);
 
             if (resetResult.Success)
+            {
                 _logger.LogInformation(
                     "✓ Zombie system VM {VmId} ({vmRole}) hard reset — services will restart via systemd",
                     vm.VmId, vm.Spec.Role);
+
+                // Register a pending Create in the reconciler's outstanding-commands map.
+                // After a hard reset the VM reboots — qemu-guest-agent and port 80 are
+                // unavailable while it boots. Without a pending entry the reconciler matrix
+                // sees reality=Unhealthy with pending=null and immediately issues Delete.
+                // The pending Create activates the existing booting-VM shield in Decide():
+                //   reality=Unhealthy, pending=Create → Wait (shielded until CommandTimeout)
+                // giving the VM up to 20 minutes to come back — identical to the protection
+                // a freshly-deployed VM gets during cloud-init.
+                var obligationRole = vm.Spec.Role switch
+                {
+                    VmRole.Dht => "dht",
+                    VmRole.BlockStore => "blockstore",
+                    _ => (string?)null
+                };
+
+                if (obligationRole is not null)
+                {
+                    _outstanding.Set(obligationRole, new OutstandingCommand
+                    {
+                        CommandId = Guid.NewGuid().ToString(),
+                        Kind = OutstandingCommandKind.Create,
+                        VmId = vm.VmId,
+                        IssuedAt = DateTime.UtcNow,
+                        TemplateRevision = 0 // not a template deploy — revision irrelevant
+                    });
+
+                    _logger.LogDebug(
+                        "SystemVmStartupService: registered pending Create shield for [{Role}] " +
+                        "VM {VmId} — reconciler will wait for reboot to complete",
+                        obligationRole, vm.VmId);
+                }
+            }
             else
                 _logger.LogWarning(
                     "✗ Failed to hard reset zombie VM {VmId}: {Error}",
