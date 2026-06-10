@@ -136,17 +136,25 @@ public class AuthenticationManager : BackgroundService
 
     private async Task<AuthenticationState> DetermineAuthStateAsync(CancellationToken ct)
     {
-        var authFileExists = File.Exists(PendingAuthFile);
-
-        _logger.LogInformation("Auth file exists: {AuthFileExists}", authFileExists);
-
         // Pending-auth always takes priority — checked first (cheapest operation).
+        // Logged at Debug because in steady state this is False every iteration
+        // and the value of a healthy node — Information level produces noise that
+        // obscures cadence gaps caused by real state transitions.
+        var authFileExists = File.Exists(PendingAuthFile);
+        _logger.LogDebug("Pending-auth file exists: {Exists}", authFileExists);
+
         if (authFileExists)
         {
             return AuthenticationState.PendingRegistration;
         }
 
-        // Check if credentials exist and are valid
+        // Check if credentials exist and are valid.
+        // We do NOT call the orchestrator here — credential revocation is
+        // detected via 401 responses on heartbeat and command operations
+        // (SendHeartbeatAsync, FetchPendingCommandsAsync, AcknowledgeCommandAsync),
+        // which already run continuously and transition the state machine on 401.
+        // A polling verify call here is redundant, slower, and conflates transport
+        // failure with credential rejection — see commit message for full rationale.
         if (File.Exists(CredentialsFilePath))
         {
             var credentials = await LoadCredentialsAsync(ct);
@@ -160,17 +168,7 @@ public class AuthenticationManager : BackgroundService
                 credentials["WALLET_ADDRESS"] = _nodeMetadata.WalletAddress;
 
             if (await ValidateCredentialsAsync(credentials, ct))
-            {
-                var nodeId = _nodeMetadata.NodeId;
-
-                var isAuthorized = await VerifyNodeAuthorizationAsync(
-                    _nodeMetadata.NodeId,
-                    credentials["API_KEY"],
-                    ct);
-
-                if (isAuthorized)
-                    return AuthenticationState.Registered;
-            }
+                return AuthenticationState.Registered;
 
             return AuthenticationState.CredentialsInvalid;
         }
@@ -285,78 +283,6 @@ public class AuthenticationManager : BackgroundService
         }
 
         return true;
-    }
-
-    /// <summary>
-    /// Verify node authorization by calling GET /api/nodes/{nodeId}.
-    /// Returns (isAuthorized, isSchedulingReady) — both derived from the
-    /// same HTTP response so no extra round-trip is needed.
-    /// </summary>
-    private async Task<bool> VerifyNodeAuthorizationAsync(
-        string nodeId,
-        string apiKey,
-        CancellationToken ct)
-    {
-        try
-        {
-            using var httpClient = new HttpClient
-            {
-                Timeout = TimeSpan.FromSeconds(10)
-            };
-
-            var requestUrl = $"{_nodeMetadata.OrchestratorUrl.TrimEnd('/')}/api/nodes/{nodeId}";
-
-            var request = new HttpRequestMessage(HttpMethod.Get, requestUrl);
-            request.Headers.Authorization =
-                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
-
-            var response = await httpClient.SendAsync(request, ct);
-
-            if (response.StatusCode != System.Net.HttpStatusCode.OK)
-            {
-                _logger.LogWarning(
-                    "Node authorization failed: {StatusCode} - {Reason}",
-                    (int)response.StatusCode,
-                    response.ReasonPhrase);
-
-                return false;
-            }
-
-            // Parse SchedulingReady from the response body — same call,
-            // no extra round-trip.
-            var body = await response.Content.ReadAsStringAsync(ct);
-            var isSchedulingReady = false;
-
-            try
-            {
-                using var doc = JsonDocument.Parse(body);
-                // Response shape: { "data": { "schedulingReady": true, ... } }
-                // or flat: { "schedulingReady": true, ... }
-                if (doc.RootElement.TryGetProperty("data", out var data))
-                {
-                    isSchedulingReady = data.TryGetProperty("schedulingReady", out var prop)
-                        && prop.GetBoolean();
-                }
-                else if (doc.RootElement.TryGetProperty("schedulingReady", out var prop))
-                {
-                    isSchedulingReady = prop.GetBoolean();
-                }
-            }
-            catch (JsonException ex)
-            {
-                // Non-fatal — we know the node is authorized; scheduling state
-                // will be resolved at the next auto-login attempt.
-                _logger.LogWarning(ex, "Could not parse schedulingReady from node response");
-            }
-
-            _logger.LogInformation("✓ Node authorization verified with orchestrator");
-            return true;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to verify node authorization with orchestrator");
-            return false;
-        }
     }
 
     /// <summary>

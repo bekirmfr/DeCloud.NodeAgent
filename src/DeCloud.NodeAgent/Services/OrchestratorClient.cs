@@ -960,6 +960,17 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                     _logger.LogError(
                         "❌ Heartbeat rejected: Signature validation failed. " +
                         "Check that node wallet matches registered wallet.");
+
+                    // Authoritative credential rejection from the orchestrator.
+                    // Transition the state machine so HandleInvalidCredentialsAsync
+                    // surfaces the "❌ Invalid Credentials Detected" operator-action
+                    // block. The heartbeat is the natural boundary for this signal —
+                    // it is the most frequent authenticated operation on the node
+                    // (15s cadence) and its response is authoritative. Transport
+                    // failures (timeouts, connection refused) fall through to the
+                    // else branch and do NOT transition state — they are not
+                    // credential events.
+                    _nodeState.SetAuthState(AuthenticationState.CredentialsInvalid);
                 }
                 else
                 {
