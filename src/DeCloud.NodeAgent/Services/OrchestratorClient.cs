@@ -115,10 +115,24 @@ public partial class OrchestratorClient : IOrchestratorClient
         var isOrchestratorReachable = await IsOrchestratorReachableAsync(ct);
         _nodeState.SetOrchestratorReachable(isOrchestratorReachable);
 
-        // Pre-fetch performance evaluation and scheduling config
-        // Node state is updated within these methods
+        // Pre-fetch performance evaluation, scheduling config, and the
+        // orchestrator's stored allocation. All three follow the same
+        // pattern: the orchestrator is authoritative, the local cache file
+        // is a fallback used only when the orchestrator is unreachable at
+        // startup. Fetching allocation here re-hydrates state that may have
+        // been wiped by 'decloud update' or backup restore — without
+        // requiring the operator to re-run 'decloud allocate' after every
+        // update.
+        //
+        // Each call is independent and non-fatal: failure logs a warning
+        // and falls through to whatever NodeMetadataService loaded from
+        // disk during its own InitializeAsync. NodeMetadataService runs
+        // first in DI startup, so the cache is already loaded by the time
+        // we get here — a successful orchestrator fetch overrides the
+        // cache values; a failed fetch leaves them intact.
         await GetPerformanceEvaluationAsync(ct);
         await GetSchedulingConfigAsync(ct);
+        await GetAllocationAsync(ct);
 
         _logger.LogInformation("OrchestratorClient initialized with wallet: {Wallet} \n" +
             "internet connection: {Internet}" +

@@ -287,6 +287,19 @@ public interface IOrchestratorClient
     Task<NodeCapacityResponse?> GetCapacityAsync(CancellationToken ct = default);
 
     /// <summary>
+    /// Get the orchestrator's stored allocation for this node.
+    /// Endpoint: GET /api/nodes/me/allocation
+    /// </summary>
+    /// <remarks>
+    /// Returns the operator-configured percentages and resolved absolute
+    /// values. Called at startup to re-hydrate AllocationResolvedAt and
+    /// AllocatedResources from authoritative orchestrator state — the local
+    /// cache at /etc/decloud/allocation-resolved.json is now a fallback,
+    /// not the source of truth.
+    /// </remarks>
+    Task<NodeAllocateResponse?> GetAllocationAsync(CancellationToken ct = default);
+
+    /// <summary>
     /// Evaluate node: benchmark, receive obligations, persist all state.
     /// Primary lifecycle step between register and login.
     /// Endpoint: POST /api/nodes/me/evaluate

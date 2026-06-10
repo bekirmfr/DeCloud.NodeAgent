@@ -257,6 +257,77 @@ public partial class OrchestratorClient
     }
 
     // =====================================================================
+    // GET /api/nodes/me/allocation - Orchestrator-Stored Allocation
+    // =====================================================================
+
+    /// <inheritdoc />
+    public async Task<NodeAllocateResponse?> GetAllocationAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            _logger.LogDebug("Fetching allocation from orchestrator...");
+
+            var response = await _httpClient.GetAsync("/api/nodes/me/allocation", ct);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                // 404 here means the node isn't registered yet — fall back to
+                // the local cache (loaded by NodeMetadataService.LoadResolvedAllocationAsync).
+                // Other failures are equally non-fatal at this stage.
+                _logger.LogWarning(
+                    "Could not fetch orchestrator allocation: {StatusCode} - {Reason}. " +
+                    "Falling back to local cache / settings-derived values.",
+                    (int)response.StatusCode, response.ReasonPhrase);
+                return null;
+            }
+
+            var content = await response.Content.ReadAsStringAsync(ct);
+            var allocation = JsonSerializer.Deserialize<NodeAllocateResponse>(content, _jsonOptions);
+
+            if (allocation == null)
+            {
+                _logger.LogWarning(
+                    "Orchestrator returned empty allocation response — keeping local cache.");
+                return null;
+            }
+
+            // Apply the same way AllocateAsync does — populate in-memory state
+            // and persist the cache file. UpdateFromOrchestratorResolutionAsync's
+            // "> 0" guards correctly skip null/zero fields, so a not-yet-evaluated
+            // node won't have its non-zero in-memory values clobbered.
+            await _nodeMetadata.UpdateFromOrchestratorResolutionAsync(allocation, ct);
+
+            _logger.LogInformation(
+                "✓ Allocation fetched from orchestrator: CPU={CpuPct:P0}, " +
+                "Mem={MemPct:P0}, Stor={StorPct:P0}, " +
+                "Resolved={Resolved}",
+                allocation.EffectiveCpuPercent,
+                allocation.EffectiveMemoryPercent,
+                allocation.EffectiveStoragePercent,
+                allocation.ResolvedComputePoints.HasValue ? "yes" : "no (not evaluated)");
+
+            return allocation;
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogWarning(ex,
+                "HTTP error fetching orchestrator allocation — keeping local cache");
+            return null;
+        }
+        catch (TaskCanceledException) when (ct.IsCancellationRequested)
+        {
+            _logger.LogDebug("Allocation request cancelled");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Error fetching orchestrator allocation — keeping local cache");
+            return null;
+        }
+    }
+
+    // =====================================================================
     // POST /api/nodes/me/evaluate - Request Performance Re-evaluation
     // =====================================================================
 
