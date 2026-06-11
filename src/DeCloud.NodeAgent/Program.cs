@@ -67,7 +67,18 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.DefaultIgnoreCondition = wire.DefaultIgnoreCondition;
 });
 
-builder.Services.AddHttpClient<IImageManager, ImageManager>();
+// ImageManager owns its own download deadline via ImageManagerOptions.DownloadTimeout
+// (30 min default) and a linked CancellationTokenSource in DownloadAndHashAsync.
+// HttpClient.Timeout is a hard ceiling enforced independently of any CancellationToken
+// (.NET behaviour); leaving the default 100 s here silently overrides the configured
+// download timeout. Set to InfiniteTimeSpan so the class-level deadline is the single
+// source of truth.
+builder.Services.AddHttpClient<IImageManager, ImageManager>()
+    .ConfigureHttpClient(client =>
+    {
+        client.Timeout = Timeout.InfiniteTimeSpan;
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("DeCloud-NodeAgent/1.0");
+    });
 builder.Services.AddHttpClient<OrchestratorClient>()
     .ConfigureHttpClient(client =>
     {
