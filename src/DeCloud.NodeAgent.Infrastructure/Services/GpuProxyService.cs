@@ -70,6 +70,17 @@ public class GpuProxyService
     public int KernelTimeoutSeconds { get; set; } = 30;
 
     /// <summary>
+    /// SEC-1 GPU isolation mode passed to the daemon via -i:
+    ///   "auto"     — fork one worker process per VM when a GPU is present (default)
+    ///   "threaded" — legacy shared CUDA context, NO cross-tenant isolation
+    ///   "fork"     — force per-VM fork
+    /// Resolved at launch as: env DECLOUD_GPU_ISOLATION → this property → "auto".
+    /// Phase 3 (orchestrator) sets the env to "threaded" only on GPUs it has
+    /// confirmed are single-tenant, reclaiming per-context VRAM.
+    /// </summary>
+    public string IsolationMode { get; set; } = "auto";
+
+    /// <summary>
     /// Enable verbose (debug) logging on the daemon.
     /// When true, passes -v to the daemon and sets GPU_PROXY_VERBOSE=1,
     /// which enables LOG_DBG messages for all CUDA calls, kernel launches,
@@ -236,15 +247,35 @@ public class GpuProxyService
 
             // Start the daemon
             _logger.LogInformation(
-                "Starting GPU proxy daemon: {Path} -p {Port}",
+                "Starting GPU proxy daemon: {Path} -p {Port} (isolation resolved below)",
                 DaemonPath, DaemonPort);
 
             // Always enable TCP listener — needed for WSL2 and as fallback
             var verboseFlag = VerboseLogging ? " -v" : "";
+
+            // SEC-1: resolve isolation mode. env overrides the property so the
+            // orchestrator (Phase 3) can set policy per node without code changes.
+            var isolationMode = Environment.GetEnvironmentVariable("DECLOUD_GPU_ISOLATION");
+            if (string.IsNullOrWhiteSpace(isolationMode))
+                isolationMode = IsolationMode;
+            isolationMode = isolationMode?.Trim().ToLowerInvariant();
+            if (isolationMode is not ("auto" or "threaded" or "fork"))
+            {
+                _logger.LogWarning(
+                    "Unknown GPU isolation mode '{Mode}' — defaulting to auto (isolated)",
+                    isolationMode);
+                isolationMode = "auto";
+            }
+
+            // SEC-1: the per-worker kernel watchdog only fires when a timeout is set.
+            // Threaded mode keeps -t 0 (async pipelining, no co-tenant to protect);
+            // auto/fork pass the timeout so a runaway kernel kills only its own worker.
+            var timeoutSeconds = (isolationMode == "threaded") ? 0 : KernelTimeoutSeconds;
+
             var psi = new ProcessStartInfo
             {
                 FileName = DaemonPath,
-                Arguments = $"-p {DaemonPort} -t 0 -T 192.168.122.1{verboseFlag}",
+                Arguments = $"-p {DaemonPort} -t {timeoutSeconds} -T 192.168.122.1 -i {isolationMode}{verboseFlag}",
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
