@@ -73,7 +73,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 // (.NET behaviour); leaving the default 100 s here silently overrides the configured
 // download timeout. Set to InfiniteTimeSpan so the class-level deadline is the single
 // source of truth.
-builder.Services.AddHttpClient<IImageManager, ImageManager>()
+builder.Services.AddHttpClient<ImageManager>()
     .ConfigureHttpClient(client =>
     {
         client.Timeout = Timeout.InfiniteTimeSpan;
