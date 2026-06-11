@@ -42,6 +42,18 @@
 #define GPU_EX_KERNEL_TIMEOUT 70   /* worker self-terminated on runaway kernel */
 #define GPU_EX_CUINIT         71   /* child cuInit failed */
 
+/* SEC-1 Phase 3: per-context VRAM overhead.
+ * Each forked worker's CUDA primary context consumes driver state + reserved
+ * heap (~200-400MB on consumer GPUs). Deducted from the tenant's enforced quota
+ * so per-VM physical usage (context + tenant) stays within the node's reservation,
+ * keeping FILTER 5 headroom honest. Conservative-high: under-estimating reopens
+ * over-packing; over-estimating only mildly shrinks usable VRAM. Tune from
+ * hardware measurements once available.
+ * GPU_CONTEXT_MIN_USABLE floors the result so a tiny request isn't reduced to an
+ * unusable quota — such connections are rejected at HELLO instead. */
+#define GPU_CONTEXT_OVERHEAD_BYTES (400ULL * 1024 * 1024)   /* 400 MB */
+#define GPU_CONTEXT_MIN_USABLE     (256ULL * 1024 * 1024)   /* 256 MB floor */
+
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
@@ -511,11 +523,34 @@ static int handle_hello(ConnectionCtx *ctx, const void *payload, uint32_t len)
         strncpy(ctx->vm_id, vm_id, sizeof(ctx->vm_id) - 1);
         LOG_INFO("TCP auth OK: VM %s (PID %u, shim v%u)",
                  vm_id, req.pid, req.shim_version);
-        /* Apply operator-set VRAM quota immediately — enforced by handle_malloc.
-         * Set by the host before VM boot via the token registry; the tenant
+        /* Set by the host before VM boot via the token registry; the tenant
          * cannot modify it from inside the VM. */
         ctx->memory_quota = vm_quota;
-        if (ctx->memory_quota > 0) {
+
+        /* SEC-1 Phase 3: in a forked worker (own CUDA context), reserve the
+         * context's overhead out of the tenant's quota so context + tenant
+         * stays within the node's reservation. Threaded mode shares one context
+         * (no per-VM overhead) and is left unchanged. Unlimited (0) untouched. */
+        if (g_in_forked_worker && ctx->memory_quota > 0) {
+            if (ctx->memory_quota <= GPU_CONTEXT_OVERHEAD_BYTES + GPU_CONTEXT_MIN_USABLE) {
+                LOG_ERR("VM %s: VRAM quota %llu MB too small for isolated worker "
+                        "(needs > %llu MB context overhead + %llu MB minimum) — rejecting",
+                        ctx->vm_id,
+                        (unsigned long long)(ctx->memory_quota / (1024 * 1024)),
+                        (unsigned long long)(GPU_CONTEXT_OVERHEAD_BYTES / (1024 * 1024)),
+                        (unsigned long long)(GPU_CONTEXT_MIN_USABLE / (1024 * 1024)));
+                send_response(ctx->fd, GPU_CMD_HELLO, -1, NULL, 0);
+                return -1; /* Triggers disconnect */
+            }
+            uint64_t requested = ctx->memory_quota;
+            ctx->memory_quota = requested - GPU_CONTEXT_OVERHEAD_BYTES;
+            LOG_INFO("VM %s: VRAM quota %llu MB requested, %llu MB usable "
+                     "(%llu MB reserved for isolated CUDA context)",
+                     ctx->vm_id,
+                     (unsigned long long)(requested / (1024 * 1024)),
+                     (unsigned long long)(ctx->memory_quota / (1024 * 1024)),
+                     (unsigned long long)(GPU_CONTEXT_OVERHEAD_BYTES / (1024 * 1024)));
+        } else if (ctx->memory_quota > 0) {
             LOG_INFO("VM %s: VRAM quota applied at connect: %llu bytes (%llu MB)",
                      ctx->vm_id,
                      (unsigned long long)ctx->memory_quota,
