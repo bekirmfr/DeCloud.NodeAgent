@@ -1,8 +1,8 @@
 # DeCloud GPU Proxy — Debugging Journal
 
-**Date Range:** 2026-02-27 through 2026-05-25
+**Date Range:** 2026-02-27 through 2026-06-11
 **Authors:** BMA + Claude AI assistant
-**Status:** Active — PyTorch inference + training + LoRA + SD Forge + Ollama 3B GPU production-ready; Ollama pinned to 0.7.0; 7B+ models blocked by Bug 23a
+**Status:** Active — PyTorch inference + training + LoRA + SD Forge + Ollama 3B GPU production-ready; Ollama pinned to 0.7.0; 7B+ models blocked by Bug 23a; multi-tenant GPU sharing blocked by SEC-1 (single-tenant-per-GPU invariant required)
 
 ---
 
@@ -26,6 +26,7 @@
 | 15 | Mar 17 | **Bug 22 FIXED** — CUDA graph pass-through mode, word doubling/garbling parked for future |
 | 16 | May 24 | **Bug 23** — Ollama 0.24.0 incompatible with `cudaErrorNotSupported`; pinned to 0.7.0 |
 | 17 | May 25 | **Bug 23a** — 7B+ models corrupt at extended generation; confirmed proxy bug, not model |
+| 18 | Jun 11 | **SEC-1** — shared primary context allows cross-tenant GPU memory access; interim scheduler invariant + fork-per-VM worker plan |
 
 ---
 
@@ -765,9 +766,61 @@ The divergence point will be in kernel launches that occur after token ~200, com
 
 32. **Corruption onset token count is a diagnostic signal.** Corruption starting at token ~200-250 and cascading is consistent with a per-token accumulated error (e.g. wrong KV cache address that gets read back every attention step). Instant corruption from token 1 would indicate a model weight loading error.
 
+
 ---
 
-## Production Status (2026-05-25)
+## Session 18: Security Review — Shared Primary Context (SEC-1) (June 11, 2026)
+
+### SEC-1: Cross-Tenant GPU Memory Access via Shared Primary Context
+
+**Classification:** Security finding from architecture review — not a runtime bug. No code misbehaves; the vulnerability is an emergent property of correct decisions composing.
+**Severity:** 🔴 Critical for multi-tenant GPU deployments. No impact under single-tenant-per-GPU operation.
+
+**Origin:** Session 7, Problem 25. The switch from `cuCtxCreate` to `cuDevicePrimaryCtxRetain` was the correct fix for the runtime/driver context mismatch (`CUDA_ERROR_INVALID_HANDLE`). Its unexamined consequence: the primary context is per-device **per-process**, and the daemon is one process serving every VM connection on the node. All tenants therefore share one CUDA context — one GPU address space.
+
+**Why this matters:** A CUDA context is the GPU's equivalent of a process address space. Device pointers are virtual addresses valid context-wide, and within a context CUDA provides **zero isolation** — any code in the context can read, write, or free any allocation. CUDA's security model assumes one context = one trust domain. Per-VM tokens authenticate *who is calling*; they say nothing about *which addresses* the call may name. Memory quotas limit how much a tenant allocates, not which addresses it can reference. Per-connection function tables cover modules, not memory.
+
+**Attack surface (per RPC verb):**
+
+| Verb | Cross-tenant capability |
+|------|------------------------|
+| `GPU_CMD_MEMCPY` D2H with foreign device address | Read another tenant's VRAM — weights, KV cache, prompts. Address space is scannable (success/failure oracle; VRAM is small) |
+| `GPU_CMD_MEMCPY` H2D / `GPU_CMD_MEMSET` with foreign address | Silent integrity corruption — weight poisoning, KV cache manipulation. Victim may never know |
+| `GPU_CMD_FREE` on foreign pointer | Cross-tenant use-after-free / denial of service |
+| `GPU_CMD_LAUNCH_KERNEL` with attacker kernel | Full read/write of foreign buffers via pointer arguments — **unvalidatable in principle** (see below) |
+
+The attacker requires no exploit and no privilege — only a valid tenant token, which a permissionless platform hands out by design. The Session 8 design (daemon dereferences VM-supplied device pointers, e.g. D2H reads of GEMM pointer arrays) makes this a documented, normal code path.
+
+**Why daemon-side pointer validation is insufficient:** The daemon could maintain a per-connection allocation map (it already sees every Malloc/Free) and reject memcpy/memset/free naming foreign addresses — that genuinely closes three verbs. But `cudaLaunchKernel` parameters arrive as an **opaque byte blob**: no kernel signature, no type information, no way to distinguish pointers from integers. A tenant launches its own kernel whose arguments point into foreign buffers, and the kernel — running in the shared context — accesses them freely. Validation alone can never close the hole. Per the platform design philosophy: don't wrap a systemic problem in an artificial control; align to the boundary the system provides.
+
+**Root fix (planned): fork-per-VM daemon workers.** The CUDA primary context is per-process, so one daemon worker process per VM connection yields per-tenant contexts with **GPU MMU-enforced isolation** — cross-context access fails at the driver level, no validation code written by us. Additional benefits:
+- Fault isolation: a worker crash (malformed RPC, daemon bug) kills one tenant's session, not every tenant on the node
+- Enables a per-launch compute watchdog: timeout → kill worker → context released cleanly (impossible to do surgically inside a shared-context monolith)
+
+**Cost (honest):** ~200–400MB VRAM per CUDA context on consumer GPUs (driver state + reserved heap). On an 8GB RTX 4060, 3-4 workers consume 1GB+ before tensors load. Tenant density becomes a scheduler-visible resource — feeds the existing `GpuVramBytes` accounting in `ResourceSnapshot`. At realistic model sizes, consumer-GPU density is 2-3 tenants anyway, so the overhead rarely changes the answer.
+
+**Interim mitigation (REQUIRED before any GPU co-tenancy):** Scheduler invariant — **at most one wallet's GPU VMs per physical GPU**. A one-line constraint in orchestrator GPU scheduling that makes the entire attack class structurally impossible at zero cost at current scale.
+
+**Residual hardening (ship with the worker refactor):**
+- **Zero-on-free:** `cudaMalloc` does not zero memory and NVIDIA does not guarantee scrubbing of recycled VRAM — published "CUDA Leaks"-class research recovers prior tenants' data across processes. Daemon must `cudaMemset(0)` on every Free and on connection teardown.
+- **Compute watchdog:** an adversarial non-terminating kernel hangs the shared silicon regardless of context isolation. Per-launch timeout → worker kill → context reset.
+- **Transport:** the per-VM token travels plaintext on the TCP path. Restrict TCP transport to the WireGuard overlay or vsock only — never bind a routable interface.
+
+**Out of scope at this layer (document in threat model):** GPU microarchitectural side channels (timing, cache contention) and the absence of MIG-style hardware partitioning on consumer cards. Workloads with hard confidentiality requirements get the dedicated-GPU tier — an honest product boundary, not a weakness.
+
+### Key Lessons Learned (Session 18)
+
+33. **A correct fix can carry an unexamined trust-model consequence.** Problem 25's primary-context switch was right for API interop and wrong for multi-tenancy. Review every shared-resource decision against the tenant boundary, not just the bug in front of you.
+
+34. **Authentication is not authorization for addresses.** Per-VM tokens prove who is calling; they say nothing about which memory the call may name. Any RPC carrying raw device pointers crosses a trust boundary and must be treated as such.
+
+35. **Opaque kernel launch parameters make daemon-side pointer validation impossible in principle.** Only context separation — per-process primary contexts enforced by the GPU MMU — actually closes the hole. Align to the boundary the driver provides instead of building a validation layer that cannot be complete.
+
+36. **`cudaMalloc` does not zero memory, and freed VRAM is not scrubbed.** Cross-tenant data survives deallocation. Zero-on-free in the daemon is mandatory hygiene for any shared GPU, even after process separation.
+
+---
+
+## Production Status (2026-06-11)
 
 | Workload | Status | Notes |
 |----------|--------|-------|
@@ -780,11 +833,14 @@ The divergence point will be in kernel launches that occur after token ~200, com
 | JupyterLab kernel | ✅ Confirmed | Via systemd EnvironmentFile |
 | Stable Diffusion Forge | ✅ Confirmed | Image generation 1.61 it/s |
 | cuDNN-accelerated conv | ❌ Blocked | Bug 19 — parked |
+| Multi-tenant GPU sharing | ❌ Blocked | SEC-1 — shared primary context; single-tenant-per-GPU scheduler invariant required until fork-per-VM workers ship |
 
 ## Pending Items
 
 | Item | Priority | Notes |
 |------|----------|-------|
+| SEC-1 interim — scheduler invariant: one wallet's GPU VMs per physical GPU | 🔴 Critical | One-line orchestrator constraint. Must ship before any GPU co-tenancy. Zero cost at current scale |
+| SEC-1 root fix — fork-per-VM daemon workers | High | Per-process primary contexts → GPU MMU isolation. ~200–400MB VRAM/context overhead feeds `GpuVramBytes` scheduling. Include zero-on-free + per-launch watchdog + transport restriction (WireGuard/vsock only) |
 | Bug 23a — 7B+ model Ġ token corruption | High | Proxy kernel launch or KV stride error at large tensor geometry. Enable `DECLOUD_GPU_DEBUG`, capture RPC log, diff vs 3B launch params. |
 | Bug 23 — Shim fix for `ggml_backend_cuda_graph_reserve` | High | Root fix: `cudaStreamBeginCapture` must return `cudaSuccess` on first call per-process. Until fixed, Ollama pinned to 0.7.0. |
 | Bug 22a — Word doubling/garbling | 🅿️ Parked | Only observed during capture/replay testing; pass-through fix eliminates root cause. Revisit if it resurfaces. |

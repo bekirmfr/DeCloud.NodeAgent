@@ -66,7 +66,13 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.PropertyNameCaseInsensitive = wire.PropertyNameCaseInsensitive;
     options.SerializerOptions.DefaultIgnoreCondition = wire.DefaultIgnoreCondition;
 });
-
+// COUPLED: these two registrations must stay in sync. AddHttpClient<TConcrete>()
+// registers TConcrete with typed-client wiring; the AddSingleton<TInterface>
+// forwarding factory below depends on that concrete registration being resolvable.
+// Switching the AddHttpClient line to the two-arg form `<TInterface, TConcrete>`
+// will compile but crash at startup — the two-arg form does not register
+// TConcrete as a service. See the OrchestratorClient registration for the
+// canonical pattern.
 // ImageManager owns its own download deadline via ImageManagerOptions.DownloadTimeout
 // (30 min default) and a linked CancellationTokenSource in DownloadAndHashAsync.
 // HttpClient.Timeout is a hard ceiling enforced independently of any CancellationToken

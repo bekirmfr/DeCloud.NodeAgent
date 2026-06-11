@@ -101,7 +101,7 @@ typedef struct __attribute__((packed)) {
 ### Daemon (`gpu_proxy_daemon.c`)
 
 `handle_func_get_attributes`:
-- Looks up function by `host_func_ptr` in per-connection function table
+- Looks up function by `host_func_ptr` in per-connection function table — note this table isolates *function handles* per connection, **not device memory**: all connections share the daemon's primary CUDA context and therefore one GPU address space (see SEC-1)
 - Sets CUDA context via `cuCtxSetCurrent`
 - Queries 9 attributes via `cuFuncGetAttribute()` on the real `CUfunction`
 - Returns packed response
@@ -172,3 +172,13 @@ For ggml, the MMQ path avoids cuBLAS entirely. cuBLAS compute (`cublasGemmBatche
 | Generation | N/A | ~10 tok/s | **13-21 tok/s** |
 | Model load | ✅ (17/17 layers) | ✅ | ✅ (~3s warm) |
 | GPU utilization | 0% | 100% | 100% |
+
+---
+
+## 8. Security Note (SEC-1)
+
+True GPU Presence is per-connection at the *function handle* level (each connection has its own function table), but **device memory is not isolated**: the daemon serves all VM connections from one process holding the device's primary CUDA context, so all tenants share a single GPU address space. Cross-tenant read/write/free of VRAM is possible for any co-tenant, and kernel launch parameters (opaque byte blobs) make daemon-side pointer validation impossible in principle.
+
+**Consequence:** multi-tenant GPU sharing is blocked until fork-per-VM daemon workers (per-process primary contexts, GPU MMU-enforced isolation) ship. Until then the orchestrator must enforce **single-tenant-per-GPU** scheduling.
+
+Full analysis: Architecture Review §5 and Debugging Journal Session 18 (SEC-1).

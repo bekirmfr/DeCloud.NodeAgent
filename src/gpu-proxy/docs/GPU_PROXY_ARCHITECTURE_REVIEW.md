@@ -1,8 +1,8 @@
 # DeCloud GPU Proxy — Architecture Review
 
-**Date Range:** 2026-02-27 through 2026-03-17
+**Date Range:** 2026-02-27 through 2026-06-11
 **Authors:** BMA + Claude AI assistant
-**Status:** Production-ready with known limitations — Ollama 3B GPU confirmed; 7B+ blocked by Bug 23a; Ollama pinned to 0.7.0 (Bug 23)
+**Status:** Production-ready with known limitations — Ollama 3B GPU confirmed; 7B+ blocked by Bug 23a; Ollama pinned to 0.7.0 (Bug 23); multi-tenant GPU sharing blocked by SEC-1 (single-tenant-per-GPU required)
 
 ---
 
@@ -21,6 +21,8 @@ Over ten debugging sessions spanning three weeks, we built a complete CUDA virtu
 - Inference, backward pass, optimizer step, and LoRA all confirmed working end-to-end
 
 The proxy is now **fully generic** — no hardcoded application (Ollama/ggml) or vendor (NVIDIA RTX 4060) dependencies in the C code. Application-specific configuration is driven by template environment variables written to `/etc/decloud/gpu-proxy.env`.
+
+> 🔴 **Security (SEC-1, 2026-06-11):** All VM connections share the daemon's primary CUDA context — one GPU address space. Cross-tenant VRAM read/write/free is possible for any co-tenant, and kernel-launch parameters are unvalidatable in principle. **Multi-tenant GPU sharing is blocked** until fork-per-VM daemon workers ship; until then the scheduler must enforce single-tenant-per-GPU. See Section 5.
 
 ---
 
@@ -160,6 +162,7 @@ install.sh handles: Docker compat build (glibc 2.31), native daemon build, stale
 | TCP_NODELAY + TCP_QUICKACK | ✅ | Sub-ms RPC latency |
 | Template-driven env vars | ✅ | Generic proxy |
 | Zero-touch VM deployment | ✅ | Cloud-init automated |
+| Multi-tenant GPU sharing | ❌ Blocked | SEC-1 — shared primary context; single-tenant-per-GPU until fork-per-VM workers |
 | PyTorch inference (forward pass) | ✅ | Confirmed 2026-03-13 |
 | PyTorch training (backward + optimizer) | ✅ | Confirmed 2026-03-13 |
 | LoRA fine-tuning via PEFT | ✅ | Confirmed 2026-03-13; 1,360MB VRAM |
@@ -172,7 +175,36 @@ install.sh handles: Docker compat build (glibc 2.31), native daemon build, stale
 
 ---
 
-## 5. Files Reference
+## 5. Security Model & Multi-Tenancy (SEC-1)
+
+**Status:** 🔴 Multi-tenant GPU sharing blocked pending fix — single-tenant-per-GPU scheduler invariant required (2026-06-11)
+
+### The Finding
+
+The daemon adopts the device's **primary CUDA context** (`cuDevicePrimaryCtxRetain`, Session 7) — the correct fix for runtime/driver API interop, with an unexamined consequence: the primary context is per-device per-process, and the daemon is one process serving all VM connections. Every tenant therefore shares **one GPU address space**. Within a CUDA context there is no isolation: any connection can read (`Memcpy` D2H), corrupt (`Memcpy` H2D / `Memset`), or free another tenant's allocations by naming their device addresses — and can launch its own kernels whose pointer arguments reference foreign buffers.
+
+Per-VM tokens authenticate connections, not addresses. Memory quotas limit allocation amounts, not addressable ranges. Per-connection function tables cover modules, not memory. The attacker is simply another paying tenant.
+
+### Why Pointer Validation Cannot Close It
+
+A per-connection allocation map can validate Memcpy/Memset/Free — but `LaunchKernel` parameters are an **opaque byte blob** with no signature information. The daemon cannot distinguish pointers from integers, so kernel-mediated access to foreign memory is unvalidatable in principle. Only context separation closes the hole.
+
+### Fix Plan
+
+| Layer | Measure | Status |
+|-------|---------|--------|
+| Interim (required before any GPU co-tenancy) | Scheduler invariant: at most one wallet's GPU VMs per physical GPU | Planned — one-line orchestrator constraint |
+| Root fix | Fork-per-VM daemon workers — per-process primary contexts, GPU MMU-enforced isolation; also gives fault isolation and enables per-launch watchdog (kill worker → clean context release) | Planned |
+| Hardening | Zero-on-free (`cudaMemset(0)` on Free + teardown — recycled VRAM is not scrubbed by the driver); compute watchdog for non-terminating kernels; TCP transport restricted to WireGuard overlay / vsock only | Planned with worker refactor |
+| Out of scope | GPU microarchitectural side channels; no MIG on consumer cards → confidential workloads use the dedicated-GPU tier | Documented threat-model boundary |
+
+**Cost of root fix:** ~200–400MB VRAM per CUDA context on consumer GPUs. Tenant density becomes scheduler-visible via the existing `GpuVramBytes` accounting.
+
+**Full analysis:** Debugging Journal, Session 18 (SEC-1) — including lessons 33–36.
+
+---
+
+## 6. Files Reference
 
 ### GPU Proxy Source (`src/gpu-proxy/`)
 

@@ -33,8 +33,14 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <sys/wait.h>
 
 #include <dlfcn.h>
+
+/* SEC-1 worker exit codes */
+#define GPU_EX_OK             0
+#define GPU_EX_KERNEL_TIMEOUT 70   /* worker self-terminated on runaway kernel */
+#define GPU_EX_CUINIT         71   /* child cuInit failed */
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -42,6 +48,23 @@
 #include <cublasLt.h>
 
 #include "../proto/gpu_proxy_proto.h"
+
+/* ================================================================
+ * SEC-1: per-VM isolation mode
+ * ================================================================ */
+typedef enum {
+    ISOLATION_AUTO = 0,   /* fork per connection when GPU present (default) */
+    ISOLATION_THREADED,   /* legacy shared-context, NO isolation */
+    ISOLATION_FORK        /* force fork */
+} isolation_mode_t;
+
+static isolation_mode_t g_isolation_mode = ISOLATION_AUTO;
+static int g_in_forked_worker = 0;   /* set to 1 in the child after fork */
+static int g_gpu_available    = 0;   /* device count (probe / cuInit) */
+static int g_vsock_listen_fd  = -1;  /* hoisted so children can close it */
+static int g_tcp_listen_fd    = -1;
+
+static void *connection_handler(void *arg);  /* defined later in file */
 
 /*
  * cuFuncGetParamInfo (CUDA 12.0+ Driver API) may be missing from
@@ -414,9 +437,12 @@ static void cleanup_connection(ConnectionCtx *ctx)
                  (unsigned long)uptime);
     }
 
-    /* Free tracked device allocations */
+    /* Free tracked device allocations (SEC-1: scrub before free) */
     for (int i = 0; i < MAX_ALLOCS; i++) {
         if (ctx->allocs[i].in_use) {
+            if (ctx->allocs[i].size > 0)
+                cudaMemset((void *)(uintptr_t)ctx->allocs[i].device_ptr,
+                           0, (size_t)ctx->allocs[i].size);
             cudaFree((void *)(uintptr_t)ctx->allocs[i].device_ptr);
             ctx->allocs[i].in_use = 0;
         }
@@ -642,23 +668,31 @@ static int handle_free(ConnectionCtx *ctx, const void *payload, uint32_t len)
     memcpy(&req, payload, sizeof(req));
 
     void *devptr = (void *)(uintptr_t)req.device_ptr;
-    cudaError_t err = cudaFree(devptr);
 
-    LOG_DBG("cudaFree(%p) -> err=%d", devptr, err);
-
-    if (err == cudaSuccess) {
-        /* Release from alloc tracking */
-        for (int i = 0; i < MAX_ALLOCS; i++) {
-            if (ctx->allocs[i].in_use &&
-                ctx->allocs[i].device_ptr == req.device_ptr) {
-                if (ctx->memory_allocated >= ctx->allocs[i].size)
-                    ctx->memory_allocated -= ctx->allocs[i].size;
-                else
-                    ctx->memory_allocated = 0;
-                ctx->allocs[i].in_use = 0;
-                break;
-            }
+    /* Locate the tracked allocation first so we know its size for the wipe. */
+    int slot = -1;
+    uint64_t sz = 0;
+    for (int i = 0; i < MAX_ALLOCS; i++) {
+        if (ctx->allocs[i].in_use &&
+            ctx->allocs[i].device_ptr == req.device_ptr) {
+            slot = i;
+            sz = ctx->allocs[i].size;
+            break;
         }
+    }
+
+    /* SEC-1: scrub before free. cudaMalloc does not zero, and the driver does
+     * not guarantee recycled VRAM is cleared between allocations/tenants. */
+    if (sz > 0) cudaMemset(devptr, 0, (size_t)sz);
+
+    cudaError_t err = cudaFree(devptr);
+    LOG_DBG("cudaFree(%p, %lu bytes, wiped) -> err=%d",
+            devptr, (unsigned long)sz, err);
+
+    if (err == cudaSuccess && slot >= 0) {
+        if (ctx->memory_allocated >= sz) ctx->memory_allocated -= sz;
+        else                              ctx->memory_allocated = 0;
+        ctx->allocs[slot].in_use = 0;
     }
 
     return send_response(ctx->fd, GPU_CMD_FREE, (int32_t)err, NULL, 0);
@@ -1726,22 +1760,30 @@ static int handle_launch_kernel(ConnectionCtx *ctx, const void *payload, uint32_
         }
 
         if (timed_out) {
-            LOG_ERR("CID %u: kernel TIMEOUT after %lu µs (limit=%lu µs) — "
-                    "resetting CUDA context",
+            LOG_ERR("CID %u: kernel TIMEOUT after %lu µs (limit=%lu µs)",
                     ctx->peer_cid,
                     (unsigned long)(now_us() - t0),
                     (unsigned long)g_kernel_timeout_us);
             ctx->kernel_timeouts++;
-            /* cuCtxResetPersistingL2Cache is lightweight; for a hard stop
-             * we destroy and recreate the context on the next call. */
+            cr = CUDA_ERROR_LAUNCH_TIMEOUT; /* 702 */
+
+            if (g_in_forked_worker) {
+                /* Isolated worker: report the error, then terminate self.
+                 * Process exit releases ONLY this tenant's context — co-tenants
+                 * on the GPU are untouched (unlike a global cudaDeviceReset). */
+                send_response(ctx->fd, GPU_CMD_LAUNCH_KERNEL, (int32_t)cr, NULL, 0);
+                cleanup_connection(ctx);
+                close(ctx->fd);
+                _exit(GPU_EX_KERNEL_TIMEOUT);
+            }
+
+            /* Threaded (single-tenant legacy) path: global reset as before. */
             if (ctx->cu_ctx) {
                 cuCtxSetCurrent(ctx->cu_ctx);
                 cudaDeviceReset();
-                /* Invalidate the context so it's recreated on next module load */
                 cuCtxDestroy(ctx->cu_ctx);
                 ctx->cu_ctx = NULL;
             }
-            cr = CUDA_ERROR_LAUNCH_TIMEOUT; /* 702 */
         }
     } else if (cr == CUDA_SUCCESS && g_kernel_timeout_us == 0) {
         /* No timeout — skip sync to allow async kernel pipelining.
@@ -2327,6 +2369,91 @@ static void sighup_handler(int sig)
     g_reload_tokens = 1;
 }
 
+/* ================================================================
+ * SEC-1: GPU probe, child reaper, per-connection dispatch
+ * ================================================================ */
+
+/* Probe GPU in a short-lived child so the supervisor never initializes CUDA
+ * in its own address space (CUDA state cannot survive fork()). Returns the
+ * device count (0 = none/unavailable). */
+static int probe_gpu_available(void)
+{
+    pid_t pid = fork();
+    if (pid < 0) {
+        LOG_ERR("GPU probe fork failed: %s", strerror(errno));
+        return 0;
+    }
+    if (pid == 0) {
+        if (cuInit(0) != CUDA_SUCCESS) _exit(0);
+        int n = 0;
+        if (cudaGetDeviceCount(&n) != cudaSuccess) _exit(0);
+        _exit(n > 255 ? 255 : n);   /* exit code carries device count */
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return 0;
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 0;
+}
+
+/* Reap forked workers. MUST be installed AFTER probe_gpu_available() —
+ * an auto-reaping disposition would make the probe's waitpid() fail ECHILD. */
+static void sigchld_handler(int sig)
+{
+    (void)sig;
+    int saved = errno;
+    while (waitpid(-1, NULL, WNOHANG) > 0) { /* drain */ }
+    errno = saved;
+}
+
+/* Threaded vs forked handoff. Takes ownership of ctx and ctx->fd. */
+static void dispatch_connection(ConnectionCtx *ctx)
+{
+    if (g_isolation_mode == ISOLATION_THREADED) {
+        pthread_t tid;
+        if (pthread_create(&tid, NULL, connection_handler, ctx) != 0) {
+            LOG_ERR("pthread_create failed: %s", strerror(errno));
+            close(ctx->fd);
+            free(ctx);
+            return;
+        }
+        pthread_detach(tid);
+        return;
+    }
+
+    /* AUTO or FORK -> isolate this connection in its own process. */
+    fflush(NULL);                 /* flush stdio so buffers aren't duplicated */
+    pid_t pid = fork();
+    if (pid < 0) {
+        /* Refuse rather than silently fall back to a shared context: the
+         * supervisor holds no CUDA context to fall back to, and under-isolating
+         * would reopen SEC-1. */
+        LOG_ERR("worker fork failed: %s — refusing connection (no under-isolation)",
+                strerror(errno));
+        close(ctx->fd);
+        free(ctx);
+        return;
+    }
+    if (pid == 0) {
+        /* CHILD */
+        if (g_vsock_listen_fd >= 0) close(g_vsock_listen_fd);
+        if (g_tcp_listen_fd   >= 0) close(g_tcp_listen_fd);
+        signal(SIGCHLD, SIG_DFL);   /* child has no workers of its own */
+        g_in_forked_worker = 1;
+
+        CUresult cr = cuInit(0);
+        if (cr != CUDA_SUCCESS) {
+            LOG_ERR("worker cuInit failed (%d)", cr);
+            close(ctx->fd);
+            _exit(GPU_EX_CUINIT);
+        }
+        connection_handler(ctx);    /* runs loop, cleans up, closes fd, frees ctx */
+        _exit(GPU_EX_OK);
+    }
+
+    /* PARENT: child owns the connection now. */
+    close(ctx->fd);
+    free(ctx);
+}
+
 /* Check and reload tokens if signaled — call from accept loops */
 static void maybe_reload_tokens(void)
 {
@@ -2344,6 +2471,10 @@ static void usage(const char *prog)
             (int)(GPU_DEFAULT_KERNEL_TIMEOUT_US / 1000000));
     fprintf(stderr, "  -T tcp_bind      enable TCP listener on addr (e.g. %s)\n", GPU_PROXY_TCP_BIND);
     fprintf(stderr, "  -v               verbose logging\n");
+    fprintf(stderr, "  -i mode          isolation: auto (default) | threaded | fork\n");
+    fprintf(stderr, "                   auto/fork = one worker process per VM (SEC-1)\n");
+    fprintf(stderr, "                   threaded  = shared context, NO isolation\n");
+    fprintf(stderr, "  -w               alias for -i fork\n");
     exit(1);
 }
 
@@ -2359,6 +2490,7 @@ static void *tcp_listener_thread(void *arg)
         LOG_ERR("TCP socket() failed: %s", strerror(errno));
         return NULL;
     }
+    g_tcp_listen_fd = listen_fd;
 
     int opt = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -2414,14 +2546,7 @@ static void *tcp_listener_thread(void *arg)
         LOG_INFO("TCP connection from %s:%d",
                  inet_ntoa(peer.sin_addr), ntohs(peer.sin_port));
 
-        pthread_t tid;
-        if (pthread_create(&tid, NULL, connection_handler, ctx) != 0) {
-            LOG_ERR("pthread_create failed for TCP client: %s", strerror(errno));
-            close(client_fd);
-            free(ctx);
-            continue;
-        }
-        pthread_detach(tid);
+        dispatch_connection(ctx);
     }
 
     close(listen_fd);
@@ -2437,12 +2562,19 @@ int main(int argc, char **argv)
     int port = GPU_PROXY_PORT;
     int opt;
 
-    while ((opt = getopt(argc, argv, "p:t:T:v")) != -1) {
+    while ((opt = getopt(argc, argv, "p:t:T:vi:w")) != -1) {
         switch (opt) {
         case 'p': port = atoi(optarg); break;
         case 't': g_kernel_timeout_us = (uint64_t)atoi(optarg) * 1000000ULL; break;
         case 'T': g_tcp_enabled = 1; g_tcp_bind = optarg; break;
         case 'v': g_verbose = 1; break;
+        case 'i':
+            if      (!strcmp(optarg, "auto"))     g_isolation_mode = ISOLATION_AUTO;
+            else if (!strcmp(optarg, "threaded")) g_isolation_mode = ISOLATION_THREADED;
+            else if (!strcmp(optarg, "fork"))     g_isolation_mode = ISOLATION_FORK;
+            else { fprintf(stderr, "invalid -i mode '%s'\n", optarg); usage(argv[0]); }
+            break;
+        case 'w': g_isolation_mode = ISOLATION_FORK; break;   /* Phase 2 alias */
         default: usage(argv[0]);
         }
     }
@@ -2450,6 +2582,16 @@ int main(int argc, char **argv)
     /* Also enable verbose via environment variable (useful when launched by NodeAgent) */
     if (!g_verbose && getenv("GPU_PROXY_VERBOSE"))
         g_verbose = 1;
+
+    /* SEC-1: isolation mode env override (NodeAgent / scheduler, Phases 2-3) */
+    {
+        const char *iso = getenv("DECLOUD_GPU_ISOLATION");
+        if (iso) {
+            if      (!strcmp(iso, "auto"))     g_isolation_mode = ISOLATION_AUTO;
+            else if (!strcmp(iso, "threaded")) g_isolation_mode = ISOLATION_THREADED;
+            else if (!strcmp(iso, "fork"))     g_isolation_mode = ISOLATION_FORK;
+        }
+    }
 
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
@@ -2459,34 +2601,50 @@ int main(int argc, char **argv)
     /* Load auth tokens for TCP connections */
     load_tokens();
 
-    /* Initialize CUDA Driver API (required for cuModuleLoadData, cuLaunchKernel) */
-    CUresult cr = cuInit(0);
-    if (cr != CUDA_SUCCESS) {
-        LOG_ERR("cuInit failed (%d) — is the NVIDIA driver loaded?", cr);
-        return 1;
+    /* CUDA availability.
+     * Threaded mode runs handlers in THIS process, so it must init CUDA here.
+     * Auto/fork keep the supervisor CUDA-free (CUDA state cannot survive fork);
+     * each worker inits its own context and a forked probe reports the count. */
+    if (g_isolation_mode == ISOLATION_THREADED) {
+        CUresult cr = cuInit(0);
+        if (cr != CUDA_SUCCESS) {
+            LOG_ERR("cuInit failed (%d) — is the NVIDIA driver loaded?", cr);
+            return 1;
+        }
+        int dev_count = 0;
+        cudaError_t cerr = cudaGetDeviceCount(&dev_count);
+        if (cerr != cudaSuccess || dev_count == 0) {
+            LOG_ERR("No CUDA devices found (cudaGetDeviceCount=%d, err=%s)",
+                    dev_count, cudaGetErrorString(cerr));
+            return 1;
+        }
+        g_gpu_available = dev_count;
+        LOG_INFO("Found %d CUDA device(s) [threaded — shared context, NO tenant isolation]",
+                 dev_count);
+        for (int i = 0; i < dev_count; i++) {
+            struct cudaDeviceProp props;
+            cudaGetDeviceProperties(&props, i);
+            LOG_INFO("  GPU %d: %s (%ldMB, compute %d.%d)",
+                     i, props.name,
+                     (long)(props.totalGlobalMem / (1024 * 1024)),
+                     props.major, props.minor);
+        }
+    } else {
+        g_gpu_available = probe_gpu_available();
+        if (g_gpu_available == 0) {
+            LOG_ERR("No CUDA devices (probe) — nothing to proxy, exiting");
+            return 1;
+        }
+        LOG_INFO("Found %d CUDA device(s) [probe] — supervisor CUDA-free; "
+                 "per-VM fork isolation active (SEC-1)", g_gpu_available);
     }
 
-    /* Verify CUDA is available */
-    int dev_count = 0;
-    cudaError_t cerr = cudaGetDeviceCount(&dev_count);
-    if (cerr != cudaSuccess || dev_count == 0) {
-        LOG_ERR("No CUDA devices found (cudaGetDeviceCount=%d, err=%s)",
-                dev_count, cudaGetErrorString(cerr));
-        return 1;
-    }
-    LOG_INFO("Found %d CUDA device(s)", dev_count);
-
-    for (int i = 0; i < dev_count; i++) {
-        struct cudaDeviceProp props;
-        cudaGetDeviceProperties(&props, i);
-        LOG_INFO("  GPU %d: %s (%ldMB, compute %d.%d)",
-                 i, props.name,
-                 (long)(props.totalGlobalMem / (1024 * 1024)),
-                 props.major, props.minor);
-    }
+    /* Child reaper — install AFTER the probe (auto-reap would break its waitpid). */
+    signal(SIGCHLD, sigchld_handler);
 
     /* Create vsock listener (may fail on WSL2 — fall through to TCP-only) */
     int listen_fd = socket(AF_VSOCK, SOCK_STREAM, 0);
+    g_vsock_listen_fd = listen_fd;
     if (listen_fd < 0) {
         if (g_tcp_enabled) {
             LOG_INFO("vsock unavailable (%s) — running TCP-only mode", strerror(errno));
@@ -2579,14 +2737,7 @@ int main(int argc, char **argv)
         ctx->peer_cid = peer.svm_cid;
         ctx->is_tcp = 0;
 
-        pthread_t tid;
-        if (pthread_create(&tid, NULL, connection_handler, ctx) != 0) {
-            LOG_ERR("pthread_create failed: %s", strerror(errno));
-            close(client_fd);
-            free(ctx);
-            continue;
-        }
-        pthread_detach(tid);
+        dispatch_connection(ctx);
     }
 
     LOG_INFO("Shutting down");
