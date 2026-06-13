@@ -176,7 +176,16 @@ public class VmInstance
     /// Checked via qemu-guest-agent by VmReadinessMonitor.
     /// </summary>
     public List<VmServiceModel> Services { get; set; } = new();
-    public bool IsFullyReady => Services.Count > 0 && Services.All(s => s.Status == ServiceStatus.Ready);
+    // GuestAgentPing is a transport-liveness diagnostic, not a service-readiness
+    // signal. A virtio-channel hiccup (notably while libvirt reconnects and taps
+    // re-attach after a node-agent/host restart) must not flip a serving VM to
+    // not-ready and drive SystemVmReconciler to delete + redeploy it. Readiness is
+    // determined solely by the real service checks; the agent ping stays in the
+    // list for diagnostics and to gate guest-exec probing in VmReadinessMonitor.
+    public bool IsFullyReady =>
+        Services.Any(s => s.CheckType != CheckType.GuestAgentPing) &&
+        Services.Where(s => s.CheckType != CheckType.GuestAgentPing)
+                .All(s => s.Status == ServiceStatus.Ready);
 
     public string? NetworkInterface { get; set; }  // e.g., "vnet0"
 
