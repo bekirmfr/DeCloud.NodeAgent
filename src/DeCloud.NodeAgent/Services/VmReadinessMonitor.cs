@@ -1,10 +1,11 @@
-using System.Text;
-using System.Text.Json;
-using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
+using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.Shared.Enums;
 using DeCloud.Shared.Models;
+using System.Text;
+using System.Text.Json;
 
 namespace DeCloud.NodeAgent.Services;
 
@@ -18,6 +19,7 @@ public class VmReadinessMonitor : BackgroundService
     private readonly IVmManager _vmManager;
     private readonly VmRepository _repository;
     private readonly ICommandExecutor _commandExecutor;
+    private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<VmReadinessMonitor> _logger;
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan GuestExecWait = TimeSpan.FromSeconds(3);
@@ -42,11 +44,13 @@ public class VmReadinessMonitor : BackgroundService
         IVmManager vmManager,
         VmRepository repository,
         ICommandExecutor commandExecutor,
+        IHttpClientFactory httpClientFactory,
         ILogger<VmReadinessMonitor> logger)
     {
         _vmManager = vmManager;
         _repository = repository;
         _commandExecutor = commandExecutor;
+        _httpClientFactory = httpClientFactory;
         _logger = logger;
     }
 
@@ -234,7 +238,47 @@ public class VmReadinessMonitor : BackgroundService
 
         if (!agentAlive)
         {
-            _logger.LogDebug("Guest agent not ready for VM {VmId}, skipping active checks", vm.VmId);
+            // Guest-exec checks can't run without the agent. For SYSTEM VMs, fall
+            // back to a host-side dashboard probe over virbr0 so a genuinely dead
+            // service stack is detected instead of frozen at stale Ready — the gap
+            // that stranded relay/dht/blockstore VMs when the agent channel died
+            // while the in-guest services were also down.
+            if (vm.Spec.Category == VmCategory.System)
+            {
+                var dashAlive = await IsSystemVmDashboardReachableAsync(vm, ct);
+                foreach (var svc in vm.Services.Where(s =>
+                             s.LivenessCheck && s.CheckType != CheckType.GuestAgentPing))
+                {
+                    if (dashAlive)
+                    {
+                        // Service stack confirmed alive over the network — hold the
+                        // line. Precise per-service recovery resumes via guest-exec
+                        // once the agent reconnects.
+                        svc.ConsecutiveFailures = 0;
+                    }
+                    else if (svc.Status == ServiceStatus.Ready)
+                    {
+                        svc.ConsecutiveFailures++;
+                        svc.LastCheckAt = DateTime.UtcNow;
+                        if (svc.ConsecutiveFailures >= GuestAgentFailureThreshold)
+                        {
+                            svc.Status = ServiceStatus.Failed;
+                            svc.StatusMessage =
+                                "Dashboard unreachable over network (guest agent also down)";
+                            anyChanged = true;
+                            _logger.LogWarning(
+                                "Service {Service} on system VM {VmId} FAILED — dashboard port " +
+                                "unreachable over virbr0 and guest agent down ({Count} consecutive)",
+                                svc.Name, vm.VmId, svc.ConsecutiveFailures);
+                        }
+                    }
+                }
+            }
+            else
+            {
+                _logger.LogDebug("Guest agent not ready for VM {VmId}, skipping active checks", vm.VmId);
+            }
+
             if (anyChanged)
                 await _repository.SaveVmAsync(vm);
             return;
@@ -374,6 +418,38 @@ public class VmReadinessMonitor : BackgroundService
         if (anyChanged)
         {
             await _repository.SaveVmAsync(vm);
+        }
+    }
+
+    /// <summary>
+    /// Host-side liveness probe for a system VM, independent of the guest agent.
+    /// Hits the dashboard port (ISystemVmService.DashboardPort) over virbr0 — the
+    /// same host-reachable endpoint SystemVmController's proxy and SystemVmWatchdog
+    /// use, and uniform across relay/dht/blockstore (unlike the per-role API ports,
+    /// where DHT's :5080 binds localhost-only). ANY HTTP response means the service
+    /// stack is alive; only a refused or timed-out connection counts as failure.
+    /// This signal does not freeze when the guest agent dies.
+    /// </summary>
+    private async Task<bool> IsSystemVmDashboardReachableAsync(VmInstance vm, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(vm.Spec.IpAddress)) return false;
+        var url = $"http://{vm.Spec.IpAddress}:{ISystemVmService.DashboardPort}/";
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(3));
+            var client = _httpClientFactory.CreateClient("VmProxy");
+            using var resp = await client.GetAsync(
+                url, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+            return true; // any HTTP response = service stack alive
+        }
+        catch (HttpRequestException)
+        {
+            return false; // connection refused / unreachable
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return false; // probe timed out
         }
     }
 

@@ -1,6 +1,5 @@
 using DeCloud.Shared.Enums;
 using DeCloud.Shared.Models;
-using System.Text.Json.Serialization;
 
 namespace DeCloud.NodeAgent.Core.Models;
 
@@ -176,12 +175,12 @@ public class VmInstance
     /// Checked via qemu-guest-agent by VmReadinessMonitor.
     /// </summary>
     public List<VmServiceModel> Services { get; set; } = new();
-    // GuestAgentPing is a transport-liveness diagnostic, not a service-readiness
-    // signal. A virtio-channel hiccup (notably while libvirt reconnects and taps
-    // re-attach after a node-agent/host restart) must not flip a serving VM to
-    // not-ready and drive SystemVmReconciler to delete + redeploy it. Readiness is
-    // determined solely by the real service checks; the agent ping stays in the
-    // list for diagnostics and to gate guest-exec probing in VmReadinessMonitor.
+    // GuestAgentPing is a transport diagnostic, not a service-readiness signal.
+    // A virtio-channel hiccup must not flip a serving VM to not-ready and drive
+    // SystemVmReconciler to delete+redeploy it. Readiness is the real service
+    // checks; for system VMs a genuinely dead stack is still caught because the
+    // host-side dashboard probe in VmReadinessMonitor drives those services to
+    // Failed when the dashboard port is unreachable over virbr0.
     public bool IsFullyReady =>
         Services.Any(s => s.CheckType != CheckType.GuestAgentPing) &&
         Services.Where(s => s.CheckType != CheckType.GuestAgentPing)
