@@ -1642,24 +1642,40 @@ cmd_status() {
     # means an evaluation exists.
     echo -e "${BOLD}Evaluation:${NC}"
     if [[ -f "$CREDENTIALS_FILE" ]] && check_service_running; then
-        local perf benchmark highest_tier is_acceptable
+        local perf benchmark highest_tier is_acceptable tier_name
+        # GET /api/orchestrator/performance returns 404 until the orchestrator has
+        # evaluated this node; a populated record means evaluation is done. So a
+        # successful fetch — not the tier value — is the evaluated/pending signal.
         if perf=$(api_get "/api/orchestrator/performance" 2>/dev/null); then
             benchmark=$(echo    "$perf" | jq -r '.benchmarkScore // empty' 2>/dev/null)
-            highest_tier=$(echo "$perf" | jq -r '.highestTier    // "N/A"' 2>/dev/null)
-            is_acceptable=$(echo "$perf" | jq -r '.isAcceptable  // "false"' 2>/dev/null)
-            if [[ -n "$benchmark" && "$benchmark" != "null" ]]; then
-                if [[ "$is_acceptable" == "true" ]]; then
-                    log_success "Evaluated"
-                else
-                    log_warn "Evaluated (below acceptance threshold)"
-                fi
-                echo "  Benchmark Score:  $benchmark"
-                echo "  Highest Tier:     $highest_tier"
+            highest_tier=$(echo "$perf" | jq -r '.highestTier   // empty' 2>/dev/null)
+            is_acceptable=$(echo "$perf" | jq -r '.isAcceptable // "false"' 2>/dev/null)
+
+            # QualityTier enum: 0=Dedicated, 1=Standard, 2=Balanced, 3=Burstable.
+            # 0 is the HIGHEST tier (node can host everything), not "unassigned".
+            # The orchestrator may serialize this as an int (0) or the enum name
+            # ("Guaranteed" is the code name for the product-facing "Dedicated"),
+            # so match both forms case-insensitively.
+            case "${highest_tier,,}" in
+                0|guaranteed|dedicated) tier_name="Dedicated (0)" ;;
+                1|standard)             tier_name="Standard (1)" ;;
+                2|balanced)             tier_name="Balanced (2)" ;;
+                3|burstable)            tier_name="Burstable (3)" ;;
+                ""|null)                tier_name="N/A" ;;
+                *)                      tier_name="$highest_tier" ;;
+            esac
+
+            if [[ "$is_acceptable" == "true" ]]; then
+                log_success "Evaluated"
+                [[ -n "$benchmark" && "$benchmark" != "null" ]] && echo "  Benchmark Score:  $benchmark"
+                echo "  Highest Tier:     $tier_name"
             else
-                log_warn "Not evaluated"
-                echo "  Run: sudo $SCRIPT_NAME evaluate"
+                log_warn "Evaluated — not eligible (below acceptance threshold)"
+                [[ -n "$benchmark" && "$benchmark" != "null" ]] && echo "  Benchmark Score:  $benchmark"
+                echo "  Highest Tier:     $tier_name"
             fi
         else
+            # No performance record yet — node has not been evaluated.
             log_warn "Not evaluated"
             echo "  Run: sudo $SCRIPT_NAME evaluate"
         fi
@@ -1681,6 +1697,45 @@ cmd_status() {
         echo "  Resume with: sudo $SCRIPT_NAME login"
     else
         log_success "Logged in (scheduling active)"
+    fi
+    echo ""
+
+    # Obligations — system-VM roles the orchestrator has assigned to this node
+    # (Dht, Relay, BlockStore, Ingress). Sourced from GET /api/dashboard/obligations,
+    # which the agent proxies from the orchestrator. Empty for nodes with no duties.
+    echo -e "${BOLD}Obligations:${NC}"
+    if [[ -f "$CREDENTIALS_FILE" ]] && check_service_running; then
+        local obl obl_count
+        if obl=$(api_get "/api/dashboard/obligations" 2>/dev/null); then
+            obl_count=$(echo "$obl" | jq -r '.obligations // [] | length' 2>/dev/null || echo "0")
+            [[ "$obl_count" =~ ^[0-9]+$ ]] || obl_count=0
+            if [[ "$obl_count" -gt 0 ]]; then
+                local role_name status_name fail_count state_ver last_error
+                while IFS=$'\t' read -r role_name status_name fail_count state_ver last_error; do
+                    [[ -z "$role_name" ]] && continue
+                    if [[ "$status_name" == "Active" ]]; then
+                        log_success "$role_name: $status_name"
+                    else
+                        log_warn "$role_name: ${status_name:-Unknown}"
+                    fi
+                    # StateVersion 0 = orchestrator has not generated identity state yet (pending).
+                    [[ "$state_ver" == "0" ]] && echo "    Identity state: not yet provisioned"
+                    if [[ "${fail_count:-0}" =~ ^[0-9]+$ ]] && (( fail_count > 0 )); then
+                        echo "    Failures: $fail_count${last_error:+ — $last_error}"
+                    fi
+                done < <(echo "$obl" | jq -r \
+                    '.obligations[] | [.roleName, .statusName, (.failureCount // 0), (.stateVersion // 0), (.lastError // "")] | @tsv' \
+                    2>/dev/null)
+            else
+                echo "  None assigned"
+            fi
+        else
+            echo "  Unable to fetch obligations"
+        fi
+    elif [[ ! -f "$CREDENTIALS_FILE" ]]; then
+        echo "  Not available (node not registered)"
+    else
+        echo "  Not available (service not running)"
     fi
     echo ""
 
