@@ -1705,26 +1705,51 @@ cmd_status() {
     # which the agent proxies from the orchestrator. Empty for nodes with no duties.
     echo -e "${BOLD}Obligations:${NC}"
     if [[ -f "$CREDENTIALS_FILE" ]] && check_service_running; then
-        local obl obl_count
+        local obl obl_count obl_vms
         if obl=$(api_get "/api/dashboard/obligations" 2>/dev/null); then
             obl_count=$(echo "$obl" | jq -r '.obligations // [] | length' 2>/dev/null || echo "0")
             [[ "$obl_count" =~ ^[0-9]+$ ]] || obl_count=0
             if [[ "$obl_count" -gt 0 ]]; then
-                local role_name status_name fail_count state_ver last_error
-                while IFS=$'\t' read -r role_name status_name fail_count state_ver last_error; do
+                # The orchestrator's statusName ("Active") is the ASSIGNED/desired
+                # state. It does NOT mean the system VM is actually deployed here —
+                # after a re-register the obligation can read Active while the VM has
+                # been torn down. Cross-reference the obligation's vmId against the
+                # local VM list to report real deployment state separately.
+                obl_vms=$(api_get "/api/vms" 2>/dev/null || echo "")
+                local role_name status_name vm_id fail_count state_ver last_error
+                while IFS=$'\t' read -r role_name status_name vm_id fail_count state_ver last_error; do
                     [[ -z "$role_name" ]] && continue
-                    if [[ "$status_name" == "Active" ]]; then
-                        log_success "$role_name: $status_name"
+
+                    local deployed running=false vm_state
+                    if [[ -z "$obl_vms" ]]; then
+                        deployed="local VM state unknown"
+                    elif [[ -z "$vm_id" || "$vm_id" == "null" ]]; then
+                        deployed="no VM on this node"
                     else
-                        log_warn "$role_name: ${status_name:-Unknown}"
+                        vm_state=$(echo "$obl_vms" | jq -r --arg id "$vm_id" \
+                            'first(.[] | select(.vmId == $id) | .state) // empty' 2>/dev/null)
+                        if [[ -z "$vm_state" ]]; then
+                            deployed="no VM on this node"
+                        elif [[ "$vm_state" == "3" ]]; then
+                            deployed="running"; running=true
+                        else
+                            deployed="VM $(vm_state_name "$vm_state")"
+                        fi
                     fi
-                    # StateVersion 0 = orchestrator has not generated identity state yet (pending).
+
+                    # [✓] only when the orchestrator says Active AND the VM is actually running.
+                    if [[ "$status_name" == "Active" && "$running" == true ]]; then
+                        log_success "$role_name — assigned: $status_name, deployed: $deployed"
+                    else
+                        log_warn "$role_name — assigned: ${status_name:-Unknown}, deployed: $deployed"
+                    fi
+
                     [[ "$state_ver" == "0" ]] && echo "    Identity state: not yet provisioned"
                     if [[ "${fail_count:-0}" =~ ^[0-9]+$ ]] && (( fail_count > 0 )); then
                         echo "    Failures: $fail_count${last_error:+ — $last_error}"
                     fi
                 done < <(echo "$obl" | jq -r \
-                    '.obligations[] | [.roleName, .statusName, (.failureCount // 0), (.stateVersion // 0), (.lastError // "")] | @tsv' \
+                    '.obligations[] | [.roleName, .statusName, (.vmId // ""), (.failureCount // 0), (.stateVersion // 0), (.lastError // "")] | @tsv' \
                     2>/dev/null)
             else
                 echo "  None assigned"
