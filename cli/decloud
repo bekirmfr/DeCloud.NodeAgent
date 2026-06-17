@@ -1713,22 +1713,28 @@ cmd_status() {
                 # The orchestrator's statusName ("Active") is the ASSIGNED/desired
                 # state. It does NOT mean the system VM is actually deployed here —
                 # after a re-register the obligation can read Active while the VM has
-                # been torn down. Cross-reference the obligation's vmId against the
-                # local VM list to report real deployment state separately.
+                # been torn down. Cross-reference against the local VM list to report
+                # real deployment state separately.
+                #
+                # Match by role, NOT by the obligation's vmId: the orchestrator's
+                # vmId is its own reference, while the locally-created system VM gets
+                # a different local id. The reconciler names system VMs
+                # "<role>-<localid8>" (e.g. "dht-d088f918"), so a case-insensitive
+                # "<rolename>-" name prefix is the reliable join. VM run state is the
+                # integer .status field (3 = Running), not .state.
                 obl_vms=$(api_get "/api/vms" 2>/dev/null || echo "")
                 local role_name status_name vm_id fail_count state_ver last_error
                 while IFS=$'\t' read -r role_name status_name vm_id fail_count state_ver last_error; do
                     [[ -z "$role_name" ]] && continue
 
-                    local deployed running=false vm_state
+                    local deployed running=false vm_state role_lc
+                    role_lc=$(echo "$role_name" | tr '[:upper:]' '[:lower:]')
                     if [[ -z "$obl_vms" ]]; then
                         deployed="local VM state unknown"
-                    elif [[ -z "$vm_id" || "$vm_id" == "null" ]]; then
-                        deployed="no VM on this node"
                     else
-                        vm_state=$(echo "$obl_vms" | jq -r --arg id "$vm_id" \
-                            'first(.[] | select(.vmId == $id) | .state) // empty' 2>/dev/null)
-                        if [[ -z "$vm_state" ]]; then
+                        vm_state=$(echo "$obl_vms" | jq -r --arg r "$role_lc" \
+                            'first(.[] | select((.name // "" | ascii_downcase) | startswith($r + "-")) | .status) // empty' 2>/dev/null)
+                        if [[ -z "$vm_state" || "$vm_state" == "null" ]]; then
                             deployed="no VM on this node"
                         elif [[ "$vm_state" == "3" ]]; then
                             deployed="running"; running=true
@@ -1805,7 +1811,7 @@ cmd_status() {
         if vms=$(api_get "/api/vms" 2>/dev/null); then
             total=$(echo "$vms"   | jq -r 'length' 2>/dev/null || echo "0")
             # VmState.Running = index 3 in the enum
-            running=$(echo "$vms" | jq -r '[.[] | select(.state == 3)] | length' 2>/dev/null || echo "0")
+            running=$(echo "$vms" | jq -r '[.[] | select(.status == 3)] | length' 2>/dev/null || echo "0")
             echo "  Total:    $total"
             echo "  Running:  $running"
         else
@@ -2212,7 +2218,7 @@ cmd_vm_list() {
             echo "$vms" | jq -r '.[] | [
                 .vmId,
                 (.name // "-"),
-                (.state | tostring),
+                (.status | tostring),
                 ((.spec.virtualCpuCores // 0) | tostring),
                 ((.spec.memoryBytes     // 0) | tostring)
             ] | @tsv' 2>/dev/null | while IFS=$'\t' read -r vmid name state cpus membytes; do
@@ -2454,7 +2460,7 @@ cmd_vm_diagnose_system() {
     if [[ -n "$vms" ]]; then
         echo "$vms" | jq -r '
             .[] | select(.spec.vmRole == 6 or .spec.vmRole == 7 or .spec.vmRole == 8) |
-            "  \(.name)\t state=\(.state)\t heartbeat=\(.lastHeartbeat)"
+            "  \(.name)\t status=\(.status)\t heartbeat=\(.lastHeartbeat)"
         ' 2>/dev/null || true
     fi
 
