@@ -1636,6 +1636,54 @@ cmd_status() {
     fi
     echo ""
 
+    # Evaluation status — has the orchestrator benchmarked this node?
+    # Source of truth: GET /api/orchestrator/performance (same endpoint the
+    # 'performance' command and the 'allocate' gate use). A benchmark score
+    # means an evaluation exists.
+    echo -e "${BOLD}Evaluation:${NC}"
+    if [[ -f "$CREDENTIALS_FILE" ]] && check_service_running; then
+        local perf benchmark highest_tier is_acceptable
+        if perf=$(api_get "/api/orchestrator/performance" 2>/dev/null); then
+            benchmark=$(echo    "$perf" | jq -r '.benchmarkScore // empty' 2>/dev/null)
+            highest_tier=$(echo "$perf" | jq -r '.highestTier    // "N/A"' 2>/dev/null)
+            is_acceptable=$(echo "$perf" | jq -r '.isAcceptable  // "false"' 2>/dev/null)
+            if [[ -n "$benchmark" && "$benchmark" != "null" ]]; then
+                if [[ "$is_acceptable" == "true" ]]; then
+                    log_success "Evaluated"
+                else
+                    log_warn "Evaluated (below acceptance threshold)"
+                fi
+                echo "  Benchmark Score:  $benchmark"
+                echo "  Highest Tier:     $highest_tier"
+            else
+                log_warn "Not evaluated"
+                echo "  Run: sudo $SCRIPT_NAME evaluate"
+            fi
+        else
+            log_warn "Not evaluated"
+            echo "  Run: sudo $SCRIPT_NAME evaluate"
+        fi
+    elif [[ ! -f "$CREDENTIALS_FILE" ]]; then
+        echo "  Not available (node not registered)"
+    else
+        echo "  Not available (service not running)"
+    fi
+    echo ""
+
+    # Log-in status — is scheduling active? Tracked locally by the logged-out
+    # sentinel (written/cleared by 'login'/'logout'), so this is accurate even
+    # when the orchestrator is unreachable.
+    echo -e "${BOLD}Log-in:${NC}"
+    if [[ ! -f "$CREDENTIALS_FILE" ]]; then
+        echo "  Not available (node not registered)"
+    elif [[ -f "$CONFIG_DIR/logged-out" ]]; then
+        log_warn "Logged out (scheduling paused)"
+        echo "  Resume with: sudo $SCRIPT_NAME login"
+    else
+        log_success "Logged in (scheduling active)"
+    fi
+    echo ""
+
     # Service status
     echo -e "${BOLD}Service:${NC}"
     if check_service_running; then
