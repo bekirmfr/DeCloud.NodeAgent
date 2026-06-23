@@ -3049,6 +3049,24 @@ public class LibvirtVmManager : IVmManager
         var consoleLogPath = Path.Combine(_options.VmStoragePath, spec.Id, "console.log");
 
         // ========================================
+        // WATCHDOG — system VMs only
+        // ========================================
+        // i6300esb is the most widely-supported emulated watchdog; its driver
+        // ships in the Debian 12 cloud kernel. action='reset' hard-resets the
+        // guest if the in-guest watchdog daemon (systemd RuntimeWatchdogSec)
+        // stops petting /dev/watchdog — which happens when the kernel or
+        // systemd wedges (e.g. a virtio stall). Recovers a frozen guest in
+        // ~30s without host-side reconciler involvement.
+        //
+        // Tenant VMs are excluded: auto-reset is the tenant's policy to set,
+        // not the platform's. System VMs are platform-owned, so the platform
+        // chooses their failure behaviour.
+        var watchdogXml = spec.Category == VmCategory.System
+            ? @"
+                <watchdog model='i6300esb' action='reset'/>"
+            : "";
+
+        // ========================================
         // COMPLETE LIBVIRT XML
         // ========================================
         var kvmAvailable = File.Exists("/dev/kvm");
@@ -3108,7 +3126,7 @@ public class LibvirtVmManager : IVmManager
                 </video>
                 <rng model='virtio'>
                   <backend model='random'>/dev/urandom</backend>
-                </rng>{gpuPassthroughXml}{vsockXml}{sharedFsXml}
+                </rng>{watchdogXml}{gpuPassthroughXml}{vsockXml}{sharedFsXml}
                 <channel type='unix'>
                   <source mode='bind' path='/var/lib/libvirt/qemu/channel/target/{spec.Id}.org.qemu.guest_agent.0'/>
                   <target type='virtio' name='org.qemu.guest_agent.0'/>
