@@ -271,7 +271,15 @@ remove_binaries() {
     rm -f /usr/local/bin/decloud-relay-nat
     rm -rf /usr/local/share/doc/decloud
     rm -f /etc/profile.d/golang.sh
-    rm -rf /usr/local/go 
+    rm -rf /usr/local/go
+
+    # GPU proxy: stop a running daemon (child of the agent, not killed by
+    # stop_service), then remove its binary, staleness marker, and shim dir.
+    pkill -f gpu-proxy-daemon 2>/dev/null || true
+    rm -f  /usr/local/bin/gpu-proxy-daemon
+    rm -f  /usr/local/bin/.gpu-proxy-daemon.sha256
+    rm -rf /usr/local/lib/decloud-gpu-shim
+
     log_success "Binaries removed"
 }
 

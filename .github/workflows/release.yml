@@ -298,7 +298,7 @@ jobs:
         if: steps.check.outputs.skip == 'false'
         run: make -C src/gpu-proxy all-shims-compat
 
-      - name: Package
+      - name: Package shims
         if: steps.check.outputs.skip == 'false'
         run: |
           set -euo pipefail
@@ -310,11 +310,27 @@ jobs:
             libcublas_stub.so libcublasLt_stub.so \
             libcudnn_stub.so libcuda_pytorch_stubs.so
 
+      # Daemon SOURCE (not binary): compiled on-node against local CUDA.
+      # Arch-independent — the .c/.h are identical for amd64/arm64; the node's
+      # own CUDA toolkit determines the build. Shipped so install/update can
+      # build a daemon whose version is bound to these shims (no skew).
+      - name: Package daemon source
+        if: steps.check.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          tar -czf "decloud-gpu-daemon-src-${{ needs.verify-tag.outputs.version }}.tar.gz" \
+            -C src/gpu-proxy \
+            daemon/gpu_proxy_daemon.c \
+            proto/gpu_proxy_proto.h \
+            Makefile
+
       - uses: actions/upload-artifact@v4
         if: steps.check.outputs.skip == 'false'
         with:
           name: gpu-shims
-          path: decloud-gpu-shim-*.tar.gz
+          path: |
+            decloud-gpu-shim-*.tar.gz
+            decloud-gpu-daemon-src-*.tar.gz
           if-no-files-found: error
 
   # --------------------------------------------------------------------------

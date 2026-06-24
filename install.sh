@@ -1235,6 +1235,85 @@ install_cuda_toolkit() {
 }
 
 # ============================================================
+# GPU Proxy Daemon Build (on-node, from verified source)
+# ============================================================
+# Source files that determine the daemon binary (matches the Makefile
+# `daemon` rule prerequisites). Hash ONLY these — not the whole tree —
+# so the staleness check is O(2 files) and never false-triggers on shim
+# changes.
+GPU_DAEMON_BIN="/usr/local/bin/gpu-proxy-daemon"
+GPU_DAEMON_HASH_FILE="/usr/local/bin/.gpu-proxy-daemon.sha256"
+
+gpu_daemon_source_hash() {
+    local src_dir="$1"
+    sha256sum \
+        "${src_dir}/daemon/gpu_proxy_daemon.c" \
+        "${src_dir}/proto/gpu_proxy_proto.h" \
+        2>/dev/null | sha256sum | cut -d' ' -f1
+}
+
+build_gpu_proxy_daemon() {
+    local version="$1"
+    local asset_arch="$2"
+
+    if [ -z "$CUDA_HOME" ]; then
+        log_warn "CUDA_HOME unset — cannot build GPU proxy daemon."
+        log_warn "  Install a CUDA toolkit and re-run; proxy VMs will fall back to CPU."
+        return 0
+    fi
+
+    # ── Fetch + verify the daemon source tarball (arch-independent) ─────
+    local src_name="decloud-gpu-daemon-src-${version}.tar.gz"
+    local manifest="${RELEASE_CACHE_DIR}/manifest.${version}.json"
+    if ! jq -e --arg n "$src_name" '.artifacts[$n]' "$manifest" >/dev/null 2>&1; then
+        log_warn "Daemon source '${src_name}' not in manifest for ${version}."
+        log_warn "  (release predates daemon-source shipping; build manually if needed)"
+        return 0
+    fi
+    local src_tar="${RELEASE_CACHE_DIR}/${src_name}"
+    download_artifact_verified "$version" "$src_name" "$src_tar" || return 1
+
+    local src_dir="${GPU_PROXY_DIR}/daemon-src"
+    rm -rf "$src_dir"; mkdir -p "$src_dir"
+    if ! tar -xzf "$src_tar" -C "$src_dir"; then
+        log_error "Failed to extract daemon source tarball"
+        return 1
+    fi
+
+    # ── Staleness gate: rebuild only if source changed or binary missing ─
+    local want_hash have_hash=""
+    want_hash=$(gpu_daemon_source_hash "$src_dir")
+    [ -f "$GPU_DAEMON_HASH_FILE" ] && have_hash=$(cat "$GPU_DAEMON_HASH_FILE" 2>/dev/null)
+
+    if [ -x "$GPU_DAEMON_BIN" ] && [ -n "$want_hash" ] && [ "$want_hash" = "$have_hash" ]; then
+        log_success "GPU proxy daemon up to date (source unchanged) — skipping rebuild"
+        return 0
+    fi
+
+    log_step "Building GPU proxy daemon (source changed or binary missing)..."
+
+    # Stop a running daemon before overwriting its binary: avoids ETXTBSY and
+    # leaves no orphaned process holding the GPU. NodeAgent's GpuProxyService
+    # relaunches it on the next GPU-proxied VM start.
+    pkill -f gpu-proxy-daemon 2>/dev/null || true
+
+    # Build the daemon ONLY (not `make install` / `make all`, which would also
+    # rebuild the host-glibc shim and clobber the compat shims installed above).
+    if make -C "$src_dir" daemon CUDA_HOME="$CUDA_HOME"; then
+        install -m 755 "${src_dir}/build/gpu-proxy-daemon" "$GPU_DAEMON_BIN"
+        echo "$want_hash" > "$GPU_DAEMON_HASH_FILE"
+        log_success "GPU proxy daemon built and installed → ${GPU_DAEMON_BIN}"
+        if "$GPU_DAEMON_BIN" --help 2>&1 | grep -q -- '-i'; then
+            log_success "  Daemon supports -i isolation flag (SEC-1)"
+        fi
+    else
+        log_error "GPU proxy daemon build failed — leaving any existing binary in place"
+        log_error "  Check CUDA toolkit at CUDA_HOME=${CUDA_HOME}"
+        return 1
+    fi
+}
+
+# ============================================================
 # GPU Proxy Build (daemon + shim)
 # ============================================================
 build_gpu_proxy() {
@@ -1311,21 +1390,15 @@ build_gpu_proxy() {
 
     log_success "Shims installed to $SHIM_DIR/"
 
-    # ── 6. Daemon: NOT shipped via release ──────────────────────────────
-    # The daemon links against the host's exact CUDA runtime version, so
-    # a single prebuilt binary is unsafe across CUDA versions. Document
-    # the manual build path and continue. VM creation in proxy mode will
-    # surface the missing-daemon error clearly when the user tries it.
+    # ── 6. Daemon: build on-node from verified source (Option 1) ────────
+    # The daemon links against the host's exact CUDA, so it is never shipped
+    # as a prebuilt binary. Instead the SOURCE is fetched (cosign-verified,
+    # same manifest as the shims) and compiled locally with `make daemon`.
+    # Rebuilds only when the source hash changes or the binary is missing —
+    # so `decloud update` (which re-runs this whole script) refreshes a stale
+    # daemon, but a no-op update stays fast.
     if [ "$GPU_MODE" = "proxy" ]; then
-        if [ -x /usr/local/bin/gpu-proxy-daemon ]; then
-            log_info "Existing gpu-proxy-daemon detected at /usr/local/bin/gpu-proxy-daemon"
-            log_info "  Daemon was NOT replaced — release pipeline does not ship it."
-            log_info "  Rebuild manually if needed (see docs/gpu-proxy-daemon.md)"
-        else
-            log_warn "GPU_MODE=proxy but no daemon installed."
-            log_warn "  The daemon must be built locally against your CUDA toolkit."
-            log_warn "  See: https://github.com/bekirmfr/DeCloud.NodeAgent/blob/${version}/docs/gpu-proxy-daemon.md"
-        fi
+        build_gpu_proxy_daemon "$version" "$asset_arch"
     fi
 
     # ── 7. Verify symbol counts on installed stubs ──────────────────────
