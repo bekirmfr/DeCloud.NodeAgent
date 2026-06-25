@@ -2597,11 +2597,6 @@ static void *tcp_listener_thread(void *arg)
         setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &ka_intvl, sizeof(ka_intvl));
         setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPCNT,   &ka_cnt,   sizeof(ka_cnt));
 
-        /* vsock has no keepalive — bound a half-open worker's blocking read with
-         * an idle ceiling so it can't leak its CUDA context forever. */
-        struct timeval rcv_to = { .tv_sec = 600, .tv_usec = 0 };  /* 10 min */
-        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_to, sizeof(rcv_to));
-
         ConnectionCtx *ctx = calloc(1, sizeof(ConnectionCtx));
         if (!ctx) {
             LOG_ERR("calloc failed for connection context");
@@ -2609,8 +2604,8 @@ static void *tcp_listener_thread(void *arg)
             continue;
         }
         ctx->fd = client_fd;
-        ctx->peer_cid = peer.svm_cid;
-        ctx->is_tcp = 0;
+        ctx->peer_cid = 0;  /* No CID for TCP — identified by token */
+        ctx->is_tcp = 1;
 
         dispatch_connection(ctx);
     }
@@ -2792,6 +2787,11 @@ int main(int argc, char **argv)
             LOG_ERR("accept() failed: %s", strerror(errno));
             break;
         }
+
+        /* vsock has no keepalive — bound a half-open worker's blocking read
+         * with an idle ceiling so it can't leak its CUDA context forever. */
+        struct timeval rcv_to = { .tv_sec = 600, .tv_usec = 0 };  /* 10 min */
+        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_to, sizeof(rcv_to));
 
         ConnectionCtx *ctx = calloc(1, sizeof(ConnectionCtx));
         if (!ctx) {
