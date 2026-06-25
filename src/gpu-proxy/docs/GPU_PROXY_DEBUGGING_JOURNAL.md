@@ -2,7 +2,7 @@
 
 **Date Range:** 2026-02-27 through 2026-06-25
 **Authors:** BMA + Claude AI assistant
-**Status:** Active — PyTorch inference + training + LoRA + SD Forge + Ollama 3B GPU production-ready; Ollama pinned to 0.7.0; 7B+ models blocked by Bug 23a. SEC-1 root fix (fork-per-VM workers) **shipped and hardware-validated** (2026-06-25) along with worker/supervisor lifecycle fixes and per-tenant VRAM quota; cross-tenant denial probe and vsock quota path still open.
+**Status:** Active — PyTorch inference + training + LoRA + SD Forge + Ollama 3B GPU production-ready; Ollama pinned to 0.7.0; 7B+ models blocked by Bug 23a. SEC-1 root fix (fork-per-VM workers) **shipped and hardware-validated** (2026-06-25) — including worker/supervisor lifecycle, per-tenant VRAM quota, and the **cross-tenant denial property itself** (fork DENIED vs. threaded VULNERABLE, two wallets). vsock quota path code-verified only (untestable on WSL2).
 
 ---
 
@@ -31,6 +31,7 @@
 | 20 | Jun 25 | **Worker/supervisor lifecycle** — context/VRAM leak root-caused (half-open blocking + unkillable workers + supervisor orphan); all three fixed and hardware-validated |
 | 21 | Jun 25 | **Per-tenant VRAM quota** — quota was per-connection (VM could get N× via N connections); fixed with shared-memory ledger; TCP hardware-confirmed, vsock code-complete |
 | 22 | Jun 25 | **Quota validation + docs** — enforcement confirmed end-to-end (oversized model DENIED; per-tenant cap holds); docs updated |
+| 23 | Jun 25 | **SEC-1 cross-tenant denial VALIDATED** — two different-owner VMs; B's read of A's VRAM DENIED under fork, VULNERABLE under threaded control. The security property itself, not just the mechanism, confirmed on hardware |
 
 ---
 
@@ -884,6 +885,36 @@ A second, deeper gap surfaced while scoping the fix: quota was enforced **only o
 
 ---
 
+## Session 23: SEC-1 Cross-Tenant Denial — Validated (June 25, 2026)
+
+The security property at the heart of SEC-1 — *a tenant cannot read another tenant's VRAM* — was directly tested for the first time. Everything prior validated the mechanism (fork-per-VM contexts) and resource fairness (quota); this tested the trust boundary itself, with **two different owner wallets**.
+
+**Method (guest-side `sec1_probe_guest`, over the real TCP transport, each VM using its own valid token):**
+- VM-A (victim): `cudaMalloc(1 MB)`, `cudaMemset` a `0xAB` sentinel, print the device pointer (`DEVPTR=0x705800000`), hold the connection open.
+- VM-B (attacker, different wallet): `cudaMemcpy` device→host from A's exact address.
+
+**Result:**
+
+| Daemon mode | VM-B reading VM-A's `0xAB` buffer | Process topology |
+|-------------|-----------------------------------|------------------|
+| `auto` (fork) | `READ DENIED — isolation OK` | supervisor + per-VM forked workers |
+| `threaded` (shared ctx, control) | `>>> VULNERABLE: first=0xAB` | single daemon, no forks |
+
+The threaded control is what makes the result conclusive: it reproduces the original SEC-1 vulnerability on demand (B reads A's sentinel through the shared context), proving the probe genuinely detects cross-tenant access. The same probe, same addresses, is DENIED only when fork isolation gives each worker its own context. **DENIED-under-fork + VULNERABLE-under-threaded is the result that closes SEC-1.**
+
+The probe uses D2H memcpy (not a peer-to-peer device copy), so `GGML_CUDA_NO_PEER_COPY` is not a factor — the denial is attributable to the context boundary.
+
+**Scope (honest):** this covers the read (D2H) path — the canonical confidentiality test. Write (H2D/memset), free, and kernel-launch cross-tenant access are closed by the *same* per-worker context boundary (a foreign address is unmapped regardless of which verb names it), but were not each separately probed. A read DENIED is strong evidence the boundary holds for every path sharing that context. The threaded node config was reverted to `auto` immediately after the control.
+
+### Key Lessons
+
+44. **A mechanism test and a property test are different claims.** "Workers fork into separate contexts" (mechanism) was proven days before "tenant B cannot read tenant A" (property). Same-owner concurrency exercises the mechanism; only different-owner probing tests the boundary the threat model cares about. Don't let the first stand in for the second.
+
+45. **A security test that cannot fail proves nothing — build the positive control.** An isolated DENIED result is indistinguishable from a broken probe. Forcing the vulnerable (threaded) configuration and confirming the probe reports VULNERABLE is what earns trust in the DENIED. The contrast is the evidence, not either result alone.
+
+---
+
+
 
 
 | Workload | Status | Notes |
@@ -897,14 +928,14 @@ A second, deeper gap surfaced while scoping the fix: quota was enforced **only o
 | JupyterLab kernel | ✅ Confirmed | Via systemd EnvironmentFile |
 | Stable Diffusion Forge | ✅ Confirmed | Image generation 1.61 it/s |
 | cuDNN-accelerated conv | ❌ Blocked | Bug 19 — parked |
-| Multi-tenant GPU sharing | 🟡 Mechanism shipped | SEC-1 root fix (fork-per-VM workers) + lifecycle + per-tenant quota shipped and hardware-validated (TCP). Cross-tenant denial probe + vsock quota path still open — see Sessions 19–22 |
+| Multi-tenant GPU sharing | 🟢 Isolation validated | SEC-1 root fix + lifecycle + per-tenant quota + **cross-tenant denial** all hardware-validated (Sessions 19–23; fork DENIED vs. threaded VULNERABLE, two wallets). vsock quota path code-verified only |
 
 ## Pending Items
 
 | Item | Priority | Notes |
 |------|----------|-------|
 | SEC-1 root fix — fork-per-VM daemon workers | ✅ Shipped + hardware-validated (Session 19) | Per-process primary contexts → GPU MMU isolation. ~400 MB VRAM/context deducted from quota. Lifecycle (Session 20) and per-tenant quota (Sessions 21–22) also shipped |
-| SEC-1 — cross-tenant *denial* test | 🔴 Open | Mechanism proven, but the security property (tenant A cannot read/write tenant B's VRAM) is untested. Needs two **different-owner** VMs + `sec1_probe` cross-context read attempt; resolve `GGML_CUDA_NO_PEER_COPY`'s role so a DENIED result is attributable to the fork boundary |
+| SEC-1 — cross-tenant *denial* test | ✅ Validated (Session 23) | Two different-owner VMs: B's D2H read of A's address DENIED under fork, VULNERABLE under threaded control. Read path proven; write/free/kernel-launch closed by the same context boundary but not separately probed |
 | SEC-1 — vsock quota enforcement | 🟡 Code-complete, untested | Per-tenant quota + CID-based vsock identity written but not exercisable on WSL2 (no vsock). Validate on a bare-metal node. Note: before this work, quota was TCP-only — bare-metal/vsock nodes had no VRAM cap at all |
 | SEC-1 — adopt-on-pgrep | 🟡 Open | `HealthCheckAsync` adopts any running `gpu-proxy-daemon` via pgrep instead of verifying it's the current binary — same permissive pattern as the original stale-daemon incident. Needs a version/capability probe |
 | SEC-1 hardening — compute watchdog / transport restriction | Medium | Per-launch worker-kill watchdog not yet wired (kernel `-t` timeout exists); restrict TCP transport to WireGuard overlay / vsock (token travels plaintext on TCP) |

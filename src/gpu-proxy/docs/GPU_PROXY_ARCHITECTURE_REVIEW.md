@@ -2,7 +2,7 @@
 
 **Date Range:** 2026-02-27 through 2026-06-25
 **Authors:** BMA + Claude AI assistant
-**Status:** Production-ready with known limitations — Ollama 3B GPU confirmed; 7B+ blocked by Bug 23a; Ollama pinned to 0.7.0 (Bug 23). SEC-1 root fix (fork-per-VM workers) **shipped and hardware-validated** (2026-06-25): per-VM CUDA-context isolation, worker/supervisor lifecycle, and per-tenant VRAM quota all confirmed on hardware. Cross-tenant *denial* (different-owner probe) and the vsock quota path remain untested — see §5.
+**Status:** Production-ready with known limitations — Ollama 3B GPU confirmed; 7B+ blocked by Bug 23a; Ollama pinned to 0.7.0 (Bug 23). SEC-1 root fix (fork-per-VM workers) **shipped and hardware-validated** (2026-06-25): per-VM CUDA-context isolation, worker/supervisor lifecycle, per-tenant VRAM quota, and the **cross-tenant denial property itself** all confirmed on hardware. The vsock quota path remains code-verified only (not testable on WSL2) — see §5.
 
 ---
 
@@ -22,7 +22,7 @@ Over ten debugging sessions spanning three weeks, we built a complete CUDA virtu
 
 The proxy is now **fully generic** — no hardcoded application (Ollama/ggml) or vendor (NVIDIA RTX 4060) dependencies in the C code. Application-specific configuration is driven by template environment variables written to `/etc/decloud/gpu-proxy.env`.
 
-> 🟡 **Security (SEC-1, updated 2026-06-25):** The original finding — all VM connections shared the daemon's single primary CUDA context, allowing cross-tenant VRAM access — is **addressed by the fork-per-VM worker model, now shipped and hardware-validated**. Each VM connection is served by a separate forked worker process with its own CUDA context (GPU-MMU-enforced separation). Worker/supervisor lifecycle (context reaping on disconnect, killability, clean shutdown) and per-tenant VRAM quota are confirmed on hardware. **Still open:** the cross-tenant *denial* property has not been directly tested with two different-owner tenants (mechanism is proven; the security boundary itself is not yet probed), and the vsock quota path is code-verified only (not testable on the WSL2 dev node). See §5.
+> 🟢 **Security (SEC-1, validated 2026-06-25):** The original finding — all VM connections shared the daemon's single primary CUDA context, allowing cross-tenant VRAM access — is **closed by the fork-per-VM worker model, shipped and hardware-validated**. Each VM connection is served by a separate forked worker process with its own CUDA context (GPU-MMU-enforced separation). The **cross-tenant denial property is directly confirmed**: with two different-owner VMs on one GPU, tenant B's attempt to read tenant A's device address was DENIED under fork isolation and VULNERABLE under the threaded (shared-context) control — the contrast proving both that the test detects a real leak and that isolation closes it. Worker/supervisor lifecycle and per-tenant VRAM quota are also confirmed on hardware. **Remaining:** the vsock quota path is code-verified only (not testable on the WSL2 dev node), and the write/free/kernel-launch cross-tenant paths are closed by the same context boundary but were not each separately probed (read is the canonical confidentiality test). See §5.
 
 ---
 
@@ -162,7 +162,7 @@ install.sh handles: Docker compat build (glibc 2.31), native daemon build, stale
 | TCP_NODELAY + TCP_QUICKACK | ✅ | Sub-ms RPC latency |
 | Template-driven env vars | ✅ | Generic proxy |
 | Zero-touch VM deployment | ✅ | Cloud-init automated |
-| Multi-tenant GPU sharing | 🟡 Mechanism shipped | SEC-1 root fix (fork-per-VM workers) shipped + hardware-validated; per-tenant quota enforced (TCP). Cross-tenant *denial* probe and vsock quota path still untested — see §5 |
+| Multi-tenant GPU sharing | 🟢 Isolation validated | SEC-1 root fix + lifecycle + per-tenant quota shipped & hardware-validated; cross-tenant denial directly confirmed (fork DENIED vs. threaded VULNERABLE, two wallets). vsock quota path code-verified only — see §5 |
 | PyTorch inference (forward pass) | ✅ | Confirmed 2026-03-13 |
 | PyTorch training (backward + optimizer) | ✅ | Confirmed 2026-03-13 |
 | LoRA fine-tuning via PEFT | ✅ | Confirmed 2026-03-13; 1,360MB VRAM |
@@ -177,7 +177,7 @@ install.sh handles: Docker compat build (glibc 2.31), native daemon build, stale
 
 ## 5. Security Model & Multi-Tenancy (SEC-1)
 
-**Status:** 🟡 Root fix shipped and hardware-validated (2026-06-25). Isolation mechanism, lifecycle, and per-tenant quota proven on hardware; cross-tenant denial test and vsock quota path still open.
+**Status:** 🟢 Root fix shipped and hardware-validated (2026-06-25). Isolation mechanism, lifecycle, per-tenant quota, and the cross-tenant denial property all proven on hardware. vsock quota path remains code-verified only.
 
 ### The Finding (original, 2026-06-11)
 
@@ -208,10 +208,11 @@ A per-connection allocation map can validate Memcpy/Memset/Free — but `LaunchK
 - Fork-per-VM workers create separate CUDA contexts (mechanism).
 - Worker/supervisor lifecycle is correct: contexts are reaped on disconnect, workers are killable by SIGTERM, the supervisor exits cleanly on agent restart with no orphan and VRAM returning to 0.
 - Per-tenant VRAM quota is enforced across a VM's connections on the TCP path.
+- **Cross-tenant denial (the security property itself).** Two **different-owner** VMs on one GPU; tenant A allocated a buffer, filled it with a `0xAB` sentinel, and held it open. Tenant B (a legitimate tenant with its own valid token) attempted a device→host read of A's exact device address. Under fork isolation (`auto`): `READ DENIED` — A's address is unmapped in B's separate context. Under the threaded (shared-context) control: `VULNERABLE — read returned 0xAB` — B read A's sentinel. The contrast is the proof: the probe genuinely detects a leak (threaded), and fork isolation closes it (auto). The probe used D2H memcpy, so `GGML_CUDA_NO_PEER_COPY` is not a factor in the result.
 
 **Still open (do not claim closed):**
-- **Cross-tenant denial.** The isolation *mechanism* is proven, but the security *property* — that tenant A literally cannot read/write tenant B's VRAM — has not been directly tested with two **different-owner** tenants and a deliberate cross-context probe (`sec1_probe`). Same-owner concurrency was tested; the trust boundary itself was not. Until that probe runs (ideally with the `GGML_CUDA_NO_PEER_COPY` flag's role resolved so a DENIED result is attributable to the fork boundary), the denial guarantee is *expected* but *unverified*.
 - **vsock quota enforcement.** The per-tenant quota and its vsock (CID-based) identity path are code-verified but not hardware-tested — vsock does not function under WSL2. First real exercise is on a bare-metal node. Note that prior to this work, quota was enforced only on the TCP path at all; bare-metal/vsock nodes had no VRAM quota.
+- **Write / free / kernel-launch cross-tenant paths.** The denial test covered the read (D2H) path — the canonical confidentiality test. The write (H2D/memset), free, and kernel-launch paths are closed by the *same* per-worker context boundary (a foreign address is unmapped regardless of verb), but were not each separately probed. A read DENIED is strong evidence the boundary holds for all paths sharing that context; a full read/write/free matrix would make it exhaustive.
 - **Adopt-on-pgrep.** `GpuProxyService.HealthCheckAsync` still adopts any running `gpu-proxy-daemon` found via `pgrep` rather than verifying it is the current binary — the same permissive pattern that caused the original stale-daemon incident, one layer up. Closing it needs a version/capability probe.
 
 **Cost of the root fix (as built):** ~400 MB VRAM per CUDA context on consumer GPUs (deducted per-connection from the tenant's quota via `GPU_CONTEXT_OVERHEAD_BYTES`). Tenant density is scheduler-visible via the existing `GpuVramBytes` accounting.

@@ -198,6 +198,159 @@ public class GpuProxyService
     }
 
     /// <summary>
+    /// Resolve the intended SEC-1 isolation mode: env DECLOUD_GPU_ISOLATION →
+    /// IsolationMode property → "auto". Single source of truth shared by the
+    /// launcher and the adoption verifier.
+    /// </summary>
+    private string ResolveIsolationMode()
+    {
+        var mode = Environment.GetEnvironmentVariable("DECLOUD_GPU_ISOLATION");
+        if (string.IsNullOrWhiteSpace(mode))
+            mode = IsolationMode;
+        mode = mode?.Trim().ToLowerInvariant();
+        if (mode is not ("auto" or "threaded" or "fork"))
+        {
+            _logger.LogWarning(
+                "Unknown GPU isolation mode '{Mode}' — defaulting to auto (isolated)", mode);
+            mode = "auto";
+        }
+        return mode!;
+    }
+
+    /// <summary>
+    /// Decide whether a running gpu-proxy-daemon process may be ADOPTED, instead
+    /// of trusting bare name-match. A daemon is adoptable only if it is the
+    /// current installed binary AND running in the intended isolation mode.
+    ///
+    /// Reads /proc/&lt;pid&gt;/exe (real executable inode) and /proc/&lt;pid&gt;/cmdline
+    /// (launch args). Returns true only on a verified match; logs the reason on
+    /// mismatch so the caller can kill-and-relaunch.
+    ///
+    /// Fail-safe: any uncertainty (can't read /proc, exe deleted, no -i found)
+    /// returns false → the caller relaunches a known-good daemon rather than
+    /// adopting an unverifiable one.
+    /// </summary>
+    private bool IsAdoptableDaemon(int pid)
+    {
+        try
+        {
+            // (a) Currency: /proc/<pid>/exe must resolve to the current DaemonPath.
+            //     A replaced binary shows up as a different target or "(deleted)".
+            var exeLink = $"/proc/{pid}/exe";
+            string? exeTarget = null;
+            try
+            {
+                // .NET resolves the symlink target of /proc/<pid>/exe.
+                var fi = new FileInfo(exeLink);
+                exeTarget = fi.LinkTarget; // null on older runtimes
+            }
+            catch { /* fall through to readlink below */ }
+
+            if (string.IsNullOrEmpty(exeTarget))
+            {
+                // Fallback: readlink via the shell (LinkTarget unavailable / null).
+                var rl = _executor.ExecuteAsync("readlink", $"-f {exeLink}",
+                    CancellationToken.None).GetAwaiter().GetResult();
+                exeTarget = rl.Success ? rl.StandardOutput.Trim() : null;
+            }
+
+            if (string.IsNullOrEmpty(exeTarget))
+            {
+                _logger.LogWarning(
+                    "GPU proxy daemon PID {Pid}: cannot resolve /proc/{Pid}/exe — not adopting", pid, pid);
+                return false;
+            }
+
+            // Normalize: "(deleted)" suffix means the binary was replaced under it.
+            if (exeTarget.EndsWith("(deleted)", StringComparison.Ordinal) ||
+                !string.Equals(exeTarget, DaemonPath, StringComparison.Ordinal))
+            {
+                _logger.LogWarning(
+                    "GPU proxy daemon PID {Pid} runs '{Exe}', not current '{Path}' — stale, not adopting",
+                    pid, exeTarget, DaemonPath);
+                return false;
+            }
+
+            // (b) Mode: /proc/<pid>/cmdline must carry the intended -i <mode>.
+            //     cmdline is NUL-separated; read and split on '\0'.
+            var cmdlinePath = $"/proc/{pid}/cmdline";
+            if (!File.Exists(cmdlinePath))
+            {
+                _logger.LogWarning(
+                    "GPU proxy daemon PID {Pid}: no cmdline — not adopting", pid);
+                return false;
+            }
+            var raw = File.ReadAllText(cmdlinePath);
+            var args = raw.Split('\0', StringSplitOptions.RemoveEmptyEntries);
+
+            string? runningMode = null;
+            for (int i = 0; i < args.Length - 1; i++)
+            {
+                if (args[i] == "-i") { runningMode = args[i + 1].Trim().ToLowerInvariant(); break; }
+            }
+
+            var intendedMode = ResolveIsolationMode();
+            if (runningMode is null)
+            {
+                _logger.LogWarning(
+                    "GPU proxy daemon PID {Pid}: no -i flag in cmdline (pre-isolation build?) — not adopting", pid);
+                return false;
+            }
+            if (!string.Equals(runningMode, intendedMode, StringComparison.Ordinal))
+            {
+                _logger.LogWarning(
+                    "GPU proxy daemon PID {Pid} runs mode '{Running}', intended '{Intended}' — not adopting",
+                    pid, runningMode, intendedMode);
+                return false;
+            }
+
+            _logger.LogInformation(
+                "GPU proxy daemon PID {Pid} verified (binary current, mode '{Mode}') — adopting",
+                pid, runningMode);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "GPU proxy daemon PID {Pid}: identity check failed — not adopting", pid);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Kill an unadoptable daemon by PID (SIGTERM, then SIGKILL via the executor).
+    /// Used when a running daemon fails identity verification, so the caller can
+    /// launch a known-good one. Best-effort.
+    /// </summary>
+    private async Task KillUnadoptableDaemonAsync(int pid, CancellationToken ct)
+    {
+        _logger.LogWarning("Killing unadoptable GPU proxy daemon PID {Pid}", pid);
+        try
+        {
+            // kill the whole tree (a forked supervisor may have workers).
+            await _executor.ExecuteAsync("pkill", $"-TERM -P {pid}", ct);
+            await _executor.ExecuteAsync("kill", $"-TERM {pid}", ct);
+            await Task.Delay(500, ct);
+            await _executor.ExecuteAsync("pkill", $"-KILL -P {pid}", ct);
+            await _executor.ExecuteAsync("kill", $"-KILL {pid}", ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to kill GPU proxy daemon PID {Pid}", pid);
+        }
+    }
+
+    /// <summary>
+    /// Parse the first PID from `pgrep` stdout (newline-separated).
+    /// Returns -1 if none/unparseable.
+    /// </summary>
+    private static int FirstPid(string pgrepStdout)
+    {
+        var first = pgrepStdout.Trim().Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        return first.Length > 0 && int.TryParse(first[0].Trim(), out var pid) ? pid : -1;
+    }
+
+    /// <summary>
     /// Start the GPU proxy daemon if the node supports GPU proxy mode.
     /// Idempotent — does nothing if already running.
     /// </summary>
@@ -233,16 +386,26 @@ public class GpuProxyService
                 return false;
             }
 
-            // Check if already running externally (e.g. via systemd)
+            // A daemon may already be running (survived an agent restart, or was
+            // launched by hand). Adopt it ONLY if it is the current binary in the
+            // intended isolation mode — otherwise kill it and launch a correct one.
+            // Name-match alone is not trust (SEC-1: stale/wrong-mode daemon must
+            // not be silently adopted).
             var checkResult = await _executor.ExecuteAsync(
                 "pgrep", "-f gpu-proxy-daemon", ct);
             if (checkResult.Success && !string.IsNullOrWhiteSpace(checkResult.StandardOutput))
             {
-                _logger.LogInformation(
-                    "GPU proxy daemon already running (PID: {Pid})",
-                    checkResult.StandardOutput.Trim().Split('\n')[0]);
-                _isRunning = true;
-                return true;
+                var pid = FirstPid(checkResult.StandardOutput);
+                if (pid > 0 && IsAdoptableDaemon(pid))
+                {
+                    _isRunning = true;
+                    return true;
+                }
+                // Unverifiable / stale / wrong-mode → remove it, then launch ours.
+                if (pid > 0)
+                    await KillUnadoptableDaemonAsync(pid, ct);
+                _isRunning = false;
+                // fall through to launch a fresh, correct daemon
             }
 
             // Start the daemon
@@ -253,19 +416,9 @@ public class GpuProxyService
             // Always enable TCP listener — needed for WSL2 and as fallback
             var verboseFlag = VerboseLogging ? " -v" : "";
 
-            // SEC-1: resolve isolation mode. env overrides the property so the
-            // orchestrator (Phase 3) can set policy per node without code changes.
-            var isolationMode = Environment.GetEnvironmentVariable("DECLOUD_GPU_ISOLATION");
-            if (string.IsNullOrWhiteSpace(isolationMode))
-                isolationMode = IsolationMode;
-            isolationMode = isolationMode?.Trim().ToLowerInvariant();
-            if (isolationMode is not ("auto" or "threaded" or "fork"))
-            {
-                _logger.LogWarning(
-                    "Unknown GPU isolation mode '{Mode}' — defaulting to auto (isolated)",
-                    isolationMode);
-                isolationMode = "auto";
-            }
+            // SEC-1: resolve isolation mode (shared with the adoption verifier so
+            // they can never disagree about the intended mode).
+            var isolationMode = ResolveIsolationMode();
 
             // SEC-1: the per-worker kernel watchdog only fires when a timeout is set.
             // Threaded mode keeps -t 0 (async pipelining, no co-tenant to protect);
@@ -429,14 +582,22 @@ public class GpuProxyService
             return false;
         }
 
-        // Case 3: Daemon was started externally (_daemonProcess is null,
-        // _isRunning is true). Verify it's still alive via pgrep.
+        // Case 3: Daemon was started externally / survived a restart
+        // (_daemonProcess is null, _isRunning is true). A running process named
+        // gpu-proxy-daemon is NOT sufficient — verify it is the current binary in
+        // the intended isolation mode before reporting healthy (SEC-1). An
+        // unverifiable daemon is unhealthy, so EnsureHealthyAsync relaunches one.
         try
         {
             var result = await _executor.ExecuteAsync(
                 "pgrep", "-f gpu-proxy-daemon", ct);
             if (result.Success && !string.IsNullOrWhiteSpace(result.StandardOutput))
-                return true;
+            {
+                var pid = FirstPid(result.StandardOutput);
+                if (pid > 0 && IsAdoptableDaemon(pid))
+                    return true;
+                // present but stale/wrong-mode/unverifiable → not healthy
+            }
         }
         catch
         {
