@@ -610,30 +610,10 @@ public class LibvirtVmManager : IVmManager
                 // Always generate auth token (needed for TCP fallback)
                 spec.GpuProxyToken = GenerateGpuProxyToken();
 
-                // Append token to daemon's registry file
-                // The daemon reloads on SIGHUP (sent after this write)
-                try
-                {
-                    // Include quota when set so the daemon applies it at HELLO time.
-                    // Format: <token> <vm_id> [<quota_bytes>]
-                    // Third field is optional; absent = unlimited (old format still valid).
-                    var tokenLine = spec.GpuVramBytes is > 0
-                        ? $"{spec.GpuProxyToken} {spec.Id} {spec.GpuVramBytes.Value}\n"
-                        : $"{spec.GpuProxyToken} {spec.Id}\n";
-                    await File.AppendAllTextAsync(_gpuProxy.TokenFile, tokenLine, ct);
-
-                    // Signal daemon to reload tokens
-                    var signalResult = await _executor.ExecuteAsync(
-                        "pkill", "-HUP -f gpu-proxy-daemon", ct);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "VM {VmId}: Failed to register GPU proxy token", spec.Id);
-                }
-
-                // Detect WSL2 — skip vsock (Hyper-V owns vsock layer)
+                // Detect WSL2 — skip vsock (Hyper-V owns vsock layer).
+                // Assign the CID BEFORE writing the registry so it can be
+                // recorded for CID-based quota lookup on the vsock path.
                 var isWsl2 = _isWsl2;
-
                 if (!isWsl2)
                 {
                     spec.VsockCid = _nextVsockCid++;
@@ -646,6 +626,29 @@ public class LibvirtVmManager : IVmManager
                     _logger.LogInformation(
                         "VM {VmId}: GPU proxy mode (WSL2) — TCP transport, vsock skipped",
                         spec.Id);
+                }
+
+                // Append token to daemon's registry file
+                // The daemon reloads on SIGHUP (sent after this write)
+                try
+                {
+                    // Format: <token> <vm_id> <quota_bytes> <cid>
+                    // quota_bytes: 0 = unlimited. cid: 0 = none (WSL2/TCP-only).
+                    // Older 2- and 3-field lines remain valid (daemon treats
+                    // missing fields as 0). The CID lets the daemon resolve
+                    // vm_id + quota for vsock connections, which carry no token.
+                    var quota = spec.GpuVramBytes is > 0 ? spec.GpuVramBytes.Value : 0;
+                    var cid = spec.VsockCid ?? 0;
+                    var tokenLine = $"{spec.GpuProxyToken} {spec.Id} {quota} {cid}\n";
+                    await File.AppendAllTextAsync(_gpuProxy.TokenFile, tokenLine, ct);
+
+                    // Signal daemon to reload tokens
+                    var signalResult = await _executor.ExecuteAsync(
+                        "pkill", "-HUP -f gpu-proxy-daemon", ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "VM {VmId}: Failed to register GPU proxy token", spec.Id);
                 }
 
                 // Ensure the GPU proxy daemon is running before the VM boots.

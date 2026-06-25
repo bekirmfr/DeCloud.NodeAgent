@@ -34,6 +34,7 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <sys/wait.h>
+#include <sys/mman.h>
 
 #include <dlfcn.h>
 
@@ -75,6 +76,110 @@ static int g_in_forked_worker = 0;   /* set to 1 in the child after fork */
 static int g_gpu_available    = 0;   /* device count (probe / cuInit) */
 static int g_vsock_listen_fd  = -1;  /* hoisted so children can close it */
 static int g_tcp_listen_fd    = -1;
+
+/* ================================================================
+ * Per-tenant VRAM quota ledger (shared across forked workers)
+ *
+ * Each connection owns one slot. handle_malloc enforces against the SUM of
+ * live slots for the same vm_id, so a VM's TOTAL allocation across all its
+ * connections is capped — not each connection independently.
+ *
+ * Created with MAP_SHARED|MAP_ANONYMOUS by the supervisor BEFORE it forks,
+ * so every worker inherits the same physical pages. Self-healing: a slot
+ * whose PID is no longer alive is skipped and cleared while summing, so a
+ * SIGKILL'd worker (no cleanup) cannot leak budget. Fail-safe: a stale slot
+ * over-counts (tenant gets less), never under-counts (never over-allocates).
+ * ================================================================ */
+#define MAX_QUOTA_SLOTS 1024   /* total concurrent connections across all VMs */
+
+typedef struct {
+    char     vm_id[64];
+    pid_t    pid;             /* owning worker; 0 = free slot */
+    uint64_t allocated;       /* bytes this connection currently holds */
+} VmQuotaSlot;
+
+static VmQuotaSlot *g_quota_slots = NULL;          /* mmap'd shared array */
+static int          g_my_quota_slot = -1;          /* this worker's slot index */
+
+/* Coarse spinlock in shared memory (one int, atomic CAS). Allocation is not a
+ * hot path (model load, not per-token), so a simple spinlock is fine and avoids
+ * the setup cost / signal-safety questions of a PROCESS_SHARED pthread mutex. */
+static int *g_quota_lock = NULL;
+
+static void quota_lock(void)   { while (__sync_lock_test_and_set(g_quota_lock, 1)) { /* spin */ } }
+static void quota_unlock(void) { __sync_lock_release(g_quota_lock); }
+
+/* Create the shared ledger. Called once by the supervisor before forking. */
+static void quota_ledger_init(void)
+{
+    size_t sz = sizeof(int) + sizeof(VmQuotaSlot) * MAX_QUOTA_SLOTS;
+    void *region = mmap(NULL, sz, PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (region == MAP_FAILED) {
+        LOG_ERR("quota ledger mmap failed: %s — per-tenant quota DISABLED", strerror(errno));
+        g_quota_slots = NULL;
+        return;
+    }
+    g_quota_lock  = (int *)region;
+    *g_quota_lock = 0;
+    g_quota_slots = (VmQuotaSlot *)((char *)region + sizeof(int));
+    memset(g_quota_slots, 0, sizeof(VmQuotaSlot) * MAX_QUOTA_SLOTS);
+    LOG_INFO("Per-tenant VRAM quota ledger ready (%d slots, shared)", MAX_QUOTA_SLOTS);
+}
+
+/* Claim a free slot for this worker's connection. Called once per worker after
+ * HELLO succeeds (vm_id known). Returns slot index or -1 if full/disabled. */
+static int quota_slot_claim(const char *vm_id)
+{
+    if (!g_quota_slots) return -1;
+    quota_lock();
+    int idx = -1;
+    for (int i = 0; i < MAX_QUOTA_SLOTS; i++) {
+        if (g_quota_slots[i].pid == 0) {
+            g_quota_slots[i].pid = getpid();
+            g_quota_slots[i].allocated = 0;
+            strncpy(g_quota_slots[i].vm_id, vm_id, sizeof(g_quota_slots[i].vm_id) - 1);
+            g_quota_slots[i].vm_id[sizeof(g_quota_slots[i].vm_id) - 1] = '\0';
+            idx = i;
+            break;
+        }
+    }
+    quota_unlock();
+    if (idx < 0) LOG_ERR("quota ledger full (%d slots) — VM %s unaccounted", MAX_QUOTA_SLOTS, vm_id);
+    return idx;
+}
+
+/* Release this worker's slot (normal disconnect). Hard-kill is handled by the
+ * PID-liveness sweep in quota_vm_total(). */
+static void quota_slot_release(void)
+{
+    if (!g_quota_slots || g_my_quota_slot < 0) return;
+    quota_lock();
+    memset(&g_quota_slots[g_my_quota_slot], 0, sizeof(VmQuotaSlot));
+    quota_unlock();
+    g_my_quota_slot = -1;
+}
+
+/* Sum live allocations for a vm_id. Self-healing: clears slots whose owning
+ * PID is dead (kill(pid,0) == ESRCH). Caller must hold no lock; we take it. */
+static uint64_t quota_vm_total(const char *vm_id)
+{
+    if (!g_quota_slots) return 0;
+    uint64_t total = 0;
+    quota_lock();
+    for (int i = 0; i < MAX_QUOTA_SLOTS; i++) {
+        if (g_quota_slots[i].pid == 0) continue;
+        /* Reap dead owners: a SIGKILL'd worker left its slot behind. */
+        if (kill(g_quota_slots[i].pid, 0) != 0 && errno == ESRCH) {
+            memset(&g_quota_slots[i], 0, sizeof(VmQuotaSlot));
+            continue;
+        }
+        if (strncmp(g_quota_slots[i].vm_id, vm_id, sizeof(g_quota_slots[i].vm_id)) == 0)
+            total += g_quota_slots[i].allocated;
+    }
+    quota_unlock();
+    return total;
+}
 
 static void *connection_handler(void *arg);  /* defined later in file */
 
@@ -140,6 +245,7 @@ typedef struct {
     char     token[GPU_PROXY_TOKEN_LEN + 1];
     char     vm_id[64];
     uint64_t quota_bytes;   /* VRAM quota, 0 = unlimited */
+    unsigned int cid;       /* vsock guest CID, 0 = none (TCP-only/WSL2) */
     int      active;
 } TokenEntry;
 
@@ -165,11 +271,12 @@ static void load_tokens(void)
     int count = 0;
     while (fgets(line, sizeof(line), f) && count < MAX_TOKENS) {
         char hex_token[65], vm_id[64];
-        unsigned long long quota = 0; /* optional third field, 0 = unlimited */
+        unsigned long long quota = 0; /* optional 3rd field, 0 = unlimited */
+        unsigned int cid = 0;         /* optional 4th field, 0 = none (TCP) */
 
-        /* Format: <hex_token> <vm_id> [<quota_bytes>]
-         * Third field is optional — absent means unlimited (legacy entries). */
-        int parsed = sscanf(line, "%64s %63s %llu", hex_token, vm_id, &quota);
+        /* Format: <hex_token> <vm_id> [<quota_bytes>] [<cid>]
+         * 3rd/4th fields optional — legacy 2-/3-field lines still valid. */
+        int parsed = sscanf(line, "%64s %63s %llu %u", hex_token, vm_id, &quota, &cid);
         if (parsed < 2) continue;
 
         /* Parse hex string → bytes */
@@ -184,6 +291,7 @@ static void load_tokens(void)
         }
         strncpy(e->vm_id, vm_id, sizeof(e->vm_id) - 1);
         e->quota_bytes = (uint64_t)quota;
+        e->cid = cid;
         e->active = 1;
         count++;
     }
@@ -215,6 +323,31 @@ static int validate_token(const uint8_t *token, char *vm_id_out, size_t vm_id_si
     }
     pthread_mutex_unlock(&g_token_lock);
     return -1; /* Invalid token */
+}
+
+/* Resolve a vsock guest CID → vm_id + quota from the registry.
+ * vsock connections carry no token; the guest's source CID (peer.svm_cid,
+ * captured at accept) is authoritative. Returns 1 and fills outputs on match,
+ * 0 if the CID isn't registered (treated as unlimited/unknown). */
+static int resolve_cid(unsigned int cid, char *vm_id_out, size_t vm_id_size,
+                       uint64_t *quota_out)
+{
+    if (cid == 0) return 0;   /* 0 = no vsock mapping */
+    pthread_mutex_lock(&g_token_lock);
+    for (int i = 0; i < MAX_TOKENS; i++) {
+        if (!g_tokens[i].active) continue;
+        if (g_tokens[i].cid == cid) {
+            if (vm_id_out) {
+                strncpy(vm_id_out, g_tokens[i].vm_id, vm_id_size - 1);
+                vm_id_out[vm_id_size - 1] = '\0';
+            }
+            if (quota_out) *quota_out = g_tokens[i].quota_bytes;
+            pthread_mutex_unlock(&g_token_lock);
+            return 1;
+        }
+    }
+    pthread_mutex_unlock(&g_token_lock);
+    return 0; /* CID not registered */
 }
 
 /* ================================================================
@@ -558,6 +691,52 @@ static int handle_hello(ConnectionCtx *ctx, const void *payload, uint32_t len)
         } else {
             LOG_INFO("VM %s: no VRAM quota (unlimited)", ctx->vm_id);
         }
+
+        /* Claim this connection's slot in the shared per-tenant ledger so its
+         * allocations count toward the VM total across all its connections. */
+        g_my_quota_slot = quota_slot_claim(ctx->vm_id);
+    } else {
+        /* vsock path: no token, but the guest's source CID (ctx->peer_cid,
+         * set at accept from peer.svm_cid) identifies the VM. Resolve vm_id +
+         * quota from the CID registry so quota is enforced on bare metal too. */
+        char vm_id[64] = {0};
+        uint64_t vm_quota = 0;
+        if (resolve_cid(ctx->peer_cid, vm_id, sizeof(vm_id), &vm_quota)) {
+            strncpy(ctx->vm_id, vm_id, sizeof(ctx->vm_id) - 1);
+            ctx->memory_quota = vm_quota;
+            LOG_INFO("vsock CID %u → VM %s", ctx->peer_cid, vm_id);
+
+            /* Same Phase-3 per-context overhead reservation as the TCP path. */
+            if (g_in_forked_worker && ctx->memory_quota > 0) {
+                if (ctx->memory_quota <= GPU_CONTEXT_OVERHEAD_BYTES + GPU_CONTEXT_MIN_USABLE) {
+                    LOG_ERR("VM %s: VRAM quota %llu MB too small for isolated worker "
+                            "(needs > %llu MB overhead + %llu MB min) — rejecting",
+                            ctx->vm_id,
+                            (unsigned long long)(ctx->memory_quota / (1024 * 1024)),
+                            (unsigned long long)(GPU_CONTEXT_OVERHEAD_BYTES / (1024 * 1024)),
+                            (unsigned long long)(GPU_CONTEXT_MIN_USABLE / (1024 * 1024)));
+                    send_response(ctx->fd, GPU_CMD_HELLO, -1, NULL, 0);
+                    return -1;
+                }
+                uint64_t requested = ctx->memory_quota;
+                ctx->memory_quota = requested - GPU_CONTEXT_OVERHEAD_BYTES;
+                LOG_INFO("VM %s: VRAM quota %llu MB requested, %llu MB usable "
+                         "(%llu MB reserved for isolated CUDA context)",
+                         ctx->vm_id,
+                         (unsigned long long)(requested / (1024 * 1024)),
+                         (unsigned long long)(ctx->memory_quota / (1024 * 1024)),
+                         (unsigned long long)(GPU_CONTEXT_OVERHEAD_BYTES / (1024 * 1024)));
+            } else if (ctx->memory_quota > 0) {
+                LOG_INFO("VM %s: VRAM quota applied at connect: %llu bytes (%llu MB)",
+                         ctx->vm_id,
+                         (unsigned long long)ctx->memory_quota,
+                         (unsigned long long)(ctx->memory_quota / (1024 * 1024)));
+            }
+            g_my_quota_slot = quota_slot_claim(ctx->vm_id);
+        } else {
+            LOG_INFO("vsock CID %u: no registry match — no quota (unlimited)",
+                     ctx->peer_cid);
+        }
     }
 
     int count = 0;
@@ -651,17 +830,23 @@ static int handle_malloc(ConnectionCtx *ctx, const void *payload, uint32_t len)
     }
     memcpy(&req, payload, sizeof(req));
 
-    /* Enforce memory quota */
-    if (ctx->memory_quota > 0 &&
-        ctx->memory_allocated + req.size > ctx->memory_quota) {
-        LOG_ERR("CID %u: cudaMalloc(%lu) DENIED — would exceed quota "
-                "(%lu + %lu > %lu)",
-                ctx->peer_cid, (unsigned long)req.size,
-                (unsigned long)ctx->memory_allocated,
-                (unsigned long)req.size,
-                (unsigned long)ctx->memory_quota);
-        /* cudaErrorMemoryAllocation = 2 */
-        return send_response(ctx->fd, GPU_CMD_MALLOC, 2, NULL, 0);
+    /* Enforce memory quota — across ALL of this VM's connections, not just
+     * this one. quota_vm_total sums live slots for ctx->vm_id (self-healing:
+     * dead workers' slots are reaped while summing). ctx->memory_quota is the
+     * per-connection post-overhead usable ceiling; using it as the VM ceiling
+     * is conservative (see patch header). */
+    if (ctx->memory_quota > 0) {
+        uint64_t vm_used = quota_vm_total(ctx->vm_id);
+        if (vm_used + req.size > ctx->memory_quota) {
+            LOG_ERR("CID %u VM %s: cudaMalloc(%lu) DENIED — would exceed VM quota "
+                    "(vm_used %lu + %lu > %lu)",
+                    ctx->peer_cid, ctx->vm_id, (unsigned long)req.size,
+                    (unsigned long)vm_used,
+                    (unsigned long)req.size,
+                    (unsigned long)ctx->memory_quota);
+            /* cudaErrorMemoryAllocation = 2 */
+            return send_response(ctx->fd, GPU_CMD_MALLOC, 2, NULL, 0);
+        }
     }
 
     void *devptr = NULL;
@@ -670,11 +855,18 @@ static int handle_malloc(ConnectionCtx *ctx, const void *payload, uint32_t len)
     LOG_DBG("cudaMalloc(%lu) -> %p (err=%d)", (unsigned long)req.size, devptr, err);
 
     if (err == cudaSuccess) {
-        /* Track allocation */
+        /* Track allocation (per-connection, for stats) */
         ctx->memory_allocated += req.size;
         ctx->total_alloc_bytes += req.size;
         if (ctx->memory_allocated > ctx->peak_memory)
             ctx->peak_memory = ctx->memory_allocated;
+
+        /* Update this connection's shared-ledger slot (per-VM enforcement). */
+        if (g_quota_slots && g_my_quota_slot >= 0) {
+            quota_lock();
+            g_quota_slots[g_my_quota_slot].allocated += req.size;
+            quota_unlock();
+        }
 
         /* Record in alloc table for cleanup */
         for (int i = 0; i < MAX_ALLOCS; i++) {
@@ -728,6 +920,16 @@ static int handle_free(ConnectionCtx *ctx, const void *payload, uint32_t len)
         if (ctx->memory_allocated >= sz) ctx->memory_allocated -= sz;
         else                              ctx->memory_allocated = 0;
         ctx->allocs[slot].in_use = 0;
+
+        /* Return freed bytes to the shared per-VM ledger. */
+        if (g_quota_slots && g_my_quota_slot >= 0) {
+            quota_lock();
+            if (g_quota_slots[g_my_quota_slot].allocated >= sz)
+                g_quota_slots[g_my_quota_slot].allocated -= sz;
+            else
+                g_quota_slots[g_my_quota_slot].allocated = 0;
+            quota_unlock();
+        }
     }
 
     return send_response(ctx->fd, GPU_CMD_FREE, (int32_t)err, NULL, 0);
@@ -2381,6 +2583,7 @@ static void *connection_handler(void *arg)
 done:
     free(buf);
     cleanup_connection(ctx);
+    quota_slot_release();          /* drop this connection from the VM total */
     close(fd);
     LOG_INFO("VM CID %u disconnected (resources cleaned up)", cid);
     free(ctx);
@@ -2669,6 +2872,10 @@ int main(int argc, char **argv)
     signal(SIGTERM, sig_handler);
     signal(SIGPIPE, SIG_IGN);
     signal(SIGHUP, sighup_handler);
+
+    /* Per-tenant VRAM quota ledger — MUST be created before any worker fork so
+     * all workers share the same mapping. */
+    quota_ledger_init();
 
     /* Load auth tokens for TCP connections */
     load_tokens();
