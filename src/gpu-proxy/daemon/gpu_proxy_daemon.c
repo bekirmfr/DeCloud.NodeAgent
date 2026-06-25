@@ -2395,6 +2395,15 @@ static void sig_handler(int sig)
 {
     (void)sig;
     g_running = 0;
+    /* Take forked workers down with the supervisor so a restart can't orphan
+     * them (orphaned workers keep their CUDA contexts → VRAM leak across
+     * restarts). Only the supervisor reaches here with children to signal;
+     * workers reset SIGTERM to SIG_DFL and exit before re-entering this path.
+     * Guard so a worker that somehow runs this can't signal the group. */
+    if (!g_in_forked_worker) {
+        signal(SIGTERM, SIG_IGN);   /* don't re-signal ourselves in the group */
+        kill(0, SIGTERM);           /* SIGTERM to our process group → workers */
+    }
 }
 
 /* SIGHUP: set flag for main loop to reload tokens (async-signal-safe) */
@@ -2472,6 +2481,13 @@ static void dispatch_connection(ConnectionCtx *ctx)
         if (g_vsock_listen_fd >= 0) close(g_vsock_listen_fd);
         if (g_tcp_listen_fd   >= 0) close(g_tcp_listen_fd);
         signal(SIGCHLD, SIG_DFL);   /* child has no workers of its own */
+        /* Reset SIGTERM to default: the inherited supervisor handler only sets
+         * g_running, which a worker blocked in read_exact() never re-checks —
+         * so SIGTERM would be ignored and the worker would orphan on daemon
+         * shutdown, surviving with its GPU context held. Default disposition
+         * terminates the worker immediately; its kernel cleanup releases the
+         * CUDA context. Per-connection cleanup is idempotent at the OS level. */
+        signal(SIGTERM, SIG_DFL);
         g_in_forked_worker = 1;
 
         CUresult cr = cuInit(0);
@@ -2569,17 +2585,32 @@ static void *tcp_listener_thread(void *arg)
         int quickack = 1;
         setsockopt(client_fd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
 
+        /* Keepalive: detect a dead/half-open peer (killed VM runner, dropped
+         * link) so the worker's blocking read_exact() returns error and the
+         * connection_handler loop breaks → cleanup_connection → _exit. Without
+         * this a worker blocks forever holding its CUDA context (VRAM leak).
+         * ~90s to detection: 60s idle + 3 probes × 10s. */
+        int ka = 1;
+        setsockopt(client_fd, SOL_SOCKET,  SO_KEEPALIVE,  &ka, sizeof(ka));
+        int ka_idle = 60, ka_intvl = 10, ka_cnt = 3;
+        setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPIDLE,  &ka_idle,  sizeof(ka_idle));
+        setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPINTVL, &ka_intvl, sizeof(ka_intvl));
+        setsockopt(client_fd, IPPROTO_TCP, TCP_KEEPCNT,   &ka_cnt,   sizeof(ka_cnt));
+
+        /* vsock has no keepalive — bound a half-open worker's blocking read with
+         * an idle ceiling so it can't leak its CUDA context forever. */
+        struct timeval rcv_to = { .tv_sec = 600, .tv_usec = 0 };  /* 10 min */
+        setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_to, sizeof(rcv_to));
+
         ConnectionCtx *ctx = calloc(1, sizeof(ConnectionCtx));
         if (!ctx) {
+            LOG_ERR("calloc failed for connection context");
             close(client_fd);
             continue;
         }
         ctx->fd = client_fd;
-        ctx->peer_cid = 0;  /* No CID for TCP — identified by token */
-        ctx->is_tcp = 1;
-
-        LOG_INFO("TCP connection from %s:%d",
-                 inet_ntoa(peer.sin_addr), ntohs(peer.sin_port));
+        ctx->peer_cid = peer.svm_cid;
+        ctx->is_tcp = 0;
 
         dispatch_connection(ctx);
     }
