@@ -2403,6 +2403,17 @@ static void sig_handler(int sig)
     if (!g_in_forked_worker) {
         signal(SIGTERM, SIG_IGN);   /* don't re-signal ourselves in the group */
         kill(0, SIGTERM);           /* SIGTERM to our process group → workers */
+
+        /* Deterministic supervisor exit. On WSL2 the supervisor parks in a
+         * sleep() loop while tcp_listener_thread blocks in accept(); without
+         * closing the listen FDs that thread never returns and the supervisor
+         * can orphan to init on a fast `systemctl restart`. The supervisor
+         * holds NO CUDA context (CUDA-free by SEC-1 design), so there is
+         * nothing to clean up — shut the listeners and exit immediately.
+         * async-signal-safe: shutdown/close/_exit are all on the safe list. */
+        if (g_vsock_listen_fd >= 0) { shutdown(g_vsock_listen_fd, SHUT_RDWR); close(g_vsock_listen_fd); }
+        if (g_tcp_listen_fd   >= 0) { shutdown(g_tcp_listen_fd,   SHUT_RDWR); close(g_tcp_listen_fd);   }
+        _exit(0);
     }
 }
 

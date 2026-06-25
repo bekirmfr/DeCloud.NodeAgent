@@ -366,10 +366,14 @@ public class GpuProxyService
 
             _logger.LogInformation("Stopping GPU proxy daemon (PID: {Pid})", _daemonProcess.Id);
 
-            // Send SIGTERM for graceful shutdown
+            // Send SIGTERM to the whole tree (supervisor + any worker the
+            // supervisor hasn't reaped). entireProcessTree:false left the
+            // supervisor able to outlive the agent and orphan to init on
+            // `systemctl restart`; the daemon's own sig_handler then makes
+            // exit deterministic, but kill the tree here too (defense in depth).
             try
             {
-                _daemonProcess.Kill(entireProcessTree: false);
+                _daemonProcess.Kill(entireProcessTree: true);
             }
             catch (Exception ex)
             {
