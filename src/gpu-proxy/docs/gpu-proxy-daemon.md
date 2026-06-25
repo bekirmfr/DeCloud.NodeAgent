@@ -112,6 +112,50 @@ is private may opt in explicitly:
 DECLOUD_GPU_ISOLATION=threaded
 ```
 
+### Per-tenant VRAM quota
+
+Each proxied VM has a VRAM quota (`GpuVramBytes`, set by the orchestrator and
+written to the token registry). The daemon enforces it at allocation time in
+`handle_malloc`: an allocation that would push the VM over its quota is denied
+(`cudaErrorMemoryAllocation`), and the guest sees `unable to allocate CUDA0
+buffer`. The guest still *sees* the whole card via `cudaMemGetInfo` — the quota
+caps what it can `cudaMalloc`, not what it can observe.
+
+The quota is enforced **per-tenant, across all of a VM's connections** — not
+per-connection. A single VM can open several proxy connections (e.g. multiple
+Ollama runners, or a terminal plus a web UI), each served by its own forked
+worker. Enforcement sums every live connection's allocations for the VM and
+checks the total against the quota, via a shared-memory slot ledger the
+supervisor creates before forking. The ledger is self-healing: a worker killed
+without clean teardown (SIGKILL) leaves a slot behind, which is reaped on the
+next allocation sweep by a PID-liveness check (`kill(pid,0) == ESRCH`). The
+accounting is fail-safe — a not-yet-reaped slot over-counts (the tenant gets
+slightly less than quota) and never under-counts.
+
+In a forked worker, ~400 MB of the quota is reserved for the worker's own CUDA
+context (`GPU_CONTEXT_OVERHEAD_BYTES`), so a 3072 MB quota yields ~2672 MB
+usable. A quota too small to leave a usable floor after this reservation is
+rejected at `HELLO`.
+
+> **Transport note:** quota enforcement requires the daemon to know which VM a
+> connection belongs to. On TCP (WSL2) this comes from the auth token; on vsock
+> (bare metal) it comes from the guest's source CID, resolved against the
+> registry's `cid` field. The vsock path is code-complete but has only been
+> exercised on TCP so far — vsock is unavailable under WSL2.
+
+### Worker and supervisor lifecycle
+
+Each VM connection is served by a forked worker that lives exactly as long as its
+connection. A worker exits — releasing its CUDA context and VRAM — when the VM
+disconnects: cleanly on a normal close, or within ~90 s of an abrupt drop
+(half-open connections are detected by TCP keepalive, or a recv-timeout on
+vsock). Workers honor `SIGTERM` (they reset the inherited supervisor handler to
+default), so they are individually killable and are not orphaned across a daemon
+restart. On shutdown the supervisor signals its worker process group and exits
+deterministically (it closes its listen FDs to unblock `accept()` and `_exit`s);
+it holds no CUDA context, so an immediate exit is safe. A correct restart leaves
+no orphaned `gpu-proxy-daemon` process and returns VRAM to baseline.
+
 ### WSL2 note
 
 WSL2 reaches the GPU through a passthrough CUDA stack
@@ -158,7 +202,7 @@ system with the rest of the node agent.
 | `/usr/local/bin/gpu-proxy-daemon` | The compiled daemon binary |
 | `/usr/local/bin/.gpu-proxy-daemon.sha256` | Source hash for the staleness check |
 | `/usr/local/lib/decloud-gpu-shim/` | Compat shims delivered to VMs (do not overwrite with host-glibc shims) |
-| `/var/lib/decloud/gpu-proxy-tokens` | Per-VM TCP auth tokens (`<token> <vm_id> [<quota_bytes>]`); daemon reloads on `SIGHUP` |
+| `/var/lib/decloud/gpu-proxy-tokens` | Per-VM registry, one line per VM: `<token> <vm_id> [<quota_bytes>] [<cid>]`. Fields 3–4 optional (missing → 0). `quota_bytes` enforces the per-VM VRAM cap; `cid` lets the daemon map a vsock connection (which carries no token) to its VM. Daemon reloads on `SIGHUP` |
 | `daemon/gpu_proxy_daemon.c`, `proto/gpu_proxy_proto.h`, `Makefile` | Source shipped in `decloud-gpu-daemon-src-<version>.tar.gz` |
 
 ## Related

@@ -1,8 +1,8 @@
 # DeCloud GPU Proxy — Architecture Review
 
-**Date Range:** 2026-02-27 through 2026-06-11
+**Date Range:** 2026-02-27 through 2026-06-25
 **Authors:** BMA + Claude AI assistant
-**Status:** Production-ready with known limitations — Ollama 3B GPU confirmed; 7B+ blocked by Bug 23a; Ollama pinned to 0.7.0 (Bug 23); multi-tenant GPU sharing blocked by SEC-1 (single-tenant-per-GPU required)
+**Status:** Production-ready with known limitations — Ollama 3B GPU confirmed; 7B+ blocked by Bug 23a; Ollama pinned to 0.7.0 (Bug 23). SEC-1 root fix (fork-per-VM workers) **shipped and hardware-validated** (2026-06-25): per-VM CUDA-context isolation, worker/supervisor lifecycle, and per-tenant VRAM quota all confirmed on hardware. Cross-tenant *denial* (different-owner probe) and the vsock quota path remain untested — see §5.
 
 ---
 
@@ -22,7 +22,7 @@ Over ten debugging sessions spanning three weeks, we built a complete CUDA virtu
 
 The proxy is now **fully generic** — no hardcoded application (Ollama/ggml) or vendor (NVIDIA RTX 4060) dependencies in the C code. Application-specific configuration is driven by template environment variables written to `/etc/decloud/gpu-proxy.env`.
 
-> 🔴 **Security (SEC-1, 2026-06-11):** All VM connections share the daemon's primary CUDA context — one GPU address space. Cross-tenant VRAM read/write/free is possible for any co-tenant, and kernel-launch parameters are unvalidatable in principle. **Multi-tenant GPU sharing is blocked** until fork-per-VM daemon workers ship; until then the scheduler must enforce single-tenant-per-GPU. See Section 5.
+> 🟡 **Security (SEC-1, updated 2026-06-25):** The original finding — all VM connections shared the daemon's single primary CUDA context, allowing cross-tenant VRAM access — is **addressed by the fork-per-VM worker model, now shipped and hardware-validated**. Each VM connection is served by a separate forked worker process with its own CUDA context (GPU-MMU-enforced separation). Worker/supervisor lifecycle (context reaping on disconnect, killability, clean shutdown) and per-tenant VRAM quota are confirmed on hardware. **Still open:** the cross-tenant *denial* property has not been directly tested with two different-owner tenants (mechanism is proven; the security boundary itself is not yet probed), and the vsock quota path is code-verified only (not testable on the WSL2 dev node). See §5.
 
 ---
 
@@ -162,7 +162,7 @@ install.sh handles: Docker compat build (glibc 2.31), native daemon build, stale
 | TCP_NODELAY + TCP_QUICKACK | ✅ | Sub-ms RPC latency |
 | Template-driven env vars | ✅ | Generic proxy |
 | Zero-touch VM deployment | ✅ | Cloud-init automated |
-| Multi-tenant GPU sharing | ❌ Blocked | SEC-1 — shared primary context; single-tenant-per-GPU until fork-per-VM workers |
+| Multi-tenant GPU sharing | 🟡 Mechanism shipped | SEC-1 root fix (fork-per-VM workers) shipped + hardware-validated; per-tenant quota enforced (TCP). Cross-tenant *denial* probe and vsock quota path still untested — see §5 |
 | PyTorch inference (forward pass) | ✅ | Confirmed 2026-03-13 |
 | PyTorch training (backward + optimizer) | ✅ | Confirmed 2026-03-13 |
 | LoRA fine-tuning via PEFT | ✅ | Confirmed 2026-03-13; 1,360MB VRAM |
@@ -177,11 +177,11 @@ install.sh handles: Docker compat build (glibc 2.31), native daemon build, stale
 
 ## 5. Security Model & Multi-Tenancy (SEC-1)
 
-**Status:** 🔴 Multi-tenant GPU sharing blocked pending fix — single-tenant-per-GPU scheduler invariant required (2026-06-11)
+**Status:** 🟡 Root fix shipped and hardware-validated (2026-06-25). Isolation mechanism, lifecycle, and per-tenant quota proven on hardware; cross-tenant denial test and vsock quota path still open.
 
-### The Finding
+### The Finding (original, 2026-06-11)
 
-The daemon adopts the device's **primary CUDA context** (`cuDevicePrimaryCtxRetain`, Session 7) — the correct fix for runtime/driver API interop, with an unexamined consequence: the primary context is per-device per-process, and the daemon is one process serving all VM connections. Every tenant therefore shares **one GPU address space**. Within a CUDA context there is no isolation: any connection can read (`Memcpy` D2H), corrupt (`Memcpy` H2D / `Memset`), or free another tenant's allocations by naming their device addresses — and can launch its own kernels whose pointer arguments reference foreign buffers.
+The daemon adopts the device's **primary CUDA context** (`cuDevicePrimaryCtxRetain`, Session 7) — the correct fix for runtime/driver API interop, with an unexamined consequence: the primary context is per-device per-process, and the daemon was one process serving all VM connections. Every tenant therefore shared **one GPU address space**. Within a CUDA context there is no isolation: any connection could read (`Memcpy` D2H), corrupt (`Memcpy` H2D / `Memset`), or free another tenant's allocations by naming their device addresses — and could launch its own kernels whose pointer arguments reference foreign buffers.
 
 Per-VM tokens authenticate connections, not addresses. Memory quotas limit allocation amounts, not addressable ranges. Per-connection function tables cover modules, not memory. The attacker is simply another paying tenant.
 
@@ -189,18 +189,34 @@ Per-VM tokens authenticate connections, not addresses. Memory quotas limit alloc
 
 A per-connection allocation map can validate Memcpy/Memset/Free — but `LaunchKernel` parameters are an **opaque byte blob** with no signature information. The daemon cannot distinguish pointers from integers, so kernel-mediated access to foreign memory is unvalidatable in principle. Only context separation closes the hole.
 
-### Fix Plan
+### Fix Plan & Status
 
 | Layer | Measure | Status |
 |-------|---------|--------|
-| Interim (required before any GPU co-tenancy) | Scheduler invariant: at most one wallet's GPU VMs per physical GPU | Planned — one-line orchestrator constraint |
-| Root fix | Fork-per-VM daemon workers — per-process primary contexts, GPU MMU-enforced isolation; also gives fault isolation and enables per-launch watchdog (kill worker → clean context release) | Planned |
-| Hardening | Zero-on-free (`cudaMemset(0)` on Free + teardown — recycled VRAM is not scrubbed by the driver); compute watchdog for non-terminating kernels; TCP transport restricted to WireGuard overlay / vsock only | Planned with worker refactor |
+| Interim | Scheduler invariant: at most one wallet's GPU VMs per physical GPU | Superseded by the root fix for the isolation property; still useful as defense-in-depth |
+| Root fix | Fork-per-VM daemon workers — per-process primary contexts, GPU MMU-enforced isolation | ✅ **Shipped + hardware-validated (2026-06-25).** Supervisor stays CUDA-free and forks one worker per connection; each worker holds its own context. Confirmed on RTX 4060/WSL2: two same-owner VMs ran concurrently, each in a separate forked worker with its own context |
+| Lifecycle | Worker context reaping on disconnect; killability; clean supervisor shutdown | ✅ **Shipped + hardware-validated.** Half-open detection (TCP keepalive / vsock recv-timeout), worker SIGTERM-default (killable, no orphan-on-restart), deterministic supervisor exit (close-listen-FD + `_exit`). Confirmed: leaked workers were the cause of a VRAM leak (5719 MiB → 13 MiB on reap); all three teardown paths verified |
+| Hardening — zero-on-free | `cudaMemset(0)` on Free + teardown (recycled VRAM not scrubbed) | ✅ Present in `handle_free` (scrub before `cudaFree`) |
+| Per-tenant quota | VRAM quota enforced across ALL of a VM's connections, not per-connection | ✅ **TCP path shipped + hardware-validated;** 🟡 **vsock path code-verified only.** Shared-memory slot ledger summed by `vm_id`, self-healing via PID-liveness. Confirmed: a VM running two models was held to its quota (second model DENIED) instead of getting 2× quota |
+| Hardening — compute watchdog | Per-launch timeout → kill worker → context released | Partial — kernel timeout (`-t`) exists; per-launch worker-kill watchdog not yet wired |
+| Hardening — transport | TCP restricted to WireGuard overlay / vsock only | Planned — token still travels plaintext on the TCP path; do not bind a routable interface |
 | Out of scope | GPU microarchitectural side channels; no MIG on consumer cards → confidential workloads use the dedicated-GPU tier | Documented threat-model boundary |
 
-**Cost of root fix:** ~200–400MB VRAM per CUDA context on consumer GPUs. Tenant density becomes scheduler-visible via the existing `GpuVramBytes` accounting.
+### What is proven vs. still open (be precise)
 
-**Full analysis:** Debugging Journal, Session 18 (SEC-1) — including lessons 33–36.
+**Proven on hardware (2026-06-25):**
+- Fork-per-VM workers create separate CUDA contexts (mechanism).
+- Worker/supervisor lifecycle is correct: contexts are reaped on disconnect, workers are killable by SIGTERM, the supervisor exits cleanly on agent restart with no orphan and VRAM returning to 0.
+- Per-tenant VRAM quota is enforced across a VM's connections on the TCP path.
+
+**Still open (do not claim closed):**
+- **Cross-tenant denial.** The isolation *mechanism* is proven, but the security *property* — that tenant A literally cannot read/write tenant B's VRAM — has not been directly tested with two **different-owner** tenants and a deliberate cross-context probe (`sec1_probe`). Same-owner concurrency was tested; the trust boundary itself was not. Until that probe runs (ideally with the `GGML_CUDA_NO_PEER_COPY` flag's role resolved so a DENIED result is attributable to the fork boundary), the denial guarantee is *expected* but *unverified*.
+- **vsock quota enforcement.** The per-tenant quota and its vsock (CID-based) identity path are code-verified but not hardware-tested — vsock does not function under WSL2. First real exercise is on a bare-metal node. Note that prior to this work, quota was enforced only on the TCP path at all; bare-metal/vsock nodes had no VRAM quota.
+- **Adopt-on-pgrep.** `GpuProxyService.HealthCheckAsync` still adopts any running `gpu-proxy-daemon` found via `pgrep` rather than verifying it is the current binary — the same permissive pattern that caused the original stale-daemon incident, one layer up. Closing it needs a version/capability probe.
+
+**Cost of the root fix (as built):** ~400 MB VRAM per CUDA context on consumer GPUs (deducted per-connection from the tenant's quota via `GPU_CONTEXT_OVERHEAD_BYTES`). Tenant density is scheduler-visible via the existing `GpuVramBytes` accounting.
+
+**Full analysis:** Debugging Journal, Sessions 18–22.
 
 ---
 

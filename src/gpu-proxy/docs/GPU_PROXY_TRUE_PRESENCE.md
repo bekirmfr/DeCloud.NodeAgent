@@ -101,7 +101,7 @@ typedef struct __attribute__((packed)) {
 ### Daemon (`gpu_proxy_daemon.c`)
 
 `handle_func_get_attributes`:
-- Looks up function by `host_func_ptr` in per-connection function table — note this table isolates *function handles* per connection, **not device memory**: all connections share the daemon's primary CUDA context and therefore one GPU address space (see SEC-1)
+- Looks up function by `host_func_ptr` in per-connection function table — this table isolates *function handles* per connection. As of the fork-per-VM worker model (2026-06-25), each connection also runs in its own worker process with its own CUDA context, so device memory is isolated per tenant at the GPU MMU level (see SEC-1)
 - Sets CUDA context via `cuCtxSetCurrent`
 - Queries 9 attributes via `cuFuncGetAttribute()` on the real `CUfunction`
 - Returns packed response
@@ -177,8 +177,8 @@ For ggml, the MMQ path avoids cuBLAS entirely. cuBLAS compute (`cublasGemmBatche
 
 ## 8. Security Note (SEC-1)
 
-True GPU Presence is per-connection at the *function handle* level (each connection has its own function table), but **device memory is not isolated**: the daemon serves all VM connections from one process holding the device's primary CUDA context, so all tenants share a single GPU address space. Cross-tenant read/write/free of VRAM is possible for any co-tenant, and kernel launch parameters (opaque byte blobs) make daemon-side pointer validation impossible in principle.
+True GPU Presence is per-connection at the *function handle* level (each connection has its own function table). When the original SEC-1 finding was written, device memory was **not** isolated: the daemon served all VM connections from one process holding the device's single primary CUDA context, so all tenants shared one GPU address space.
 
-**Consequence:** multi-tenant GPU sharing is blocked until fork-per-VM daemon workers (per-process primary contexts, GPU MMU-enforced isolation) ship. Until then the orchestrator must enforce **single-tenant-per-GPU** scheduling.
+**Updated 2026-06-25:** This is addressed by the **fork-per-VM worker model, now shipped and hardware-validated**. The supervisor stays CUDA-free and forks a separate worker process per connection, each with its own primary CUDA context — cross-context access fails at the GPU MMU level, not at a validation layer. Worker/supervisor lifecycle and per-tenant VRAM quota are also confirmed on hardware.
 
-Full analysis: Architecture Review §5 and Debugging Journal Session 18 (SEC-1).
+**Still open:** the cross-tenant *denial* property has not been directly tested with two different-owner tenants (the mechanism is proven; the trust boundary itself is not yet probed), and the vsock quota path is code-verified only. See Architecture Review §5 and Debugging Journal Sessions 18–22.

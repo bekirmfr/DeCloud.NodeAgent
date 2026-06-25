@@ -78,6 +78,17 @@ static int g_vsock_listen_fd  = -1;  /* hoisted so children can close it */
 static int g_tcp_listen_fd    = -1;
 
 /* ================================================================
+ * Logging (defined early — used by token registry and all handlers)
+ * ================================================================ */
+
+#define LOG_INFO(fmt, ...) \
+    fprintf(stdout, "[gpu-proxy] " fmt "\n", ##__VA_ARGS__)
+#define LOG_ERR(fmt, ...) \
+    fprintf(stderr, "[gpu-proxy] ERROR: " fmt "\n", ##__VA_ARGS__)
+#define LOG_DBG(fmt, ...) \
+    do { if (g_verbose) fprintf(stdout, "[gpu-proxy] DBG: " fmt "\n", ##__VA_ARGS__); } while(0)
+
+/* ================================================================
  * Per-tenant VRAM quota ledger (shared across forked workers)
  *
  * Each connection owns one slot. handle_malloc enforces against the SUM of
@@ -223,16 +234,6 @@ static uint64_t now_us(void)
     return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
 }
 
-/* ================================================================
- * Logging (defined early — used by token registry and all handlers)
- * ================================================================ */
-
-#define LOG_INFO(fmt, ...) \
-    fprintf(stdout, "[gpu-proxy] " fmt "\n", ##__VA_ARGS__)
-#define LOG_ERR(fmt, ...) \
-    fprintf(stderr, "[gpu-proxy] ERROR: " fmt "\n", ##__VA_ARGS__)
-#define LOG_DBG(fmt, ...) \
-    do { if (g_verbose) fprintf(stdout, "[gpu-proxy] DBG: " fmt "\n", ##__VA_ARGS__); } while(0)
 
 /* ================================================================
  * Auth token registry — maps tokens to VM identifiers.

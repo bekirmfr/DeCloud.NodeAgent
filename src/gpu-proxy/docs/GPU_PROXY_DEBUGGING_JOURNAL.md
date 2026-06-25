@@ -1,8 +1,8 @@
 # DeCloud GPU Proxy — Debugging Journal
 
-**Date Range:** 2026-02-27 through 2026-06-11
+**Date Range:** 2026-02-27 through 2026-06-25
 **Authors:** BMA + Claude AI assistant
-**Status:** Active — PyTorch inference + training + LoRA + SD Forge + Ollama 3B GPU production-ready; Ollama pinned to 0.7.0; 7B+ models blocked by Bug 23a; multi-tenant GPU sharing blocked by SEC-1 (single-tenant-per-GPU invariant required)
+**Status:** Active — PyTorch inference + training + LoRA + SD Forge + Ollama 3B GPU production-ready; Ollama pinned to 0.7.0; 7B+ models blocked by Bug 23a. SEC-1 root fix (fork-per-VM workers) **shipped and hardware-validated** (2026-06-25) along with worker/supervisor lifecycle fixes and per-tenant VRAM quota; cross-tenant denial probe and vsock quota path still open.
 
 ---
 
@@ -27,6 +27,10 @@
 | 16 | May 24 | **Bug 23** — Ollama 0.24.0 incompatible with `cudaErrorNotSupported`; pinned to 0.7.0 |
 | 17 | May 25 | **Bug 23a** — 7B+ models corrupt at extended generation; confirmed proxy bug, not model |
 | 18 | Jun 11 | **SEC-1** — shared primary context allows cross-tenant GPU memory access; interim scheduler invariant + fork-per-VM worker plan |
+| 19 | Jun 25 | **SEC-1 root fix shipped** — fork-per-VM workers built + deployed via on-node daemon build pipeline; per-VM context isolation hardware-confirmed |
+| 20 | Jun 25 | **Worker/supervisor lifecycle** — context/VRAM leak root-caused (half-open blocking + unkillable workers + supervisor orphan); all three fixed and hardware-validated |
+| 21 | Jun 25 | **Per-tenant VRAM quota** — quota was per-connection (VM could get N× via N connections); fixed with shared-memory ledger; TCP hardware-confirmed, vsock code-complete |
+| 22 | Jun 25 | **Quota validation + docs** — enforcement confirmed end-to-end (oversized model DENIED; per-tenant cap holds); docs updated |
 
 ---
 
@@ -820,7 +824,67 @@ The attacker requires no exploit and no privilege — only a valid tenant token,
 
 ---
 
-## Production Status (2026-06-11)
+## Session 19: SEC-1 Root Fix Shipped — Fork-per-VM Workers (June 25, 2026)
+
+The fork-per-VM worker model planned in Session 18 was built, deployed, and hardware-validated. The supervisor stays CUDA-free (it probes the GPU in a short-lived forked child so it never initializes CUDA in its own address space — CUDA state cannot survive `fork()`), and forks one worker process per connection. Each worker calls `cuInit` itself, getting its own primary CUDA context → cross-context access fails at the GPU MMU. Three isolation modes (`auto`/`fork`/`threaded`), with `auto` the default and `threaded` an explicit single-tenant opt-in the orchestrator never selects.
+
+**Deployment mechanism (separate but enabling work):** the daemon links against the host's exact CUDA version, so it cannot ship as a prebuilt binary. It ships as cosign-verified **source** in the release; `install.sh`/`decloud update` fetch, verify, and compile it on-node, rebuilding only when the source hash changes. This closed a latent incident: the installed daemon had been a stale May-7 binary with no `-i` support; the agent launched it with `-i auto`, it exited `invalid option`, and VMs silently fell back to CPU. The on-node build pipeline makes daemon fixes flow through `decloud update` like any other change — exercised five times this session.
+
+**Hardware result:** on RTX 4060 / WSL2, `auto` mode forks correctly despite the WSL2 passthrough CUDA stack (`per-VM fork isolation active (SEC-1)` logged; VM connected; inference ran). Two same-owner VMs later ran concurrently, each in its own forked worker with its own context.
+
+### Key Lessons
+
+37. **A correct daemon binary is worthless if the deploy path can ship a stale one.** The fix wasn't only the fork code — it was making the build staleness-checked and automatic. A security fix that depends on manual rebuild will silently rot.
+
+38. **Never hand-launch the daemon while the agent is running.** A manually started daemon wins the port race, serves stale tokens, and starves the agent's own daemon — diagnosed twice this session. The agent owns the lifecycle.
+
+---
+
+## Session 20: Worker & Supervisor Lifecycle (June 25, 2026)
+
+Concurrent same-owner VMs surfaced a context/VRAM leak: orphaned forked workers holding CUDA contexts (5719 MiB held with VMs idle; killing them → 13 MiB, proving the leak was real contexts, not WSL2 accounting). Three distinct defects, all teardown-related, all fixed and hardware-verified.
+
+**Defect 1 — half-open leak.** A worker blocks forever in `read_exact` when its VM connection dies without a clean close (killed runner, dropped link). No FIN/GOODBYE arrives, the blocking `recv` never returns, the existing `break → cleanup → _exit` path never fires. **Fix:** `SO_KEEPALIVE` (60/10/3 ≈ 90 s) on accepted TCP connections so a dead peer makes the read return; `SO_RCVTIMEO` ceiling for vsock. The dead-peer case now becomes observable to the already-correct cleanup path.
+
+**Defect 2 — unkillable worker.** The forked child inherited the supervisor's flag-only `SIGTERM` handler (sets `g_running`, which a worker blocked in `recv` never re-checks). Only `SIGKILL` ended it → workers orphaned across `decloud update` restarts. **Fix:** child resets `signal(SIGTERM, SIG_DFL)` (alongside the existing `SIGCHLD` reset). Workers are now individually killable and die with the daemon.
+
+**Defect 3 — supervisor orphan.** On WSL2 the supervisor runs TCP-only fallback: main thread parks in `sleep(1)` while `tcp_listener_thread` blocks in `accept()`. On SIGTERM the handler set `g_running=0` and `kill(0,SIGTERM)` (reaping workers — worked) but nothing closed the listen FD, so the listener thread never returned and the supervisor reparented to init (PPID 1) on restart — then got re-adopted by the next agent via the pgrep health path (same permissive "a daemon exists → trust it" antipattern as the original stale-binary incident). **Fix:** handler closes the listen FDs to unblock `accept()` then `_exit(0)` (the supervisor holds no CUDA context — VRAM→0 proved it — so immediate exit is safe); agent's `StopAsync` first kill changed to `entireProcessTree: true`.
+
+**Hardware result:** plain `kill` (not `-9`) now ends a worker; stopping a VM's Ollama drops its worker; agent restart leaves no surviving worker or supervisor PID and VRAM returns to 0.
+
+### Key Lessons
+
+39. **A blocked syscall ignoring a flag-only signal handler is the same bug at every level.** Worker `recv` and supervisor `accept` both ignored `g_running`. The fix in both cases is to make the syscall *return* (close the FD / arm keepalive), not to hope the flag is noticed.
+
+40. **The right fix for a leaked resource is to bind its lifetime to the boundary the system already has** — a worker's life = its connection's life; the supervisor's life = the agent's. Not a reaper sweep or an idle-kill timer, which only conceal the systemic problem.
+
+---
+
+## Session 21–22: Per-Tenant VRAM Quota (June 25, 2026)
+
+With the lifecycle stable, the VRAM quota was tested and found enforced **per-connection, not per-tenant**. Confirmed on hardware: one VM with `OLLAMA_MAX_LOADED_MODELS=2` loaded two ~2 GB models concurrently (two runners = two connections) = 6.7 GB on GPU against a 2672 MB quota — each connection independently got the full quota. This breaks the scheduler's `GpuVramBytes` accounting (the orchestrator packs assuming each VM is bounded by its quota) and is a multi-tenant fairness/DoS vector.
+
+A second, deeper gap surfaced while scoping the fix: quota was enforced **only on the TCP path**. `ctx->memory_quota` and `ctx->vm_id` were set exclusively inside the `if (ctx->is_tcp)` branch of `handle_hello`, from the auth token. vsock connections (preferred on bare metal) carry no token, skipped that branch, and got `vm_id=""`/`quota=0` → no enforcement at all. So on bare-metal/vsock nodes, VRAM quotas were unenforced entirely — independent of the per-tenant bug.
+
+**Fix (two parts):**
+- **Per-tenant ledger.** A shared-memory slot table (`mmap(MAP_SHARED|MAP_ANONYMOUS)` created by the supervisor before forking, so all workers inherit it), one slot per connection `{vm_id, pid, allocated}`. `handle_malloc` enforces against the **sum of live slots for the VM**, not the connection's private counter. Self-healing: dead-PID slots are reaped while summing (`kill(pid,0)==ESRCH`), so a SIGKILL'd worker can't leak budget; fail-safe (over-counts → tenant gets less, never over-allocates). Chosen over a running counter precisely because hard-killed workers happen.
+- **vsock coverage.** The registry line gained a `cid` field (`<token> <vm_id> <quota> <cid>`); the daemon resolves a vsock connection's VM from the guest source CID (`peer.svm_cid`, captured at accept — unspoofable, the hypervisor assigns it). Both transports now populate `vm_id`+`quota` before `handle_malloc`.
+
+**Hardware result (TCP path):** quota enforcement confirmed end-to-end first — an oversized single model (llama3.1:8b, ~4.3 GB) was DENIED at `cudaMalloc(4617396480)` against the 2801795072-byte quota, VM got `unable to allocate CUDA0 buffer`. (Per-tenant patch validated by re-running the two-model test: second model now DENIED, `ollama ps` shows one model, instead of 6.7 GB.)
+
+**Still open:** the vsock path is code-complete but untestable on WSL2 (vsock unavailable) — first real exercise is on bare metal. And the cross-tenant *denial* security test (two different-owner tenants + `sec1_probe`) remains the distinct, still-unrun validation of the isolation *property* (vs. the mechanism, which is proven).
+
+### Key Lessons
+
+41. **A per-connection control is not a per-tenant control when one tenant can open many connections.** The quota was correct in value and wrong in scope. Test the boundary the threat model cares about (the tenant), not the one the code happens to track (the connection).
+
+42. **Cross-process enforcement needs cross-process state.** Fork-per-VM isolation (separate address spaces) is exactly what made the per-VM counter hard — the same boundary that isolates contexts isolates counters. Shared memory keyed on identity, summed over live owners, is the aligned fix.
+
+43. **Validate enforcement is armed before assuming it works — and after.** Quota looked unenforced (guest saw the whole card); the daemon log proved it *was* set; an oversized-model test proved it *fired*. Each step corrected a wrong assumption. "Configured" ≠ "enforced" ≠ "enforced at the right scope."
+
+---
+
+
 
 | Workload | Status | Notes |
 |----------|--------|-------|
@@ -833,14 +897,18 @@ The attacker requires no exploit and no privilege — only a valid tenant token,
 | JupyterLab kernel | ✅ Confirmed | Via systemd EnvironmentFile |
 | Stable Diffusion Forge | ✅ Confirmed | Image generation 1.61 it/s |
 | cuDNN-accelerated conv | ❌ Blocked | Bug 19 — parked |
-| Multi-tenant GPU sharing | ❌ Blocked | SEC-1 — shared primary context; single-tenant-per-GPU scheduler invariant required until fork-per-VM workers ship |
+| Multi-tenant GPU sharing | 🟡 Mechanism shipped | SEC-1 root fix (fork-per-VM workers) + lifecycle + per-tenant quota shipped and hardware-validated (TCP). Cross-tenant denial probe + vsock quota path still open — see Sessions 19–22 |
 
 ## Pending Items
 
 | Item | Priority | Notes |
 |------|----------|-------|
-| SEC-1 interim — scheduler invariant: one wallet's GPU VMs per physical GPU | 🔴 Critical | One-line orchestrator constraint. Must ship before any GPU co-tenancy. Zero cost at current scale |
-| SEC-1 root fix — fork-per-VM daemon workers | High | Per-process primary contexts → GPU MMU isolation. ~200–400MB VRAM/context overhead feeds `GpuVramBytes` scheduling. Include zero-on-free + per-launch watchdog + transport restriction (WireGuard/vsock only) |
+| SEC-1 root fix — fork-per-VM daemon workers | ✅ Shipped + hardware-validated (Session 19) | Per-process primary contexts → GPU MMU isolation. ~400 MB VRAM/context deducted from quota. Lifecycle (Session 20) and per-tenant quota (Sessions 21–22) also shipped |
+| SEC-1 — cross-tenant *denial* test | 🔴 Open | Mechanism proven, but the security property (tenant A cannot read/write tenant B's VRAM) is untested. Needs two **different-owner** VMs + `sec1_probe` cross-context read attempt; resolve `GGML_CUDA_NO_PEER_COPY`'s role so a DENIED result is attributable to the fork boundary |
+| SEC-1 — vsock quota enforcement | 🟡 Code-complete, untested | Per-tenant quota + CID-based vsock identity written but not exercisable on WSL2 (no vsock). Validate on a bare-metal node. Note: before this work, quota was TCP-only — bare-metal/vsock nodes had no VRAM cap at all |
+| SEC-1 — adopt-on-pgrep | 🟡 Open | `HealthCheckAsync` adopts any running `gpu-proxy-daemon` via pgrep instead of verifying it's the current binary — same permissive pattern as the original stale-daemon incident. Needs a version/capability probe |
+| SEC-1 hardening — compute watchdog / transport restriction | Medium | Per-launch worker-kill watchdog not yet wired (kernel `-t` timeout exists); restrict TCP transport to WireGuard overlay / vsock (token travels plaintext on TCP) |
+| Template debt — `DECLOUD_GPU_GRAPH_NOOP` in ai-chatbot template | Low | Dead flag (removed Session 15) still emitted by `tenant-vms/ai-chatbot/cloud-init.yaml`; confirmed not read by daemon. Drop from the YAML so reseeds stop carrying it |
 | Bug 23a — 7B+ model Ġ token corruption | High | Proxy kernel launch or KV stride error at large tensor geometry. Enable `DECLOUD_GPU_DEBUG`, capture RPC log, diff vs 3B launch params. |
 | Bug 23 — Shim fix for `ggml_backend_cuda_graph_reserve` | High | Root fix: `cudaStreamBeginCapture` must return `cudaSuccess` on first call per-process. Until fixed, Ollama pinned to 0.7.0. |
 | Bug 22a — Word doubling/garbling | 🅿️ Parked | Only observed during capture/replay testing; pass-through fix eliminates root cause. Revisit if it resurfaces. |
