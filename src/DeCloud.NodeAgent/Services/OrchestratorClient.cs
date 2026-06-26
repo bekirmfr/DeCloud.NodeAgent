@@ -68,6 +68,10 @@ public partial class OrchestratorClient : IOrchestratorClient
     public string? NodeId => _nodeId;
     public string? WalletAddress => _walletAddress;
 
+    // Compliance: held VM IDs from the latest heartbeat response (informational).
+    private IReadOnlyCollection<string> _heldVmIds = Array.Empty<string>();
+    public IReadOnlyCollection<string> HeldVmIds => _heldVmIds;
+
     public OrchestratorClient(
         HttpClient httpClient,
         IOptions<OrchestratorClientOptions> options,
@@ -1189,6 +1193,14 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                     });
                 }
             }
+
+            // ── Compliance holds (informational) ───────────────────────────────
+            // Surfaced on the node dashboard so the operator knows these VMs are held
+            // centrally. The node takes NO action — the orchestrator force-stops held
+            // VMs and re-enforces them on every heartbeat.
+            _heldVmIds = data.HeldVmIds is { Count: > 0 }
+                ? new HashSet<string>(data.HeldVmIds)
+                : Array.Empty<string>();
 
             // ── Settings drift warning ─────────────────────────────────────────
             if (data.SettingsDrift is not null)

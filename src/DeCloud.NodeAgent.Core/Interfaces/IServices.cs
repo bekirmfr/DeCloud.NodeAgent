@@ -363,6 +363,12 @@ public interface IOrchestratorClient
     /// Returns null on failure (dashboard falls back to cached data).
     /// </summary>
     Task<List<SystemVmObligationDto>?> GetObligationsAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// VM IDs the orchestrator has administratively held, from the latest heartbeat
+    /// response. Informational — surfaced on the node dashboard. Empty until first set.
+    /// </summary>
+    IReadOnlyCollection<string> HeldVmIds { get; }
 }
 
 /// <summary>

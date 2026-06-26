@@ -147,6 +147,7 @@ public class NodeDashboardController : ControllerBase
                 lastHeartbeatAt = lastHeartbeat != null ? lastHeartbeat.Heartbeat.Timestamp : (DateTime?)null,
                 secondsAgo = heartbeatSecondsAgo
             },
+            heldVmIds = _orchestratorClient.HeldVmIds,
             collectedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
         });
     }

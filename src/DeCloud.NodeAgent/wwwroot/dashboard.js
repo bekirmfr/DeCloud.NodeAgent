@@ -522,7 +522,9 @@ function renderVMs() {
         return `<tr>
           <td class="vm-name-cell">${esc(vm.name ?? spec.name ?? '—')}</td>
           <td class="vm-id-cell">${truncId(vm.vmId ?? '—')}</td>
-          <td>${stateBadge(vm.status, vm.vmId ?? vm.spec?.id)}</td>
+          <td>${(S.summary?.heldVmIds ?? []).includes(vm.vmId ?? vm.spec?.id)
+                ? `<span class="state-badge state-other" title="Held by the orchestrator (compliance). Do not start, stop, or delete — managed centrally.">Administratively Held</span>`
+                : stateBadge(vm.status, vm.vmId ?? vm.spec?.id)}</td>
           <td class="health-cell">${renderHealthCell(vm)}</td>
           <td>${spec.virtualCpuCores ?? '—'}</td>
           <td>${spec.memoryBytes ? fmtBytes(spec.memoryBytes) : '—'}</td>
