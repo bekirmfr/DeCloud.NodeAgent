@@ -89,6 +89,18 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                                 continue;
                             }
 
+                            // Don't "heal" a VM the orchestrator has administratively held.
+                            // A held VM is force-stopped, so its guest heartbeat is stale by
+                            // design — restarting it just fights the hold (the orchestrator
+                            // force-stops it again on the next heartbeat), producing a
+                            // start/stop loop. The orchestrator owns the held VM's run state.
+                            if (_orchestratorClient.HeldVmIds.Contains(vm.VmId))
+                            {
+                                _logger.LogDebug(
+                                    "VM {VmId} is administratively held — skipping health restart", vm.VmId);
+                                continue;
+                            }
+
                             var timeSinceLastHeartbeat = DateTime.UtcNow - vm.LastHeartbeat;
                             if (vm.IsFullyReady && timeSinceLastHeartbeat > TimeSpan.FromMinutes(5))
                             {
