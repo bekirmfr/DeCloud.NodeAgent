@@ -2,7 +2,7 @@
 
 **Date Range:** 2026-02-27 through 2026-06-25
 **Authors:** BMA + Claude AI assistant
-**Status:** Active — PyTorch inference + training + LoRA + SD Forge + Ollama 3B GPU production-ready; Ollama pinned to 0.7.0; 7B+ models blocked by Bug 23a. SEC-1 root fix (fork-per-VM workers) **shipped and hardware-validated** (2026-06-25) — including worker/supervisor lifecycle, per-tenant VRAM quota, and the **cross-tenant denial property itself** (fork DENIED vs. threaded VULNERABLE, two wallets). vsock quota path code-verified only (untestable on WSL2).
+**Status:** Active — PyTorch inference + training + LoRA + SD Forge + Ollama 3B GPU production-ready; Ollama pinned to 0.7.0; 7B+ models blocked by Bug 23a. SEC-1 root fix (fork-per-VM workers) **shipped and hardware-validated** (2026-06-25) — including worker/supervisor lifecycle, per-tenant VRAM quota, the **cross-tenant denial property itself** (fork DENIED vs. threaded VULNERABLE, two wallets), and identity-verified daemon adoption. vsock quota path code-verified only (untestable on WSL2).
 
 ---
 
@@ -32,6 +32,7 @@
 | 21 | Jun 25 | **Per-tenant VRAM quota** — quota was per-connection (VM could get N× via N connections); fixed with shared-memory ledger; TCP hardware-confirmed, vsock code-complete |
 | 22 | Jun 25 | **Quota validation + docs** — enforcement confirmed end-to-end (oversized model DENIED; per-tenant cap holds); docs updated |
 | 23 | Jun 25 | **SEC-1 cross-tenant denial VALIDATED** — two different-owner VMs; B's read of A's VRAM DENIED under fork, VULNERABLE under threaded control. The security property itself, not just the mechanism, confirmed on hardware |
+| 24 | Jun 25 | **Identity-verified daemon adoption** — agent no longer trusts pgrep name-match; verifies `/proc/<pid>/exe` currency + `-i` mode before adopting, kill-and-relaunch on mismatch. Closes the stale/wrong-mode adoption gap |
 
 ---
 
@@ -914,6 +915,25 @@ The probe uses D2H memcpy (not a peer-to-peer device copy), so `GGML_CUDA_NO_PEE
 
 ---
 
+## Session 24: Identity-Verified Daemon Adoption (June 25, 2026)
+
+A latent instance of the original stale-daemon pattern, one layer up. `GpuProxyService` adopted any process matching `pgrep -f gpu-proxy-daemon` as healthy — in `EnsureStartedAsync` (startup) and `HealthCheckAsync` Case 3 (monitoring) — without confirming it was the current binary or in the intended isolation mode. Three silent failures: a stale binary survives an update, a `threaded` daemon is trusted where `auto` is intended (a silent isolation hole), or a hand-launched daemon is adopted (hit twice during this session's work).
+
+**Fix:** adopt only after verifying identity, using signals that already exist (no daemon change). `/proc/<pid>/exe` must resolve to the current `DaemonPath` (currency — a replaced binary shows a different target or `(deleted)`); `/proc/<pid>/cmdline` must carry the intended `-i <mode>` (resolved by the same env→property→`auto` logic the launcher uses, factored into a shared helper so launcher and verifier cannot disagree). On a verified match → adopt; on mismatch or any uncertainty → kill the daemon and launch a correct one (fail-safe — unverifiable means relaunch, never trust).
+
+**Hardware result (WSL2), both rejection paths:**
+- *Currency:* a `sudo`-wrapped launch made pgrep match the `sudo` process; `/proc/<pid>/exe` = `/usr/bin/sudo` ≠ `DaemonPath` → rejected "stale, not adopting", killed, relaunched.
+- *Mode:* a bare `threaded` daemon (exe = current binary, so currency passes) → mode check ran → rejected "runs mode 'threaded', intended 'auto' — not adopting", killed, replaced with the agent's `-i auto` daemon.
+
+The two attempts to reproduce the mode-rejection accidentally proved the currency path first (the `sudo` wrapper kept being what pgrep matched) — a reminder that *how a process is launched changes what `/proc/<pid>/exe` points at*, which is exactly the signal the check relies on. Becoming root and launching the bare daemon (`exe` = the real binary) was needed to exercise the mode path.
+
+### Key Lesson
+
+46. **Verify identity, not name.** "A process named X exists" is not "the X I am responsible for is running." The agent owns the daemon lifecycle; the aligned check confirms the running daemon is the one it would launch (current binary, intended mode) via signals the OS already exposes (`/proc/<pid>/exe`, `/proc/<pid>/cmdline`) — not a `pgrep` name-match standing in for ownership.
+
+---
+
+
 
 
 
@@ -937,7 +957,7 @@ The probe uses D2H memcpy (not a peer-to-peer device copy), so `GGML_CUDA_NO_PEE
 | SEC-1 root fix — fork-per-VM daemon workers | ✅ Shipped + hardware-validated (Session 19) | Per-process primary contexts → GPU MMU isolation. ~400 MB VRAM/context deducted from quota. Lifecycle (Session 20) and per-tenant quota (Sessions 21–22) also shipped |
 | SEC-1 — cross-tenant *denial* test | ✅ Validated (Session 23) | Two different-owner VMs: B's D2H read of A's address DENIED under fork, VULNERABLE under threaded control. Read path proven; write/free/kernel-launch closed by the same context boundary but not separately probed |
 | SEC-1 — vsock quota enforcement | 🟡 Code-complete, untested | Per-tenant quota + CID-based vsock identity written but not exercisable on WSL2 (no vsock). Validate on a bare-metal node. Note: before this work, quota was TCP-only — bare-metal/vsock nodes had no VRAM cap at all |
-| SEC-1 — adopt-on-pgrep | 🟡 Open | `HealthCheckAsync` adopts any running `gpu-proxy-daemon` via pgrep instead of verifying it's the current binary — same permissive pattern as the original stale-daemon incident. Needs a version/capability probe |
+| SEC-1 — adopt-on-pgrep | ✅ Closed (Session 24) | `EnsureStartedAsync`/`HealthCheckAsync` now adopt only after verifying `/proc/<pid>/exe` = current binary AND `/proc/<pid>/cmdline` has the intended `-i <mode>`; kill-and-relaunch on mismatch. Hardware-validated on WSL2 (both currency and mode rejection paths) |
 | SEC-1 hardening — compute watchdog / transport restriction | Medium | Per-launch worker-kill watchdog not yet wired (kernel `-t` timeout exists); restrict TCP transport to WireGuard overlay / vsock (token travels plaintext on TCP) |
 | Template debt — `DECLOUD_GPU_GRAPH_NOOP` in ai-chatbot template | Low | Dead flag (removed Session 15) still emitted by `tenant-vms/ai-chatbot/cloud-init.yaml`; confirmed not read by daemon. Drop from the YAML so reseeds stop carrying it |
 | Bug 23a — 7B+ model Ġ token corruption | High | Proxy kernel launch or KV stride error at large tensor geometry. Enable `DECLOUD_GPU_DEBUG`, capture RPC log, diff vs 3B launch params. |

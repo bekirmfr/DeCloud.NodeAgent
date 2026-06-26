@@ -1269,37 +1269,31 @@ public class LibvirtVmManager : IVmManager
             await _repository.UpdateVmStateAsync(vmId, VmStatus.Stopping);
         }
 
-        // virsh reset/reboot only works on running domains.
-        // For stopped domains (defined but not started), use virsh start instead.
-        var domainIsRunning = _vms.TryGetValue(vmId, out var tracked)
-            && tracked.Status == VmStatus.Running;
+        // Stop the domain. Graceful ACPI shutdown by default; force => immediate
+        // power-off. (This method previously held RestartVmAsync's body — reset/reboot,
+        // or virsh start when "not running" — so a Stop rebooted the VM and left it
+        // Running. Fixed here.)
+        var verb = force ? "destroy" : "shutdown";
+        var result = await _executor.ExecuteAsync("virsh", $"{verb} {vmId}", ct);
 
-        CommandResult result;
-        if (!domainIsRunning)
-        {
-            _logger.LogInformation(
-                "VM {VmId} is not running — using virsh start instead of reset/reboot", vmId);
-            result = await _executor.ExecuteAsync("virsh", $"start {vmId}", ct);
-        }
-        else
-        {
-            var command = force ? "reset" : "reboot";
-            result = await _executor.ExecuteAsync("virsh", $"{command} {vmId}", ct);
-        }
+        var alreadyOff = result.StandardError.Contains("not running", StringComparison.OrdinalIgnoreCase);
 
-        if (result.Success || result.StandardError.Contains("already active"))
+        if (result.Success || alreadyOff)
         {
-            if (_vms.TryGetValue(vmId, out var restarted))
+            if (_vms.TryGetValue(vmId, out var stopped))
             {
-                restarted.Status = VmStatus.Provisioning;
-                restarted.StartedAt = DateTime.UtcNow;
-                // Persist state change
-                await _repository.UpdateVmStateAsync(vmId, VmStatus.Provisioning);
+                // shutdown is asynchronous (guest ACPI) — leave Stopping and let the
+                // heartbeat confirm Stopped. destroy is immediate — mark Stopped now.
+                var newStatus = force ? VmStatus.Stopped : VmStatus.Stopping;
+                stopped.Status = newStatus;
+                if (newStatus == VmStatus.Stopped) stopped.StoppedAt = DateTime.UtcNow;
+                await _repository.UpdateVmStateAsync(vmId, newStatus);
             }
-            return VmOperationResult.Ok(vmId, VmStatus.Running);
+            return VmOperationResult.Ok(vmId, force ? VmStatus.Stopped : VmStatus.Stopping);
         }
-        _logger.LogError("Failed to restart VM {VmId}: {Error}", vmId, result.StandardError);
-        return VmOperationResult.Fail(vmId, result.StandardError, "RESTART_FAILED");
+
+        _logger.LogError("Failed to stop VM {VmId}: {Error}", vmId, result.StandardError);
+        return VmOperationResult.Fail(vmId, result.StandardError, "STOP_FAILED");
     }
 
     public async Task<VmOperationResult> RestartVmAsync(string vmId, bool force = false, CancellationToken ct = default)
