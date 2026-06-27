@@ -1,7 +1,6 @@
 using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Models;
-using DeCloud.NodeAgent.Infrastructure.Docker;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
@@ -26,7 +25,6 @@ public class CommandProcessorService : BackgroundService
     private readonly ConcurrentQueue<PendingCommand> _pushedCommands;
     private readonly IVmManager _vmManager;
     private readonly GpuProxyService _gpuProxy;
-    private readonly DockerContainerManager _dockerManager;
     private readonly IVmDeploymentPipeline _pipeline;
     private readonly IResourceDiscoveryService _resourceDiscovery;
     private readonly INatRuleManager _natRuleManager;
@@ -65,7 +63,6 @@ public class CommandProcessorService : BackgroundService
         ConcurrentQueue<PendingCommand> pushedCommands,
         IVmManager vmManager,
         GpuProxyService gpuProxy,
-        DockerContainerManager dockerManager,
         IVmDeploymentPipeline pipeline,
         IResourceDiscoveryService resourceDiscovery,
         INatRuleManager natRuleManager,
@@ -83,7 +80,6 @@ public class CommandProcessorService : BackgroundService
         _pushedCommands = pushedCommands;
         _vmManager = vmManager;
         _gpuProxy = gpuProxy;
-        _dockerManager = dockerManager;
         _pipeline = pipeline;
         _resourceDiscovery = resourceDiscovery;
         _natRuleManager = natRuleManager;
@@ -535,9 +531,7 @@ public class CommandProcessorService : BackgroundService
         // the manager) leaks abstraction.
         if (result.Success)
         {
-            IVmManager manager = deploymentMode == DeploymentMode.Container
-                ? _dockerManager
-                : _vmManager;
+            IVmManager manager = _vmManager;
 
             var vm = (manager.GetAllVms()).FirstOrDefault(v => v.VmId == vmId);
             if (vm != null)
@@ -780,10 +774,6 @@ public class CommandProcessorService : BackgroundService
     /// </summary>
     private async Task<IVmManager> ResolveManagerForVmAsync(string vmId, CancellationToken ct)
     {
-        // Check Docker manager first (faster, in-memory lookup)
-        var dockerVm = await _dockerManager.GetVmAsync(vmId, ct);
-        if (dockerVm != null) return _dockerManager;
-
         // Default to libvirt VM manager
         return _vmManager;
     }

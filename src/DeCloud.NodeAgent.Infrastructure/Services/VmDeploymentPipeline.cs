@@ -1,6 +1,5 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
 using DeCloud.NodeAgent.Core.Models;
-using DeCloud.NodeAgent.Infrastructure.Docker;
 using DeCloud.Shared.Enums;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Logging;
@@ -37,18 +36,15 @@ public class VmDeploymentPipeline : IVmDeploymentPipeline
 {
     private readonly IArtifactCacheService _artifactCache;
     private readonly IVmManager _vmManager;
-    private readonly DockerContainerManager _dockerManager;
     private readonly ILogger<VmDeploymentPipeline> _logger;
 
     public VmDeploymentPipeline(
         IArtifactCacheService artifactCache,
         IVmManager vmManager,
-        DockerContainerManager dockerManager,
         ILogger<VmDeploymentPipeline> logger)
     {
         _artifactCache = artifactCache;
         _vmManager = vmManager;
-        _dockerManager = dockerManager;
         _logger = logger;
     }
 
@@ -98,9 +94,7 @@ public class VmDeploymentPipeline : IVmDeploymentPipeline
         }
 
         // ── Step 5 — dispatch ───────────────────────────────────────────
-        IVmManager manager = spec.DeploymentMode == DeploymentMode.Container
-            ? _dockerManager
-            : _vmManager;
+        IVmManager manager = _vmManager;
 
         return await manager.CreateVmAsync(spec, password, ct);
     }

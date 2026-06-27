@@ -5,7 +5,6 @@ using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Interfaces.UserNetwork;
 using DeCloud.Shared.Json;
 using DeCloud.NodeAgent.Core.Settings;
-using DeCloud.NodeAgent.Infrastructure.Docker;
 using DeCloud.NodeAgent.Infrastructure.Libvirt;
 using DeCloud.NodeAgent.Infrastructure.Network;
 using DeCloud.NodeAgent.Infrastructure.Network.UserNetwork;
@@ -287,11 +286,6 @@ builder.Services.AddSingleton<IVmManager>(sp => sp.GetRequiredService<LibvirtVmM
 // GPU Proxy Service (host-side daemon for proxied GPU access via vsock)
 // =====================================================
 builder.Services.AddSingleton<GpuProxyService>();
-
-// =====================================================
-// Docker Container Manager (GPU sharing for WSL2/non-IOMMU nodes)
-// =====================================================
-builder.Services.AddSingleton<DockerContainerManager>();
 
 // =====================================================
 // Unified VM deploy pipeline (P2.5).
