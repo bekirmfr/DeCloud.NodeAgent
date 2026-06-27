@@ -102,7 +102,16 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                             }
 
                             var timeSinceLastHeartbeat = DateTime.UtcNow - vm.LastHeartbeat;
-                            if (vm.IsFullyReady && timeSinceLastHeartbeat > TimeSpan.FromMinutes(5))
+                            // Only reboot a VM whose libvirt domain is actually Running — a
+                            // hung guest (domain up, guest-agent silent). A Stopped domain with
+                            // a stale heartbeat was stopped deliberately (owner/admin) or
+                            // crashed; whether it should run again is desired-state the
+                            // orchestrator owns, not something the node may decide by issuing
+                            // virsh start. ReconcileAllWithLibvirtAsync (top of this loop) keeps
+                            // vm.Status fresh from libvirt, so this reflects the real domain
+                            // state.
+                            if (vm.Status == Shared.Enums.VmStatus.Running &&
+                                vm.IsFullyReady && timeSinceLastHeartbeat > TimeSpan.FromMinutes(5))
                             {
 
                                 _logger.LogWarning(
