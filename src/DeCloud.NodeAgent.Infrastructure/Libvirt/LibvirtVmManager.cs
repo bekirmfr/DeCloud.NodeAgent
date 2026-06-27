@@ -1225,6 +1225,12 @@ public class LibvirtVmManager : IVmManager
             }
         }
 
+        if (instance.ComplianceHold)
+        {
+            _logger.LogWarning("Refusing to start VM {VmId} — administratively held", vmId);
+            return VmOperationResult.Fail(vmId, "VM is administratively held", "VM_HELD");
+        }
+
         _logger.LogInformation("Starting VM {VmId}", vmId);
 
         var result = await _executor.ExecuteAsync("virsh", $"start {vmId}", ct);
@@ -1237,11 +1243,52 @@ public class LibvirtVmManager : IVmManager
             // NEW: Persist state change
             await _repository.UpdateVmStateAsync(vmId, VmStatus.Running);
 
+            // A started VM should survive a host/libvirtd restart. Re-enable autostart
+            // (idempotent) — also restores it for a VM whose autostart was disabled while
+            // it was under a compliance hold.
+            await _executor.ExecuteAsync("virsh", $"autostart {vmId}", ct);
+
             return VmOperationResult.Ok(vmId, VmStatus.Running);
         }
 
         _logger.LogError("Failed to start VM {VmId}: {Error}", vmId, result.StandardError);
         return VmOperationResult.Fail(vmId, result.StandardError, "START_FAILED");
+    }
+
+    public async Task<bool> SetAutostartAsync(string vmId, bool enabled, CancellationToken ct = default)
+    {
+        var args = enabled ? $"autostart {vmId}" : $"autostart --disable {vmId}";
+        var result = await _executor.ExecuteAsync("virsh", args, ct);
+        if (result.Success)
+        {
+            _logger.LogInformation("VM {VmId} autostart {State}", vmId, enabled ? "enabled" : "disabled");
+            return true;
+        }
+        _logger.LogWarning(
+            "Failed to set autostart={Enabled} for VM {VmId}: {Error}",
+            enabled, vmId, result.StandardError);
+        return false;
+    }
+
+    public async Task<bool> SetComplianceHoldAsync(string vmId, bool held, CancellationToken ct = default)
+    {
+        if (!_vms.TryGetValue(vmId, out var vm))
+        {
+            vm = await _repository.LoadVmAsync(vmId);
+            if (vm == null) return false;
+            _vms[vmId] = vm;
+        }
+
+        if (vm.ComplianceHold != held)
+        {
+            vm.ComplianceHold = held;
+            await _repository.SaveVmAsync(vm);
+            _logger.LogInformation("VM {VmId} compliance hold {State}", vmId, held ? "set" : "lifted");
+        }
+
+        // Held → no autostart (host restart won't revive it). Released → restore.
+        await SetAutostartAsync(vmId, enabled: !held, ct);
+        return true;
     }
 
     public async Task<VmOperationResult> StopVmAsync(string vmId, bool force = false, CancellationToken ct = default)
@@ -1299,6 +1346,13 @@ public class LibvirtVmManager : IVmManager
     public async Task<VmOperationResult> RestartVmAsync(string vmId, bool force = false, CancellationToken ct = default)
     {
         if (!_initialized) await InitializeAsync(ct);
+
+        if (_vms.TryGetValue(vmId, out var heldCheck) && heldCheck.ComplianceHold)
+        {
+            _logger.LogWarning("Refusing to restart VM {VmId} — administratively held", vmId);
+            return VmOperationResult.Fail(vmId, "VM is administratively held", "VM_HELD");
+        }
+
         _logger.LogInformation("Restarting VM {VmId} (force={Force})", vmId, force);
         // virsh reset/reboot only works on running domains.
         // For stopped domains (defined but not started), use virsh start instead.

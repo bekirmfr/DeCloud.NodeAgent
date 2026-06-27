@@ -68,8 +68,9 @@ public partial class OrchestratorClient : IOrchestratorClient
     public string? NodeId => _nodeId;
     public string? WalletAddress => _walletAddress;
 
-    // Compliance: held VM IDs from the latest heartbeat response (informational).
-    private IReadOnlyCollection<string> _heldVmIds = Array.Empty<string>();
+    // Compliance: held VM IDs from the latest heartbeat response. Drives the dashboard
+    // badge and libvirt autostart (held VMs must not auto-start on a host restart).
+    private HashSet<string> _heldVmIds = new();
     public IReadOnlyCollection<string> HeldVmIds => _heldVmIds;
 
     public OrchestratorClient(
@@ -1194,13 +1195,24 @@ REGISTERED_AT={DateTime.UtcNow:O}";
                 }
             }
 
-            // ── Compliance holds (informational) ───────────────────────────────
-            // Surfaced on the node dashboard so the operator knows these VMs are held
-            // centrally. The node takes NO action — the orchestrator force-stops held
-            // VMs and re-enforces them on every heartbeat.
-            _heldVmIds = data.HeldVmIds is { Count: > 0 }
+            // ── Compliance holds ───────────────────────────────────────────────
+            // Surfaced on the node dashboard, and used to disable libvirt autostart for
+            // held VMs so a host/libvirtd restart (e.g. 'decloud update') does not bring
+            // them back up while the orchestrator is down and can't re-enforce. Diffed so
+            // virsh runs only on change. The orchestrator still owns start/stop.
+            var newHeld = data.HeldVmIds is { Count: > 0 }
                 ? new HashSet<string>(data.HeldVmIds)
-                : Array.Empty<string>();
+                : new HashSet<string>();
+            var previousHeld = _heldVmIds;
+            _heldVmIds = newHeld;
+
+            foreach (var heldId in newHeld)
+                if (!previousHeld.Contains(heldId))
+                    await _vmManager.SetComplianceHoldAsync(heldId, true, ct);    // newly held
+
+            foreach (var releasedId in previousHeld)
+                if (!newHeld.Contains(releasedId))
+                    await _vmManager.SetComplianceHoldAsync(releasedId, false, ct); // released
 
             // ── Settings drift warning ─────────────────────────────────────────
             if (data.SettingsDrift is not null)

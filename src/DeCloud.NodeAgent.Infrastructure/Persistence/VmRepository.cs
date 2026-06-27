@@ -25,7 +25,7 @@ public class VmRepository : IDisposable
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly bool _encrypted;
 
-    private const int CURRENT_SCHEMA_VERSION = 8; // Incremented when schema changes
+    private const int CURRENT_SCHEMA_VERSION = 9; // Incremented when schema changes
 
     public VmRepository(string databasePath, ILogger logger, string? encryptionKey = null)
     {
@@ -182,7 +182,8 @@ public class VmRepository : IDisposable
                 LabelsJson TEXT,
                 TargetNodeId TEXT,
                 DeletionReason TEXT,
-                CrashJournal TEXT
+                CrashJournal TEXT,
+                ComplianceHold INTEGER NOT NULL DEFAULT 0
             );
             
             CREATE INDEX IF NOT EXISTS idx_tenant ON VmRecords(OwnerId);
@@ -207,7 +208,15 @@ public class VmRepository : IDisposable
         using var transaction = _connection.BeginTransaction();
         try
         {
-            // Add migration function calls here.
+            // v9: persisted compliance hold so the suspend gate survives restarts.
+            if (fromVersion < 9)
+            {
+                using var c = _connection.CreateCommand();
+                c.Transaction = transaction;
+                c.CommandText =
+                    "ALTER TABLE VmRecords ADD COLUMN ComplianceHold INTEGER NOT NULL DEFAULT 0";
+                c.ExecuteNonQuery();
+            }
 
             transaction.Commit();
         }
@@ -234,20 +243,21 @@ public class VmRepository : IDisposable
                  State, IpAddress, MacAddress, VncPort, Pid,
                  CreatedAt, StartedAt, StoppedAt, LastUpdated, DiskPath, ConfigPath,
                  BaseImageUrl, BaseImageHash, SshPublicKey, EncryptedPassword,
-                 Category, Role, LabelsJson, TargetNodeId)
+                 Category, Role, LabelsJson, TargetNodeId, ComplianceHold)
                 VALUES
                 (@VmId, @Name, @ServicesJson, @OwnerId, @QualityTier, @ReplicationFactor, @ComputePointCost,
                  @VirtualCpuCores, @MemoryBytes, @DiskBytes,
                  @State, @IpAddress, @MacAddress, @VncPort, @Pid,
                  @CreatedAt, @StartedAt, @StoppedAt, @LastUpdated, @DiskPath, @ConfigPath,
                  @BaseImageUrl, @BaseImageHash, @SshPublicKey, @EncryptedPassword,
-                 @Category, @Role, @LabelsJson, @TargetNodeId)
+                 @Category, @Role, @LabelsJson, @TargetNodeId, @ComplianceHold)
             ";
 
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = sql;
 
             cmd.Parameters.AddWithValue("@VmId", vm.VmId);
+            cmd.Parameters.AddWithValue("@ComplianceHold", vm.ComplianceHold ? 1 : 0);
             cmd.Parameters.AddWithValue("@Name", vm.Name);
             cmd.Parameters.AddWithValue("@ServicesJson",
                 vm.Services.Count > 0 ? JsonSerializer.Serialize(vm.Services) : "[]");
@@ -684,6 +694,7 @@ public class VmRepository : IDisposable
                     TargetNodeId = GetNullableString(reader, "TargetNodeId")
                 },
                 Status = Enum.Parse<VmStatus>(reader.GetString(reader.GetOrdinal("State"))),
+                ComplianceHold = GetNullableInt(reader, "ComplianceHold") == 1,
                 VncPort = GetNullableInt(reader, "VncPort"),
                 Pid = GetNullableInt(reader, "Pid"),
                 CreatedAt = DateTime.Parse(reader.GetString(reader.GetOrdinal("CreatedAt"))),

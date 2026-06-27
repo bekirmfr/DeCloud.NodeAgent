@@ -623,6 +623,9 @@ public class CommandProcessorService : BackgroundService
         if (string.IsNullOrEmpty(vmId)) return false;
 
         var manager = await ResolveManagerForVmAsync(vmId, ct);
+        // Authoritative start: the orchestrator refuses StartVm while held, so this command
+        // means the hold is lifted. Clear it first so the manager gate lets the start through.
+        await manager.SetComplianceHoldAsync(vmId, false, ct);
         _logger.LogInformation("Starting VM {VmId}", vmId);
         var result = await manager.StartVmAsync(vmId, ct);
         return result.Success;

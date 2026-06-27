@@ -94,7 +94,7 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
                             // design — restarting it just fights the hold (the orchestrator
                             // force-stops it again on the next heartbeat), producing a
                             // start/stop loop. The orchestrator owns the held VM's run state.
-                            if (_orchestratorClient.HeldVmIds.Contains(vm.VmId))
+                            if (vm.ComplianceHold)
                             {
                                 _logger.LogDebug(
                                     "VM {VmId} is administratively held — skipping health restart", vm.VmId);

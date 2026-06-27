@@ -167,6 +167,12 @@ public class VmInstance
     public VmCategory Category { get; set; } = VmCategory.Tenant;
     public VmRole Role { get; set; } = VmRole.General;
     public VmStatus Status { get; set; }
+    /// <summary>
+    /// Administrative compliance hold, mirrored from the orchestrator's HeldVmIds.
+    /// Persisted so it survives node restarts and is known before the first heartbeat.
+    /// While true the VM manager refuses to start/restart this VM.
+    /// </summary>
+    public bool ComplianceHold { get; set; }
     public VmSpec Spec { get; set; } = new();
 
     /// <summary>

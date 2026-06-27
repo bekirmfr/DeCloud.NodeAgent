@@ -73,6 +73,20 @@ public interface IVmManager
     Task<VmResourceUsage> GetVmUsageAsync(string vmId, CancellationToken ct = default);
     Task ReconcileAllWithLibvirtAsync(CancellationToken ct = default);
     Task<bool> VmExistsAsync(string vmId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Enable or disable libvirt autostart for a VM's domain (persisted). Held VMs get
+    /// autostart disabled so a host/libvirtd restart does not bring them back up while
+    /// the orchestrator is unavailable to re-enforce the hold.
+    /// </summary>
+    Task<bool> SetAutostartAsync(string vmId, bool enabled, CancellationToken ct = default);
+
+    /// <summary>
+    /// Set/clear the persisted compliance hold. Held VMs are refused by Start/Restart and
+    /// have libvirt autostart disabled, so neither a background actor nor a host restart
+    /// can revive them. Released VMs get autostart restored.
+    /// </summary>
+    Task<bool> SetComplianceHoldAsync(string vmId, bool held, CancellationToken ct = default);
     Task<string?> GetVmIpAddressAsync(string vmId, CancellationToken ct = default);
     /// <summary>
     /// Apply CPU quota cap to a running VM
