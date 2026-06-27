@@ -160,6 +160,12 @@ public class LazysyncDaemon : BackgroundService
         var vms = _vmManager.GetRunningVms()
             .Where(v => v.Spec.ReplicationFactor > 0 &&
                         v.Spec.Role == VmRole.General &&
+                        // A held VM must not be replicated. It is force-stopped on hold,
+                        // so it normally drops out of GetRunningVms() anyway — but the
+                        // stop lags the hold flag by one command round-trip, and we must
+                        // not push (nor, for a content hold, keep spreading) its blocks in
+                        // that window. Explicit guard — does not rely on the stop landing.
+                        !v.ComplianceHold &&
                         v.IsFullyReady)  // wait for cloud-init + guest agent
             .ToList();
 
