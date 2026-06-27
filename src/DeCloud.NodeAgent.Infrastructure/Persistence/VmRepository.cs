@@ -106,12 +106,31 @@ public class VmRepository : IDisposable
             _logger.LogWarning("Database schema outdated (v{Current}). Migrating to v{Target}...",
                 currentVersion, CURRENT_SCHEMA_VERSION);
             MigrateSchema(currentVersion, CURRENT_SCHEMA_VERSION);
+            SetSchemaVersion(CURRENT_SCHEMA_VERSION);
             _logger.LogInformation("✓ Database schema migrated successfully to v{Version}", CURRENT_SCHEMA_VERSION);
         }
         else
         {
             _logger.LogDebug("Database schema is up to date (v{Version})", currentVersion);
         }
+    }
+
+    /// <summary>
+    /// Whether a column exists on a table. Keeps ADD COLUMN migrations idempotent.
+    /// Table name is an internal literal, never user input — no injection surface.
+    /// </summary>
+    private bool ColumnExists(string table, string column)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = $"PRAGMA table_info({table})";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            if (string.Equals(reader.GetString(reader.GetOrdinal("name")), column,
+                    StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
     }
 
     /// <summary>
@@ -209,7 +228,8 @@ public class VmRepository : IDisposable
         try
         {
             // v9: persisted compliance hold so the suspend gate survives restarts.
-            if (fromVersion < 9)
+            // Guarded so a re-run, or a DB that already has the column, is a no-op.
+            if (fromVersion < 9 && !ColumnExists("VmRecords", "ComplianceHold"))
             {
                 using var c = _connection.CreateCommand();
                 c.Transaction = transaction;
