@@ -509,10 +509,13 @@ public class VmReadinessMonitor : BackgroundService
             case CheckType.HttpGet:
                 path = "/usr/bin/curl";
                 var url = $"http://localhost:{service.Port}{service.HttpPath ?? "/"}";
-                // -s: silent (no progress bar). No -f: any HTTP response means
-                // the service is running. No -o /dev/null: response body is
-                // captured by guest-exec so it can be read on failure for diagnostics.
-                args = new[] { "-s", "-m", "5", url };
+                // -s: silent (no progress bar). --fail-with-body: a non-2xx/3xx
+                // response is a FAILED check (exit 22) — a reverse proxy answering
+                // 502 for a dead upstream must not read as Ready (ai-chatbot nginx
+                // → Open WebUI). Unlike plain -f, the response body is still
+                // emitted, so guest-exec captures it for diagnostics on failure.
+                // Requires curl >= 7.76 (Ubuntu 22.04 ships 7.81).
+                args = new[] { "-s", "-m", "5", "--fail-with-body", url };
                 break;
 
             case CheckType.ExecCommand:
