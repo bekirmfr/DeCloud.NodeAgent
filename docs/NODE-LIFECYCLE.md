@@ -891,22 +891,32 @@ locality has changed, the orchestrator:
 1. Validates the new locality (country in `countries.json`, region in
    `regions.json`)
 2. Verifies wallet signature over canonical message
-3. Walks all running tenant VMs on this node. For each VM with
-   `spec.Constraints`, evaluates every constraint against the node's
-   new locality using the same `IConstraintEvaluator` that FILTER 10
-   uses at scheduling time. This covers jurisdiction tags, country
-   requirements, region filtering, and any other constraint the tenant
-   specified — one evaluator, one answer.
+3. Walks all running tenant VMs on this node and evaluates each VM's
+   **authored constraints** (`spec.Constraints`) and its **derived
+   constraints** (`DerivedConstraints.Derive(spec)` — quality tier,
+   GPU mode, replication) against the node's current state, using the
+   same `IConstraintEvaluator` that FILTER 10 uses at scheduling time.
+   This covers jurisdiction tags, country requirements, region
+   filtering, any other constraint the tenant specified, *and* the
+   requirements the tenant never had to write — one evaluator, one
+   answer, for scheduling and compliance alike.
 4. For each non-compliant VM:
    - Sets `VirtualMachine.NonCompliantSince` and `NonComplianceReason`
    - Migration scheduler picks them up on next cycle and moves them
      to compliant nodes
 5. Returns the registration response with the list of flagged VMs
 
-VMs without constraints are always compliant — they placed no
-locality demands at creation time. System VMs (Relay, DHT,
-BlockStore) are never compliance-checked — they are
-orchestrator-controlled infrastructure, not tenant workloads.
+A VM with no authored constraints is **not** automatically compliant —
+its spec fields still carry derived requirements (every VM derives at
+least the tier requirement), so a node re-registering with changed
+capabilities (e.g. its GPUs removed from the hardware inventory) flags
+its GPU VMs even if their tenants authored nothing. Authored
+constraints are evaluated first (existing failure messages stay
+byte-identical); derived failures are labeled by their origin field —
+`Derived from GpuMode=Proxied: ...` — never by an index into a list the
+tenant never wrote. System VMs (Relay, DHT, BlockStore) are never
+compliance-checked — they are orchestrator-controlled infrastructure,
+not tenant workloads.
 
 The operator sees:
 
@@ -1087,9 +1097,11 @@ Implementation status by tier:
 - `VirtualMachine.NonCompliantSince` (DateTime?) and
   `NonComplianceReason` (string?) fields
 - `FlagNonCompliantVmsAsync` in `NodeService` — walks running tenant
-  VMs, evaluates `spec.Constraints` against new node locality using
-  `IConstraintEvaluator` (same evaluator as FILTER 10; no parallel
-  bespoke field checks)
+  VMs, evaluates authored `spec.Constraints` plus derived constraints
+  (`DerivedConstraints.Derive`: tier, GPU mode, replication) against
+  the node's current state using `IConstraintEvaluator` (same evaluator
+  and same derivation as FILTER 10; no parallel bespoke field checks,
+  no "no constraints ⇒ always compliant" early exit)
 - Called in `RegisterNodeAsync` after node save, only on
   re-registration with locality change
 - `NodeRegistrationResponse` extended with `NonCompliantVms`
