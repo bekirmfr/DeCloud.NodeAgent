@@ -2239,22 +2239,20 @@ static int handle_event_elapsed_time(ConnectionCtx *ctx, const void *payload, ui
 
 static int handle_set_memory_quota(ConnectionCtx *ctx, const void *payload, uint32_t len)
 {
-    if (len < sizeof(GpuSetMemoryQuotaRequest)) {
-        return send_response(ctx->fd, GPU_CMD_SET_MEMORY_QUOTA, -1, NULL, 0);
-    }
+    (void)payload; (void)len;
 
-    GpuSetMemoryQuotaRequest req;
-    memcpy(&req, payload, sizeof(req));
-
-    ctx->memory_quota = req.quota_bytes;
-
-    LOG_INFO("CID %u: memory quota set to %lu bytes (%lu MB)%s",
-             ctx->peer_cid,
-             (unsigned long)req.quota_bytes,
-             (unsigned long)(req.quota_bytes / (1024 * 1024)),
-             req.quota_bytes == 0 ? " (unlimited)" : "");
-
-    return send_response(ctx->fd, GPU_CMD_SET_MEMORY_QUOTA, 0, NULL, 0);
+    /* DENIED unconditionally. Quota's single source of truth is the host-side
+     * token/CID registry, resolved at HELLO (see Session 21-22). This verb
+     * arrives on the tenant's own shim connection — honoring it would let a
+     * guest raise or clear its own VRAM quota (quota_bytes=0 = unlimited),
+     * bypassing per-tenant enforcement and the MEM_GET_INFO clamp. No shim or
+     * node-agent sender exists; the verb is a pre-registry remnant kept only
+     * for wire compatibility. Logged as a security event: any occurrence in
+     * production is a guest probing the protocol. */
+    LOG_ERR("CID %u VM %s: SET_MEMORY_QUOTA DENIED — quota is host-controlled "
+            "(registry); in-guest quota modification attempt",
+            ctx->peer_cid, ctx->vm_id[0] ? ctx->vm_id : "unknown");
+    return send_response(ctx->fd, GPU_CMD_SET_MEMORY_QUOTA, -1, NULL, 0);
 }
 
 static int handle_get_usage_stats(ConnectionCtx *ctx)
@@ -2338,15 +2336,30 @@ static int handle_ctx_create(int fd, const void *payload, uint32_t len)
                          (int32_t)err, &resp, sizeof(resp));
 }
 
-static int handle_mem_get_info(int fd)
+static int handle_mem_get_info(ConnectionCtx *ctx)
 {
     size_t free_mem = 0, total_mem = 0;
     cudaError_t err = cudaMemGetInfo(&free_mem, &total_mem);
+
+    /* Present the tenant's quota as the device capacity (MIG semantics).
+     * Planners (Ollama's offload estimator via NVML, ggml via cuMemGetInfo)
+     * must see the same boundary handle_malloc enforces — otherwise they
+     * plan loads that enforcement kills mid-load ("it said it fits").
+     * Also closes a side channel: physical `free` is a live gauge of
+     * co-tenant VRAM activity. quota==0 (unlimited) keeps raw values. */
+    if (err == cudaSuccess && ctx->memory_quota > 0) {
+        uint64_t vm_used = quota_vm_total(ctx->vm_id);
+        uint64_t q       = ctx->memory_quota;
+        uint64_t q_free  = (vm_used < q) ? (q - vm_used) : 0;
+        if ((uint64_t)total_mem > q)      total_mem = (size_t)q;
+        if ((uint64_t)free_mem  > q_free) free_mem  = (size_t)q_free;
+    }
+
     GpuMemInfoResponse resp = {
         .free  = (uint64_t)free_mem,
         .total = (uint64_t)total_mem,
     };
-    return send_response(fd, GPU_CMD_MEM_GET_INFO,
+    return send_response(ctx->fd, GPU_CMD_MEM_GET_INFO,
                          (int32_t)err, &resp, sizeof(resp));
 }
 
@@ -2544,7 +2557,7 @@ static void *connection_handler(void *arg)
             rc = handle_ctx_create(fd, buf, hdr.payload_len);
             break;
         case GPU_CMD_MEM_GET_INFO:
-            rc = handle_mem_get_info(fd);
+            rc = handle_mem_get_info(ctx);
             break;
         case GPU_CMD_CTX_DESTROY:
             rc = handle_ctx_destroy(fd);
