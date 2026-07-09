@@ -19,6 +19,7 @@ using DeCloud.NodeAgent.Services;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
+using DeCloud.NodeAgent.Infrastructure.Services.Compliance;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -342,6 +343,12 @@ builder.Services.AddHostedService<VmReadinessMonitor>();
 
 // Auto-start GPU proxy daemon on non-IOMMU nodes with GPUs
 builder.Services.AddHostedService<GpuProxyStartupService>();
+
+// CSAM scanner seam (Phase 6 pass 1, Decisions 1/9/15) — honest null
+// implementation until the real matcher (Microsoft CSAM Matching API) is
+// wired. Enabled=false ⇒ every VM's scan state records NotScanned, never
+// Clean, and no external surface may claim scanning coverage.
+builder.Services.AddSingleton<ICsamScanner, NullCsamScanner>();
 
 // Lazysync daemon — continuous overlay disk replication to local BlockStore VM
 builder.Services.AddSingleton<IQmpClient, QmpClient>();

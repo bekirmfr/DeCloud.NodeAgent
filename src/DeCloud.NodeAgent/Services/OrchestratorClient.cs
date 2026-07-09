@@ -415,8 +415,6 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         };
     }
 
-
-
     public async Task<bool> LoginAsync(CancellationToken ct = default)
     {
         if (!_nodeState.IsAuthenticated || string.IsNullOrEmpty(_nodeId))
@@ -484,8 +482,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
     /// store for inclusion in the registration request.
     /// Allows the orchestrator to skip sending states the node already has.
     /// </summary>
-    private async Task<Dictionary<string, int>> BuildObligationStateVersionsAsync(
-        CancellationToken ct)
+    private async Task<Dictionary<string, int>> BuildObligationStateVersionsAsync(CancellationToken ct)
     {
         var roles = new[] { "relay", "dht", "blockstore" };
         var versions = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -518,8 +515,7 @@ REGISTERED_AT={DateTime.UtcNow:O}";
     /// appropriate for this node's architecture.
     /// Errors are logged but do not fail registration.
     /// </summary>
-    private async Task TriggerArtifactPrefetchAsync(
-        string role, string templateJson, CancellationToken ct)
+    private async Task TriggerArtifactPrefetchAsync(string role, string templateJson, CancellationToken ct)
     {
         try
         {
@@ -1434,6 +1430,41 @@ REGISTERED_AT={DateTime.UtcNow:O}";
         catch (Exception ex)
         {
             _logger.LogError(ex, "RegisterManifest error for VM {VmId}", vmId);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Phase 6: report a CSAM hash match. POST /api/compliance/csam-report.
+    /// </summary>
+    public async Task<bool> ReportCsamMatchAsync(
+        string vmId,
+        string matchedFileHash,
+        string? dbSource,
+        DateTime detectedAt,
+        CancellationToken ct = default)
+    {
+        if (!_nodeState.IsAuthenticated) return false;
+
+        try
+        {
+            var response = await _httpClient.PostAsJsonAsync(
+                "/api/compliance/csam-report",
+                new { vmId, matchedFileHash, dbSource, detectedAt },
+                JsonOptions.Wire, ct);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "csam-report failed for VM {VmId}: HTTP {Status}",
+                    vmId, response.StatusCode);
+                return false;
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "csam-report error for VM {VmId}", vmId);
             return false;
         }
     }

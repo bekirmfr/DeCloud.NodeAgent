@@ -18,7 +18,8 @@ namespace DeCloud.NodeAgent.Services;
 /// BlockStore VM via the lazysync protocol.
 ///
 /// Cycle (every 5 minutes, 5 minute startup delay):
-///   For each Running tenant VM with ReplicationFactor > 0:
+///   For each Running tenant VM (ALL replication factors — Decision 15;
+///   the RF>0 condition gates only the replication tail, steps 2–7):
 ///   1. Take a coherent point-in-time snapshot via blockdev-snapshot-sync
 ///      inside a guest-fsfreeze envelope:
 ///         a. fsfreeze — guest page cache flushed, no writes in flight
@@ -74,6 +75,11 @@ public class LazysyncDaemon : BackgroundService
 {
     private static readonly TimeSpan CycleInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan StartupDelay = TimeSpan.FromMinutes(5);
+    // Per-VM scan budget within a cycle. Merge-back is the deadline (plan
+    // §3.1): a scan that exceeds this defers the cycle for that VM (retry
+    // next round) rather than holding the frozen disk open. Deliberately
+    // below CycleInterval.
+    private static readonly TimeSpan CsamScanBudget = TimeSpan.FromMinutes(4);
     private const int BlockSizeBytes = 1024 * 1024; // 1 MB
     private const int BlockSizeKb = 1024;
     private const long SparseScanThreshold = 65536; // -S value for qemu-img convert
@@ -103,6 +109,7 @@ public class LazysyncDaemon : BackgroundService
     private readonly IOrchestratorClient _orchestratorClient;
     private readonly LibvirtVmManagerOptions _vmOptions;
     private readonly IQmpClient _qmpClient;
+    private readonly ICsamScanner _csamScanner;
     private readonly HttpClient _blockstoreClient;
     private readonly ILogger<LazysyncDaemon> _logger;
 
@@ -115,6 +122,7 @@ public class LazysyncDaemon : BackgroundService
         IOrchestratorClient orchestratorClient,
         IOptions<LibvirtVmManagerOptions> vmOptions,
         IQmpClient qmpClient,
+        ICsamScanner csamScanner,
         HttpClient blockstoreClient,
         ILogger<LazysyncDaemon> logger)
     {
@@ -123,6 +131,7 @@ public class LazysyncDaemon : BackgroundService
         _orchestratorClient = orchestratorClient;
         _vmOptions = vmOptions.Value;
         _qmpClient = qmpClient;
+        _csamScanner = csamScanner;
         _blockstoreClient = blockstoreClient;
         _logger = logger;
     }
@@ -150,16 +159,20 @@ public class LazysyncDaemon : BackgroundService
 
     private async Task RunCycleAsync(CancellationToken ct)
     {
+        // Decision 15: the cycle no longer requires a local BlockStore VM.
+        // Scanning is universal; only the replication tail needs the
+        // blockstore. A missing blockstore defers replication (RF>0 VMs skip
+        // their push this cycle and retry) but must never skip the scan —
+        // otherwise a safety property would ride a storage dependency.
         var blockstoreAddr = await FindBlockstoreApiAsync(ct);
-        if (blockstoreAddr == null)
-        {
-            _logger.LogDebug("LazysyncDaemon: no local BlockStore VM running — skipping cycle");
-            return;
-        }
 
         var vms = _vmManager.GetRunningVms()
-            .Where(v => v.Spec.ReplicationFactor > 0 &&
+            .Where(v => // Decision 15: ALL tenant VMs enroll, RF=0 included —
+                        // the ReplicationFactor>0 condition moved to the
+                        // replication tail inside SyncVmAsync. Containers are
+                        // out of the node-FS scan surface (no qcow2 overlay).
                         v.Spec.Role == VmRole.General &&
+                        v.Spec.DeploymentMode != DeploymentMode.Container &&
                         // A held VM must not be replicated. It is force-stopped on hold,
                         // so it normally drops out of GetRunningVms() anyway — but the
                         // stop lags the hold flag by one command round-trip, and we must
@@ -210,6 +223,7 @@ public class LazysyncDaemon : BackgroundService
 
         string? newOverlayNode = null;
         var appArmorGranted = false;
+        var overlayMerged = false;
 
         try
         {
@@ -260,6 +274,42 @@ public class LazysyncDaemon : BackgroundService
             _logger.LogInformation(
                 "VM {VmId}: snapshot taken — disk.qcow2 frozen, writes redirected to overlay node={Node}",
                 vm.VmId, newOverlayNode);
+
+            // ── CSAM scan seam (Decisions 9 & 15) ─────────────────────────────────
+            // Runs on the frozen, coherent, plaintext disk.qcow2 — before any
+            // block leaves this node. Gated on the RESULT: only a positive
+            // Match blocks; NotScanned (no matcher wired), Clean, and
+            // Unscannable all proceed. Merge-back for every early return here
+            // is handled by the finally block (single-exit invariant).
+            var scanStage = await RunCsamScanStageAsync(vm, diskPath, state, ct);
+            if (scanStage == CsamStageOutcome.Match)
+            {
+                // Contain at the origin: never push. The orchestrator (told
+                // via csam-report) suspends the VM; the hold preserves the
+                // overlay and excludes the VM from future cycles.
+                return;
+            }
+            if (scanStage == CsamStageOutcome.Deferred)
+            {
+                // Scan didn't finish in budget: publish nothing this cycle,
+                // retry next. Visible as a stalled LazysyncStatus (the
+                // manifest simply doesn't advance) — no new flag.
+                return;
+            }
+
+            // Decision 15: RF=0 VMs are detection-only — no replication tail.
+            if (vm.Spec.ReplicationFactor <= 0)
+                return;
+
+            // The replication tail needs the local blockstore; the scan above
+            // deliberately did not.
+            if (blockstoreAddr == null)
+            {
+                _logger.LogWarning(
+                    "VM {VmId}: no local BlockStore VM — replication deferred this cycle (scan completed)",
+                    vm.VmId);
+                return;
+            }
 
             // ── Step 1.5: Convert frozen disk.qcow2 to flat raw for scanning ──────
             // disk.qcow2 is now open by QEMU as a backing file (read-only, no writes).
@@ -319,7 +369,10 @@ public class LazysyncDaemon : BackgroundService
             // After this call: disk.qcow2 is self-contained and writable by QEMU.
             // Non-fatal: crash-recovery in LibvirtVmManager handles any orphan.
             if (newOverlayNode != null)
+            {
                 await _qmpClient.DeleteSnapshotNodeAsync(vm.VmId, newOverlayNode, newOverlayPath, ct);
+                overlayMerged = true;
+            }
 
             // Step 9: Persist state
             await SaveStateAsync(vm.VmId, state);
@@ -337,6 +390,28 @@ public class LazysyncDaemon : BackgroundService
         }
         finally
         {
+            // Single-exit invariant: any cycle that took a snapshot must merge
+            // the overlay back, or the guest keeps writing to an orphan overlay
+            // while disk.qcow2 stays frozen. Covers the scan-gate returns above,
+            // the "no changed chunks" early return, and exception paths.
+            // CancellationToken.None: a cancelled cycle must still merge (same
+            // reasoning as the FsThawAsync finally). Best-effort — a failure
+            // here falls to LibvirtVmManager crash-recovery, as before.
+            if (newOverlayNode != null && !overlayMerged)
+            {
+                try
+                {
+                    await _qmpClient.DeleteSnapshotNodeAsync(
+                        vm.VmId, newOverlayNode, newOverlayPath, CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "VM {VmId}: merge-back in finally failed — orphan overlay left for crash-recovery",
+                        vm.VmId);
+                }
+            }
+
             // Revoke AppArmor grant for the overlay file regardless of outcome.
             if (appArmorGranted)
                 await _qmpClient.RevokeScratchAppArmorAsync(vm.VmId, newOverlayPath, ct);
@@ -682,6 +757,101 @@ public class LazysyncDaemon : BackgroundService
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // CSAM scan stage (Phase 6 pass 1 — Decisions 9 & 15)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private enum CsamStageOutcome { Proceed, Match, Deferred }
+
+    /// <summary>
+    /// Runs the scanner on the frozen disk and records the outcome truthfully
+    /// in the VM's lazysync state. Returns what the caller must do:
+    /// Proceed (only non-Match outcomes), Match (block the push, report), or
+    /// Deferred (budget overrun — publish nothing, retry next cycle).
+    /// </summary>
+    private async Task<CsamStageOutcome> RunCsamScanStageAsync(
+        VmInstance vm, string frozenDiskPath, LazysyncState state, CancellationToken ct)
+    {
+        // A recorded match from an earlier cycle is terminal for this VM's
+        // pipeline: never push again, and keep retrying the report until the
+        // orchestrator acknowledges it (the suspend will normally arrive and
+        // un-enroll the VM before this matters).
+        if (state.CsamScan.Outcome == CsamOutcome.Match)
+        {
+            if (!state.CsamScan.MatchReported)
+                await TryReportCsamMatchAsync(vm, state, ct);
+            return CsamStageOutcome.Match;
+        }
+
+        CsamScanResult result;
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(CsamScanBudget);
+        try
+        {
+            result = await _csamScanner.ScanAsync(vm.VmId, frozenDiskPath, budget.Token);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // Budget overrun — a scheduling fact, not a content outcome. The
+            // previous scan record stands; nothing is published this cycle.
+            _logger.LogWarning(
+                "VM {VmId}: CSAM scan exceeded budget {Budget} — deferring cycle",
+                vm.VmId, CsamScanBudget);
+            return CsamStageOutcome.Deferred;
+        }
+
+        // Honesty wiring lives HERE, in the caller (handout §6 item 1): with
+        // no matcher wired the recorded state is NotScanned — never Clean —
+        // regardless of what the scanner returned.
+        var outcome = result.Overall;
+        if (!_csamScanner.Enabled && outcome == CsamOutcome.Clean)
+            outcome = CsamOutcome.NotScanned;
+
+        state.CsamScan.Outcome = outcome;
+        state.CsamScan.LastScanAt = DateTime.UtcNow;
+
+        if (outcome == CsamOutcome.Match)
+        {
+            var match = result.Files.FirstOrDefault(f => f.Outcome == CsamOutcome.Match);
+            state.CsamScan.MatchHash = match?.MatchHash;
+            state.CsamScan.MatchDbSource = match?.DbSource;
+            state.CsamScan.MatchReported = false;
+            // Persist BEFORE reporting — a crash between here and the report
+            // must not lose the match record (the next cycle re-enters the
+            // terminal branch above and retries the report).
+            await SaveStateAsync(vm.VmId, state);
+            await TryReportCsamMatchAsync(vm, state, ct);
+            return CsamStageOutcome.Match;
+        }
+
+        await SaveStateAsync(vm.VmId, state);
+        return CsamStageOutcome.Proceed;
+    }
+
+    private async Task TryReportCsamMatchAsync(
+        VmInstance vm, LazysyncState state, CancellationToken ct)
+    {
+        var ok = await _orchestratorClient.ReportCsamMatchAsync(
+            vm.VmId,
+            state.CsamScan.MatchHash ?? string.Empty,
+            state.CsamScan.MatchDbSource,
+            state.CsamScan.LastScanAt ?? DateTime.UtcNow,
+            ct);
+
+        if (ok)
+        {
+            state.CsamScan.MatchReported = true;
+            await SaveStateAsync(vm.VmId, state);
+            _logger.LogWarning("VM {VmId}: CSAM match reported to orchestrator", vm.VmId);
+        }
+        else
+        {
+            _logger.LogError(
+                "VM {VmId}: CSAM match report FAILED — will retry next cycle; push remains blocked",
+                vm.VmId);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // State persistence
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -742,4 +912,29 @@ public class LazysyncState
 
     /// <summary>When the last successful sync completed.</summary>
     public DateTime LastSyncAt { get; set; } = DateTime.MinValue;
+
+    /// <summary>
+    /// CSAM scan record for this VM (Phase 6 pass 1). Lives here because it is
+    /// per-VM, cycle-coupled state with the same lifetime as the sync state —
+    /// one file, one load/save path. Pre-existing lazysync.json files
+    /// deserialize to the default (NotScanned), which is the honest answer.
+    /// </summary>
+    public CsamScanRecord CsamScan { get; set; } = new();
+}
+
+/// <summary>Persisted CSAM scan state. Outcome is never silently upgraded.</summary>
+public class CsamScanRecord
+{
+    public DeCloud.NodeAgent.Core.Interfaces.CsamOutcome Outcome { get; set; }
+        = DeCloud.NodeAgent.Core.Interfaces.CsamOutcome.NotScanned;
+
+    public DateTime? LastScanAt { get; set; }
+
+    /// <summary>True once the orchestrator acknowledged the csam-report for a
+    /// Match. Until then the daemon retries the report every cycle and the
+    /// push stays blocked.</summary>
+    public bool MatchReported { get; set; }
+
+    public string? MatchHash { get; set; }
+    public string? MatchDbSource { get; set; }
 }
