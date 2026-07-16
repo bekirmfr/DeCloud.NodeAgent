@@ -1204,7 +1204,10 @@ cmd_register() {
     # ── Step 1: run cli-decloud-node register ───────────────────────────────
     # This prompts for wallet, shows QR code, waits for signature,
     # verifies it locally, and writes the JSON pending-auth file.
-    "$wallet_cli" register
+    # Forward our args: --orchestrator, --wallet, --verbose are the CLI's to
+    # interpret. (--force is handled here too — we rm the pending-auth above —
+    # but the CLI has its own --force guard for direct invocation.)
+    "$wallet_cli" register "$@"
     local cli_exit=$?
 
     if (( cli_exit != 0 )); then
