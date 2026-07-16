@@ -128,46 +128,146 @@ def load_credentials() -> Optional[Dict[str, str]]:
     return credentials if credentials else None
 
 # =============================================================================
+# TERMS OF SERVICE
+# =============================================================================
+
+def fetch_current_tos(orchestrator_url: str) -> Dict[str, str]:
+    """
+    Fetch the Terms of Service currently in effect.
+
+    GET /api/tos is public (no auth) and returns the version, the SHA-256 of the
+    document's exact bytes, and the full text.
+
+    Fetched fresh on every run and never cached to disk: the operator must sign
+    the terms actually in effect right now. A cached copy would mean signing terms
+    they were not shown — which is the one way this whole flow could quietly become
+    a lie.
+
+    Fails closed. No terms => no declaration => no registration. An operator must
+    never be able to register by being offline.
+    """
+    url = f"{orchestrator_url.rstrip('/')}/api/tos"
+
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as e:
+        log_error(f"Could not fetch the Terms of Service from {url}")
+        log_error(f"  {e}")
+        log_error("Registration cannot proceed without the terms in effect.")
+        sys.exit(1)
+
+    # TosController wraps in ApiResponse ({ success, data }); tolerate a bare object.
+    data = payload.get('data') or payload
+
+    version = (data.get('version') or '').strip()
+    tos_hash = (data.get('hash') or '').strip()
+    text = data.get('text') or ''
+
+    if not version or not tos_hash or not text.strip():
+        log_error("The orchestrator returned incomplete Terms of Service.")
+        log_error("This is a server-side problem — report it; do not work around it.")
+        sys.exit(1)
+
+    return {'version': version, 'hash': tos_hash, 'text': text}
+
+
+def display_and_accept_tos(tos: Dict[str, str]) -> bool:
+    """
+    Show the terms and require an explicit, typed acceptance.
+
+    The operator is about to sign a statement that they accept these terms, so they
+    must be able to read them first — that is the entire point. Printing the full
+    text is what makes the signature mean something rather than being a formality.
+
+    Requires typing 'accept': not a bare Enter, not a default-yes prompt. Anything
+    else aborts. There is deliberately no --accept-tos flag; adding one is a
+    decision to make on its own, in daylight.
+    """
+    print()
+    print(f"{Colors.BOLD}{'='*70}{Colors.NC}")
+    print(f"{Colors.BOLD}  DeCloud Terms of Service — version {tos['version']}{Colors.NC}")
+    print(f"{Colors.BOLD}{'='*70}{Colors.NC}")
+    print()
+    print(tos['text'])
+    print()
+    print(f"{Colors.BOLD}{'='*70}{Colors.NC}")
+    print(f"  Version:  {tos['version']}")
+    print(f"  SHA-256:  {tos['hash']}")
+    print(f"{Colors.BOLD}{'='*70}{Colors.NC}")
+    print()
+    print("Registering a node means hosting other people's workloads. The message")
+    print("you are about to sign records that you accept these exact terms — the")
+    print("hash above pins the document byte-for-byte.")
+    print()
+
+    answer = input(f"  {Colors.BOLD}Type 'accept' to accept these terms:{Colors.NC} ").strip().lower()
+    print()
+
+    if answer != 'accept':
+        log_error("Terms not accepted — registration aborted.")
+        log_info("Nothing was written. Re-run 'decloud register' when ready.")
+        return False
+
+    log_success(f"Terms of Service {tos['version']} accepted")
+    return True
+
+# =============================================================================
 # CANONICAL SIGNING MESSAGE
 # =============================================================================
 
-def create_signing_message(machine_id: str, wallet_address: str) -> str:
+def create_signing_message(machine_id: str, wallet_address: str,
+                           tos: Dict[str, str]) -> str:
     """
-    Create canonical locality message for wallet signing.
+    Create the canonical node declaration for wallet signing.
 
     The message format is defined in NODE-LIFECYCLE.md section 2 (decloud register).
-    Country and region are included because they carry jurisdictional trust
-    meaning — the wallet signature attests to the operator's locality claim.
 
-    The orchestrator reconstructs this exact message from the registration
-    request fields and verifies that the recovered signer matches the
-    declared wallet. Any field mismatch between what was signed and what
-    was sent causes signature recovery to produce a different address,
-    which fails the wallet ownership check.
+    It declares two things, in one signature, because they are one act:
+      - Locality. Country and region carry jurisdictional trust meaning; the
+        signature attests to the operator's locality claim.
+      - Terms of Service. Registering a node means hosting other people's
+        workloads, so the operator must be bound by the terms. Rather than make
+        them sign a second time in the web app, the declaration names the terms:
+        version AND the SHA-256 of the document's exact bytes.
+
+    Both ToS lines are required. The version is a label; the hash is the
+    commitment. The orchestrator matches both against the terms currently in
+    effect, so a declaration signed against superseded terms fails closed — the
+    operator re-runs 'decloud register', is shown the new terms, and signs those.
 
     Timestamp uses ISO 8601 UTC. The orchestrator enforces a 5-minute
     validity window with +/-2-minute skew tolerance.
     """
     timestamp = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
 
-    # Read country and region from settings JSON.
-    # These must match what the registration request sends to the
-    # orchestrator, or signature verification will fail.
+    # Read country and region from settings JSON — the SAME source and the SAME
+    # defaults the node agent uses when it builds the registration request
+    # (NodeMetadataService: country ?? "ZZ", region ?? "default"). The orchestrator
+    # rejects a registration whose request fields disagree with this signed text,
+    # so a default mismatch here is a registration failure, not a cosmetic
+    # difference. 'unknown' was used here historically and never matched the
+    # agent's 'default' — harmless only because nothing compared them.
     country = _read_locality_field('country') or 'ZZ'
-    region = _read_locality_field('region') or 'unknown'
+    region = _read_locality_field('region') or 'default'
 
-    message = f"""DeCloud Node Locality Declaration
+    message = f"""DeCloud Node Declaration
 
 Country:    {country}
 Region:     {region}
 Machine ID: {machine_id}
 Wallet:     {wallet_address}
+Terms of Service version: {tos['version']}
+Terms of Service hash: {tos['hash']}
 Timestamp:  {timestamp}
 
 This signature attests that the operator of this wallet declares
 the above DeCloud node to be located in the stated country and
-network region. The orchestrator will use this declaration for
-jurisdictional placement of tenant workloads."""
+network region, and that the operator has read and accepts the
+DeCloud Terms of Service identified above. The orchestrator will
+use this declaration for jurisdictional placement of tenant
+workloads."""
 
     return message
 
@@ -311,8 +411,15 @@ def run_wallet_signing(orchestrator_url: str, wallet_address: str = None,
 
     print(f"Machine ID: {machine_id}")
 
-    # Create canonical signing message
-    message = create_signing_message(machine_id, wallet_address)
+    # Terms of Service: fetched fresh (never cached), shown in full, explicitly
+    # accepted — then folded into the message the operator signs. One signature,
+    # one act: this node is here, and I accept these terms.
+    tos = fetch_current_tos(orchestrator_url)
+    if not display_and_accept_tos(tos):
+        return False
+
+    # Create canonical signing message (locality + ToS identity)
+    message = create_signing_message(machine_id, wallet_address, tos)
 
     # Generate signing URL
     signing_url = generate_signing_url(message, wallet_address)
