@@ -599,4 +599,21 @@ def main():
         parser.print_help()
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        # Ctrl-C at the wallet or ToS prompt is a normal way to back out — most
+        # likely at "Type 'accept'", where someone reading terms hesitates. A
+        # traceback there reads as "the tool crashed", not "I declined", and this
+        # is the one moment we ask an operator to make a legal decision. Say the
+        # true thing about the state they are left in: nothing was written.
+        print()
+        log_info("Cancelled — nothing was written.")
+        sys.exit(1)
+    except EOFError:
+        # stdin closed (piped, cron, no TTY). The ceremony REQUIRES a human to
+        # read the terms and type 'accept'; there is no correct non-interactive
+        # answer, so fail closed and say why.
+        print()
+        log_error("No input available — 'decloud register' needs a terminal.")
+        sys.exit(1)

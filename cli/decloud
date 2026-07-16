@@ -1207,8 +1207,14 @@ cmd_register() {
     # Forward our args: --orchestrator, --wallet, --verbose are the CLI's to
     # interpret. (--force is handled here too — we rm the pending-auth above —
     # but the CLI has its own --force guard for direct invocation.)
-    "$wallet_cli" register "$@"
-    local cli_exit=$?
+    # Forward our args — --orchestrator, --wallet, --verbose are the CLI's to
+    # interpret. (--force is handled here too, since we rm the pending-auth
+    # above, but the CLI has its own guard for direct invocation.)
+    # `|| cli_exit=$?` is required: under `set -e` (line 15) a bare failing
+    # command exits the script immediately, so `local cli_exit=$?` never ran and
+    # every check below it was unreachable.
+    local cli_exit=0
+    "$wallet_cli" register "$@" || cli_exit=$?
 
     if (( cli_exit != 0 )); then
         log_error "Authentication cancelled or failed"
@@ -1462,8 +1468,10 @@ cmd_install() {
     cd / 2>/dev/null || true
 
     # Execute install
-    bash "$install_script" "$@"
-    local exit_code=$?
+    # `|| exit_code=$?` — under `set -e` a bare failure exits here and the
+    # error-guidance branch below never runs.
+    local exit_code=0
+    bash "$install_script" "$@" || exit_code=$?
 
     if (( exit_code == 0 )); then
         echo ""
@@ -1517,8 +1525,10 @@ cmd_update() {
  
     echo ""
     cd / 2>/dev/null || true
-    bash "$install_script" "${SAVED_PARAMS[@]}"
-    local exit_code=$?
+    # `|| exit_code=$?` — under `set -e` a failed update exited here, skipping
+    # the `rm -f "$cleanup_path"` below and leaking the downloaded install.sh.
+    local exit_code=0
+    bash "$install_script" "${SAVED_PARAMS[@]}" || exit_code=$?
  
     [ -n "$cleanup_path" ] && rm -f "$cleanup_path"
  
@@ -1598,8 +1608,10 @@ cmd_remove() {
  
     echo ""
     cd / 2>/dev/null || true
-    bash "$uninstall_script" "${passthrough_args[@]}"
-    local exit_code=$?
+    # `|| exit_code=$?` — under `set -e` a failed uninstall exited here, skipping
+    # the `rm -f "$cleanup_path"` below and leaking the downloaded uninstall.sh.
+    local exit_code=0
+    bash "$uninstall_script" "${passthrough_args[@]}" || exit_code=$?
  
     [ -n "$cleanup_path" ] && rm -f "$cleanup_path"
  
