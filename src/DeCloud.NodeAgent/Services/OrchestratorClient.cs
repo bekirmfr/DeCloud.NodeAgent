@@ -1435,41 +1435,6 @@ REGISTERED_AT={DateTime.UtcNow:O}";
     }
 
     /// <summary>
-    /// Phase 6: report a CSAM hash match. POST /api/compliance/csam-report.
-    /// </summary>
-    public async Task<bool> ReportCsamMatchAsync(
-        string vmId,
-        string matchedFileHash,
-        string? dbSource,
-        DateTime detectedAt,
-        CancellationToken ct = default)
-    {
-        if (!_nodeState.IsAuthenticated) return false;
-
-        try
-        {
-            var response = await _httpClient.PostAsJsonAsync(
-                "/api/compliance/csam-report",
-                new { vmId, matchedFileHash, dbSource, detectedAt },
-                JsonOptions.Wire, ct);
-
-            if (!response.IsSuccessStatusCode)
-            {
-                _logger.LogWarning(
-                    "csam-report failed for VM {VmId}: HTTP {Status}",
-                    vmId, response.StatusCode);
-                return false;
-            }
-            return true;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "csam-report error for VM {VmId}", vmId);
-            return false;
-        }
-    }
-
-    /// <summary>
     /// Get supported VM images
     /// </summary>
     private List<string> GetSupportedImages()

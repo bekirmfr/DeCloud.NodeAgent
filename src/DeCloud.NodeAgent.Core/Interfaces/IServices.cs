@@ -383,20 +383,6 @@ public interface IOrchestratorClient
     /// response. Informational — surfaced on the node dashboard. Empty until first set.
     /// </summary>
     IReadOnlyCollection<string> HeldVmIds { get; }
-    /// <summary>
-    /// Phase 6: report a node-side CSAM hash match to the orchestrator
-    /// (POST /api/compliance/csam-report, node-JWT authenticated). The
-    /// orchestrator files a P0 item into the abuse queue and applies the
-    /// protective suspend. Returns true only on HTTP success — the caller
-    /// retries otherwise and keeps the VM's push blocked meanwhile.
-    /// Hashes only ever cross this wire — never file content.
-    /// </summary>
-    Task<bool> ReportCsamMatchAsync(
-        string vmId,
-        string matchedFileHash,
-        string? dbSource,
-        DateTime detectedAt,
-        CancellationToken ct = default);
 }
 
 /// <summary>
