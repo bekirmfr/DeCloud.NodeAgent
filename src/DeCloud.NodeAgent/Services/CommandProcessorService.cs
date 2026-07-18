@@ -34,6 +34,7 @@ public class CommandProcessorService : BackgroundService
     private readonly IPortForwardingManager _portForwardingManager;
     private readonly PortMappingRepository _portMappingRepository;
     private readonly VmRepository _repository;
+    private readonly ICsamScanner _csamScanner;
     private readonly ILogger<CommandProcessorService> _logger;
     private readonly CommandProcessorOptions _options;
     private readonly LibvirtVmManagerOptions _libvirtOptions;
@@ -72,6 +73,7 @@ public class CommandProcessorService : BackgroundService
         IPortForwardingManager portForwardingManager,
         PortMappingRepository portMappingRepository,
         VmRepository repository,
+        ICsamScanner csamScanner,
         IOptions<CommandProcessorOptions> options,
         IOptions<LibvirtVmManagerOptions> libvirtOptions,
         ILogger<CommandProcessorService> logger)
@@ -89,6 +91,7 @@ public class CommandProcessorService : BackgroundService
         _portForwardingManager = portForwardingManager;
         _portMappingRepository = portMappingRepository;
         _repository = repository;
+        _csamScanner = csamScanner;
         _logger = logger;
         _options = options.Value;
         _libvirtOptions = libvirtOptions.Value;
@@ -275,6 +278,9 @@ public class CommandProcessorService : BackgroundService
 
             case NodeCommandType.ReseedVm:
                 return (await HandleReseedVmAsync(command.Payload, ct), null);
+
+            case NodeCommandType.ScanVm:
+                return await HandleScanVmAsync(command.Payload, ct);
 
             default:
                 _logger.LogWarning("Unknown command type: {Type}", command.Type);
@@ -623,6 +629,58 @@ public class CommandProcessorService : BackgroundService
         _logger.LogInformation("Starting VM {VmId}", vmId);
         var result = await manager.StartVmAsync(vmId, ct);
         return result.Success;
+    }
+
+    private async Task<(bool success, string? data)> HandleScanVmAsync(string payload, CancellationToken ct)
+    {
+        string? vmId = null;
+        try
+        {
+            var root = JsonDocument.Parse(payload).RootElement;
+            vmId = GetStringProperty(root, "vmId", "VmId");
+            if (string.IsNullOrEmpty(vmId))
+                return (false, JsonSerializer.Serialize(new { error = "missing vmId" }, JsonOptions.Wire));
+
+            // Independent precondition check (plan §4.5 step 3): the orchestrator asserted
+            // the VM is held+stopped, but its view can be stale; the node's cannot. Reading a
+            // live disk is incoherent and unsafe. Refuse a running VM — a Failed record, not
+            // an Unscannable one: no scan occurred.
+            var manager = await ResolveManagerForVmAsync(vmId, ct);
+            var vmInstance = await manager.GetVmAsync(vmId, ct);
+            if (vmInstance != null && vmInstance.Status == VmStatus.Running)
+            {
+                _logger.LogWarning("ScanVm: refusing VM {VmId} — it is Running", vmId);
+                return (false, JsonSerializer.Serialize(new { error = "VM is running" }, JsonOptions.Wire));
+            }
+
+            var diskPath = Path.Combine(_libvirtOptions.VmStoragePath, vmId, "disk.qcow2");
+
+            var result = await _csamScanner.ScanAsync(vmId, diskPath, ct);
+
+            // Honesty clamp, same rule as pass 1, new home: a matcher-less scanner never
+            // reports Clean. If the scanner is not Enabled, any Clean becomes NotScanned.
+            var overall = (!_csamScanner.Enabled && result.Overall == CsamOutcome.Clean)
+                ? CsamOutcome.NotScanned
+                : result.Overall;
+
+            var data = JsonSerializer.Serialize(new
+            {
+                outcome = overall.ToString(),
+                matcher = _csamScanner.GetType().Name,
+                enabled = _csamScanner.Enabled,
+                files = result.Files.Where(f => f.Outcome == CsamOutcome.Match)
+                                    .Select(f => new { f.Path, f.MatchHash, f.DbSource })
+            }, JsonOptions.Wire);
+
+            _logger.LogInformation("ScanVm: VM {VmId} → {Outcome} ({Matcher})",
+                vmId, overall, _csamScanner.GetType().Name);
+            return (true, data);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "ScanVm: failed for VM {VmId}", vmId ?? "(unknown)");
+            return (false, JsonSerializer.Serialize(new { error = ex.Message }, JsonOptions.Wire));
+        }
     }
 
     private async Task<bool> HandleStopVmAsync(string payload, CancellationToken ct)
