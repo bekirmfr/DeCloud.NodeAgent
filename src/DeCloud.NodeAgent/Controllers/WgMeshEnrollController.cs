@@ -1,3 +1,4 @@
+using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Infrastructure.Services;
 using Microsoft.AspNetCore.Mvc;
 using System.Net.Sockets;
@@ -23,15 +24,18 @@ public class WgMeshEnrollController : ControllerBase
 {
     private readonly IPortForwardingManager _portForwardingManager;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly IObligationStateService _obligationState;
     private readonly ILogger<WgMeshEnrollController> _logger;
 
     public WgMeshEnrollController(
         IPortForwardingManager portForwardingManager,
         IHttpClientFactory httpClientFactory,
+        IObligationStateService obligationState,
         ILogger<WgMeshEnrollController> logger)
     {
         _portForwardingManager = portForwardingManager;
         _httpClientFactory = httpClientFactory;
+        _obligationState = obligationState;
         _logger = logger;
     }
 
@@ -124,6 +128,25 @@ public class WgMeshEnrollController : ControllerBase
             // wg-mesh-enroll.sh retries via Strategy 2 using the public relay API.
             client.Timeout = TimeSpan.FromSeconds(3);
 
+            // relay-api.py is fail-closed: every mutating endpoint (incl. add-peer)
+            // requires the per-relay Bearer token (RelayObligationState.AuthToken).
+            // The orchestrator's RelayNodeService already presents it on the CGNAT
+            // path; this local-VM proxy must too, or the relay returns 401 and no
+            // system VM can join the mesh. The node agent already holds the relay
+            // obligation state locally (the same store served at
+            // /api/obligations/relay/state), so no new plumbing is needed.
+            var relayToken = ExtractAuthToken(await _obligationState.GetStateJsonAsync("relay", ct));
+            if (string.IsNullOrEmpty(relayToken))
+            {
+                _logger.LogWarning(
+                    "Relay obligation AuthToken unavailable - cannot authenticate mesh " +
+                    "enrollment to relay at {RelayIp}; returning null so the caller/watchdog retries",
+                    relayIp);
+                return null; // fail safe: never POST unauthenticated
+            }
+            client.DefaultRequestHeaders.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", relayToken);
+
             var payload = new
             {
                 public_key = request.PublicKey,
@@ -169,6 +192,30 @@ public class WgMeshEnrollController : ControllerBase
             }
             return null;
         }
+    }
+
+    /// <summary>
+    /// Extracts the <c>authToken</c> field from a relay obligation state JSON
+    /// blob (serialised camelCase by the orchestrator). Returns null if the JSON
+    /// is empty, unparseable, or has no such field. Never logs the token value.
+    /// </summary>
+    private static string? ExtractAuthToken(string? stateJson)
+    {
+        if (string.IsNullOrWhiteSpace(stateJson)) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(stateJson);
+            foreach (var prop in doc.RootElement.EnumerateObject())
+            {
+                if (string.Equals(prop.Name, "authToken", StringComparison.OrdinalIgnoreCase))
+                    return prop.Value.GetString();
+            }
+        }
+        catch
+        {
+            // Malformed or unexpected JSON - treat as no token (fail closed).
+        }
+        return null;
     }
 
     /// <summary>
