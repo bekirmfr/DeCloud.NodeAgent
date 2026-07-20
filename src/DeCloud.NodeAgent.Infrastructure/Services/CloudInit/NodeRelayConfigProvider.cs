@@ -1,8 +1,6 @@
 ﻿using DeCloud.NodeAgent.Core.Interfaces;
-using DeCloud.NodeAgent.Core.Models;
 using DeCloud.Shared.Enums;
 using Microsoft.Extensions.Logging;
-using System.Net.Http;
 
 namespace DeCloud.NodeAgent.Infrastructure.Services.CloudInit;
 
@@ -16,6 +14,15 @@ public interface INodeRelayConfigProvider
     /// (environment endpoint relies on watcher's generation diff).
     /// </summary>
     Task<NodeRelayConfig?> TryGetAsync(string role, CancellationToken ct);
+
+    /// <summary>
+    /// Returns the per-relay Bearer token for this node's assigned relay, or null
+    /// when unavailable. Role-agnostic: the token is per-relay, not per-role. On a
+    /// CGNAT node it comes from the relay assignment (CgnatInfo.RelayApiToken); on a
+    /// co-located relay host it is null here (the NodeAgent reads it from the local
+    /// relay obligation instead).
+    /// </summary>
+    Task<string?> TryGetRelayApiTokenAsync(CancellationToken ct);
 }
 
 /// <summary>
@@ -27,7 +34,10 @@ public sealed record NodeRelayConfig(
     string RelayPublicKey,
     string RelayApiUrl,      // e.g. "http://142.234.200.95:8080"
     string TunnelIp,         // e.g. "10.30.0.248/24"
-    int Mtu);                // wg-mesh interface MTU for this node's path
+    int Mtu,                 // wg-mesh interface MTU for this node's path
+    string? AuthToken = null); // per-relay Bearer token; set on CGNAT nodes (from
+                               // CgnatInfo), null on co-located relay hosts, whose
+                               // NodeAgent reads it from the local relay obligation
 
 // WireGuard mesh MTU per encapsulation depth. The mesh interface defaults to
 // 1420 (single-WireGuard assumption). A CGNAT node carries DHT traffic as
@@ -93,11 +103,12 @@ public sealed class NodeRelayConfigProvider : INodeRelayConfigProvider
                 {
                     var relayHostIp = relayEndpoint.Split(':')[0];
                     return new NodeRelayConfig(
-                        RelayEndpoint: relayEndpoint,
-                        RelayPublicKey: relayPubKey,
-                        RelayApiUrl: $"http://{relayHostIp}:8080",
-                        TunnelIp: $"{vmTunnelIp}/24",
-                        Mtu: WgMeshMtu.Cgnat);
+                         RelayEndpoint: relayEndpoint,
+                         RelayPublicKey: relayPubKey,
+                         RelayApiUrl: $"http://{relayHostIp}:8080",
+                         TunnelIp: $"{vmTunnelIp}/24",
+                         Mtu: WgMeshMtu.Cgnat,
+                         AuthToken: cgnatInfo.RelayApiToken);
                 }
             }
         }
@@ -160,6 +171,15 @@ public sealed class NodeRelayConfigProvider : INodeRelayConfigProvider
             }
         }
         return null;
+    }
+
+    public Task<string?> TryGetRelayApiTokenAsync(CancellationToken ct)
+    {
+        // Role-agnostic, no network: the relay token rides the heartbeat on
+        // CgnatInfo. Null on a co-located relay host (that NodeAgent uses the
+        // local relay obligation instead).
+        var cgnatInfo = _orchestratorClient.GetLastHeartbeat()?.Heartbeat?.CgnatInfo;
+        return Task.FromResult(cgnatInfo?.RelayApiToken);
     }
 
     private static string? ComputeVmTunnelIp(string hostTunnelIp, string role)

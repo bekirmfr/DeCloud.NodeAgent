@@ -1,5 +1,6 @@
 using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Infrastructure.Services;
+using DeCloud.NodeAgent.Infrastructure.Services.CloudInit;
 using Microsoft.AspNetCore.Mvc;
 using System.Net.Sockets;
 using System.Text;
@@ -25,17 +26,20 @@ public class WgMeshEnrollController : ControllerBase
     private readonly IPortForwardingManager _portForwardingManager;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IObligationStateService _obligationState;
+    private readonly INodeRelayConfigProvider _relayConfigProvider;
     private readonly ILogger<WgMeshEnrollController> _logger;
 
     public WgMeshEnrollController(
         IPortForwardingManager portForwardingManager,
         IHttpClientFactory httpClientFactory,
         IObligationStateService obligationState,
+        INodeRelayConfigProvider relayConfigProvider,
         ILogger<WgMeshEnrollController> logger)
     {
         _portForwardingManager = portForwardingManager;
         _httpClientFactory = httpClientFactory;
         _obligationState = obligationState;
+        _relayConfigProvider = relayConfigProvider;
         _logger = logger;
     }
 
@@ -135,13 +139,19 @@ public class WgMeshEnrollController : ControllerBase
             // system VM can join the mesh. The node agent already holds the relay
             // obligation state locally (the same store served at
             // /api/obligations/relay/state), so no new plumbing is needed.
+            // Relay-host nodes hold the relay obligation locally and read the token
+            // from it. CGNAT nodes have no relay obligation; the orchestrator delivers
+            // the token via the relay assignment (CgnatInfo -> NodeRelayConfig), so
+            // fall back to that before giving up.
             var relayToken = ExtractAuthToken(await _obligationState.GetStateJsonAsync("relay", ct));
+            if (string.IsNullOrEmpty(relayToken))
+                relayToken = await _relayConfigProvider.TryGetRelayApiTokenAsync(ct);
             if (string.IsNullOrEmpty(relayToken))
             {
                 _logger.LogWarning(
-                    "Relay obligation AuthToken unavailable - cannot authenticate mesh " +
-                    "enrollment to relay at {RelayIp}; returning null so the caller/watchdog retries",
-                    relayIp);
+                    "Relay token unavailable (no local relay obligation, none in relay " +
+                    "assignment) - cannot authenticate mesh enrollment to relay at {RelayIp}; " +
+                    "returning null so the caller/watchdog retries", relayIp);
                 return null; // fail safe: never POST unauthenticated
             }
             client.DefaultRequestHeaders.Authorization =
