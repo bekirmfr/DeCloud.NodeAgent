@@ -72,12 +72,13 @@ public class ObligationStateController : ControllerBase
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<ObligationStateController> _logger;
 
-    // Tunnel IP offsets within the relay subnet — must match orchestrator's DhtNodeService
-    // and BlockStoreService offset conventions.
-    private const int DhtCgnatOffset = 230; // host .2 → DHT .232
-    private const int BlockStoreCgnatOffset = 210; // host .2 → BlockStore .212
-    private const int DhtRelayNodeOctet = 199; // fixed for co-located relay nodes
-    private const int BlockStoreRelayNodeOctet = 202; // fixed for co-located relay nodes
+    // Relay /24 mesh addressing — single source of truth in
+    // DeCloud.Shared.Models.RelaySubnetLayout. Compile-time aliases: the numbers
+    // are defined once there, so this file can never drift from the provider's copy.
+    private const int DhtCgnatOffset = DeCloud.Shared.Models.RelaySubnetLayout.DhtCgnatOffset;
+    private const int BlockStoreCgnatOffset = DeCloud.Shared.Models.RelaySubnetLayout.BlockStoreCgnatOffset;
+    private const int DhtRelayNodeOctet = DeCloud.Shared.Models.RelaySubnetLayout.DhtRelayNodeOctet;
+    private const int BlockStoreRelayNodeOctet = DeCloud.Shared.Models.RelaySubnetLayout.BlockStoreRelayNodeOctet;
 
     public ObligationStateController(
         IObligationStateService obligationState,

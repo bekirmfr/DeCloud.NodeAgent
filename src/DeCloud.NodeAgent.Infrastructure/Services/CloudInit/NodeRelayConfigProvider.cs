@@ -55,14 +55,13 @@ public static class WgMeshMtu
 
 public sealed class NodeRelayConfigProvider : INodeRelayConfigProvider
 {
-    // Tunnel IP offsets — must match orchestrator's DhtNodeService and
-    // BlockStoreService offset conventions. Lifted as-is from
-    // ObligationStateController; consolidate via shared constants when
-    // the controller's GetWgConfig is refactored to call this provider.
-    private const int DhtCgnatOffset = 230;
-    private const int BlockStoreCgnatOffset = 210;
-    private const int DhtRelayNodeOctet = 199;
-    private const int BlockStoreRelayNodeOctet = 202;
+    // Relay /24 mesh addressing — single source of truth in
+    // DeCloud.Shared.Models.RelaySubnetLayout. Compile-time aliases: the numbers
+    // are defined once there, so this file can never drift from the controller's copy.
+    private const int DhtCgnatOffset = DeCloud.Shared.Models.RelaySubnetLayout.DhtCgnatOffset;
+    private const int BlockStoreCgnatOffset = DeCloud.Shared.Models.RelaySubnetLayout.BlockStoreCgnatOffset;
+    private const int DhtRelayNodeOctet = DeCloud.Shared.Models.RelaySubnetLayout.DhtRelayNodeOctet;
+    private const int BlockStoreRelayNodeOctet = DeCloud.Shared.Models.RelaySubnetLayout.BlockStoreRelayNodeOctet;
 
     private readonly IOrchestratorClient _orchestratorClient;
     private readonly IPortForwardingManager _portForwardingManager;
