@@ -1,4 +1,6 @@
+using System.Net.Http.Headers;
 using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.State;
 using DeCloud.NodeAgent.Core.Interfaces.SystemVm;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
@@ -63,13 +65,14 @@ public class PortForwardingManager : IPortForwardingManager
     private readonly PortMappingRepository _repository;
     private readonly IVmManager _vmManager;
     private readonly ISystemVmService _systemVmService;
+    private readonly IObligationStateService _obligationState;
     private readonly ILogger<PortForwardingManager> _logger;
     private readonly bool _isLinux;
     private readonly SemaphoreSlim _lock = new(1, 1);
 
     // Chain name for port forwarding rules (keeps them organized)
     private const string CHAIN_NAME = "DECLOUD_PORT_FWD";
-    
+
     // DeCloud tunnel network range (10.20.0.0/16)
     private const string TUNNEL_IP_PREFIX = "10.20.";
 
@@ -78,14 +81,67 @@ public class PortForwardingManager : IPortForwardingManager
         PortMappingRepository repository,
         IVmManager vmManager,
         ISystemVmService systemVmService,
+        IObligationStateService obligationState,
         ILogger<PortForwardingManager> logger)
     {
         _executor = executor;
         _repository = repository;
         _vmManager = vmManager;
         _systemVmService = systemVmService;
+        _obligationState = obligationState;
         _logger = logger;
         _isLinux = Environment.OSVersion.Platform == PlatformID.Unix;
+    }
+
+    /// <summary>
+    /// Reads the relay VM's API token from this node's local relay obligation state
+    /// (delivered by the orchestrator at registration and persisted in obligation-state.db).
+    /// The relay VM fail-closes every mutating POST without a valid Bearer token; because this
+    /// node hosts the relay VM, it already holds that token locally — no per-command delivery
+    /// from the orchestrator is required.
+    /// </summary>
+    private async Task<string?> GetRelayApiTokenAsync(CancellationToken ct)
+    {
+        var stateJson = await _obligationState.GetStateJsonAsync("relay", ct);
+        if (string.IsNullOrWhiteSpace(stateJson))
+        {
+            _logger.LogError(
+                "No local relay obligation state — cannot authenticate to the relay VM API. " +
+                "This node may hold no relay obligation, or its state has not been delivered yet.");
+            return null;
+        }
+
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(stateJson);
+            // The token is RelayObligationState.AuthToken on the orchestrator side.
+            // CONFIRM the exact JSON property name against RelayObligationState's serialization
+            // (and any JsonNamingPolicy in effect) before relying on this in production.
+            if (doc.RootElement.TryGetProperty("AuthToken", out var t) &&
+                t.ValueKind == System.Text.Json.JsonValueKind.String)
+            {
+                return t.GetString();
+            }
+
+            _logger.LogError("Relay obligation state has no string AuthToken property");
+            return null;
+        }
+        catch (System.Text.Json.JsonException ex)
+        {
+            _logger.LogError(ex, "Failed to parse relay obligation state JSON");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Attach the relay VM's Bearer token to a client. Returns false if no token is available.
+    /// </summary>
+    private async Task<bool> TrySetRelayAuthAsync(HttpClient client, CancellationToken ct)
+    {
+        var token = await GetRelayApiTokenAsync(ct);
+        if (string.IsNullOrEmpty(token)) return false;
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        return true;
     }
 
     public async Task<bool> CreateForwardingAsync(
@@ -107,7 +163,7 @@ public class PortForwardingManager : IPortForwardingManager
             // Don't pass ct to WaitAsync - prevents cancellation from crashing host
             await _lock.WaitAsync();
             lockAcquired = true;
-            
+
             return await CreateForwardingInternalAsync(vmIp, vmPort, publicPort, protocol, ct);
         }
         catch (Exception ex)
@@ -145,29 +201,29 @@ public class PortForwardingManager : IPortForwardingManager
             // Check if this is relay forwarding (tunnel IP destination)
             string actualDestination = vmIp;
             int actualPort = vmPort;
-            
+
             bool isRelayForwarding = false;
             string? relayVmIp = null;
-            
+
             if (IsTunnelIp(vmIp))
             {
                 _logger.LogInformation(
                     "Detected tunnel IP {TunnelIp} - checking for local relay VM...",
                     vmIp);
-                
+
                 relayVmIp = await GetRelayVmIpAsync(ct);
                 if (relayVmIp != null)
                 {
                     _logger.LogInformation(
                         "Found relay VM at {RelayVmIp} - will forward through it",
                         relayVmIp);
-                    
+
                     // Forward to relay VM on the same public port
                     // The relay VM will then forward to the tunnel IP
                     actualDestination = relayVmIp;
                     actualPort = publicPort;
                     isRelayForwarding = true;
-                    
+
                     _logger.LogInformation(
                         "Creating 2-hop forwarding: :{PublicPort} → {RelayVmIp}:{Port} → {TunnelIp}:{VmPort}",
                         publicPort, relayVmIp, publicPort, vmIp, vmPort);
@@ -194,7 +250,7 @@ public class PortForwardingManager : IPortForwardingManager
             {
                 await CreateIptablesRuleAsync("udp", actualDestination, actualPort, publicPort, ct);
             }
-            
+
             // If this is relay forwarding, also create rules INSIDE the relay VM
             if (isRelayForwarding && relayVmIp != null)
             {
@@ -239,7 +295,7 @@ public class PortForwardingManager : IPortForwardingManager
         {
             await _lock.WaitAsync(ct);
             lockAcquired = true;
-            
+
             _logger.LogInformation(
                 "Removing port forwarding for {VmIp}:{VmPort} → :{PublicPort} ({Protocol})",
                 vmIp, vmPort, publicPort, protocol);
@@ -250,7 +306,7 @@ public class PortForwardingManager : IPortForwardingManager
             int actualDestPort = vmPort;
             string? relayVmIp = await GetRelayVmIpAsync(ct);
             bool isRelayNodeRules = (relayVmIp != null && vmIp == relayVmIp);
-            
+
             if (isRelayNodeRules)
             {
                 // This is the relay node's own rules (relay node → tunnel IP)
@@ -646,7 +702,7 @@ public class PortForwardingManager : IPortForwardingManager
             return null;
         }
     }
-    
+
     /// <summary>
     /// Create port forwarding rules inside the relay VM via its API.
     /// This sets up the second hop: relay VM port -> tunnel IP
@@ -665,7 +721,7 @@ public class PortForwardingManager : IPortForwardingManager
             {
                 Timeout = TimeSpan.FromSeconds(10)
             };
-            
+
             var request = new
             {
                 public_port = publicPort,
@@ -679,19 +735,28 @@ public class PortForwardingManager : IPortForwardingManager
                     _ => "tcp"
                 }
             };
-            
+
             var json = System.Text.Json.JsonSerializer.Serialize(request);
             var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-            
+
+            // The relay VM fail-closes this POST without a valid Bearer token. Present the
+            // token this node holds for its local relay obligation; fail loud if it is absent,
+            // rather than letting the relay VM turn it into an opaque 401.
+            if (!await TrySetRelayAuthAsync(httpClient, ct))
+            {
+                throw new InvalidOperationException(
+                    "Relay API token unavailable in local obligation state — cannot create relay VM forwarding");
+            }
+
             _logger.LogInformation(
                 "Calling relay VM API to create second hop: {RelayVmIp}:{PublicPort} → {TunnelIp}:{TunnelPort}",
                 relayVmIp, publicPort, tunnelIp, tunnelPort);
-            
+
             var response = await httpClient.PostAsync(
                 $"http://{relayVmIp}:8080/api/relay/add-port-forward",
                 content,
                 ct);
-            
+
             if (!response.IsSuccessStatusCode)
             {
                 var errorBody = await response.Content.ReadAsStringAsync(ct);
@@ -700,7 +765,7 @@ public class PortForwardingManager : IPortForwardingManager
                     response.StatusCode, errorBody);
                 throw new Exception($"Relay VM API returned {response.StatusCode}: {errorBody}");
             }
-            
+
             _logger.LogInformation(
                 "✓ Relay VM forwarding created: {RelayVmIp}:{PublicPort} → {TunnelIp}:{TunnelPort}",
                 relayVmIp, publicPort, tunnelIp, tunnelPort);
@@ -742,6 +807,10 @@ public class PortForwardingManager : IPortForwardingManager
 
             using var httpClient = new HttpClient();
             httpClient.Timeout = TimeSpan.FromSeconds(10);
+
+            // Best-effort auth: relay VM fail-closes without it; missing token is logged below
+            // via the non-success path rather than aborting cleanup.
+            await TrySetRelayAuthAsync(httpClient, ct);
 
             var content = new StringContent(
                 System.Text.Json.JsonSerializer.Serialize(payload),
@@ -789,6 +858,10 @@ public class PortForwardingManager : IPortForwardingManager
         {
             using var httpClient = new HttpClient();
             httpClient.Timeout = TimeSpan.FromSeconds(10);
+
+            // Best-effort auth: relay VM fail-closes without it; missing token is logged below
+            // via the non-success path rather than aborting reconciliation.
+            await TrySetRelayAuthAsync(httpClient, ct);
 
             var response = await httpClient.PostAsync(
                 $"http://{relayVmIp}:8080/api/relay/flush-port-forwards",
