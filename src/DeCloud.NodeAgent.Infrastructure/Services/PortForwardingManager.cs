@@ -113,18 +113,20 @@ public class PortForwardingManager : IPortForwardingManager
 
         try
         {
-            using var doc = System.Text.Json.JsonDocument.Parse(stateJson);
-            // The token is RelayObligationState.AuthToken on the orchestrator side.
-            // CONFIRM the exact JSON property name against RelayObligationState's serialization
-            // (and any JsonNamingPolicy in effect) before relying on this in production.
-            if (doc.RootElement.TryGetProperty("AuthToken", out var t) &&
-                t.ValueKind == System.Text.Json.JsonValueKind.String)
+            // Deserialize the shared RelayObligationState with the platform-wide Wire profile —
+            // the same options the state is written with — so casing/format match across the
+            // boundary by construction, not by hope. AuthToken is the relay VM's Bearer credential.
+            var state = System.Text.Json.JsonSerializer.Deserialize<DeCloud.Shared.Models.RelayObligationState>(
+                stateJson,
+                DeCloud.Shared.Json.JsonOptions.Wire);
+
+            if (string.IsNullOrEmpty(state?.AuthToken))
             {
-                return t.GetString();
+                _logger.LogError("Relay obligation state has no AuthToken");
+                return null;
             }
 
-            _logger.LogError("Relay obligation state has no string AuthToken property");
-            return null;
+            return state.AuthToken;
         }
         catch (System.Text.Json.JsonException ex)
         {
