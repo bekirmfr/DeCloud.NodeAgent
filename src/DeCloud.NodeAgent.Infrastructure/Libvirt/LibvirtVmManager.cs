@@ -315,7 +315,29 @@ public class LibvirtVmManager : IVmManager
 
                 if (vm.Status == VmStatus.Provisioning)
                 {
-                    // Domain creation in flight — legitimately not in libvirt yet
+                    // A Provisioning VM legitimately has no libvirt domain *while its
+                    // CreateVm is still running* (image download + qemu-img convert).
+                    // That state is only valid for as long as that operation runs. A
+                    // Provisioning row with no domain that has outlived the worst-case
+                    // provisioning time is an interrupted deploy (agent restart / crash
+                    // mid-download): nothing will ever advance it, yet the heartbeat keeps
+                    // advertising it and the orchestrator keeps recovering it. Fail it to
+                    // Error; the ghost-reaper branch below soft-deletes it on the next
+                    // cycle, the node stops advertising it, and the orchestrator
+                    // reschedules a fresh CreateVm if it still wants the VM.
+                    //
+                    // Ceiling = ImageManager download timeout (30m) + qemu-img convert
+                    // timeout (30m) + margin. A live deploy never exceeds this, so this
+                    // never reaps a genuinely in-flight provision.
+                    if (DateTime.UtcNow - vm.CreatedAt < TimeSpan.FromMinutes(90))
+                        continue; // within the window — a real deploy may be in flight
+
+                    _logger.LogWarning(
+                        "VM {VmId} stuck in Provisioning since {CreatedAt:o} with no libvirt " +
+                        "domain — interrupted deploy; marking Error for cleanup",
+                        vmId, vm.CreatedAt);
+                    vm.Status = VmStatus.Error;
+                    await _repository.UpdateVmStateAsync(vmId, VmStatus.Error);
                     continue;
                 }
 

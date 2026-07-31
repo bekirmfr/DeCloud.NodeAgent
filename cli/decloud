@@ -2331,15 +2331,6 @@ cmd_vm_cleanup() {
 _vm_cleanup_one() {
     local vm_id="$1" dry_run="$2" force="$3"
 
-    # Check existence
-    local vm_state
-    vm_state=$(virsh domstate "$vm_id" 2>/dev/null || echo "not_found")
-
-    if [[ "$vm_state" == "not_found" ]] && [[ ! -d "$VM_STORAGE_PATH/$vm_id" ]]; then
-        log_error "VM not found in libvirt or storage: $vm_id"
-        exit $EXIT_ERROR
-    fi
-
     if ! $force; then
         read -rp "Delete VM '$vm_id' and all its data? This is IRREVERSIBLE. [y/N]: " confirm
         [[ "$confirm" =~ ^[Yy]$ ]] || { log_info "Cancelled"; exit $EXIT_SUCCESS; }
@@ -2347,13 +2338,43 @@ _vm_cleanup_one() {
 
     log_info "Cleaning up VM: $vm_id"
 
-    if ! $dry_run; then
-        virsh destroy  "$vm_id" 2>/dev/null || true
-        virsh undefine "$vm_id" --remove-all-storage 2>/dev/null || true
-        [[ -d "$VM_STORAGE_PATH/$vm_id" ]] && rm -rf "${VM_STORAGE_PATH:?}/${vm_id:?}" || true
+    if $dry_run; then
+        log_success "VM $vm_id cleaned up"
+        return 0
     fi
 
-    log_success "VM $vm_id cleaned up"
+    # Prefer the node agent's own delete. It soft-deletes the SQLite row
+    # (State='Deleted') under the agent's lock, which is what stops the heartbeat
+    # re-advertising the VM and the orchestrator recovering it. Idempotent even
+    # when no libvirt domain or disk exists (a deploy that died mid-provision) --
+    # exactly the case the old libvirt-only path could never clear.
+    local http_code
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+        -X DELETE "${NODE_AGENT_URL}/api/vms/${vm_id}" \
+        -H "X-API-Key: $(get_api_key)" 2>/dev/null || echo "000")
+
+    if [[ "$http_code" == "200" ]]; then
+        log_success "VM $vm_id deleted via node agent (record marked Deleted)"
+        return 0
+    fi
+
+    # Agent unreachable/refused -> local escape hatch. WARNING: this path CANNOT
+    # clear the SQLite row; if the agent restarts it will still see the VM and
+    # re-advertise it. Only meaningful when the agent is down for good.
+    log_warn "Agent delete failed (HTTP $http_code) -- falling back to local virsh cleanup"
+
+    local vm_state
+    vm_state=$(virsh domstate "$vm_id" 2>/dev/null || echo "not_found")
+    if [[ "$vm_state" == "not_found" ]] && [[ ! -d "$VM_STORAGE_PATH/$vm_id" ]]; then
+        log_error "VM not found in libvirt or storage, and agent unreachable: $vm_id"
+        exit $EXIT_ERROR
+    fi
+
+    virsh destroy  "$vm_id" 2>/dev/null || true
+    virsh undefine "$vm_id" --remove-all-storage 2>/dev/null || true
+    [[ -d "$VM_STORAGE_PATH/$vm_id" ]] && rm -rf "${VM_STORAGE_PATH:?}/${vm_id:?}" || true
+
+    log_success "VM $vm_id cleaned up (local only -- DB row NOT cleared)"
 }
 
 # Internal: clean up ALL VMs
