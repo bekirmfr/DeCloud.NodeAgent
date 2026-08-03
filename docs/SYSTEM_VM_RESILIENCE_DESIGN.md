@@ -83,6 +83,16 @@
 >    `system-vms/{role}/src/` (Go source), `system-vms/{role}/assets/` (scripts,
 >    dashboards), `system-vms/{role}/cloud-init.yaml`. `compute-artifact-constants.sh`
 >    auto-discovers all `assets/` directories — no hardcoded maps.
+>
+> 9. **Relay health means "forwarding," not "up"** (post-migration finding,
+>    2026-08-03). A wedged relay (`WG Peers: 0`, `0 B received`, guest agent dead)
+>    read `Healthy` and was excluded from every healer, so the matrix's
+>    `reality=Unhealthy → redeploy` never fired (flow-map G17). Decision: fix
+>    *detection*, not add a healer — the relay `/health` becomes a liveness check
+>    (applied), and `relay-api.py /health` reports WireGuard-forwarding health
+>    (cross-repo, pending a cold-start / expected-peers grace so a healthy idle
+>    relay never flaps into a redeploy loop). The existing matrix does the healing.
+>    Full diagnosis: `decision-log-relay-health-detection-heal.md`.
 
 ---
 
