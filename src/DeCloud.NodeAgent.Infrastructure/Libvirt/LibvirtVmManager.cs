@@ -613,6 +613,27 @@ public class LibvirtVmManager : IVmManager
                 "VM creation requires Linux with KVM/libvirt. Windows detected.", "PLATFORM_UNSUPPORTED");
         }
 
+        // Precondition, checked before any disk work. GenerateLibvirtXml (STEP 4)
+        // consumes SchedulingConfig + PerformanceEvaluation; reaching it without them
+        // costs an overlay disk and a cloud-init clean (~60s on WSL2) per attempt.
+        // CommandProcessorService.HandleCreateVmAsync has this same check for the
+        // orchestrator-command path, but SystemVmReconciler → IVmDeploymentPipeline
+        // → here never passes through it. This is the consumer, so the check belongs
+        // here and covers every caller.
+        if (!_nodeState.IsFullyInitialized)
+        {
+            _logger.LogWarning(
+                "VM {VmId}: refusing create — node not fully initialized " +
+                "(SchedulingConfig v{ConfigVersion}, PerformanceEvaluation {PerfStatus})",
+                spec.Id,
+                _nodeState.SchedulingConfig?.Version ?? 0,
+                _nodeState.PerformanceEvaluation != null ? "received" : "pending");
+
+            return VmOperationResult.Fail(spec.Id,
+                "Node has not received both scheduling configuration and performance " +
+                "evaluation from the orchestrator", "NOT_INITIALIZED");
+        }
+
         if (!_initialized)
         {
             await InitializeAsync(ct);
@@ -2919,16 +2940,26 @@ public class LibvirtVmManager : IVmManager
 
         // Formula: PointsPerVCpu = baselineOvercommit × (baselineOvercommit / tierOvercommit)
 
-        // Defensive: Ensure node is fully initialized before creating VMs
-        if (_nodeState.SchedulingConfig == null)
+        // Defensive: Ensure node is fully initialized before creating VMs.
+        // Both halves matter. Checking only SchedulingConfig was the 2026-08-04 MSI
+        // defect: SchedulingConfig self-heals via the heartbeat, PerformanceEvaluation
+        // does not, so the guarded field recovered, the unguarded one stayed null, and
+        // the dereference below became a NullReferenceException once a minute for 45
+        // minutes. IsFullyInitialized is the invariant INodeStateService already
+        // declares for exactly this ("Required before VM creation can proceed").
+        if (!_nodeState.IsFullyInitialized)
         {
             throw new InvalidOperationException(
-                "Cannot create VM: Node has not received scheduling configuration. " +
-                "Please ensure the node has successfully registered with the orchestrator.");
+                "Cannot create VM: Node has not received both scheduling configuration " +
+                $"(v{_nodeState.SchedulingConfig?.Version ?? 0}) and performance evaluation " +
+                $"({(_nodeState.PerformanceEvaluation != null ? "received" : "pending")}) " +
+                "from the orchestrator.");
         }
-        
-        var config = _nodeState.SchedulingConfig;
-        var nodeTotalPoints = _nodeState.PerformanceEvaluation.TotalComputePoints;
+
+        // ! is safe: IsFullyInitialized above establishes both are non-null.
+        // The compiler can no longer infer it from a direct == null check.
+        var config = _nodeState.SchedulingConfig!;
+        var nodeTotalPoints = _nodeState.PerformanceEvaluation!.TotalComputePoints;
 
         // Defensive: Ensure tier exists in config, fallback to Standard if not
         if (!config.Tiers.TryGetValue(spec.QualityTier, out var tierConfig))

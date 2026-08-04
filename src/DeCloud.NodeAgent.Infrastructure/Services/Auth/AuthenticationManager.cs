@@ -305,6 +305,34 @@ public class AuthenticationManager : BackgroundService
             return;
         }
 
+        // Repair a missing performance evaluation BEFORE the scheduling-ready early
+        // return below. PerformanceEvaluation is fetched once, in
+        // OrchestratorClient.InitializeAsync, and that fetch is deliberately
+        // non-fatal — so a boot that races an unreachable orchestrator leaves it null
+        // for the life of the process, while SchedulingConfig quietly repairs itself
+        // on the next heartbeat. On MSI (2026-08-04) that heartbeat also flipped
+        // SchedulingReady to true, which made this method return on its first line
+        // and silenced the "run 'decloud evaluate'" hint forever, leaving VM creation
+        // permanently broken on a node reporting perfectly healthy.
+        //
+        // This is a GET of state the orchestrator already holds — NOT EvaluateNodeAsync
+        // (POST /evaluate + benchmark). It re-reads a decision already made, so it does
+        // not bypass the register → evaluate → login lifecycle.
+        if (_nodeState.PerformanceEvaluation == null)
+        {
+            _logger.LogInformation(
+                "Performance evaluation missing — re-fetching from orchestrator");
+            try
+            {
+                await _orchestratorClient.GetPerformanceEvaluationAsync(ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex,
+                    "Re-fetch of performance evaluation failed — will retry next cycle");
+            }
+        }
+
         // Skip login if the orchestrator already has this node as scheduling-ready.
         if (_nodeState.IsSchedulingReady)
         {
@@ -313,14 +341,11 @@ public class AuthenticationManager : BackgroundService
             return;
         }
 
-        // Evaluation must exist before login — login requires PerformanceEvaluation
-        // to compute capacity. On a normal restart InitializeAsync already fetched
-        // it from the orchestrator. If it is still null here the node has not yet
-        // been evaluated (fresh registration) or the orchestrator was unreachable
-        // during init. In both cases the operator must run 'decloud evaluate'
-        // explicitly — auto-evaluating here would bypass the intended lifecycle
-        // (register → evaluate → login) and cause obligations to deploy before
-        // the operator has reviewed allocation.
+        // Login requires PerformanceEvaluation to compute capacity. If the re-fetch
+        // above did not populate it, the node has never been evaluated (fresh
+        // registration) and the operator must run 'decloud evaluate' explicitly —
+        // auto-evaluating here would bypass the intended lifecycle and cause
+        // obligations to deploy before the operator has reviewed allocation.
         if (_nodeState.PerformanceEvaluation == null)
         {
             _logger.LogInformation(
