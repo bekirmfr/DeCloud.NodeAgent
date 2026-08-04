@@ -1,4 +1,5 @@
 using DeCloud.NodeAgent.Core.Interfaces;
+using DeCloud.NodeAgent.Core.Interfaces.State;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -43,16 +44,22 @@ public class WireGuardConfigManager : BackgroundService
     // otherwise grow without bound.
     private const int MaxConfigBackups = 10;
 
+    // Used only to answer "has the orchestrator told us anything yet?" — see the
+    // deferral guard in ReconcileWireGuardStateAsync.
+    private readonly INodeStateService _nodeState;
+
     public WireGuardConfigManager(
         ILogger<WireGuardConfigManager> logger,
         INetworkManager networkManager,
         ICommandExecutor executor,
-        IOrchestratorClient orchestratorClient)
+        IOrchestratorClient orchestratorClient,
+        INodeStateService nodeState)
     {
         _logger = logger;
         _networkManager = networkManager;
         _executor = executor;
         _orchestratorClient = orchestratorClient;
+        _nodeState = nodeState;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -83,6 +90,32 @@ public class WireGuardConfigManager : BackgroundService
     /// </summary>
     private async Task ReconcileWireGuardStateAsync(CancellationToken ct)
     {
+        // ========================================
+        // STEP 0: Refuse to act on unknown state
+        // ========================================
+        // DetermineDesiredConfigAsync derives everything from
+        // _orchestratorClient.GetLastHeartbeat(). Before CGNAT data has arrived it
+        // returns null — the SAME value it returns for "this node genuinely needs no
+        // WireGuard" — and the cleanup branch below then tears down a working
+        // wg-relay on every agent restart, recreating it ~60s later once the first
+        // heartbeat lands. Observed 2026-08-05 01:36:06 → 01:37:05.
+        //
+        // Absent state is not a negative decision. Wait for authoritative data;
+        // after a successful heartbeat a null CgnatInfo really does mean "no relay"
+        // and cleanup is correct.
+        //
+        // NOTE: GetLastHeartbeat() is NOT a usable signal here — SendHeartbeatAsync
+        // assigns _lastHeartbeat before the POST, so it is non-null after the first
+        // attempt regardless of outcome. INodeStateService.LastHeartbeat is set only
+        // by RecordHeartbeat(success: true).
+        if (_nodeState.LastHeartbeat is null)
+        {
+            _logger.LogDebug(
+                "No successful heartbeat yet — deferring WireGuard reconciliation " +
+                "rather than treating unknown CGNAT state as 'no relay needed'");
+            return;
+        }
+
         // ========================================
         // STEP 1: Determine Desired State
         // ========================================
