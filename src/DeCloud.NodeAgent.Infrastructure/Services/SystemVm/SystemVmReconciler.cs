@@ -218,6 +218,24 @@ public sealed class SystemVmReconciler : BackgroundService
             pendingOrNull = null;
         }
 
+        // Converged: reality=Healthy means the Create shield has done its job.
+        // Clear the stored command rather than only neutralising it inside Decide.
+        // Otherwise the entry survives to the 20-minute CommandTimeout sweep and
+        // re-arms the shield if the VM turns Unhealthy again in the meantime —
+        // Unhealthy + pending=Create → Wait, delaying Delete/redeploy by up to
+        // 20 minutes. Also stops the cycle log reporting pending=Create on a role
+        // that has already converged. This is the behaviour ActCreateAsync's
+        // comment has always claimed.
+        if (pendingOrNull?.Kind == OutstandingCommandKind.Create &&
+            reality.State == Reality.Healthy)
+        {
+            _outstanding.Clear(role);
+            _logger.LogDebug(
+                "SystemVmReconciler [{Role}]: VM {VmId} healthy — clearing pending Create shield",
+                role, pendingOrNull.VmId);
+            pendingOrNull = null;
+        }
+
         var decision = Decide(intent, reality, pendingOrNull);
 
         var pendingDesc = pendingOrNull is null

@@ -199,9 +199,11 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     {
         var info = new CpuInfo { Flags = new List<string>() };
 
-        // Detect architecture
+        // Detect architecture first
         info.Architecture = GetArchitecture();
-        _logger.LogInformation("Detected CPU architecture: {Architecture}", info.Architecture);
+        // Debug, not Information: this runs on every resource snapshot (~10s) and
+        // the value is fixed for the process lifetime.
+        _logger.LogDebug("Detected CPU architecture: {Architecture}", info.Architecture);
 
         try
         {
@@ -283,9 +285,9 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     {
         var info = new CpuInfo { Flags = new List<string>() };
 
-        // Detect architecture first
+        // Detect architecture
         info.Architecture = GetArchitecture();
-        _logger.LogInformation("Detected CPU architecture: {Architecture}", info.Architecture);
+        _logger.LogDebug("Detected CPU architecture: {Architecture}", info.Architecture);
 
         var cpuinfoResult = await _executor.ExecuteAsync("cat", "/proc/cpuinfo", ct);
         if (cpuinfoResult.Success)

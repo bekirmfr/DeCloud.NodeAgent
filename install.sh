@@ -2408,7 +2408,9 @@ create_configuration() {
     "LogLevel": {
       "Default": "Information",
       "Microsoft.AspNetCore": "Warning",
-      "DeCloud": "Debug"
+      "System.Net.Http.HttpClient": "Warning",
+      "DeCloud": "Information",
+      "DeCloud.NodeAgent.Infrastructure.Services.SystemVm": "Debug"
     }
   },
   "Urls": "http://0.0.0.0:${AGENT_PORT}",

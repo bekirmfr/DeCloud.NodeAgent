@@ -83,7 +83,9 @@ public class AuthenticationManager : BackgroundService
                         break;
 
                     case AuthenticationState.Registered:
-                        _logger.LogInformation("✓ Node authenticated and registered");
+                        // Debug: emitted every RegisteredCheckInterval (30s) in steady
+                        // state. State *changes* are logged by SetAuthState.
+                        _logger.LogDebug("✓ Node authenticated and registered");
 
                         // Auto-login: set SchedulingReady at orchestrator unless
                         // the operator explicitly logged out (sentinel file present)
@@ -296,28 +298,13 @@ public class AuthenticationManager : BackgroundService
     /// </summary>
     private async Task AutoLoginIfNotLoggedOutAsync(CancellationToken ct)
     {
-        if (File.Exists(LoggedOutSentinelPath))
-        {
-            _logger.LogInformation(
-                "Logged-out sentinel exists at {Path} — heartbeating but not scheduling-ready. " +
-                "Run 'decloud login' to resume scheduling.",
-                LoggedOutSentinelPath);
-            return;
-        }
-
-        // Repair a missing performance evaluation BEFORE the scheduling-ready early
-        // return below. PerformanceEvaluation is fetched once, in
-        // OrchestratorClient.InitializeAsync, and that fetch is deliberately
-        // non-fatal — so a boot that races an unreachable orchestrator leaves it null
-        // for the life of the process, while SchedulingConfig quietly repairs itself
-        // on the next heartbeat. On MSI (2026-08-04) that heartbeat also flipped
-        // SchedulingReady to true, which made this method return on its first line
-        // and silenced the "run 'decloud evaluate'" hint forever, leaving VM creation
-        // permanently broken on a node reporting perfectly healthy.
-        //
-        // This is a GET of state the orchestrator already holds — NOT EvaluateNodeAsync
-        // (POST /evaluate + benchmark). It re-reads a decision already made, so it does
-        // not bypass the register → evaluate → login lifecycle.
+        // The repair below runs before the logged-out sentinel check on purpose.
+        // Logout pauses *scheduling*; it does not clear obligations —
+        // SystemVmObligationService never removes them, and IIntentComputation.Compute
+        // consults only the obligation list. So a logged-out node still reconciles its
+        // system VMs, and with PerformanceEvaluation null it would refuse every create
+        // forever with nothing to repair it. Re-reading orchestrator-owned state is
+        // unrelated to login intent.
         if (_nodeState.PerformanceEvaluation == null)
         {
             _logger.LogInformation(
@@ -333,10 +320,19 @@ public class AuthenticationManager : BackgroundService
             }
         }
 
+        if (File.Exists(LoggedOutSentinelPath))
+        {
+            _logger.LogInformation(
+                "Logged-out sentinel exists at {Path} — heartbeating but not scheduling-ready. " +
+                "Run 'decloud login' to resume scheduling.",
+                LoggedOutSentinelPath);
+            return;
+        }
+
         // Skip login if the orchestrator already has this node as scheduling-ready.
         if (_nodeState.IsSchedulingReady)
         {
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "Node is already scheduling-ready — skipping auto-login");
             return;
         }

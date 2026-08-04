@@ -198,7 +198,9 @@ public class LibvirtVmManager : IVmManager
 
     public async Task ReconcileAllWithLibvirtAsync(CancellationToken ct = default)
     {
-        _logger.LogInformation("Reconciling VM state with libvirt...");
+        // Debug: runs every reconcile cycle and reports no outcome. The findings
+        // below (state changes, re-adoptions, ghost removals) stay at Information.
+        _logger.LogDebug("Reconciling VM state with libvirt...");
 
         try
         {
@@ -215,7 +217,7 @@ public class LibvirtVmManager : IVmManager
                 .Where(uuid => !string.IsNullOrEmpty(uuid) && Guid.TryParse(uuid, out _))
                 .ToList();
 
-            _logger.LogInformation("Found {Count} VMs in libvirt", libvirtVmIds.Count);
+            _logger.LogDebug("Found {Count} VMs in libvirt", libvirtVmIds.Count);
 
             // Update state for VMs we know about
             foreach (var vmId in libvirtVmIds)

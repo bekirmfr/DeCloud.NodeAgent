@@ -387,7 +387,10 @@ public class VmRepository : IDisposable
                 }
             }
 
-            _logger.LogInformation("Loaded {Count} VMs from database", vms.Count);
+            // Debug, not Information: called several times per reconcile cycle and
+            // reports no state change. The state-change lines in this class
+            // (Saved VM / Updated VM state) are the ones worth Information.
+            _logger.LogDebug("Loaded {Count} VMs from database", vms.Count);
             return vms;
         }
         finally

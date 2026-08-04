@@ -1157,14 +1157,17 @@ REGISTERED_AT={DateTime.UtcNow:O}";
             // ── CGNAT info ─────────────────────────────────────────────────────
             if (data.CgnatInfo is not null)
             {
-                _logger.LogInformation(
+                // Debug: every heartbeat (15s) carries identical CGNAT data for a
+                // stable assignment. A relay *change* would be worth Information;
+                // repetition is not.
+                _logger.LogDebug(
                     "Received relay data: Relay {RelayId}, Tunnel IP {TunnelIp}",
                     data.CgnatInfo.AssignedRelayNodeId, data.CgnatInfo.TunnelIp);
 
                 if (_lastHeartbeat?.Heartbeat is not null)
                 {
                     _lastHeartbeat.Heartbeat.CgnatInfo = data.CgnatInfo;
-                    _logger.LogInformation("✓ Stored CGNAT info in heartbeat");
+                    _logger.LogDebug("✓ Stored CGNAT info in heartbeat");
                 }
             }
             else if (_lastHeartbeat?.Heartbeat?.CgnatInfo is not null)

@@ -97,7 +97,10 @@ public class WireGuardConfigManager : BackgroundService
             return;
         }
 
-        _logger.LogInformation(
+        // Debug: restates the desired state every reconcile interval regardless of
+        // whether anything changed. Actual transitions (create/remove/drift/stale)
+        // below stay at Information/Warning.
+        _logger.LogDebug(
             "Desired WireGuard state: Interface={Interface}, Role={Role}",
             desiredConfig.InterfaceName,
             desiredConfig.Role);
@@ -168,7 +171,8 @@ public class WireGuardConfigManager : BackgroundService
             }
         }
 
-        _logger.LogInformation(
+        // Debug: "still converged" every cycle. Divergence is already logged above.
+        _logger.LogDebug(
             "✓ WireGuard state reconciled: {Interface} is active",
             desiredConfig.InterfaceName);
     }
