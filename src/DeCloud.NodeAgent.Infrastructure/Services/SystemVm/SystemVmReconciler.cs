@@ -104,6 +104,12 @@ public sealed class SystemVmReconciler : BackgroundService
     private readonly VmRepository _repository;
     private readonly ILogger<SystemVmReconciler> _logger;
 
+    // Last logged Wait-decision signature per role. Suppresses the identical
+    // "still converged" line every cycle; see the Wait case in EvaluateRoleAsync.
+    // Single-threaded: RunCycleAsync walks CanonicalRoles sequentially in one
+    // background service, so a plain Dictionary is sufficient.
+    private readonly Dictionary<string, string> _lastWaitSignature = new();
+
     public SystemVmReconciler(
         IObligationStateService obligationState,
         ISystemVmService systemVmService,
@@ -245,13 +251,35 @@ public sealed class SystemVmReconciler : BackgroundService
         switch (decision.Action)
         {
             case MatrixAction.Wait:
-                _logger.LogDebug(
-                    "[{Role}] intent={Want}/{Deps} reality={Reality} pending={Pending} → Wait — {Reason}",
-                    role,
-                    intent.WantDeployed ? "yes" : "no",
-                    intent.DepsMet ? "depsMet" : "!depsMet",
-                    reality.State, pendingDesc, decision.Reason);
-                break;
+                {
+                    // Log Wait only when the decision inputs change. A converged role
+                    // re-emits a byte-identical line every cycle — 3 roles x ~29s — which
+                    // after the 2026-08-05 volume work is the largest remaining source of
+                    // journal churn (~63 of ~64 remaining events per 10 min).
+                    //
+                    // The informative Waits still print: !depsMet, "booting — shielded",
+                    // "delete in flight" all differ from the converged signature, so they
+                    // appear when entered and again when they clear. Create/Delete are
+                    // Information and unaffected.
+                    var waitSignature =
+                        $"{intent.WantDeployed}|{intent.DepsMet}|{reality.State}|{pendingDesc}|{decision.Reason}";
+
+                    if (_lastWaitSignature.TryGetValue(role, out var previousSignature) &&
+                        previousSignature == waitSignature)
+                    {
+                        break;
+                    }
+
+                    _lastWaitSignature[role] = waitSignature;
+
+                    _logger.LogDebug(
+                        "[{Role}] intent={Want}/{Deps} reality={Reality} pending={Pending} → Wait — {Reason}",
+                        role,
+                        intent.WantDeployed ? "yes" : "no",
+                        intent.DepsMet ? "depsMet" : "!depsMet",
+                        reality.State, pendingDesc, decision.Reason);
+                    break;
+                }
 
             case MatrixAction.IssueDelete:
                 _logger.LogInformation(
@@ -261,6 +289,7 @@ public sealed class SystemVmReconciler : BackgroundService
                     intent.DepsMet ? "depsMet" : "!depsMet",
                     reality.State, reality.VmState?.ToString() ?? "-",
                     pendingDesc, reality.VmId, decision.Reason);
+                _lastWaitSignature.Remove(role);
                 await ActDeleteAsync(role, reality.VmId!, decision.Reason, ct);
                 break;
 
@@ -271,6 +300,7 @@ public sealed class SystemVmReconciler : BackgroundService
                     intent.WantDeployed ? "yes" : "no",
                     intent.DepsMet ? "depsMet" : "!depsMet",
                     reality.State, pendingDesc, decision.Reason);
+                _lastWaitSignature.Remove(role);
                 await ActCreateAsync(role, ct);
                 break;
         }
