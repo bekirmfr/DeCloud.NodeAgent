@@ -34,6 +34,14 @@ namespace DeCloud.NodeAgent.Infrastructure.Persistence
                         stats.TotalVms,
                         stats.DatabaseSizeBytes / 1024);
                 }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    // Graceful shutdown. This service spends essentially all its time in
+                    // the 24h Task.Delay above, so cancellation there is its normal exit
+                    // path — not a maintenance failure. Previously logged at Error with a
+                    // stack trace on every single stop (observed 2026-08-05 02:10:21).
+                    break;
+                }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Database maintenance failed");

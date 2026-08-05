@@ -120,7 +120,14 @@ public class AuthenticationManager : BackgroundService
 
     private async Task WaitForResourceDiscoveryAsync(CancellationToken ct)
     {
-        _resourceDiscovery.GetInventoryCachedAsync(ct);
+        // Kick discovery off without awaiting — the loop below polls
+        // IsDiscoveryComplete. Explicit discard documents the intent and silences
+        // CS4014; the continuation surfaces failures that would otherwise become
+        // unobserved task exceptions.
+        _ = _resourceDiscovery.GetInventoryCachedAsync(ct)
+            .ContinueWith(
+                t => _logger.LogError(t.Exception, "Resource discovery failed to start"),
+                TaskContinuationOptions.OnlyOnFaulted);
 
         _logger.LogInformation("Waiting for resource discovery to complete...");
 

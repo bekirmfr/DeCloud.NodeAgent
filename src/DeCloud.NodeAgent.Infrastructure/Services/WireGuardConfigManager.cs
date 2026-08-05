@@ -76,10 +76,29 @@ public class WireGuardConfigManager : BackgroundService
                 await ReconcileWireGuardStateAsync(stoppingToken);
                 await Task.Delay(ReconcileInterval, stoppingToken);
             }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                // Graceful shutdown, not a failure. Previously logged at Error with a
+                // stack trace on every stop (observed 2026-08-05 02:10:21), putting
+                // false failures in the journal at exactly the moment someone is
+                // reading a shutdown during an incident.
+                break;
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error in WireGuard reconciliation");
-                await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
+
+                // The back-off delay is itself cancellable: without this, a real error
+                // followed by a shutdown inside the 5-minute window throws out of
+                // ExecuteAsync instead of exiting cleanly.
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMinutes(5), stoppingToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
             }
         }
     }

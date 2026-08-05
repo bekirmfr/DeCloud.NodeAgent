@@ -144,11 +144,11 @@ namespace DeCloud.NodeAgent.Infrastructure.Services
             }
             catch (OperationCanceledException)
             {
-                _logger.LogInformation("AuthenticationManager stopped");
+                _logger.LogWarning("VmHealthService stopped");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "AuthenticationManager error");
+                _logger.LogError(ex, "VmHealthService error");
                 throw;
             }
         }
