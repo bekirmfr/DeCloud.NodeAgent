@@ -144,7 +144,22 @@ public class SystemVmWatchdogService : BackgroundService
                 return;
             }
 
-            if (infoResult.StandardOutput.Contains("Active:           yes"))
+            // Parse the field; do not match on column alignment. `virsh net-info` pads
+            // labels to a fixed 16-column width, so "Name:" gets 11 trailing spaces but
+            // "Active:" gets 9. This check previously hard-coded 11 and therefore NEVER
+            // matched on any node — every agent start fell through to the "inactive"
+            // branch below, ran net-destroy (tearing down virbr0 and orphaning every
+            // tap on the host), then net-start, then relied on
+            // ReattachOrphanedTapInterfacesAsync to repair the damage it had just
+            // caused. Confirmed 2026-08-05 on both a WSL2 node and a plain VPS:
+            // "Active:         yes" — 9 spaces.
+            var isActive = infoResult.StandardOutput
+                .Split('\n')
+                .Select(line => line.Trim())
+                .Any(line => line.StartsWith("Active:", StringComparison.Ordinal)
+                          && line[7..].Trim().Equals("yes", StringComparison.OrdinalIgnoreCase));
+
+            if (isActive)
             {
                 _logger.LogDebug("SystemVmStartupService: libvirt default network already active");
                 return;
