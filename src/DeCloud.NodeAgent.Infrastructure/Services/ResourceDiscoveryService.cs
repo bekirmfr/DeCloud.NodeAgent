@@ -1140,11 +1140,29 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
         var totalStorageBytes = storage.Sum(s => s.TotalBytes);
         var allocatedStorageBytes = _nodeMetadata.AllocatedStorageBytes;
 
+        // One repository read per snapshot, shared by both consumers below.
+        // GetUsedComputePoints and GetGpuUsageFromRepository each used to load the
+        // full table themselves, so every snapshot ran two `SELECT *` scans with
+        // per-row JSON deserialisation to answer two questions about the same rows —
+        // measured at ~17 loads/minute on an idle 3-VM node.
+        // Synchronous for the same reason the helpers were: GetCurrentSnapshotAsync
+        // can run inside the discovery semaphore and awaiting here risks deadlock.
+        List<VmInstance> vms;
+        try
+        {
+            vms = _vmRepository.LoadAllVmsAsync().GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to read VmRepository for resource snapshot — reporting zero usage");
+            vms = new List<VmInstance>();
+        }
+
         // GPU accounting
         var totalGpuVramBytes = gpus.Sum(g => g.MemoryBytes);
         var usedGpuVramBytes = gpus.Sum(g => g.MemoryUsedBytes);
         var allocatedGpus = _nodeMetadata.AllocatedGpuCount ?? gpus.Count;
-        var (usedGpus, passthroughVramBytes, proxiedVramBytes) = GetGpuUsageFromRepository(gpus);
+        var (usedGpus, passthroughVramBytes, proxiedVramBytes) = GetGpuUsageFromRepository(gpus, vms);
         var allocatedGpuVramBytes = passthroughVramBytes + proxiedVramBytes;
 
         return new ResourceSnapshot
@@ -1156,7 +1174,7 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
 
             TotalComputePoints = (int)totalComputePoints,
             AllocatedComputePoints = _nodeMetadata.AllocatedComputePoints ?? 0,
-            UsedComputePoints = GetUsedComputePoints(),
+            UsedComputePoints = GetUsedComputePoints(vms),
 
             TotalMemoryBytes = memory.TotalBytes,
             AllocatedMemoryBytes = allocatedMemory,
@@ -1221,21 +1239,10 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     /// libvirt connection) to avoid initialization deadlock — IVmManager is
     /// not safe to resolve during early DI construction.
     /// </summary>
-    private int GetUsedComputePoints()
-    {
-        try
-        {
-            var vms = _vmRepository.LoadAllVmsAsync().GetAwaiter().GetResult();
-            return vms
-                .Where(v => v.Status != VmStatus.Deleted)
-                .Sum(v => v.Spec.ComputePointCost);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to query VmRepository for used compute points");
-            return 0;
-        }
-    }
+    private static int GetUsedComputePoints(IReadOnlyList<VmInstance> vms)
+        => vms
+            .Where(v => v.Status != VmStatus.Deleted)
+            .Sum(v => v.Spec.ComputePointCost);
 
     /// <summary>
     /// Single VmRepository query that produces the PCI-address → VM-ID map
@@ -1278,41 +1285,32 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
     /// Called from GetCurrentSnapshotAsync — synchronous to avoid deadlock
     /// with the discovery semaphore, consistent with GetUsedComputePoints.
     /// </summary>
-    private (int UsedGpus, long PassthroughVramBytes, long ProxiedVramBytes)
-        GetGpuUsageFromRepository(List<GpuInfo> gpus)
+    private static (int UsedGpus, long PassthroughVramBytes, long ProxiedVramBytes)
+        GetGpuUsageFromRepository(List<GpuInfo> gpus, IReadOnlyList<VmInstance> vms)
     {
-        try
-        {
-            var vms = _vmRepository.LoadAllVmsAsync().GetAwaiter().GetResult();
-            var active = vms
-                .Where(v => v.Status is not
-                    (VmStatus.Deleted or VmStatus.Stopped or VmStatus.Error))
-                .ToList();
+        var active = vms
+            .Where(v => v.Status is not
+                (VmStatus.Deleted or VmStatus.Stopped or VmStatus.Error))
+            .ToList();
 
-            // Passthrough: full GPU VRAM for each physically assigned GPU.
-            var assignedPci = active
-                .Where(v => v.Spec.GpuMode == GpuMode.Passthrough
-                         && !string.IsNullOrEmpty(v.Spec.GpuPciAddress))
-                .Select(v => v.Spec.GpuPciAddress!)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        // Passthrough: full GPU VRAM for each physically assigned GPU.
+        var assignedPci = active
+            .Where(v => v.Spec.GpuMode == GpuMode.Passthrough
+                     && !string.IsNullOrEmpty(v.Spec.GpuPciAddress))
+            .Select(v => v.Spec.GpuPciAddress!)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-            var passthroughVram = gpus
-                .Where(g => assignedPci.Contains(g.PciAddress))
-                .Sum(g => g.MemoryBytes);
+        var passthroughVram = gpus
+            .Where(g => assignedPci.Contains(g.PciAddress))
+            .Sum(g => g.MemoryBytes);
 
-            // Proxied: sum of operator-set VRAM quotas carried on VmSpec.
-            var proxiedVram = active
-                .Where(v => v.Spec.GpuMode == GpuMode.Proxied
-                         && v.Spec.GpuVramBytes > 0)
-                .Sum(v => v.Spec.GpuVramBytes!.Value);
+        // Proxied: sum of operator-set VRAM quotas carried on VmSpec.
+        var proxiedVram = active
+            .Where(v => v.Spec.GpuMode == GpuMode.Proxied
+                     && v.Spec.GpuVramBytes > 0)
+            .Sum(v => v.Spec.GpuVramBytes!.Value);
 
-            return (assignedPci.Count, passthroughVram, proxiedVram);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to query VmRepository for GPU usage");
-            return (0, 0, 0);
-        }
+        return (assignedPci.Count, passthroughVram, proxiedVram);
     }
 
     // =========================================================================
