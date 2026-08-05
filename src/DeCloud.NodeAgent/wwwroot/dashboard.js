@@ -118,7 +118,8 @@ function renderBanner() {
     set('node-id', d.nodeId ?? 'unregistered');
     set('hostname', d.hostname);
     set('os-info', d.os);
-    set('uptime', fmtUptime(d.uptimeSeconds ?? 0));
+    set('uptime', fmtUptime(d.hostUptimeSeconds ?? 0));
+    set('agent-uptime', fmtUptime(d.agentUptimeSeconds ?? 0));
     set('agent-version', d.agentVersion);
     set('wallet', d.walletAddress ? trunc(d.walletAddress, 10) : '—');
 
@@ -154,7 +155,7 @@ function renderBanner() {
     const orchDot = $('strip-orch-dot');
     if (orchDot) orchDot.className = 'strip-dot ' + (orch.connected ? 'ok' : 'err');
     set('strip-orch', orch.connected ? 'Connected' : 'Disconnected');
-    set('strip-uptime', fmtUptime(d.uptimeSeconds ?? 0));
+    set('strip-uptime', fmtUptime(d.hostUptimeSeconds ?? 0));
     set('strip-agent', d.agentVersion ?? '—');
 }
 
@@ -1761,7 +1762,8 @@ function buildTextReport(p) {
         kv('Node ID', s.nodeId);
         kv('Hostname', s.hostname);
         kv('OS', s.os);
-        kv('Uptime', fmtUptime(s.uptimeSeconds));
+        kv('Host uptime', fmtUptime(s.hostUptimeSeconds));
+        kv('Agent uptime', fmtUptime(s.agentUptimeSeconds));
         kv('Agent Version', s.agentVersion);
         kv('Wallet', s.walletAddress);
         kv('Orchestrator', s.orchestrator?.connected ? `Connected (${fmtAgo(s.orchestrator.secondsAgo)})` : 'DISCONNECTED');

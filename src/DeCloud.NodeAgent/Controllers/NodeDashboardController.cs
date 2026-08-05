@@ -138,7 +138,16 @@ public class NodeDashboardController : ControllerBase
             hostname = Environment.MachineName,
             walletAddress = _orchestratorClient.WalletAddress,
             agentVersion = _nodeStateService.AgentVersion,
-            uptimeSeconds = uptimeTask.Result,
+            // Two different clocks. These were previously collapsed into an
+            // unqualified `uptimeSeconds` inside a payload that otherwise describes
+            // the agent (nodeId, agentVersion, orchestrator.*), so it read as agent
+            // uptime when it is the host's. A diagnostic bundle collected under one
+            // PID therefore showed a span covering an earlier PID's lifetime, which
+            // sent the 2026-08-04 investigation to the wrong boot window.
+            // Note: on WSL2 /proc/uptime is the WSL VM's uptime, not Windows'.
+            hostUptimeSeconds = uptimeTask.Result,
+            agentUptimeSeconds = (long)(DateTime.UtcNow - _nodeStateService.StartedAt).TotalSeconds,
+            agentStartedAt = _nodeStateService.StartedAt,
             os = osTask.Result,
             ingressBaseDomain = ingressTask.Result,   // e.g. "vms.stackfi.tech" — null if not configured
             orchestrator = new
