@@ -85,6 +85,17 @@ public class NodeMetadataService : INodeMetadataService
                        ?? _configuration["OrchestratorClient:BaseUrl"]
                        ?? "";
 
+        // Fail closed: the node's identity is derived from the wallet, and earnings
+        // follow it. Starting with an empty wallet yields a deterministic but
+        // meaningless NodeId that nothing downstream can distinguish from a real one.
+        // Absent configuration is not a decision — see PROJECT_MEMORY.md principle 7.
+        if (string.IsNullOrWhiteSpace(WalletAddress))
+        {
+            throw new InvalidOperationException(
+                "No operator wallet configured. Set 'wallet' in /etc/decloud/settings.json " +
+                "(run: sudo decloud install --wallet <address>).");
+        }
+
         // Generate deterministic node ID
         NodeId = NodeIdGenerator.GenerateNodeId(MachineId, WalletAddress);
 
