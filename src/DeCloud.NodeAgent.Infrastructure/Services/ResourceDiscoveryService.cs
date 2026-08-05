@@ -63,6 +63,25 @@ public class ResourceDiscoveryService : IResourceDiscoveryService
                 await DiscoverAllAsync(ct);
             }
 
+            // Push the inventory to NodeMetadataService here — this is the one point
+            // where discovery is known to have produced one, and both callers funnel
+            // through it. Previously only OrchestratorClient.RegisterWithPendingAuthAsync
+            // called UpdateInventory, so Inventory was null for the whole lifetime of any
+            // restarted (already-registered) node, and percent→bytes allocation
+            // resolution silently fell back to platform defaults for operators who
+            // configured absolute values. NodeMetadataService had a pull-based priming
+            // task for this that could never run: its _resourceDiscovery field was never
+            // assigned, because this class depends on INodeMetadataService and the
+            // reverse constructor dependency would close a DI cycle. Pushing from here
+            // has the dependency pointing the way it already does.
+            //
+            // Idempotent: UpdateInventory's Resolve* methods guard on HasValue, so values
+            // already loaded by NodeMetadataService.InitializeAsync are left alone.
+            if (_cachedInventory != null)
+            {
+                _nodeMetadata.UpdateInventory(_cachedInventory);
+            }
+
             _nodeState.SetDiscoveryComplete();
             return _cachedInventory;
         }

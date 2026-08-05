@@ -1,5 +1,4 @@
 using DeCloud.NodeAgent.Core.Interfaces;
-using DeCloud.NodeAgent.Core.Models;
 using DeCloud.Shared;
 using DeCloud.Shared.Contracts;
 using DeCloud.Shared.Models;
@@ -10,7 +9,6 @@ using System.Text.Json;
 public class NodeMetadataService : INodeMetadataService
 {
     private readonly IConfiguration _configuration;
-    private readonly IResourceDiscoveryService _resourceDiscovery;
     private readonly ILogger<NodeMetadataService> _logger;
 
     public string OrchestratorUrl { get; private set; } = string.Empty;
@@ -252,17 +250,12 @@ public class NodeMetadataService : INodeMetadataService
         // Discover public IP
         PublicIp = await DiscoverPublicIpAsync(ct);
 
-        // Background task to update inventory
-        _ = Task.Run(async () => {
-            if (_resourceDiscovery == null)
-            {
-                _logger.LogWarning("Node metadata init error: {ResourcediscoveryService} is null.", nameof(_resourceDiscovery));
-                return;
-            }
-            
-            var inv = await _resourceDiscovery.GetInventoryCachedAsync(CancellationToken.None);
-            if (inv != null) UpdateInventory(inv);
-        }, ct);
+        // Inventory is pushed in by ResourceDiscoveryService.GetInventoryCachedAsync once
+        // discovery has produced one. A pull-based task used to sit here and never ran —
+        // _resourceDiscovery was declared but never assigned (this constructor takes only
+        // IConfiguration and ILogger), because ResourceDiscoveryService depends on
+        // INodeMetadataService and the reverse dependency closes a DI cycle. The orphaned
+        // field turned that into a per-start warning that read like a startup fault.
 
         _logger.LogInformation(
             "✓ Node metadata initialized: ID={NodeId}, Name={Name}, IP={PublicIp}",
