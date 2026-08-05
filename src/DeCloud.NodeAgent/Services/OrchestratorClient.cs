@@ -100,9 +100,6 @@ public partial class OrchestratorClient : IOrchestratorClient
         _pendingCommands = pendingCommands;
         _httpClient.BaseAddress = new Uri(_options.BaseUrl.TrimEnd('/'));
         _httpClient.Timeout = _options.Timeout;
-
-        _logger.LogInformation("OrchestratorClient initialized with wallet: {Wallet}",
-            _walletAddress);
     }
 
     public async Task InitializeAsync(CancellationToken ct = default)
@@ -139,9 +136,9 @@ public partial class OrchestratorClient : IOrchestratorClient
         await GetSchedulingConfigAsync(ct);
         await GetAllocationAsync(ct);
 
-        _logger.LogInformation("OrchestratorClient initialized with wallet: {Wallet} \n" +
-            "internet connection: {Internet}" +
-            "orchestrator connection: {Orchestrator}",
+        _logger.LogInformation(
+            "OrchestratorClient initialized — wallet: {Wallet}, internet: {Internet}, " +
+            "orchestrator: {Orchestrator}",
             _walletAddress, isInternetReachable, isOrchestratorReachable);
     }
     private async Task LoadCredentialsAsync()

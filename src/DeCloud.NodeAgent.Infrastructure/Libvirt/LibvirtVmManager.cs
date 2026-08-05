@@ -5,6 +5,7 @@ using DeCloud.Shared.Json;
 using DeCloud.NodeAgent.Core.Models;
 using DeCloud.NodeAgent.Infrastructure.Persistence;
 using DeCloud.NodeAgent.Infrastructure.Services;
+using DeCloud.Shared.Contracts;
 using DeCloud.Shared.Enums;
 using DeCloud.Shared.Models;
 using Microsoft.Extensions.Logging;
@@ -2960,22 +2961,32 @@ public class LibvirtVmManager : IVmManager
 
         // ! is safe: IsFullyInitialized above establishes both are non-null.
         // The compiler can no longer infer it from a direct == null check.
-        var config = _nodeState.SchedulingConfig!;
+        // SchedulingConfig is no longer read here — the node consumes the
+        // orchestrator's ComputePointCost rather than deriving it from the tier
+        // table — but the guard above still covers both halves deliberately:
+        // nodeTotalPoints below comes from PerformanceEvaluation, and narrowing the
+        // guard would reopen the 2026-08-04 failure.
         var nodeTotalPoints = _nodeState.PerformanceEvaluation!.TotalComputePoints;
 
-        // Defensive: Ensure tier exists in config, fallback to Standard if not
-        if (!config.Tiers.TryGetValue(spec.QualityTier, out var tierConfig))
+        // spec.ComputePointCost is assigned by the orchestrator in
+        // VmService.TryScheduleVmAsync ("CRITICAL: Store point cost in VM spec before
+        // scheduling"), admission runs against it, and it arrives on the CreateVm
+        // payload. The node reads it; it does not recompute it.
+        //
+        // It used to recompute it here, which (a) discarded the value admission was
+        // based on — every completed VM in the local database carried the node's
+        // number, never the orchestrator's — and (b) silently overrode the deliberate
+        // system-VM exception in TryScheduleVmAsync, which preserves declared costs
+        // (Relay: 1/2/4/13) instead of deriving them from the tier table.
+        if (spec.ComputePointCost <= 0)
         {
             _logger.LogWarning(
-                "VM {VmId}: Tier {Tier} not found in scheduling config, falling back to Standard tier",
-                spec.Id, spec.QualityTier);
-            tierConfig = config.Tiers[QualityTier.Standard];
+                "VM {VmId}: ComputePointCost is {Cost} — the orchestrator assigns this " +
+                "during scheduling and it should arrive on the CreateVm payload. CPU " +
+                "shares will fall back to the minimum. Tier={Tier}, vCPUs={VCpus}",
+                spec.Id, spec.ComputePointCost, spec.QualityTier, spec.VirtualCpuCores);
         }
 
-        var pointsPerVCpu = (tierConfig.MinimumBenchmark/config.BaselineBenchmark) *
-                           (config.BaselineOvercommitRatio / tierConfig.CpuOvercommitRatio);
-
-        spec.ComputePointCost = (int)(spec.VirtualCpuCores * pointsPerVCpu);
         int cpuShares;
 
         if (nodeTotalPoints > 0)
