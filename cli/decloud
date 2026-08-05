@@ -543,11 +543,43 @@ cmd_configure() {
 }
 
 # Read a single field from settings.json.
+#
+# CONTRACT: succeeds (exit 0) whether or not the key exists, echoing the value
+# or an empty string. This must not change. Under `set -euo pipefail` (line 15)
+# the bare call sites below — `port=$(_read_setting "agent_port")` and friends —
+# would abort the whole script the moment an optional key is absent, and
+# agent_port / wireguard_port routinely are.
+#
+# If you need to tell "absent" from "unreadable", use _read_setting_status.
 _read_setting() {
     local key="$1"
     if [[ -f "$SETTINGS_FILE" ]]; then
         jq -r --arg k "$key" '.[$k] // empty' "$SETTINGS_FILE" 2>/dev/null
     fi
+}
+
+# Same read, but reports which of three states was hit — for surfaces where an
+# operator must be able to tell them apart:
+#   0 — key found, value on stdout
+#   1 — file missing, or key absent from it
+#   2 — file exists but is unreadable (settings.json is 0600 root:root)
+#
+# `decloud status` previously printed "Wallet: Unknown" when run without sudo,
+# because an unreadable file and an unset key both collapsed to empty. Those are
+# materially different: an unset wallet means NodeMetadataService falls back to
+# the shared placeholder in appsettings.json and derives a different NodeId from
+# it — while "unreadable" just means the operator forgot sudo.
+#
+# Callers MUST capture the status with `|| rc=$?`; a bare command substitution
+# that fails aborts under `set -e`.
+_read_setting_status() {
+    local key="$1"
+    [[ -f "$SETTINGS_FILE" ]] || return 1
+    [[ -r "$SETTINGS_FILE" ]] || return 2
+    local v
+    v=$(jq -r --arg k "$key" '.[$k] // empty' "$SETTINGS_FILE" 2>/dev/null) || return 1
+    [[ -n "$v" ]] || return 1
+    printf '%s' "$v"
 }
 
 # Write a single field to settings.json.
@@ -1637,7 +1669,14 @@ cmd_status() {
         # Wallet from settings.json (authoritative source).
         # Node ID: fall back to credentials file (pre-cleanup nodes) or
         # indicate it is derived.
-        wallet=$(_read_setting "wallet" || echo "Unknown")
+        # `|| rc=$?` is required: under `set -e` (line 15) a bare failing command
+        # substitution aborts the script before `case` is ever reached.
+        local rc=0
+        wallet=$(_read_setting_status "wallet") || rc=$?
+        case $rc in
+            2) wallet="(unreadable — run: sudo $SCRIPT_NAME status)" ;;
+            1) wallet="NOT CONFIGURED — node identity falls back to a shared default" ;;
+        esac
         node_id=$(grep "^NODE_ID=" "$CREDENTIALS_FILE" 2>/dev/null | cut -d= -f2 \
                || echo "(derived from wallet + machine-id)")
         api_key=$(grep "^API_KEY=" "$CREDENTIALS_FILE" | cut -d= -f2 || echo "Unknown")
